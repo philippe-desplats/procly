@@ -415,3 +415,30 @@ fn a_service_that_is_both_a_process_and_a_compose_service_is_refused() {
     assert_eq!(output.status.code(), Some(125));
     assert!(stderr(&output).contains("exactly one of `run`"), "{}", stderr(&output));
 }
+
+#[test]
+fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1h\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.project.container();
+    assert!(fixture.project.is_running());
+
+    let output = fixture.procly.procly_in(&fixture.other, &["eject"]);
+
+    // Without waiting for the Grace period, since the Repository is going back to how it was.
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("stopped db (Compose service, its volumes are kept)"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!fixture.project.is_running());
+    assert!(!listens(fixture.port));
+    // Stopped, never removed, and the data stays.
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}

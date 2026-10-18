@@ -4,6 +4,7 @@ mod agent;
 mod clock;
 mod compose;
 mod cpu;
+mod eject;
 mod environment;
 mod health;
 mod hook;
@@ -227,7 +228,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
     let jobs = &registry.jobs;
     if matches!(
         request,
-        Request::Up { .. } | Request::Down { .. } | Request::Status { .. }
+        Request::Up { .. } | Request::Down { .. } | Request::Status { .. } | Request::Eject { .. }
     ) && let Err(message) = registry.reconciled().await
     {
         return Response::Error { message };
@@ -313,6 +314,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
                 message: format!("{error:#}"),
             },
         },
+        Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
         request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
             agent::answer(registry, request).await
         }

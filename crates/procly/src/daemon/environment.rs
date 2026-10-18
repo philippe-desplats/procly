@@ -48,13 +48,15 @@ pub(super) enum EnvironmentError {
 }
 
 /// The file in the root of a Worktree mirroring the Derived variables, for tools Procly does not launch.
-const ENV_FILE: &str = ".env.procly";
+pub(super) const ENV_FILE: &str = ".env.procly";
+/// The name the fingerprint of an Env file is recorded under, which tells it from one the developer edited.
+pub(super) const ENV_BLOCK: &str = "env-file";
 /// The name of the Managed block excluding the generated files from git.
-const EXCLUSIONS: &str = "exclusions";
+pub(super) const EXCLUSIONS: &str = "exclusions";
 /// The shared git exclude file, relative to the common git directory of the Repository.
-const EXCLUDE_FILE: &str = "info/exclude";
+pub(super) const EXCLUDE_FILE: &str = "info/exclude";
 /// The file `up --gitignore` writes to instead, relative to the root of the Worktree.
-const GITIGNORE_FILE: &str = ".gitignore";
+pub(super) const GITIGNORE_FILE: &str = ".gitignore";
 
 /// What a Service receives on top of the environment of its caller.
 #[derive(Debug)]
@@ -224,7 +226,12 @@ pub(super) fn mirror(
     let variables = derived.render_all(&facts(topology, &table, &resources))?;
     // Excluded first, so that the Env file is never visible to git, not even for a moment.
     exclude(registry, topology, gitignore)?;
-    write_env_file(&topology.worktree.path, &envfile::env_file(&variables))
+    let text = envfile::env_file(&variables);
+    write_env_file(&topology.worktree.path, &text)?;
+    registry
+        .managed
+        .record(&topology.worktree.path.join(ENV_FILE), ENV_BLOCK, &text, None)?;
+    Ok(())
 }
 
 fn facts<'a>(
@@ -394,6 +401,11 @@ fn write_env_file(worktree: &Path, text: &str) -> Result<(), EnvironmentError> {
         .map_err(|source| EnvironmentError::WriteEnvFile { path, source })
 }
 
+/// The lines of the Managed block excluding the generated files from git.
+pub(super) fn exclusion_lines() -> [String; 2] {
+    [format!("/{ENV_FILE}"), format!("/{}", config::LOCAL_FILE)]
+}
+
 /// Excludes the generated files from git, in the shared exclude file of the Repository, or in the `.gitignore` of the
 /// Worktree on request. A `.gitignore` that already holds the block keeps it, so that a later `up` without the flag
 /// does not add the block to the exclude file as well. The reverse is not undone, an earlier block stays in the
@@ -405,8 +417,7 @@ fn exclude(registry: &Registry, topology: &Topology, gitignore: bool) -> Result<
     } else {
         topology.git_common_dir.join(EXCLUDE_FILE)
     };
-    let lines = [format!("/{ENV_FILE}"), format!("/{}", config::LOCAL_FILE)];
-    if registry.managed.write(&file, EXCLUSIONS, &lines)? == Outcome::Edited {
+    if registry.managed.write(&file, EXCLUSIONS, &exclusion_lines())? == Outcome::Edited {
         eprintln!(
             "the exclusion block in {} was edited, left as it is, check that it still excludes {ENV_FILE}",
             file.display()
