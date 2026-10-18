@@ -389,12 +389,14 @@ fn prepare_compose(
         .map(|(port_name, &port)| Published {
             port_name: port_name.clone(),
             port,
-            variable: declared
-                .port_env
-                .get(port_name)
-                .cloned()
-                .unwrap_or_else(|| format!("PORT_{}", port_name.to_ascii_uppercase())),
         })
+        .collect();
+    // What the compose file may interpolate a Lease from: `PORT_<NAME>`, and the Derived variables of the Service.
+    let variables = injected
+        .leases
+        .keys()
+        .map(|port_name| format!("PORT_{}", port_name.to_ascii_uppercase()))
+        .chain(declared.env.keys().cloned())
         .collect();
     let mut env = env;
     env.extend(injected.variables);
@@ -404,6 +406,7 @@ fn prepare_compose(
         project_dir: topology.main()?.worktree.path,
         env,
         published,
+        variables,
         health: HealthCheck {
             port: injected.health_port,
             http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),

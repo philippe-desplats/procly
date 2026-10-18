@@ -101,13 +101,6 @@ pub(super) fn injected(
 
     let facts = facts(topology, &table);
     let mut variables = ports::environment(&leases, health_port);
-    // The variables a compose file interpolates, next to `PORT_<NAME>`.
-    variables.extend(
-        declared
-            .port_env
-            .iter()
-            .filter_map(|(port_name, variable)| leases.get(port_name).map(|port| (variable.clone(), port.to_string()))),
-    );
     variables.extend(derived.render(name, &facts)?);
     variables.push(("PROCLY".to_owned(), "1".to_owned()));
     variables.push(("PROCLY_SERVICE".to_owned(), name.to_owned()));

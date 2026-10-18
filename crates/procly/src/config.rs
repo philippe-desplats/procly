@@ -53,15 +53,6 @@ pub(crate) enum ConfigError {
         kind: &'static str,
         other: &'static str,
     },
-    #[error(
-        "port_env of service {service} maps {port_name:?} to {variable:?}: it must name one of the Port names of the \
-         service, and a variable of upper case letters, digits and underscores that does not start with a digit"
-    )]
-    InvalidPortEnv {
-        service: String,
-        port_name: String,
-        variable: String,
-    },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
     Invalid {
         files: Vec<PathBuf>,
@@ -148,10 +139,6 @@ pub(crate) struct ServiceConfig {
     /// The port of each Port name.
     #[serde(default)]
     pub(crate) ports: BTreeMap<String, u16>,
-    /// The variable the compose file interpolates for each Port name, such as `DB_PORT` for `db`, for a Compose
-    /// service. The Lease of a Port name is always in `PORT_<NAME>` too.
-    #[serde(default)]
-    pub(crate) port_env: BTreeMap<String, String>,
     /// Overrides `settings.grace_period` for this Compose service.
     #[serde(default, deserialize_with = "optional_duration")]
     pub(crate) grace_period: Option<Duration>,
@@ -266,9 +253,6 @@ impl ServiceConfig {
                 if self.grace_period.is_some() {
                     return Err(wrong_key("grace_period", "a Process service", "a Compose service"));
                 }
-                if !self.port_env.is_empty() {
-                    return Err(wrong_key("port_env", "a Process service", "a Compose service"));
-                }
                 Ok(ServiceKind::Process { run })
             }
             (None, Some(service)) => {
@@ -280,31 +264,12 @@ impl ServiceConfig {
                 if idle.stop.is_some() || idle.timeout.is_some() {
                     return Err(wrong_key("idle", "a Compose service", "a Process service"));
                 }
-                self.check_port_env(name)?;
                 Ok(ServiceKind::Compose { service })
             }
             _ => Err(ConfigError::ServiceKind {
                 service: name.to_owned(),
             }),
         }
-    }
-
-    fn check_port_env(&self, name: &str) -> Result<(), ConfigError> {
-        for (port_name, variable) in &self.port_env {
-            let valid = !variable.starts_with(|c: char| c.is_ascii_digit())
-                && !variable.is_empty()
-                && variable
-                    .chars()
-                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
-            if !valid || !self.ports.contains_key(port_name) {
-                return Err(ConfigError::InvalidPortEnv {
-                    service: name.to_owned(),
-                    port_name: port_name.clone(),
-                    variable: variable.clone(),
-                });
-            }
-        }
-        Ok(())
     }
 
     /// The Port name the health check of the Service `name` probes, `None` when it declares no Port name.
@@ -446,7 +411,7 @@ fn default_port_range() -> Range {
 
 /// Long enough for an agent coming back from a short break to find the container warm.
 fn default_grace_period() -> Duration {
-    Duration::from_mins(5)
+    Duration::from_mins(10)
 }
 
 /// A Range written as `<start>-<end>`, such as `24000-24999`.
@@ -738,44 +703,18 @@ mod tests {
         assert_eq!(key("compose = 'db'\nrestart = { attempts = 1 }\n", "db"), "restart");
         assert_eq!(key("compose = 'db'\nidle = { stop = false }\n", "db"), "idle");
         assert_eq!(key("run = 'x'\ngrace_period = '1m'\n", "web"), "grace_period");
-        assert_eq!(
-            key(
-                "run = 'x'\nports = { http = 1 }\nport_env = { http = 'HTTP_PORT' }\n",
-                "web"
-            ),
-            "port_env"
-        );
     }
 
     #[test]
-    fn a_port_env_names_a_declared_port_and_a_valid_variable() {
-        let invalid = |text: &str| matches!(service(text).kind("db"), Err(ConfigError::InvalidPortEnv { .. }));
-        assert!(!invalid(
-            "compose = 'db'\nports = { db = 5432 }\nport_env = { db = 'DB_PORT' }\n"
-        ));
-        assert!(invalid(
-            "compose = 'db'\nports = { db = 5432 }\nport_env = { api = 'DB_PORT' }\n"
-        ));
-        for variable in ["db_port", "1PORT", "DB-PORT", ""] {
-            assert!(
-                invalid(&format!(
-                    "compose = 'db'\nports = {{ db = 5432 }}\nport_env = {{ db = '{variable}' }}\n"
-                )),
-                "{variable:?} was accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn a_compose_service_waits_five_minutes_before_it_stops_unless_configured_otherwise() {
+    fn a_compose_service_waits_ten_minutes_before_it_stops_unless_configured_otherwise() {
         let config = parsed(
-            "[settings]\ngrace_period = '10m'\n\
+            "[settings]\ngrace_period = '20m'\n\
              [services.db]\ncompose = 'postgres'\n\
              [services.cache]\ncompose = 'redis'\ngrace_period = '30s'\n",
         );
-        assert_eq!(config.grace_period(&config.services["db"]), Duration::from_mins(10));
+        assert_eq!(config.grace_period(&config.services["db"]), Duration::from_mins(20));
         assert_eq!(config.grace_period(&config.services["cache"]), Duration::from_secs(30));
-        assert_eq!(Settings::default().grace_period, Duration::from_mins(5));
+        assert_eq!(Settings::default().grace_period, Duration::from_mins(10));
     }
 
     #[test]

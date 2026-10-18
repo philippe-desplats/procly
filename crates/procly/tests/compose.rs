@@ -4,6 +4,7 @@
 mod common;
 
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,7 +26,9 @@ fn compose_file(project: &str) -> String {
 
 /// The `procly.toml` of a Repository whose service `db` is the compose service `db`.
 fn config(port: u16, extra: &str) -> String {
-    format!("[services.db]\ncompose = \"db\"\nports = {{ db = {port} }}\nport_env = {{ db = \"DB_PORT\" }}\n{extra}")
+    format!(
+        "[services.db]\ncompose = \"db\"\nports = {{ db = {port} }}\nenv = {{ DB_PORT = \"{{services.db.ports.db}}\" }}\n{extra}"
+    )
 }
 
 /// Removes the containers, network and volumes of a test project when the test ends, passed or failed.
@@ -265,7 +268,7 @@ fn docker_down_without_a_service_releases_every_compose_service_of_the_worktree(
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        "db released, it stops after 5m unless a Worktree needs it again\n"
+        "db released, it stops after 10m unless a Worktree needs it again\n"
     );
     let again = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
     assert_eq!(stdout(&again), "db not running\n");
@@ -277,10 +280,10 @@ fn docker_a_compose_file_that_does_not_publish_the_lease_is_refused() {
         return;
     }
     let fixture = fixture("");
-    // The variable is spelled differently in the config than in the compose file.
+    // The compose file interpolates `DB_PORT`, which the config sets to anything but the Lease.
     std::fs::write(
         fixture.main.join("procly.local.toml"),
-        "[services.db.port_env]\ndb = \"OTHER_PORT\"\n",
+        "[services.db.env]\nDB_PORT = \"1\"\n",
     )
     .unwrap();
 
@@ -289,7 +292,7 @@ fn docker_a_compose_file_that_does_not_publish_the_lease_is_refused() {
     assert_eq!(output.status.code(), Some(125), "{}", stderr(&output));
     let message = stderr(&output);
     assert!(message.contains("does not publish"), "{message}");
-    assert!(message.contains("OTHER_PORT"), "{message}");
+    assert!(message.contains("PORT_DB"), "{message}");
     assert!(fixture.project.container().is_empty(), "a container was created");
 }
 
@@ -365,8 +368,6 @@ fn up_without_docker_says_what_to_install() {
 #[test]
 fn up_with_docker_but_without_compose_v2_says_what_to_install() {
     let output = up_with_path("{bin}:/usr/bin:/bin", |bin| {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let docker = bin.join("docker");
         std::fs::write(
             &docker,

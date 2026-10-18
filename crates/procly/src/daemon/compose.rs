@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tokio::process::Command;
@@ -52,14 +52,16 @@ pub(crate) enum ComposeError {
     },
     #[error(
         "the compose service {compose} of service {service} does not publish port {port}, the Lease of Port name \
-         {port_name}: have its `ports` interpolate {variable}, such as \"${{{variable}:-{port}}}:<container port>\""
+         {port_name}: have its `ports` interpolate one of {variables}, such as \"${{PORT_{upper}:-{port}}}:<container \
+         port>\""
     )]
     NotPublished {
         service: String,
         compose: String,
         port_name: String,
         port: u16,
-        variable: String,
+        upper: String,
+        variables: String,
     },
     #[error(transparent)]
     Prepare(#[from] anyhow::Error),
@@ -78,6 +80,8 @@ pub(crate) struct ComposeSpec {
     pub(crate) env: Vec<(String, String)>,
     /// The Leases of the Service, which the compose file must publish.
     pub(crate) published: Vec<Published>,
+    /// The names of the variables the compose file may interpolate the Leases from.
+    pub(crate) variables: Vec<String>,
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
 }
@@ -87,8 +91,6 @@ pub(crate) struct ComposeSpec {
 pub(crate) struct Published {
     pub(crate) port_name: String,
     pub(crate) port: u16,
-    /// The variable the compose file interpolates it from.
-    pub(crate) variable: String,
 }
 
 /// What `up` found out about a container.
@@ -120,7 +122,7 @@ struct Container {
 #[derive(Debug, Default)]
 struct State {
     /// `None` when the container was never started by Procly or has been stopped.
-    running: Option<Running>,
+    alive: Option<Alive>,
     /// The Worktrees that need the container.
     worktrees: BTreeSet<PathBuf>,
     /// Bumped whenever a Worktree starts needing the container, so that a stop waiting out its Grace period knows it
@@ -129,7 +131,7 @@ struct State {
 }
 
 #[derive(Debug, Clone)]
-struct Running {
+struct Alive {
     docker: Docker,
     port: Option<u16>,
     grace: Duration,
@@ -169,35 +171,34 @@ impl Composes {
     {
         let container = self.container(&key);
         let _commands = container.commands.lock().await;
-        let running = container.state().running.clone();
-        if let Some(mut running) = running {
-            if running.docker.is_running().await {
-                running.grace = grace;
-                let port = running.port;
-                let mut state = container.state();
-                state.running = Some(running);
-                state.worktrees.insert(worktree);
-                state.generation += 1;
-                return Ok(Brought {
-                    outcome: StartOutcome::Reused,
-                    port,
-                    health: Ok(()),
-                });
-            }
-            // Stopped from outside Procly, `up` below starts it again.
+        let alive = container.state().alive.clone();
+        // A container stopped from outside Procly is started again below, for the Worktrees that already needed it too.
+        if let Some(mut alive) = alive
+            && alive.docker.is_running().await
+        {
+            alive.grace = grace;
+            let port = alive.port;
             let mut state = container.state();
-            state.running = None;
-            state.worktrees.clear();
+            state.alive = Some(alive);
+            state.worktrees.insert(worktree);
+            state.generation += 1;
+            return Ok(Brought {
+                outcome: StartOutcome::Reused,
+                port,
+                health: Ok(()),
+            });
         }
 
         let spec = tokio::task::spawn_blocking(prepare)
             .await
             .map_err(|error| anyhow::anyhow!("the service could not be started: {error}"))??;
         let port = spec.health.port;
+        let began = Instant::now();
         let (docker, waited_out) = start(&spec).await?;
         let health = match waited_out {
             Some(end) => Err(end),
-            None => wait_healthy(&spec.health, spec.health_timeout).await,
+            // The health timeout covers `docker compose up --wait` and the probes together.
+            None => wait_healthy(&spec.health, spec.health_timeout.saturating_sub(began.elapsed())).await,
         };
         if let Err(end) = health {
             let logs = docker.logs().await;
@@ -210,8 +211,8 @@ impl Composes {
             });
         }
         let mut state = container.state();
-        state.running = Some(Running { docker, port, grace });
-        state.worktrees = BTreeSet::from([worktree]);
+        state.alive = Some(Alive { docker, port, grace });
+        state.worktrees.insert(worktree);
         state.generation += 1;
         Ok(Brought {
             outcome: StartOutcome::Started,
@@ -232,7 +233,7 @@ impl Composes {
             .collect();
         for (service, container) in containers {
             let mut state = container.state();
-            let Some(grace) = state.running.as_ref().map(|running| running.grace) else {
+            let Some(grace) = state.alive.as_ref().map(|alive| alive.grace) else {
                 continue;
             };
             if !state.worktrees.remove(worktree) {
@@ -265,18 +266,15 @@ impl Composes {
         for container in containers {
             stopping.spawn(async move {
                 let _commands = container.commands.lock().await;
-                let running = {
+                let alive = {
                     let mut state = container.state();
                     state.worktrees.clear();
                     state.generation += 1;
-                    state.running.take()
+                    state.alive.take()
                 };
-                let Some(running) = running else { return };
-                if let Err(error) = running.docker.stop().await {
-                    eprintln!(
-                        "cannot stop the container of service {}: {error}",
-                        running.docker.service
-                    );
+                let Some(alive) = alive else { return };
+                if let Err(error) = alive.docker.stop().await {
+                    eprintln!("cannot stop the container of service {}: {error}", alive.docker.service);
                 }
             });
         }
@@ -306,24 +304,24 @@ impl Container {
 async fn stop_after(clock: Clock, container: Arc<Container>, grace: Duration, generation: u64) {
     clock.sleep(grace).await;
     let _commands = container.commands.lock().await;
-    let running = {
-        let mut state = container.state();
+    let alive = {
+        let state = container.state();
         if state.generation != generation || !state.worktrees.is_empty() {
             return;
         }
-        state.running.take()
+        state.alive.clone()
     };
-    if let Some(running) = running {
-        match running.docker.stop().await {
-            Ok(()) => eprintln!(
+    let Some(alive) = alive else { return };
+    match alive.docker.stop().await {
+        Ok(()) => {
+            container.state().alive = None;
+            eprintln!(
                 "stopped the container of service {}, no Worktree needs it",
-                running.docker.service
-            ),
-            Err(error) => eprintln!(
-                "cannot stop the container of service {}: {error}",
-                running.docker.service
-            ),
+                alive.docker.service
+            );
         }
+        // Still counted as running, so that the next `up` finds it and the next release schedules another stop.
+        Err(error) => eprintln!("cannot stop the container of service {}: {error}", alive.docker.service),
     }
 }
 
@@ -355,16 +353,19 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Option<ServiceEnd>), Compo
                 compose: spec.compose.clone(),
                 port_name: published.port_name.clone(),
                 port: published.port,
-                variable: published.variable.clone(),
+                upper: published.port_name.to_ascii_uppercase(),
+                variables: spec.variables.join(", "),
             });
         }
     }
     // `--wait` returns once the container runs, or is healthy when the compose file defines a health check.
     let up = ["up", "--detach", "--wait", &spec.compose];
     let waited_out = match tokio::time::timeout(spec.health_timeout, docker.project_command(&up)).await {
-        Ok(result) => {
-            result?;
-            None
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => {
+            // A container that started but never ran well would be left running with nobody counting it.
+            let _ = docker.stop().await;
+            return Err(error);
         }
         Err(_) => Some(health_timeout(spec.health_timeout)),
     };
