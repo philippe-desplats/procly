@@ -155,3 +155,21 @@ fn wait_and_logs_fail_with_125_for_an_unknown_job() {
         );
     }
 }
+
+#[test]
+fn the_job_identifier_printed_by_run_feeds_wait_through_command_substitution() {
+    let procly = Procly::new();
+
+    let output = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#""$PROCLY" wait "$("$PROCLY" run 'echo hello')""#)
+        .env("PROCLY", env!("CARGO_BIN_EXE_procly"))
+        .env("PROCLY_STATE_DIR", procly.state_dir())
+        .current_dir(procly.scratch())
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "hello\n");
+    assert_eq!(common::stderr(&output), "started\n");
+}

@@ -114,6 +114,7 @@ fn concurrent_runs_of_one_command_share_one_job() {
                 .current_dir(&main)
                 .args(["run", "sleep 30"])
                 .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap()
         })

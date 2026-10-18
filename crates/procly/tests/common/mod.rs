@@ -91,15 +91,18 @@ impl Drop for Procly {
     }
 }
 
-/// Splits the `<job> <outcome>` line printed by `procly run`.
+/// Reads what `procly run` printed: the Job identifier alone on stdout, and the outcome alone on stderr.
 pub fn started(output: &Output) -> (String, String) {
-    let line = stdout(output);
-    let words: Vec<&str> = line.split_whitespace().collect();
+    let (job, outcome) = (stdout(output), stderr(output));
     assert!(
-        matches!(words.as_slice(), [_, "started" | "reused"]) && line.ends_with('\n') && line.lines().count() == 1,
-        "unexpected run output {line:?}"
+        job.ends_with('\n') && job.lines().count() == 1 && !job.trim().is_empty() && !job.trim().contains(' '),
+        "unexpected run stdout {job:?}"
     );
-    (words[0].to_owned(), words[1].to_owned())
+    assert!(
+        matches!(outcome.as_str(), "started\n" | "reused\n"),
+        "unexpected run stderr {outcome:?}"
+    );
+    (job.trim().to_owned(), outcome.trim().to_owned())
 }
 
 pub fn stdout(output: &Output) -> String {

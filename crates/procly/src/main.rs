@@ -37,8 +37,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Start a Job running a shell command in the current directory, and print its identifier and `started`, or
-    /// `reused` when the same command already runs in the same Worktree and directory.
+    /// Start a Job running a shell command in the current directory, print its identifier on stdout, and on stderr
+    /// `started`, or `reused` when the same command already runs in the same Worktree and directory.
     Run {
         /// Kill the Job's whole process tree once it has run this long (`90s`, `5m`, `1h`).
         #[arg(long, default_value = "30m", value_parser = duration::parse)]
@@ -90,7 +90,11 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
                 timeout_ms,
             };
             match client::send(&state, &request)? {
-                Response::Run { job, outcome } => println!("{job} {}", outcome.as_str()),
+                // The identifier alone on stdout, so that `procly wait "$(procly run …)"` works.
+                Response::Run { job, outcome } => {
+                    println!("{job}");
+                    eprintln!("{}", outcome.as_str());
+                }
                 other => return unexpected(other),
             }
             Ok(ExitCode::SUCCESS)

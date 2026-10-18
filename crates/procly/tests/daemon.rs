@@ -30,6 +30,7 @@ fn concurrent_first_commands_share_one_daemon() {
                 .command()
                 .args(["run", &format!("echo {i}")])
                 .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap()
         })
