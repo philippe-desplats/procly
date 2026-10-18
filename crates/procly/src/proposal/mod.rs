@@ -25,6 +25,12 @@ pub(crate) enum ProposalError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid YAML in {path}")]
+    Yaml {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml_ng::Error,
+    },
     #[error("{dir} has no dev script in a package.json and no compose file, so there is nothing to propose")]
     Nothing { dir: PathBuf },
 }
@@ -38,6 +44,16 @@ pub(crate) struct ServiceEntry {
     pub(crate) covers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) ports: BTreeMap<String, u16>,
+}
+
+impl ServiceEntry {
+    /// A Process service that runs `run`.
+    fn process(run: String) -> Self {
+        Self {
+            run: Some(run),
+            ..Self::default()
+        }
+    }
 }
 
 /// The Services proposed so far, by name.

@@ -116,3 +116,274 @@ fn a_directory_outside_any_repository_is_refused() {
         stderr(&output)
     );
 }
+
+/// A Bun and Turborepo style monorepo: 2 apps with a dev script, a library without one, and a root dev command.
+const MONOREPO: [(&str, &str); 5] = [
+    (
+        "package.json",
+        r#"{"name": "acme", "workspaces": ["apps/*", "packages/*"], "scripts": {"dev": "turbo dev"}}"#,
+    ),
+    ("bun.lock", ""),
+    (
+        "apps/web/package.json",
+        r#"{"name": "@acme/web", "scripts": {"dev": "next dev"}}"#,
+    ),
+    (
+        "apps/api/package.json",
+        r#"{"name": "api", "scripts": {"dev": "node ace serve"}}"#,
+    ),
+    (
+        "packages/ui/package.json",
+        r#"{"name": "@acme/ui", "scripts": {"build": "tsc"}}"#,
+    ),
+];
+
+#[test]
+fn a_monorepo_gets_a_service_per_app_dev_script_and_a_group_for_the_root_dev_command() {
+    let procly = Procly::new();
+    let main = repository(&procly, &MONOREPO);
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    assert_eq!(
+        proposal,
+        "\
+# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.
+
+[services.api]
+run = \"cd apps/api && bun run dev\"
+
+[services.dev]
+run = \"bun run dev\"
+covers = [\"api\", \"web\"]
+
+[services.web]
+run = \"cd apps/web && bun run dev\"
+"
+    );
+    for service in ["web", "api", "dev"] {
+        assert_loads(&procly, &main, service);
+    }
+}
+
+#[test]
+fn the_workspaces_of_a_pnpm_monorepo_are_read_from_pnpm_workspace_yaml() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            (
+                "package.json",
+                r#"{"name": "acme", "scripts": {"dev": "pnpm -r --parallel dev"}}"#,
+            ),
+            ("pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n  - '!apps/legacy'\n"),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "vite"}}"#,
+            ),
+            (
+                "apps/legacy/package.json",
+                r#"{"name": "legacy", "scripts": {"dev": "vite"}}"#,
+            ),
+        ],
+    );
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    assert!(proposal.contains("run = \"cd apps/web && npm run dev\""), "{proposal}");
+    assert!(proposal.contains("covers = [\"web\"]"), "{proposal}");
+    assert!(
+        !proposal.contains("legacy"),
+        "an excluded package is left out\n{proposal}"
+    );
+}
+
+#[test]
+fn a_monorepo_without_a_root_dev_command_gets_its_apps_and_no_group() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            ("package.json", r#"{"name": "acme", "workspaces": ["apps/*"]}"#),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "vite"}}"#,
+            ),
+        ],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert!(proposal.contains("[services.web]"), "{proposal}");
+    assert!(!proposal.contains("covers"), "{proposal}");
+}
+
+#[test]
+fn an_app_called_dev_does_not_clash_with_the_group() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            (
+                "package.json",
+                r#"{"name": "acme", "workspaces": ["apps/*"], "scripts": {"dev": "turbo dev"}}"#,
+            ),
+            (
+                "apps/dev/package.json",
+                r#"{"name": "dev", "scripts": {"dev": "vite"}}"#,
+            ),
+        ],
+    );
+
+    init(&procly, &main);
+
+    assert_loads(&procly, &main, "dev");
+    assert_loads(&procly, &main, "dev-2");
+}
+
+/// The `run` and the declared `http` port of a Service in a proposal.
+fn run_and_port(proposal: &str, service: &str) -> (String, Option<i64>) {
+    let table: toml::Table = proposal.parse().expect("the proposal is TOML");
+    let service = &table["services"][service];
+    (
+        service["run"].as_str().expect("the Service has a run").to_owned(),
+        service.get("ports").and_then(|ports| ports["http"].as_integer()),
+    )
+}
+
+#[test]
+fn a_port_hardcoded_in_a_dev_script_is_declared_and_replaced_by_its_placeholder() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            ("package.json", r#"{"name": "acme", "workspaces": ["apps/*"]}"#),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "next dev --port 3001"}}"#,
+            ),
+            (
+                "apps/site/package.json",
+                r#"{"name": "site", "scripts": {"dev": "vite --port=5173 --host"}}"#,
+            ),
+            (
+                "apps/docs/package.json",
+                r#"{"name": "docs", "scripts": {"dev": "serve -p 4000 ."}}"#,
+            ),
+            (
+                "apps/api/package.json",
+                r#"{"name": "api", "scripts": {"dev": "PORT=3333 node server.js"}}"#,
+            ),
+            (
+                "apps/mail/package.json",
+                r#"{"name": "mail", "scripts": {"dev": "cross-env PORT=\"1080\" mailer"}}"#,
+            ),
+        ],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    let bins = |up: &str| format!("export PATH=\"$PWD/node_modules/.bin:$PWD/{up}node_modules/.bin:$PATH\"");
+    let cases = [
+        (
+            "web",
+            format!("cd apps/web && {} && next dev --port {{ports.http}}", bins("../../")),
+            3001,
+        ),
+        (
+            "site",
+            format!(
+                "cd apps/site && {} && vite --port={{ports.http}} --host",
+                bins("../../")
+            ),
+            5173,
+        ),
+        (
+            "docs",
+            format!("cd apps/docs && {} && serve -p {{ports.http}} .", bins("../../")),
+            4000,
+        ),
+        (
+            "api",
+            format!(
+                "cd apps/api && {} && PORT={{ports.http}} node server.js",
+                bins("../../")
+            ),
+            3333,
+        ),
+        (
+            "mail",
+            format!(
+                "cd apps/mail && {} && cross-env PORT=\"{{ports.http}}\" mailer",
+                bins("../../")
+            ),
+            1080,
+        ),
+    ];
+    for (service, run, port) in cases {
+        assert_eq!(
+            run_and_port(&proposal, service),
+            (run, Some(port)),
+            "{service}\n{proposal}"
+        );
+        assert_loads(&procly, &main, service);
+    }
+}
+
+#[test]
+fn a_dev_script_naming_several_ports_or_none_keeps_running_through_the_package_manager() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            ("package.json", r#"{"name": "acme", "workspaces": ["apps/*"]}"#),
+            (
+                "apps/two/package.json",
+                r#"{"name": "two", "scripts": {"dev": "a --port 3000 & b --port 3001"}}"#,
+            ),
+            (
+                "apps/none/package.json",
+                r#"{"name": "none", "scripts": {"dev": "node server.js"}}"#,
+            ),
+            (
+                "apps/low/package.json",
+                r#"{"name": "low", "scripts": {"dev": "jest -p 2"}}"#,
+            ),
+        ],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    for (service, dir) in [("two", "two"), ("none", "none"), ("low", "low")] {
+        assert_eq!(
+            run_and_port(&proposal, service),
+            (format!("cd apps/{dir} && npm run dev"), None),
+            "{proposal}"
+        );
+    }
+}
+
+#[test]
+fn a_hardcoded_port_in_the_dev_script_of_the_root_package_is_replaced_too() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "package.json",
+            r#"{"name": "shop", "scripts": {"dev": "vite --port 5173"}}"#,
+        )],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert_eq!(
+        run_and_port(&proposal, "shop"),
+        (
+            "export PATH=\"$PWD/node_modules/.bin:$PATH\" && vite --port {ports.http}".to_owned(),
+            Some(5173)
+        )
+    );
+    assert_loads(&procly, &main, "shop");
+}
