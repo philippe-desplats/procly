@@ -156,18 +156,19 @@ fn locate(path: &Path) -> anyhow::Result<Topology> {
 fn prepare(topology: &Topology) -> anyhow::Result<Prepared> {
     let worktree = topology.worktree.path.clone();
     let config = super::read_config(&worktree)?;
-    let main = topology::worktrees(&topology.git_common_dir)?
-        .into_iter()
-        .find(|candidate| candidate.main)
-        .ok_or_else(|| InitError::NoMainWorktree {
-            worktree: worktree.clone(),
-        })?;
     let mut report = InitReport::default();
-    // The Main worktree is where the files come from, it has nothing to copy onto itself.
-    if main.path != worktree {
-        let Copied { copied, missing } = copy_listed(&main.path, &worktree, &config.worktree.copy)?;
-        report.copied = copied;
-        report.missing = missing;
+    // Only a copy needs the Main worktree, and a bare Repository has none.
+    if !config.worktree.copy.is_empty() {
+        let main = topology::worktrees(&topology.git_common_dir)?
+            .into_iter()
+            .find(|candidate| candidate.main)
+            .ok_or_else(|| InitError::NoMainWorktree {
+                worktree: worktree.clone(),
+            })?;
+        // The Main worktree is where the files come from, it has nothing to copy onto itself.
+        if main.path != worktree {
+            copy_listed(&main.path, &worktree, &config.worktree.copy, &mut report)?;
+        }
     }
     let record_path = topology::git_dir(&worktree)?.join(RECORD_FILE);
     let record = read_record(&record_path)?;
@@ -179,26 +180,33 @@ fn prepare(topology: &Topology) -> anyhow::Result<Prepared> {
     })
 }
 
-/// What copying changed in the Worktree, by the path as listed in the configuration.
-#[derive(Debug, Default)]
-struct Copied {
-    copied: Vec<String>,
-    /// Listed paths the Main worktree does not hold.
-    missing: Vec<String>,
-}
-
-/// Copies each listed path from `main` into `worktree` unless the Worktree already holds it.
-fn copy_listed(main: &Path, worktree: &Path, listed: &[String]) -> Result<Copied, InitError> {
-    let mut outcome = Copied::default();
+/// Copies each listed path from `main` into `worktree` unless the Worktree already holds it, and notes in `report`
+/// which ones it copied and which ones `main` lacks.
+fn copy_listed(main: &Path, worktree: &Path, listed: &[String], report: &mut InitReport) -> Result<(), InitError> {
     for entry in listed {
         let source = main.join(entry);
-        if source.symlink_metadata().is_err() {
-            outcome.missing.push(entry.clone());
-        } else if copy_entry(&source, &worktree.join(entry))? {
-            outcome.copied.push(entry.clone());
+        if exists(&source)? {
+            if copy_entry(&source, &worktree.join(entry))? {
+                report.copied.push(entry.clone());
+            }
+        } else {
+            report.missing.push(entry.clone());
         }
     }
-    Ok(outcome)
+    Ok(())
+}
+
+/// Whether anything, a dangling symlink included, sits at `path`. Any other failure than absence is an error, so that
+/// a permission problem never reads as a missing file.
+fn exists(path: &Path) -> Result<bool, InitError> {
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(InitError::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
 }
 
 /// The record at `path`, empty when the Worktree has not run any setup command.
@@ -236,7 +244,7 @@ fn copy_entry(source: &Path, destination: &Path) -> Result<bool, InitError> {
         source: source_error,
     };
     let kind = source.symlink_metadata().map_err(copy_error)?.file_type();
-    let absent = destination.symlink_metadata().is_err();
+    let absent = !exists(destination)?;
     if kind.is_dir() {
         fs::create_dir_all(destination).map_err(copy_error)?;
         let entries = fs::read_dir(source).map_err(|source_error| InitError::Read {
@@ -263,7 +271,12 @@ fn copy_entry(source: &Path, destination: &Path) -> Result<bool, InitError> {
         let target = fs::read_link(source).map_err(copy_error)?;
         std::os::unix::fs::symlink(target, destination).map_err(copy_error)?;
     } else {
-        fs::copy(source, destination).map_err(copy_error)?;
+        // Copied aside then renamed, so that an interrupted copy never leaves a truncated file that counts as present.
+        let mut partial = destination.as_os_str().to_owned();
+        partial.push(".procly-partial");
+        let partial = PathBuf::from(partial);
+        fs::copy(source, &partial).map_err(copy_error)?;
+        fs::rename(&partial, destination).map_err(copy_error)?;
     }
     Ok(true)
 }

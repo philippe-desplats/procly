@@ -38,7 +38,7 @@ Run in the Main worktree, `worktree init` has nothing to copy and only runs the 
 $ procly worktree init ../app-feature
 ```
 
-## Replacing an existing setup script
+## Replacing an existing script
 
 Orchestrators and worktree tools that call a setup script keep working when the script becomes one line. Give it the path when the caller passes one, and nothing when it runs inside the Worktree:
 

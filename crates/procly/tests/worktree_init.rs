@@ -287,3 +287,41 @@ fn the_one_line_wrapper_works_with_and_without_the_worktree_path() {
     // A hook that already runs inside the Worktree passes nothing.
     assert_eq!(run(&worktree, &[]), "nothing to do\n");
 }
+
+#[test]
+fn a_setup_command_failing_first_does_not_claim_there_was_nothing_to_do() {
+    let procly = Procly::new();
+    let (_, worktree) = repository_with_worktree(&procly, "[worktree]\nsetup = ['exit 3']\n");
+
+    let output = procly.procly_in(&worktree, &["worktree", "init"]);
+
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn setup_commands_run_in_a_worktree_of_a_repository_without_a_main_worktree() {
+    let procly = Procly::new();
+    let (source, _) = repository_with_worktree(&procly, "[worktree]\nsetup = ['echo ready >> setup.log']\n");
+    let bare = procly.scratch().join("bare.git");
+    git(
+        procly.scratch(),
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            &source.to_string_lossy(),
+            &bare.to_string_lossy(),
+        ],
+    );
+    let worktree = procly.scratch().join("checkout");
+    git(
+        &bare,
+        &["worktree", "add", "--quiet", &worktree.to_string_lossy(), "main"],
+    );
+
+    let output = procly.procly_in(&worktree, &["worktree", "init"]);
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "ran echo ready >> setup.log\n");
+}

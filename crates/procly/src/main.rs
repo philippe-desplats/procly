@@ -287,6 +287,9 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>) -> anyhow::Result<Exit
     };
     match client::send(state, &request)? {
         Response::WorktreeInit(report) => {
+            if report.copied.is_empty() && report.ran.is_empty() {
+                println!("nothing to do");
+            }
             print_init(&report);
             Ok(ExitCode::SUCCESS)
         }
@@ -330,9 +333,6 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>) -> anyhow::Result<Exit
 fn print_init(report: &InitReport) {
     for path in &report.missing {
         eprintln!("procly: {path} is not in the Main worktree, nothing to copy");
-    }
-    if report.copied.is_empty() && report.ran.is_empty() {
-        println!("nothing to do");
     }
     for path in &report.copied {
         println!("copied {path}");

@@ -6,7 +6,7 @@ Procly reads its configuration from 3 TOML files, merged in this order, each lev
 2. `procly.toml` at the root of the Worktree, versioned with the Repository. It declares the Services the team shares.
 3. `procly.local.toml` at the root of the Worktree, excluded from git. It holds personal overrides for this Worktree.
 
-Tables merge key by key and any other value replaces the one below, so a local file can override one port without repeating the rest of the Service. A missing file counts as empty, and an unknown key is an error, so a typo never goes unnoticed. The Daemon reads the files again on every `procly up`, no restart is needed after an edit.
+Tables merge key by key and any other value replaces the one below, so a local file can override one port without repeating the rest of the Service. A missing file counts as empty, and an unknown key is an error, so a typo never goes unnoticed. The Daemon reads the files again on every `procly up` and `procly worktree init`, no restart is needed after an edit.
 
 ## Example
 
