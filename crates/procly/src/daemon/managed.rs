@@ -83,6 +83,63 @@ impl ManagedBlocks {
     /// Makes `file` hold the block `block` with `content`, one line per element, creating the file and its directory
     /// when they are missing. The rest of the file is kept byte for byte. A block the user edited is left alone.
     pub(crate) fn write(&self, file: &Path, block: &str, content: &[impl AsRef<str>]) -> Result<Outcome, ManagedError> {
+        self.with_table(|table| {
+            let content: String = content.iter().flat_map(|line| [line.as_ref(), "\n"]).collect();
+            let text = read_text(file)?;
+            let key = (file.to_owned(), block.to_owned());
+            let (change, new_text) = plan(
+                Syntax::of(file),
+                &text,
+                block,
+                &content,
+                table.get(&key).map(String::as_str),
+            );
+            if let Some(new_text) = new_text {
+                write_text(file, &new_text)?;
+            }
+            if change != Outcome::Edited {
+                self.remember(table, key, fingerprint(&content))?;
+            }
+            Ok(change)
+        })
+    }
+
+    /// Whether `file` holds the block `block`, whatever its content.
+    pub(crate) fn holds(file: &Path, block: &str) -> Result<bool, ManagedError> {
+        Ok(!matches!(
+            locate(Syntax::of(file), &read_text(file)?, block),
+            Located::Absent
+        ))
+    }
+
+    /// The files Procly recorded a block named `block` in, whether they still hold it or not.
+    pub(crate) fn files_holding(&self, block: &str) -> Result<Vec<PathBuf>, ManagedError> {
+        self.with_table(|table| {
+            Ok(table
+                .keys()
+                .filter(|(_, name)| name == block)
+                .map(|(file, _)| file.clone())
+                .collect())
+        })
+    }
+
+    /// Records that Procly wrote `content` as the block `block` of `file`, for a file that cannot carry markers, such
+    /// as JSON. The caller finds the content again by its own means and asks [`ManagedBlocks::is_recorded`].
+    pub(crate) fn record(&self, file: &Path, block: &str, content: &str) -> Result<(), ManagedError> {
+        self.with_table(|table| self.remember(table, (file.to_owned(), block.to_owned()), fingerprint(content)))
+    }
+
+    /// Whether the block `block` of `file` was last recorded as exactly `content`, which tells a block Procly wrote
+    /// from one the user edited.
+    pub(crate) fn is_recorded(&self, file: &Path, block: &str, content: &str) -> Result<bool, ManagedError> {
+        self.with_table(|table| {
+            Ok(table.get(&(file.to_owned(), block.to_owned())).map(String::as_str)
+                == Some(fingerprint(content).as_str()))
+        })
+    }
+
+    /// Runs `action` on the table of fingerprints, read from the document the first time.
+    fn with_table<T>(&self, action: impl FnOnce(&mut Table) -> Result<T, ManagedError>) -> Result<T, ManagedError> {
         let mut table = self
             .table
             .lock()
@@ -91,28 +148,18 @@ impl ManagedBlocks {
             Some(table) => table,
             None => table.insert(self.read()?),
         };
-        let content: String = content.iter().flat_map(|line| [line.as_ref(), "\n"]).collect();
-        let text = read_text(file)?;
-        let key = (file.to_owned(), block.to_owned());
-        let (change, new_text) = plan(&text, block, &content, table.get(&key).map(String::as_str));
-        if let Some(new_text) = new_text {
-            write_text(file, &new_text)?;
-        }
-        if change != Outcome::Edited {
-            let fingerprint = fingerprint(&content);
-            if table.get(&key) != Some(&fingerprint) {
-                let mut updated = table.clone();
-                updated.insert(key, fingerprint);
-                self.write_table(&updated)?;
-                *table = updated;
-            }
-        }
-        Ok(change)
+        action(table)
     }
 
-    /// Whether `file` holds the block `block`, whatever its content.
-    pub(crate) fn holds(file: &Path, block: &str) -> Result<bool, ManagedError> {
-        Ok(!matches!(locate(&read_text(file)?, block), Located::Absent))
+    /// Stores `fingerprint` for `key`, in the document first so that a failed write leaves the table as it was.
+    fn remember(&self, table: &mut Table, key: (PathBuf, String), fingerprint: String) -> Result<(), ManagedError> {
+        if table.get(&key) != Some(&fingerprint) {
+            let mut updated = table.clone();
+            updated.insert(key, fingerprint);
+            self.write_table(&updated)?;
+            *table = updated;
+        }
+        Ok(())
     }
 
     fn read(&self) -> Result<Table, StoreError> {
@@ -154,7 +201,7 @@ fn read_text(file: &Path) -> Result<String, ManagedError> {
 }
 
 /// Replaces `file` in one step, keeping its permissions, so that a crash never leaves a half-written `.gitignore`.
-fn write_text(file: &Path, text: &str) -> Result<(), ManagedError> {
+pub(super) fn write_text(file: &Path, text: &str) -> Result<(), ManagedError> {
     let write_error = |source| ManagedError::Write {
         path: file.to_owned(),
         source,
@@ -174,20 +221,20 @@ fn write_text(file: &Path, text: &str) -> Result<(), ManagedError> {
 
 /// What to do with `text` to make it hold the block `block` with `content`, and the text to write, if any.
 /// `recorded` is the fingerprint stored for the block when Procly last wrote it.
-fn plan(text: &str, block: &str, content: &str, recorded: Option<&str>) -> (Outcome, Option<String>) {
-    match locate(text, block) {
+fn plan(syntax: Syntax, text: &str, block: &str, content: &str, recorded: Option<&str>) -> (Outcome, Option<String>) {
+    match locate(syntax, text, block) {
         Located::Absent => {
             let mut appended = text.to_owned();
             if !appended.is_empty() && !appended.ends_with('\n') {
                 appended.push('\n');
             }
-            appended.push_str(&render(block, content));
+            appended.push_str(&render(syntax, block, content));
             (Outcome::Written, Some(appended))
         }
         Located::Found { content: found, .. } if found == content => (Outcome::Unchanged, None),
         Located::Found { range, content: found } if recorded == Some(fingerprint(&found).as_str()) => {
             let mut replaced = text.to_owned();
-            replaced.replace_range(range, &render(block, content));
+            replaced.replace_range(range, &render(syntax, block, content));
             (Outcome::Written, Some(replaced))
         }
         Located::Broken | Located::Found { .. } => (Outcome::Edited, None),
@@ -207,21 +254,51 @@ enum Located {
     Broken,
 }
 
-fn open_marker(block: &str) -> String {
-    format!("# >>> procly managed block: {block} >>>")
+/// How a file marks the lines that belong to Procly, which depends on the comments the file can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Syntax {
+    /// `# …` lines, for the git exclude files.
+    Hash,
+    /// `<!-- … -->` lines, for Markdown, where a `#` line would render as a heading.
+    Html,
 }
 
-fn close_marker(block: &str) -> String {
-    format!("# <<< procly managed block: {block} <<<")
+impl Syntax {
+    /// The syntax a file takes, from its extension.
+    fn of(file: &Path) -> Self {
+        match file.extension().and_then(|extension| extension.to_str()) {
+            Some("md" | "mdc" | "markdown") => Self::Html,
+            _ => Self::Hash,
+        }
+    }
+
+    fn comment(self, text: &str) -> String {
+        match self {
+            Self::Hash => format!("# {text}"),
+            Self::Html => format!("<!-- {text} -->"),
+        }
+    }
+}
+
+fn open_marker(syntax: Syntax, block: &str) -> String {
+    syntax.comment(&format!(">>> procly managed block: {block} >>>"))
+}
+
+fn close_marker(syntax: Syntax, block: &str) -> String {
+    syntax.comment(&format!("<<< procly managed block: {block} <<<"))
 }
 
 /// The block as it is written: its markers around `content`, which ends with a line break.
-fn render(block: &str, content: &str) -> String {
-    format!("{}\n{content}{}\n", open_marker(block), close_marker(block))
+fn render(syntax: Syntax, block: &str, content: &str) -> String {
+    format!(
+        "{}\n{content}{}\n",
+        open_marker(syntax, block),
+        close_marker(syntax, block)
+    )
 }
 
-fn locate(text: &str, block: &str) -> Located {
-    let (open, close) = (open_marker(block), close_marker(block));
+fn locate(syntax: Syntax, text: &str, block: &str) -> Located {
+    let (open, close) = (open_marker(syntax, block), close_marker(syntax, block));
     let mut offset = 0;
     let mut start = None;
     for line in text.split_inclusive('\n') {
@@ -271,35 +348,38 @@ mod tests {
     }
 
     fn block(content: &str) -> String {
-        render("exclusions", content)
+        render(Syntax::Hash, "exclusions", content)
     }
 
     #[test]
     fn a_missing_block_is_appended_after_the_rest_of_the_file() {
-        let (change, text) = plan("node_modules\n", "exclusions", "/a\n", None);
+        let (change, text) = plan(Syntax::Hash, "node_modules\n", "exclusions", "/a\n", None);
         assert_eq!(change, Outcome::Written);
         assert_eq!(text.unwrap(), format!("node_modules\n{}", block("/a\n")));
     }
 
     #[test]
     fn a_file_without_a_final_line_break_gets_one_and_nothing_else_changes() {
-        let (_, text) = plan("a\nb", "exclusions", "/a\n", None);
+        let (_, text) = plan(Syntax::Hash, "a\nb", "exclusions", "/a\n", None);
         assert_eq!(text.unwrap(), format!("a\nb\n{}", block("/a\n")));
-        let (_, text) = plan("", "exclusions", "/a\n", None);
+        let (_, text) = plan(Syntax::Hash, "", "exclusions", "/a\n", None);
         assert_eq!(text.unwrap(), block("/a\n"));
     }
 
     #[test]
     fn a_block_with_the_same_content_is_left_alone() {
         let text = format!("above\n{}below", block("/a\n"));
-        assert_eq!(plan(&text, "exclusions", "/a\n", None), (Outcome::Unchanged, None));
+        assert_eq!(
+            plan(Syntax::Hash, &text, "exclusions", "/a\n", None),
+            (Outcome::Unchanged, None)
+        );
     }
 
     #[test]
     fn an_intact_block_is_updated_in_place_between_the_lines_around_it() {
         let text = format!("above\n{}below", block("/a\n"));
         let recorded = fingerprint("/a\n");
-        let (change, updated) = plan(&text, "exclusions", "/a\n/b\n", Some(&recorded));
+        let (change, updated) = plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", Some(&recorded));
         assert_eq!(change, Outcome::Written);
         assert_eq!(updated.unwrap(), format!("above\n{}below", block("/a\n/b\n")));
     }
@@ -309,24 +389,33 @@ mod tests {
         let text = format!("above\n{}below", block("/a\n/mine\n"));
         let recorded = fingerprint("/a\n");
         assert_eq!(
-            plan(&text, "exclusions", "/a\n/b\n", Some(&recorded)),
+            plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", Some(&recorded)),
             (Outcome::Edited, None)
         );
         // A block whose fingerprint was never recorded is no block of ours to rewrite either.
-        assert_eq!(plan(&text, "exclusions", "/a\n/b\n", None), (Outcome::Edited, None));
+        assert_eq!(
+            plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", None),
+            (Outcome::Edited, None)
+        );
     }
 
     #[test]
     fn a_block_that_never_closes_is_left_alone() {
-        let text = format!("{}\n/a\n", open_marker("exclusions"));
-        assert_eq!(plan(&text, "exclusions", "/a\n", None), (Outcome::Edited, None));
+        let text = format!("{}\n/a\n", open_marker(Syntax::Hash, "exclusions"));
+        assert_eq!(
+            plan(Syntax::Hash, &text, "exclusions", "/a\n", None),
+            (Outcome::Edited, None)
+        );
     }
 
     #[test]
     fn blocks_of_other_names_do_not_count() {
-        let text = render("rules", "x\n");
-        assert_eq!(locate(&text, "exclusions"), Located::Absent);
-        assert_eq!(plan(&text, "exclusions", "/a\n", None).0, Outcome::Written);
+        let text = render(Syntax::Hash, "rules", "x\n");
+        assert_eq!(locate(Syntax::Hash, &text, "exclusions"), Located::Absent);
+        assert_eq!(
+            plan(Syntax::Hash, &text, "exclusions", "/a\n", None).0,
+            Outcome::Written
+        );
     }
 
     #[test]
@@ -362,8 +451,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".gitignore");
         assert!(!ManagedBlocks::holds(&file, "exclusions").unwrap());
-        fs::write(&file, render("exclusions", "anything\n")).unwrap();
+        fs::write(&file, render(Syntax::Hash, "exclusions", "anything\n")).unwrap();
         assert!(ManagedBlocks::holds(&file, "exclusions").unwrap());
         assert!(!ManagedBlocks::holds(&file, "rules").unwrap());
+    }
+
+    #[test]
+    fn a_markdown_file_is_marked_with_html_comments_and_the_other_files_with_hash_lines() {
+        assert_eq!(Syntax::of(Path::new("AGENTS.md")), Syntax::Html);
+        assert_eq!(Syntax::of(Path::new("rules.mdc")), Syntax::Html);
+        assert_eq!(Syntax::of(Path::new(".gitignore")), Syntax::Hash);
+        assert_eq!(Syntax::of(Path::new("info/exclude")), Syntax::Hash);
+        assert_eq!(
+            render(Syntax::Html, "rules", "text\n"),
+            "<!-- >>> procly managed block: rules >>> -->\ntext\n<!-- <<< procly managed block: rules <<< -->\n"
+        );
+    }
+
+    #[test]
+    fn a_markdown_block_is_found_by_its_html_markers_and_not_by_hash_ones() {
+        let html = render(Syntax::Html, "rules", "x\n");
+        assert!(matches!(locate(Syntax::Html, &html, "rules"), Located::Found { .. }));
+        assert_eq!(locate(Syntax::Hash, &html, "rules"), Located::Absent);
+    }
+
+    #[test]
+    fn a_recorded_block_is_told_from_one_that_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocks = ManagedBlocks::new(dir.path().join("managed-blocks.json"));
+        let file = dir.path().join("settings.json");
+
+        assert!(!blocks.is_recorded(&file, "guard", "{}").unwrap());
+        blocks.record(&file, "guard", "{}").unwrap();
+        assert!(blocks.is_recorded(&file, "guard", "{}").unwrap());
+        assert!(!blocks.is_recorded(&file, "guard", "{ }").unwrap());
+
+        // A new Daemon reads the record back, and lists the files holding a block of that name.
+        let restarted = ManagedBlocks::new(dir.path().join("managed-blocks.json"));
+        assert!(restarted.is_recorded(&file, "guard", "{}").unwrap());
+        assert_eq!(restarted.files_holding("guard").unwrap(), vec![file]);
+        assert_eq!(restarted.files_holding("rules").unwrap(), Vec::<PathBuf>::new());
     }
 }
