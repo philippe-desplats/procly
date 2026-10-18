@@ -14,9 +14,10 @@ use std::path::{Path, PathBuf};
 use super::Registry;
 use super::foreign;
 use super::health::{HealthCheck, HttpCheck};
+use super::index::{IndexError, IndexRequest};
 use super::lease::{Claimed, LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
-use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
+use crate::config::{self, Config, ConfigError, Isolation, PortConfig, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts, Resource};
 use crate::driver;
 use crate::driver::{Driver, DriverError};
@@ -36,6 +37,8 @@ pub(super) enum EnvironmentError {
     Driver(#[from] DriverError),
     #[error(transparent)]
     Lease(#[from] LeaseError),
+    #[error(transparent)]
+    Index(#[from] IndexError),
     #[error(transparent)]
     Managed(#[from] ManagedError),
     #[error(transparent)]
@@ -108,7 +111,7 @@ pub(super) fn injected(
             .expect("a Lease is granted for every Port name, the health one included")
     });
 
-    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let resources = referenced_resources(registry, topology, config, &derived, &table)?;
     let facts = facts(topology, &table, &resources);
     let mut variables = ports::environment(&leases, health_port);
     variables.extend(derived.render(name, &facts)?);
@@ -173,7 +176,7 @@ pub(super) fn injected_group(
         });
         table.insert(service.clone(), leases);
     }
-    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let resources = referenced_resources(registry, topology, config, &derived, &table)?;
     let facts = facts(topology, &table, &resources);
     for service in covers {
         for variable in derived.render(service, &facts)? {
@@ -223,7 +226,7 @@ pub(super) fn mirror(
         .expect("the mirroring mutex is never poisoned, no code panics while holding it");
     let derived = Derived::from_config(&config.services)?;
     let table = grant_referenced(registry, topology, config, pinned_branch(topology, config)?, &derived)?;
-    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let resources = referenced_resources(registry, topology, config, &derived, &table)?;
     let variables = derived.render_all(&facts(topology, &table, &resources))?;
     // Excluded first, so that the Env file is never visible to git, not even for a moment.
     exclude(registry, topology, gitignore)?;
@@ -251,6 +254,7 @@ fn facts<'a>(
 /// The Logical resources of the Worktree for every Compose service some template reads one of. Only names and URLs are
 /// worked out here, creating the resources is for `up` of the Compose service.
 fn referenced_resources(
+    registry: &Registry,
     topology: &Topology,
     config: &Config,
     derived: &Derived,
@@ -265,7 +269,8 @@ fn referenced_resources(
         let service_leases = leases
             .get(service)
             .expect("the Leases of every Service a template refers to are granted before its resources");
-        if let Some((_, resources)) = logical_resources(topology, service, declared, service_leases)? {
+        if let Some((_, resources)) = logical_resources(registry, topology, config, service, declared, service_leases)?
+        {
             table.insert(service.to_owned(), resources);
         }
     }
@@ -276,8 +281,13 @@ fn referenced_resources(
 pub(super) type DriverResources = (Driver, BTreeMap<String, Resource>);
 
 /// The Driver of the Compose service `name` and its Logical resources in the Worktree, `None` when it has no Driver.
+///
+/// A Service that is Shared gives every Worktree the resources of the Main worktree. A Driver that numbers its
+/// resources has its indexes handed out here, and stored, since the URL of a resource holds one.
 pub(super) fn logical_resources(
+    registry: &Registry,
     topology: &Topology,
+    config: &Config,
     name: &str,
     declared: &ServiceConfig,
     leases: &BTreeMap<String, u16>,
@@ -290,9 +300,36 @@ pub(super) fn logical_resources(
     let health_port = declared
         .health_port_name(name)?
         .and_then(|port_name| leases.get(port_name).copied());
+    // Whose resources the Worktree reads: its own, or the ones of the Main worktree when the Service is Shared.
+    let main = config.isolation(declared) == Isolation::Shared;
+    let numbered = match driver.index_capacity() {
+        Some(capacity) => {
+            let main_worktree = topology.main()?.worktree.path;
+            let resources: Vec<String> = declared.resources.keys().cloned().collect();
+            let scope = if main { &main_worktree } else { &worktree.path };
+            let indexes = registry.indexes.allocate(&IndexRequest {
+                repository: &topology.git_common_dir,
+                main: &main_worktree,
+                worktree: scope,
+                service: name,
+                driver: &driver.name,
+                capacity,
+                resources: &resources,
+            })?;
+            Some(indexes)
+        }
+        None => None,
+    };
     let mut resources = BTreeMap::new();
     for (key, resource) in &declared.resources {
-        let resource_name = driver.resource_name(&resource.name, &worktree.slug, worktree.main)?;
+        let resource_name = match (&numbered, &resource.name) {
+            (Some(indexes), None) => indexes[key].to_string(),
+            (Some(_), Some(_)) => return Err(not_used(&driver, name, key).into()),
+            (None, Some(declared_name)) => {
+                driver.resource_name(declared_name, &worktree.slug, worktree.main || main)?
+            }
+            (None, None) => return Err(required(&driver, name, key).into()),
+        };
         let url = driver.url(&resource_name, leases, health_port)?;
         resources.insert(
             key.clone(),
@@ -303,6 +340,22 @@ pub(super) fn logical_resources(
         );
     }
     Ok(Some((driver, resources)))
+}
+
+fn required(driver: &Driver, service: &str, resource: &str) -> DriverError {
+    DriverError::NameRequired {
+        driver: driver.name.clone(),
+        service: service.to_owned(),
+        resource: resource.to_owned(),
+    }
+}
+
+fn not_used(driver: &Driver, service: &str, resource: &str) -> DriverError {
+    DriverError::NameNotUsed {
+        driver: driver.name.clone(),
+        service: service.to_owned(),
+        resource: resource.to_owned(),
+    }
 }
 
 /// The Pinned branch the Worktree is on, as the configuration names it, `None` when its branch is not pinned.

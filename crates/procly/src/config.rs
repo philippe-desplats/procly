@@ -75,6 +75,10 @@ pub(crate) enum ConfigError {
     CoveredTwice { service: String, groups: Vec<String> },
     #[error("no service is declared, there is nothing to start")]
     NoServices,
+    #[error(
+        "service {service} is set to `isolation = \"logical\"` but sets no `driver`, which creates the Logical resources"
+    )]
+    LogicalWithoutDriver { service: String },
     #[error("service {service} sets `driver` but declares no `resources` for it to create")]
     DriverWithoutResources { service: String },
     #[error(
@@ -163,6 +167,10 @@ pub(crate) struct Settings {
     /// How long a Compose service keeps running after the last Worktree that needed it stopped needing it.
     #[serde(default = "default_grace_period", deserialize_with = "duration")]
     pub(crate) grace_period: Duration,
+    /// The Isolation mode of every Compose service that sets a Driver and no `isolation` of its own, Logical when
+    /// unset.
+    #[serde(default)]
+    pub(crate) isolation: Option<Isolation>,
 }
 
 impl Default for Settings {
@@ -176,6 +184,7 @@ impl Default for Settings {
             port_range: default_port_range(),
             lease_expiry: default_lease_expiry(),
             grace_period: default_grace_period(),
+            isolation: None,
         }
     }
 }
@@ -200,6 +209,9 @@ pub(crate) struct ServiceConfig {
     /// Overrides `settings.grace_period` for this Compose service.
     #[serde(default, deserialize_with = "optional_duration")]
     pub(crate) grace_period: Option<Duration>,
+    /// Overrides `settings.isolation` for this Compose service.
+    #[serde(default)]
+    pub(crate) isolation: Option<Isolation>,
     /// The Driver that creates the Logical resources of a Compose service in its container.
     #[serde(default)]
     pub(crate) driver: Option<String>,
@@ -282,6 +294,44 @@ impl PortConfig {
     }
 }
 
+/// How a Compose service is separated between Worktrees. The Isolated mode, one container per Worktree, is for a later
+/// version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Isolation {
+    /// One container, and every Worktree reads the resources of the Main worktree.
+    Shared,
+    /// One container, and each Worktree has resources of its own in it.
+    Logical,
+}
+
+impl<'de> Deserialize<'de> for Isolation {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct IsolationVisitor;
+
+        impl Visitor<'_> for IsolationVisitor {
+            type Value = Isolation;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("\"shared\" or \"logical\"")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Isolation, E> {
+                match value {
+                    "shared" => Ok(Isolation::Shared),
+                    "logical" => Ok(Isolation::Logical),
+                    // Named apart so that nobody waits for it to start working.
+                    "isolated" => Err(E::custom(
+                        "the Isolated mode is not in v0.1, use \"shared\" or \"logical\"",
+                    )),
+                    other => Err(E::invalid_value(Unexpected::Str(other), &self)),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(IsolationVisitor)
+    }
+}
+
 /// How long a command Seed may run before it is killed.
 const DEFAULT_SEED_TIMEOUT: Duration = Duration::from_mins(10);
 
@@ -289,8 +339,10 @@ const DEFAULT_SEED_TIMEOUT: Duration = Duration::from_mins(10);
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResourceConfig {
-    /// The name in the Main worktree, other Worktrees append their slug to it.
-    pub(crate) name: String,
+    /// The name in the Main worktree, other Worktrees append their slug to it. Only for a Driver that names its
+    /// resources, one that numbers them hands the numbers out itself.
+    #[serde(default)]
+    pub(crate) name: Option<String>,
     #[serde(default)]
     pub(crate) seed: Seed,
 }
@@ -476,6 +528,9 @@ impl ServiceConfig {
                 if self.driver.is_some() {
                     return Err(wrong_key("driver", "a Process service", "a Compose service"));
                 }
+                if self.isolation.is_some() {
+                    return Err(wrong_key("isolation", "a Process service", "a Compose service"));
+                }
                 if !self.resources.is_empty() {
                     return Err(wrong_key("resources", "a Process service", "a Compose service"));
                 }
@@ -526,6 +581,11 @@ impl ServiceConfig {
     /// Fails on a Driver without resources or resources without a Driver, and on a key or a name that is not safe to
     /// put in a command run inside the container.
     fn validate_resources(&self, name: &str) -> Result<(), ConfigError> {
+        if self.isolation == Some(Isolation::Logical) && self.driver.is_none() {
+            return Err(ConfigError::LogicalWithoutDriver {
+                service: name.to_owned(),
+            });
+        }
         match (&self.driver, self.resources.is_empty()) {
             (Some(_), true) => {
                 return Err(ConfigError::DriverWithoutResources {
@@ -553,7 +613,7 @@ impl ServiceConfig {
             let unsafe_name = std::iter::once(key.as_str())
                 .chain(template)
                 .find(|text| !is_resource_name(text))
-                .or_else(|| Some(resource.name.as_str()).filter(|name| !is_declared_name(name)));
+                .or_else(|| resource.name.as_deref().filter(|name| !is_declared_name(name)));
             if let Some(text) = unsafe_name {
                 return Err(ConfigError::ResourceName {
                     service: name.to_owned(),
@@ -778,6 +838,18 @@ impl Config {
     /// How long the Compose service `service` keeps running once no Worktree needs it.
     pub(crate) fn grace_period(&self, service: &ServiceConfig) -> Duration {
         service.grace_period.unwrap_or(self.settings.grace_period)
+    }
+
+    /// How the Compose service `service` is separated between Worktrees: the mode it sets, else the one of the
+    /// Repository, else Logical. A Service without a Driver has no resources to separate, so it is Shared.
+    pub(crate) fn isolation(&self, service: &ServiceConfig) -> Isolation {
+        if service.driver.is_none() {
+            return Isolation::Shared;
+        }
+        service
+            .isolation
+            .or(self.settings.isolation)
+            .unwrap_or(Isolation::Logical)
     }
 
     /// Fails on the first Service whose keys disagree, so that no `up` starts anything from a configuration that
@@ -1170,7 +1242,7 @@ mod tests {
         let db = &config.services["db"];
         assert_eq!(db.driver.as_deref(), Some("postgres"));
         let seed = |key: &str| db.resources[key].seed.clone();
-        assert_eq!(db.resources["dev"].name, "app");
+        assert_eq!(db.resources["dev"].name.as_deref(), Some("app"));
         assert_eq!(seed("dev"), Seed::Empty);
         assert_eq!(seed("test"), Seed::Empty);
         assert_eq!(seed("copy"), Seed::Template("app_template".to_owned()));
@@ -1226,6 +1298,78 @@ mod tests {
         assert!(matches!(
             service("compose = 'db'\nresources = { dev = { name = 'app' } }\n").kind("db"),
             Err(ConfigError::ResourcesWithoutDriver { service }) if service == "db"
+        ));
+    }
+
+    #[test]
+    fn a_compose_service_is_logical_with_a_driver_and_shared_without_one() {
+        let config = parsed(
+            "[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\nresources = { dev = { name = 'app' } }\n\
+             [services.mail]\ncompose = 'mailpit'\n",
+        );
+        assert_eq!(config.isolation(&config.services["db"]), Isolation::Logical);
+        assert_eq!(config.isolation(&config.services["mail"]), Isolation::Shared);
+    }
+
+    #[test]
+    fn the_isolation_of_a_service_overrides_the_one_of_the_repository_which_overrides_the_default() {
+        let config = parsed(
+            "[settings]\nisolation = 'shared'\n\
+             [services.cache]\ncompose = 'redis'\ndriver = 'redis'\nresources = { main = {} }\n\
+             [services.db]\ncompose = 'postgres'\ndriver = 'postgres'\nisolation = 'logical'\n\
+             resources = { dev = { name = 'app' } }\n\
+             [services.mail]\ncompose = 'mailpit'\n",
+        );
+        let isolation = |name: &str| config.isolation(&config.services[name]);
+        assert_eq!(isolation("cache"), Isolation::Shared);
+        assert_eq!(isolation("db"), Isolation::Logical);
+        // A Service without a Driver has nothing to isolate, whatever the Repository asks for.
+        assert_eq!(isolation("mail"), Isolation::Shared);
+        assert_eq!(Settings::default().isolation, None);
+    }
+
+    #[test]
+    fn the_isolation_is_for_compose_services_and_logical_needs_a_driver() {
+        assert!(matches!(
+            service("run = 'x'\nisolation = 'shared'\n").kind("web"),
+            Err(ConfigError::KeyOfOtherKind { key: "isolation", .. })
+        ));
+        assert!(matches!(
+            service("compose = 'mailpit'\nisolation = 'logical'\n").kind("mail"),
+            Err(ConfigError::LogicalWithoutDriver { service }) if service == "mail"
+        ));
+        assert!(
+            service("compose = 'mailpit'\nisolation = 'shared'\n")
+                .kind("mail")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_isolated_mode_is_refused_as_not_there_yet_and_any_other_word_as_unknown() {
+        for text in [
+            "[settings]\nisolation = 'isolated'\n",
+            "[services.db]\ncompose = 'x'\nisolation = 'isolated'\n",
+        ] {
+            let error = Value::Table(table(text)).try_into::<Config>().unwrap_err().to_string();
+            assert!(error.contains("Isolated mode is not in v0.1"), "{error}");
+        }
+        let error = Value::Table(table("[settings]\nisolation = 'soft'\n"))
+            .try_into::<Config>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("\"shared\" or \"logical\""), "{error}");
+    }
+
+    #[test]
+    fn a_resource_name_is_optional_in_the_configuration_and_checked_when_given() {
+        let resources =
+            |name: &str| format!("compose = 'redis'\ndriver = 'redis'\nresources = {{ main = {{ {name} }} }}\n");
+        assert!(service(&resources("")).kind("cache").is_ok());
+        assert!(service(&resources("name = 'app'")).kind("cache").is_ok());
+        assert!(matches!(
+            service(&resources("name = 'App'")).kind("cache"),
+            Err(ConfigError::ResourceName { .. })
         ));
     }
 
