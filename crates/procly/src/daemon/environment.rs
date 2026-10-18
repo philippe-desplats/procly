@@ -16,7 +16,9 @@ use super::health::{HealthCheck, HttpCheck};
 use super::lease::{LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
-use crate::derived::{Derived, DerivedError, Facts};
+use crate::derived::{Derived, DerivedError, Facts, Resource};
+use crate::driver;
+use crate::driver::{Driver, DriverError};
 use crate::envfile;
 use crate::ports::{self, PortsError};
 use crate::topology::{self, Topology, TopologyError};
@@ -29,6 +31,8 @@ pub(super) enum EnvironmentError {
     Ports(#[from] PortsError),
     #[error(transparent)]
     Derived(#[from] DerivedError),
+    #[error(transparent)]
+    Driver(#[from] DriverError),
     #[error(transparent)]
     Lease(#[from] LeaseError),
     #[error(transparent)]
@@ -101,7 +105,8 @@ pub(super) fn injected(
             .expect("a Lease is granted for every Port name, the health one included")
     });
 
-    let facts = facts(topology, &table);
+    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let facts = facts(topology, &table, &resources);
     let mut variables = ports::environment(&leases, health_port);
     variables.extend(derived.render(name, &facts)?);
     variables.push(("PROCLY".to_owned(), "1".to_owned()));
@@ -165,7 +170,8 @@ pub(super) fn injected_group(
         });
         table.insert(service.clone(), leases);
     }
-    let facts = facts(topology, &table);
+    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let facts = facts(topology, &table, &resources);
     for service in covers {
         for variable in derived.render(service, &facts)? {
             // Two covered Services may share a variable, they were checked to give it one template.
@@ -214,18 +220,81 @@ pub(super) fn mirror(
         .expect("the mirroring mutex is never poisoned, no code panics while holding it");
     let derived = Derived::from_config(&config.services)?;
     let table = grant_referenced(registry, topology, config, pinned_branch(topology, config)?, &derived)?;
-    let variables = derived.render_all(&facts(topology, &table))?;
+    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let variables = derived.render_all(&facts(topology, &table, &resources))?;
     // Excluded first, so that the Env file is never visible to git, not even for a moment.
     exclude(registry, topology, gitignore)?;
     write_env_file(&topology.worktree.path, &envfile::env_file(&variables))
 }
 
-fn facts<'a>(topology: &'a Topology, leases: &'a BTreeMap<String, BTreeMap<String, u16>>) -> Facts<'a> {
+fn facts<'a>(
+    topology: &'a Topology,
+    leases: &'a BTreeMap<String, BTreeMap<String, u16>>,
+    resources: &'a BTreeMap<String, BTreeMap<String, Resource>>,
+) -> Facts<'a> {
     Facts {
         slug: &topology.worktree.slug,
         is_main: topology.worktree.main,
         leases,
+        resources,
     }
+}
+
+/// The Logical resources of the Worktree for every Compose service some template reads one of. Only names and URLs are
+/// worked out here, creating the resources is for `up` of the Compose service.
+fn referenced_resources(
+    topology: &Topology,
+    config: &Config,
+    derived: &Derived,
+    leases: &BTreeMap<String, BTreeMap<String, u16>>,
+) -> Result<BTreeMap<String, BTreeMap<String, Resource>>, EnvironmentError> {
+    let mut table = BTreeMap::new();
+    for service in derived.resource_services() {
+        let declared = config
+            .services
+            .get(service)
+            .expect("Derived::from_config checked that every referenced Service is declared");
+        let service_leases = leases
+            .get(service)
+            .expect("the Leases of every Service a template refers to are granted before its resources");
+        if let Some((_, resources)) = logical_resources(topology, service, declared, service_leases)? {
+            table.insert(service.to_owned(), resources);
+        }
+    }
+    Ok(table)
+}
+
+/// A Driver and the Logical resources it creates for a Worktree, by key.
+pub(super) type DriverResources = (Driver, BTreeMap<String, Resource>);
+
+/// The Driver of the Compose service `name` and its Logical resources in the Worktree, `None` when it has no Driver.
+pub(super) fn logical_resources(
+    topology: &Topology,
+    name: &str,
+    declared: &ServiceConfig,
+    leases: &BTreeMap<String, u16>,
+) -> Result<Option<DriverResources>, EnvironmentError> {
+    let Some(driver) = &declared.driver else {
+        return Ok(None);
+    };
+    let worktree = &topology.worktree;
+    let driver = Driver::load(driver, &worktree.path, driver::user_dir().as_deref())?;
+    let health_port = declared
+        .health_port_name(name)?
+        .and_then(|port_name| leases.get(port_name).copied());
+    let mut resources = BTreeMap::new();
+    for (key, resource) in &declared.resources {
+        let resource_name = driver.resource_name(&resource.name, &worktree.slug, worktree.main)?;
+        let url = driver.url(&resource_name, leases, health_port)?;
+        resources.insert(
+            key.clone(),
+            Resource {
+                name: resource_name,
+                url,
+            },
+        );
+    }
+    Ok(Some((driver, resources)))
 }
 
 /// The Pinned branch the Worktree is on, as the configuration names it, `None` when its branch is not pinned.

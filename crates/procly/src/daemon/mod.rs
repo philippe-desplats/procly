@@ -36,7 +36,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
 use self::clock::Clock;
-use self::compose::{ComposeSpec, Composes, Published};
+use self::compose::{ComposeSpec, Composes, PlannedResource, Published, ResourcePlan};
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
@@ -53,7 +53,7 @@ use crate::topology;
 /// Every Job, Service and Lease the Daemon owns.
 #[derive(Debug)]
 struct Registry {
-    jobs: Jobs,
+    jobs: Arc<Jobs>,
     services: Services,
     composes: Composes,
     leases: Arc<Leases>,
@@ -145,7 +145,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     let clock = Clock::from_env();
     let leases = Arc::new(Leases::new(state.leases(), clock.clone()));
     let registry = Arc::new(Registry {
-        jobs: Jobs::default(),
+        jobs: Arc::default(),
         services: Services::new(clock.clone(), ServiceRecords::new(state.services())),
         composes: Composes::new(clock.clone(), Arc::clone(&leases)),
         leases,
@@ -522,10 +522,14 @@ async fn up_compose(
     let key = (topology.git_common_dir.clone(), name.to_owned());
     let worktree = topology.worktree.path.clone();
     let prepare = {
-        let (registry, name) = (Arc::clone(registry), name.to_owned());
+        let (registry, name, topology, env) = (Arc::clone(registry), name.to_owned(), topology.clone(), env.clone());
         move || prepare_compose(&registry, &name, &topology, env)
     };
-    match registry.composes.up(key, worktree, grace, prepare).await {
+    let plan = {
+        let (registry, name) = (Arc::clone(registry), name.to_owned());
+        move || plan_resources(&registry, &name, &topology, env)
+    };
+    match registry.composes.up(key, worktree, grace, prepare, plan).await {
         Ok(brought) => Ok(Running::Compose {
             outcome: brought.outcome,
             port: brought.port,
@@ -584,6 +588,45 @@ fn prepare_compose(
         },
         health_timeout: config.health_timeout(declared),
     })
+}
+
+/// The Logical resources the Worktree needs in the container of the Compose service `name`, `None` when the service
+/// has no Driver. Worked out on every `up`, a Reuse included, since each Worktree has resources of its own.
+fn plan_resources(
+    registry: &Arc<Registry>,
+    name: &str,
+    topology: &topology::Topology,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<Option<ResourcePlan>> {
+    let worktree = &topology.worktree.path;
+    let config = read_config(worktree)?;
+    let declared = declared(&config, worktree, name)?;
+    if declared.driver.is_none() {
+        return Ok(None);
+    }
+    // The Leases are the ones the container runs on, granted already, so they stay as they are.
+    let injected = environment::injected(registry, topology, &config, name, declared, false)?;
+    let Some((driver, resources)) = environment::logical_resources(topology, name, declared, &injected.leases)? else {
+        return Ok(None);
+    };
+    let wanted = resources
+        .into_iter()
+        .map(|(key, resource)| PlannedResource {
+            seed: declared.resources[&key].seed.clone(),
+            key,
+            resource,
+        })
+        .collect();
+    let mut env = env;
+    env.extend(injected.variables);
+    Ok(Some(ResourcePlan {
+        driver,
+        topology: topology.clone(),
+        resources: wanted,
+        env,
+        jobs: Arc::clone(&registry.jobs),
+        ready_timeout: config.health_timeout(declared),
+    }))
 }
 
 /// The variables Procly injects into the Service `name` of the Worktree holding `cwd`.

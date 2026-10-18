@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod daemon;
 mod derived;
+mod driver;
 mod duration;
 mod envfile;
 mod guard;

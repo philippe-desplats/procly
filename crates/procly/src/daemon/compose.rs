@@ -4,6 +4,9 @@
 //! container is created from the compose file of the Main worktree under one project name, so that every Worktree
 //! finds the same container. Worktrees are counted, and once the last one let go the container is stopped, never
 //! removed, after its Grace period.
+//!
+//! A Compose service with a Driver is Logical: its container also holds a Logical resource per Worktree, which the
+//! Driver creates through `docker compose exec` once the container is healthy, whichever Worktree started it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -17,8 +20,14 @@ use tokio::task::JoinSet;
 
 use super::clock::Clock;
 use super::health::HealthCheck;
+use super::job::{Fingerprint, JobSpec, Jobs};
 use super::lease::Leases;
-use crate::protocol::{Released, ServiceEnd, StartOutcome};
+use crate::config::Seed;
+use crate::derived::Resource;
+use crate::driver::Driver;
+use crate::duration;
+use crate::protocol::{JobEnd, Released, ServiceEnd, StartOutcome};
+use crate::topology::Topology;
 
 /// Where to install `docker compose` v2, named in the error of a machine that lacks it.
 const INSTALL_URL: &str = "https://docs.docker.com/compose/install/";
@@ -26,6 +35,12 @@ const INSTALL_URL: &str = "https://docs.docker.com/compose/install/";
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
 /// How many lines of the logs of a container that never became healthy `up` shows.
 const LOG_LINES: &str = "20";
+/// How long a command of a Driver may run in the container.
+const DRIVER_COMMAND_TIMEOUT: Duration = Duration::from_mins(5);
+/// How long the Driver waits between 2 probes of a container that is not ready to create resources.
+const READY_INTERVAL: Duration = Duration::from_millis(250);
+/// How many characters of the output of a failed command an error shows, its end being where the cause is.
+const OUTPUT_TAIL: usize = 2000;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ComposeError {
@@ -64,6 +79,36 @@ pub(crate) enum ComposeError {
         upper: String,
         variables: String,
     },
+    #[error("the {driver} Driver of service {service} is not ready to create resources: {reason}")]
+    NotReady {
+        service: String,
+        driver: String,
+        reason: String,
+    },
+    #[error(
+        "the {driver} Driver of service {service} has no `copy` command, so resource {name} cannot be a copy of {template}"
+    )]
+    NoCopy {
+        service: String,
+        driver: String,
+        name: String,
+        template: String,
+    },
+    #[error("the {driver} Driver of service {service} could not {step} resource {name}: {reason}")]
+    Resource {
+        service: String,
+        driver: String,
+        step: &'static str,
+        name: String,
+        reason: String,
+    },
+    #[error("the seed of resource {name} of service {service} failed: {reason}\n{outcome}")]
+    SeedFailed {
+        service: String,
+        name: String,
+        reason: String,
+        outcome: String,
+    },
     #[error(transparent)]
     Prepare(#[from] anyhow::Error),
 }
@@ -85,6 +130,28 @@ pub(crate) struct ComposeSpec {
     pub(crate) variables: Vec<String>,
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
+}
+
+/// The Logical resources of one Worktree in the container of a Compose service, and what it takes to create them.
+#[derive(Debug)]
+pub(crate) struct ResourcePlan {
+    pub(crate) driver: Driver,
+    pub(crate) topology: Topology,
+    pub(crate) resources: Vec<PlannedResource>,
+    /// The environment of a command Seed: the caller's, then what the Service receives.
+    pub(crate) env: Vec<(String, String)>,
+    /// Where command Seeds run, as Jobs so that their process tree is killed on timeout or when the Daemon stops.
+    pub(crate) jobs: Arc<Jobs>,
+    /// How long the container may take to accept the commands of the Driver.
+    pub(crate) ready_timeout: Duration,
+}
+
+/// A Logical resource a Worktree needs.
+#[derive(Debug)]
+pub(crate) struct PlannedResource {
+    pub(crate) key: String,
+    pub(crate) resource: Resource,
+    pub(crate) seed: Seed,
 }
 
 /// A Lease the compose file must publish on the host.
@@ -162,16 +229,19 @@ impl Composes {
     /// Makes sure the container of the Compose service `key` runs for `worktree`, and waits until it is healthy.
     ///
     /// A container that Procly started and that still runs is a Reuse, whatever the Worktree. Otherwise `prepare`
-    /// builds what it takes to start it, on a blocking thread.
-    pub(crate) async fn up<P>(
+    /// builds what it takes to start it, on a blocking thread. Either way, `plan` builds the Logical resources
+    /// of the Worktree, which are created in the container when it lacks them.
+    pub(crate) async fn up<P, R>(
         &self,
         key: ComposeKey,
         worktree: PathBuf,
         grace: Duration,
         prepare: P,
+        plan: R,
     ) -> Result<Brought, ComposeError>
     where
         P: FnOnce() -> anyhow::Result<ComposeSpec> + Send + 'static,
+        R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
     {
         let container = self.container(&key);
         let _commands = container.commands.lock().await;
@@ -180,6 +250,8 @@ impl Composes {
         if let Some(mut alive) = alive
             && alive.docker.is_running().await
         {
+            // A Worktree whose resources cannot be created is not counted, it is not up.
+            alive.docker.create_resources(planned(plan).await?.as_ref()).await?;
             alive.grace = grace;
             let port = alive.port;
             let mut state = container.state();
@@ -204,6 +276,25 @@ impl Composes {
             // The health timeout covers `docker compose up --wait` and the probes together.
             None => wait_healthy(&spec.health, spec.health_timeout.saturating_sub(began.elapsed())).await,
         };
+        if health.is_ok() {
+            let created = match planned(plan).await {
+                Ok(planned) => docker.create_resources(planned.as_ref()).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = created {
+                let needed = !container.state().worktrees.is_empty();
+                if needed {
+                    // Restarted after it was stopped from outside Procly: the Worktrees that already need it keep it,
+                    // whatever one Worktree could not create in it.
+                    container.state().alive = Some(Alive { docker, port, grace });
+                } else {
+                    // A container that started but cannot hold the resources would be left running with nobody
+                    // counting it.
+                    let _ = docker.stop().await;
+                }
+                return Err(error);
+            }
+        }
         if let Err(end) = health {
             let logs = docker.logs().await;
             // Stopped, never removed: the data stays, and the next `up` starts it again.
@@ -320,6 +411,16 @@ impl Container {
     }
 }
 
+/// What the Worktree needs in the container, built on a blocking thread.
+async fn planned<R>(plan: R) -> Result<Option<ResourcePlan>, ComposeError>
+where
+    R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
+{
+    Ok(tokio::task::spawn_blocking(plan)
+        .await
+        .map_err(|error| anyhow::anyhow!("the resources could not be worked out: {error}"))??)
+}
+
 /// Stops the container after `grace`, unless a Worktree needed it again in the meantime.
 async fn stop_after(clock: Clock, leases: Arc<Leases>, container: Arc<Container>, grace: Duration, generation: u64) {
     clock.sleep(grace).await;
@@ -402,6 +503,64 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Option<ServiceEnd>), Compo
     Ok((docker, waited_out))
 }
 
+/// Runs the command Seed of a resource on the host, at the root of the Worktree, as a Job. It reads the resource in
+/// `PROCLY_RESOURCE_URL`, `PROCLY_RESOURCE_NAME` and `PROCLY_RESOURCE`, the key of the resource.
+async fn run_seed(plan: &ResourcePlan, wanted: &PlannedResource, run: &str, timeout: Duration) -> Result<(), String> {
+    let mut env = plan.env.clone();
+    env.extend([
+        ("PROCLY_RESOURCE".to_owned(), wanted.key.clone()),
+        ("PROCLY_RESOURCE_NAME".to_owned(), wanted.resource.name.clone()),
+        ("PROCLY_RESOURCE_URL".to_owned(), wanted.resource.url.clone()),
+    ]);
+    let spec = JobSpec {
+        fingerprint: Fingerprint {
+            topology: Some(plan.topology.clone()),
+            cwd: plan.topology.worktree.path.clone(),
+            command: run.to_owned(),
+        },
+        env,
+        timeout,
+    };
+    let jobs = Arc::clone(&plan.jobs);
+    // Opening a terminal and forking are blocking system calls.
+    let (id, _) = tokio::task::spawn_blocking(move || jobs.start(&spec))
+        .await
+        .map_err(|error| format!("cannot run the seed command: {error}"))?
+        .map_err(|error| format!("cannot run the seed command: {error}"))?;
+    let job = plan
+        .jobs
+        .get(&id)
+        .ok_or_else(|| "the seed command vanished from the job table".to_owned())?;
+    let reason = match job.ended().await {
+        JobEnd::Exited { code: 0 } => return Ok(()),
+        JobEnd::Exited { code } => format!("{run:?} exited with {code}"),
+        JobEnd::Signaled { signal } => format!("{run:?} was killed by signal {signal}"),
+        JobEnd::TimedOut { .. } => format!("{run:?} did not end within {}", duration::format(timeout)),
+    };
+    let output = tail(&job.output());
+    Err(if output.is_empty() {
+        reason
+    } else {
+        format!("{reason}: {output}")
+    })
+}
+
+/// How a command that failed ended, with the end of what it printed.
+fn failure(output: &Output) -> String {
+    let mut printed = text(&output.stderr);
+    if printed.is_empty() {
+        printed = text(&output.stdout);
+    }
+    format!("{}: {}", output.status, tail(&printed))
+}
+
+/// The last [`OUTPUT_TAIL`] characters of `text`.
+fn tail(text: &str) -> String {
+    let text = text.trim();
+    let skip = text.chars().count().saturating_sub(OUTPUT_TAIL);
+    text.chars().skip(skip).collect()
+}
+
 fn health_timeout(timeout: Duration) -> ServiceEnd {
     ServiceEnd::HealthTimeout {
         timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
@@ -474,6 +633,136 @@ impl Docker {
                 text
             }
             Err(_) => String::new(),
+        }
+    }
+
+    /// Creates the Logical resources of the Worktree the container lacks, each one filled by its Seed.
+    ///
+    /// A resource that exists is left as it is, whatever it holds. One created here whose command Seed fails is
+    /// dropped again, so that the next `up` seeds it afresh instead of finding it and keeping it empty.
+    async fn create_resources(&self, plan: Option<&ResourcePlan>) -> Result<(), ComposeError> {
+        let Some(plan) = plan else {
+            return Ok(());
+        };
+        if let Some(ready) = &plan.driver.ready {
+            self.wait_ready(plan, ready).await?;
+        }
+        for wanted in &plan.resources {
+            let name = &wanted.resource.name;
+            let template = wanted.seed.template();
+            let script = |command: &str| Driver::command(command, name, template);
+            // A check that cannot run says nothing about the resource: creating on its word could hit one that exists,
+            // and a failed Seed would then drop it.
+            match self.exec(&script(&plan.driver.check)).await {
+                Ok(output) if output.status.success() => continue,
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(ComposeError::Resource {
+                        service: self.service.clone(),
+                        driver: plan.driver.name.clone(),
+                        step: "check",
+                        name: name.clone(),
+                        reason: error.to_string(),
+                    });
+                }
+            }
+            let creating = match (template, &plan.driver.copy) {
+                (Some(_), Some(copy)) => copy,
+                (Some(template), None) => {
+                    return Err(ComposeError::NoCopy {
+                        service: self.service.clone(),
+                        driver: plan.driver.name.clone(),
+                        name: name.clone(),
+                        template: template.to_owned(),
+                    });
+                }
+                (None, _) => &plan.driver.create,
+            };
+            self.driver_step(plan, "create", name, &script(creating)).await?;
+            if let Seed::Command { run, timeout } = &wanted.seed
+                && let Err(reason) = run_seed(plan, wanted, run, *timeout).await
+            {
+                let outcome = self.drop_created(plan, name, &script(&plan.driver.drop)).await;
+                eprintln!(
+                    "the seed of resource {name} of service {} failed ({reason}), {outcome}",
+                    self.service
+                );
+                return Err(ComposeError::SeedFailed {
+                    service: self.service.clone(),
+                    name: name.clone(),
+                    reason,
+                    outcome,
+                });
+            }
+            eprintln!("created resource {name} of service {}", self.service);
+        }
+        Ok(())
+    }
+
+    /// Drops a resource this very request created, and says what became of it.
+    async fn drop_created(&self, plan: &ResourcePlan, name: &str, script: &str) -> String {
+        match self.driver_step(plan, "drop", name, script).await {
+            Ok(()) => format!(
+                "the resource {name} was created by this request and has been dropped, so the next `procly up` seeds it again"
+            ),
+            Err(error) => format!(
+                "the resource {name} was created by this request and could not be dropped ({error:#}), drop it with `docker compose exec {} sh -c '{script}'` before the next `procly up`",
+                self.compose
+            ),
+        }
+    }
+
+    /// Polls the container until the Driver finds it ready to create resources, or `ready_timeout` has passed.
+    async fn wait_ready(&self, plan: &ResourcePlan, ready: &str) -> Result<(), ComposeError> {
+        let deadline = Instant::now() + plan.ready_timeout;
+        loop {
+            let reason = match self.exec(ready).await {
+                Ok(output) if output.status.success() => return Ok(()),
+                Ok(output) => failure(&output),
+                Err(error) => error.to_string(),
+            };
+            if Instant::now() >= deadline {
+                return Err(ComposeError::NotReady {
+                    service: self.service.clone(),
+                    driver: plan.driver.name.clone(),
+                    reason,
+                });
+            }
+            tokio::time::sleep(READY_INTERVAL).await;
+        }
+    }
+
+    /// Runs a command of the Driver in the container, failing with what it printed.
+    async fn driver_step(
+        &self,
+        plan: &ResourcePlan,
+        step: &'static str,
+        name: &str,
+        script: &str,
+    ) -> Result<(), ComposeError> {
+        let reason = match self.exec(script).await {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => failure(&output),
+            Err(error) => error.to_string(),
+        };
+        Err(ComposeError::Resource {
+            service: self.service.clone(),
+            driver: plan.driver.name.clone(),
+            step,
+            name: name.to_owned(),
+            reason,
+        })
+    }
+
+    /// Runs a shell script in the container of the service, which must run.
+    async fn exec(&self, script: &str) -> std::io::Result<Output> {
+        let args = ["exec", "-T", &self.compose, "sh", "-c", script];
+        match tokio::time::timeout(DRIVER_COMMAND_TIMEOUT, self.project_output(&args)).await {
+            Ok(output) => output,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("it did not end within {}", duration::format(DRIVER_COMMAND_TIMEOUT)),
+            )),
         }
     }
 

@@ -75,6 +75,22 @@ pub(crate) enum ConfigError {
     CoveredTwice { service: String, groups: Vec<String> },
     #[error("no service is declared, there is nothing to start")]
     NoServices,
+    #[error("service {service} sets `driver` but declares no `resources` for it to create")]
+    DriverWithoutResources { service: String },
+    #[error(
+        "driver {name:?} of service {service} must be a file name: lowercase letters, digits, hyphens and underscores"
+    )]
+    DriverName { service: String, name: String },
+    #[error("service {service} declares `resources` but sets no `driver` to create them")]
+    ResourcesWithoutDriver { service: String },
+    #[error(
+        "resource {resource} of service {service} has {name:?}, which must start with a lowercase letter and hold only lowercase letters, digits and underscores, never 2 in a row and never at the end for a name"
+    )]
+    ResourceName {
+        service: String,
+        resource: String,
+        name: String,
+    },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
     Invalid {
         files: Vec<PathBuf>,
@@ -184,6 +200,12 @@ pub(crate) struct ServiceConfig {
     /// Overrides `settings.grace_period` for this Compose service.
     #[serde(default, deserialize_with = "optional_duration")]
     pub(crate) grace_period: Option<Duration>,
+    /// The Driver that creates the Logical resources of a Compose service in its container.
+    #[serde(default)]
+    pub(crate) driver: Option<String>,
+    /// The Logical resources each Worktree gets in the container, by key.
+    #[serde(default)]
+    pub(crate) resources: BTreeMap<String, ResourceConfig>,
     #[serde(default)]
     pub(crate) health: HealthConfig,
     /// The Derived variables of the Service: each value is a template over Leases and Worktree facts, rendered into
@@ -257,6 +279,96 @@ impl PortConfig {
     /// A declared port without a Pool, the meaning of the bare form `http = 3000`.
     pub(crate) fn declared(port: u16) -> Self {
         Self { port, pool: Vec::new() }
+    }
+}
+
+/// How long a command Seed may run before it is killed.
+const DEFAULT_SEED_TIMEOUT: Duration = Duration::from_mins(10);
+
+/// One Logical resource of a Compose service, created by its Driver in each Worktree.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResourceConfig {
+    /// The name in the Main worktree, other Worktrees append their slug to it.
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) seed: Seed,
+}
+
+/// The initial content of a new Logical resource.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) enum Seed {
+    /// Nothing, the resource starts as the Driver creates it.
+    #[default]
+    Empty,
+    /// A copy of the resource of that name, which already exists in the container.
+    Template(String),
+    /// What a command run on the host, at the root of the Worktree, leaves in the resource.
+    Command { run: String, timeout: Duration },
+}
+
+impl Seed {
+    /// The resource a new resource is copied from, `None` for the other Seeds.
+    pub(crate) fn template(&self) -> Option<&str> {
+        match self {
+            Self::Template(template) => Some(template),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Seed {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The table form, deserialized as declared so that a misspelt key is named in the error.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SeedTable {
+            template: Option<String>,
+            run: Option<String>,
+            #[serde(default, deserialize_with = "optional_duration")]
+            timeout: Option<Duration>,
+        }
+
+        struct SeedVisitor;
+
+        impl<'de> Visitor<'de> for SeedVisitor {
+            type Value = Seed;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("\"empty\", or a table with `template`, or with `run` and an optional `timeout`")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Seed, E> {
+                match value {
+                    "empty" => Ok(Seed::Empty),
+                    other => Err(E::invalid_value(Unexpected::Str(other), &self)),
+                }
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Seed, A::Error> {
+                let table = SeedTable::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                match table {
+                    SeedTable {
+                        template: Some(name),
+                        run: None,
+                        timeout: None,
+                    } => Ok(Seed::Template(name)),
+                    SeedTable {
+                        template: None,
+                        run: Some(run),
+                        timeout,
+                    } => Ok(Seed::Command {
+                        run,
+                        timeout: timeout.unwrap_or(DEFAULT_SEED_TIMEOUT),
+                    }),
+                    _ => Err(de::Error::custom(
+                        "a seed table sets `template`, or `run` with an optional `timeout`, and nothing else",
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(SeedVisitor)
     }
 }
 
@@ -361,6 +473,12 @@ impl ServiceConfig {
                 if self.grace_period.is_some() {
                     return Err(wrong_key("grace_period", "a Process service", "a Compose service"));
                 }
+                if self.driver.is_some() {
+                    return Err(wrong_key("driver", "a Process service", "a Compose service"));
+                }
+                if !self.resources.is_empty() {
+                    return Err(wrong_key("resources", "a Process service", "a Compose service"));
+                }
                 let Some(covers) = &self.covers else {
                     return Ok(ServiceKind::Process { run });
                 };
@@ -396,12 +514,55 @@ impl ServiceConfig {
                 if idle.stop.is_some() || idle.timeout.is_some() {
                     return Err(wrong_key("idle", "a Compose service", "a Process service"));
                 }
+                self.validate_resources(name)?;
                 Ok(ServiceKind::Compose { service })
             }
             _ => Err(ConfigError::ServiceKind {
                 service: name.to_owned(),
             }),
         }
+    }
+
+    /// Fails on a Driver without resources or resources without a Driver, and on a key or a name that is not safe to
+    /// put in a command run inside the container.
+    fn validate_resources(&self, name: &str) -> Result<(), ConfigError> {
+        match (&self.driver, self.resources.is_empty()) {
+            (Some(_), true) => {
+                return Err(ConfigError::DriverWithoutResources {
+                    service: name.to_owned(),
+                });
+            }
+            (None, false) => {
+                return Err(ConfigError::ResourcesWithoutDriver {
+                    service: name.to_owned(),
+                });
+            }
+            _ => {}
+        }
+        if let Some(driver) = &self.driver
+            && !is_driver_name(driver)
+        {
+            return Err(ConfigError::DriverName {
+                service: name.to_owned(),
+                name: driver.clone(),
+            });
+        }
+        for (key, resource) in &self.resources {
+            let template = resource.seed.template();
+            // The name is followed by `__` and the slug in other Worktrees, a template is an existing name as it is.
+            let unsafe_name = std::iter::once(key.as_str())
+                .chain(template)
+                .find(|text| !is_resource_name(text))
+                .or_else(|| Some(resource.name.as_str()).filter(|name| !is_declared_name(name)));
+            if let Some(text) = unsafe_name {
+                return Err(ConfigError::ResourceName {
+                    service: name.to_owned(),
+                    resource: key.clone(),
+                    name: text.to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The Port name the health check of the Service `name` probes, `None` when it declares no Port name.
@@ -631,6 +792,28 @@ impl Config {
     pub(crate) fn health_timeout(&self, service: &ServiceConfig) -> Duration {
         service.health.timeout.unwrap_or(self.settings.health_timeout)
     }
+}
+
+/// Whether `text` can name a resource in the Main worktree: a resource name that holds no `__` and does not end with
+/// `_`, so that the `__` before the slug is always the first one.
+fn is_declared_name(text: &str) -> bool {
+    is_resource_name(text) && !text.contains("__") && !text.ends_with('_')
+}
+
+/// Whether `text` can name the file of a Driver without leaving the directory that holds it.
+fn is_driver_name(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// Whether `text` is a lowercase letter then lowercase letters, digits and underscores: a word every Driver can use as
+/// a resource name, and one that needs no quoting in a shell command.
+fn is_resource_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// Long enough for a dev server compiling a large app on its first start.
@@ -972,6 +1155,138 @@ mod tests {
         assert_eq!(config.grace_period(&config.services["db"]), Duration::from_mins(20));
         assert_eq!(config.grace_period(&config.services["cache"]), Duration::from_secs(30));
         assert_eq!(Settings::default().grace_period, Duration::from_mins(10));
+    }
+
+    #[test]
+    fn a_compose_service_declares_a_driver_and_its_logical_resources_with_their_seeds() {
+        let config = parsed(
+            "[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\n\
+             [services.db.resources.dev]\nname = 'app'\n\
+             [services.db.resources.test]\nname = 'app_test'\nseed = 'empty'\n\
+             [services.db.resources.copy]\nname = 'app_copy'\nseed = { template = 'app_template' }\n\
+             [services.db.resources.filled]\nname = 'app_filled'\nseed = { run = 'make seed', timeout = '2m' }\n\
+             [services.db.resources.quick]\nname = 'app_quick'\nseed = { run = 'make seed' }\n",
+        );
+        let db = &config.services["db"];
+        assert_eq!(db.driver.as_deref(), Some("postgres"));
+        let seed = |key: &str| db.resources[key].seed.clone();
+        assert_eq!(db.resources["dev"].name, "app");
+        assert_eq!(seed("dev"), Seed::Empty);
+        assert_eq!(seed("test"), Seed::Empty);
+        assert_eq!(seed("copy"), Seed::Template("app_template".to_owned()));
+        assert_eq!(
+            seed("filled"),
+            Seed::Command {
+                run: "make seed".to_owned(),
+                timeout: Duration::from_mins(2)
+            }
+        );
+        assert_eq!(
+            seed("quick"),
+            Seed::Command {
+                run: "make seed".to_owned(),
+                timeout: Duration::from_mins(10)
+            }
+        );
+        assert!(db.kind("db").is_ok());
+    }
+
+    #[test]
+    fn a_seed_is_empty_a_template_or_a_command_and_nothing_else() {
+        for seed in [
+            "'full'",
+            "{ template = 'a', run = 'b' }",
+            "{}",
+            "{ timeout = '1m' }",
+            "{ template = 'a', timeout = '1m' }",
+            "{ copy = 'a' }",
+        ] {
+            let text = format!(
+                "[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\n[services.db.resources.dev]\nname = 'app'\nseed = {seed}\n"
+            );
+            assert!(
+                Value::Table(table(&text)).try_into::<Config>().is_err(),
+                "seed {seed} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_driver_belongs_to_a_compose_service_that_declares_resources_for_it() {
+        let key = |text: &str| match service(text).kind("db") {
+            Err(ConfigError::KeyOfOtherKind { key, .. }) => key,
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        assert_eq!(key("run = 'x'\ndriver = 'postgres'\n"), "driver");
+        assert_eq!(key("run = 'x'\nresources = { dev = { name = 'app' } }\n"), "resources");
+        assert!(matches!(
+            service("compose = 'db'\ndriver = 'postgres'\n").kind("db"),
+            Err(ConfigError::DriverWithoutResources { service }) if service == "db"
+        ));
+        assert!(matches!(
+            service("compose = 'db'\nresources = { dev = { name = 'app' } }\n").kind("db"),
+            Err(ConfigError::ResourcesWithoutDriver { service }) if service == "db"
+        ));
+    }
+
+    #[test]
+    fn a_driver_is_named_by_a_file_name_that_cannot_leave_the_directory_of_drivers() {
+        for bad in ["../x", "a/b", "A", "", "a.b", "a b"] {
+            let text = format!("compose = 'db'\ndriver = '{bad}'\nresources = {{ dev = {{ name = 'app' }} }}\n");
+            assert!(
+                matches!(
+                    service(&text).kind("db"),
+                    Err(ConfigError::DriverName { name, .. }) if name == bad
+                ),
+                "{bad:?}"
+            );
+        }
+        let ok = "compose = 'db'\ndriver = 'my-db_2'\nresources = { dev = { name = 'app' } }\n";
+        assert!(service(ok).kind("db").is_ok());
+    }
+
+    #[test]
+    fn a_resource_key_and_name_are_lowercase_words_that_are_safe_in_a_shell_command() {
+        let name = |text: &str| match service(text).kind("db") {
+            Err(ConfigError::ResourceName { resource, name, .. }) => (resource, name),
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        let with = |key: &str, name: &str, seed: &str| {
+            format!(
+                "compose = 'db'\ndriver = 'd'\nresources = {{ \"{key}\" = {{ name = '{name}', seed = {seed} }} }}\n"
+            )
+        };
+        for bad in ["App", "a b", "a;b", "a-b", "", "app\"", "$(x)", "é"] {
+            assert_eq!(
+                name(&with("dev", bad, "'empty'")),
+                ("dev".to_owned(), bad.to_owned()),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            name(&with("dev", "app", "{ template = 'a b' }")),
+            ("dev".to_owned(), "a b".to_owned())
+        );
+        assert_eq!(
+            name(&with("De v", "app", "'empty'")),
+            ("De v".to_owned(), "De v".to_owned())
+        );
+        assert!(service(&with("dev_2", "app_2", "'empty'")).kind("db").is_ok());
+        // The Worktree slug is appended after a double underscore, which names never hold so that 2 Worktrees never
+        // share a resource.
+        for bad in ["app__x", "app_"] {
+            assert_eq!(
+                name(&with("dev", bad, "'empty'")),
+                ("dev".to_owned(), bad.to_owned()),
+                "{bad:?}"
+            );
+        }
+        // A template is an existing resource, written as it is.
+        assert!(
+            service(&with("dev", "app", "{ template = 'base__2' }"))
+                .kind("db")
+                .is_ok()
+        );
     }
 
     #[test]
