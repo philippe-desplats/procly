@@ -29,6 +29,13 @@ pub(crate) struct ServiceRecord {
     pub(crate) port: Option<u16>,
     /// The port of every Lease of the Service.
     pub(crate) lease_ports: Vec<u16>,
+    /// The Services it covers when it is a Group, whose Leases it holds. Absent from a document written before
+    /// Groups existed, where no Service is one.
+    #[serde(default)]
+    pub(crate) covers: Vec<String>,
+    /// The port each Service a Group covers is probed on, which the Group must still listen on to be re-attached.
+    #[serde(default)]
+    pub(crate) covered_ports: Vec<u16>,
     /// How long the Service may be idle before it is stopped.
     pub(crate) idle_ms: Option<u64>,
 }
