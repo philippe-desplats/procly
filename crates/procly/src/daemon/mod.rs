@@ -30,7 +30,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use self::clock::Clock;
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
-use self::lease::{LeaseRequest, Leases};
+use self::lease::{LeaseRequest, Leases, PinnedBranch};
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
 use crate::ports;
@@ -94,10 +94,11 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", state.pid().display()))?;
     eprintln!("procly daemon {} listening on {}", std::process::id(), socket.display());
 
+    let clock = Clock::from_env();
     let registry = Arc::new(Registry {
         jobs: Jobs::default(),
-        services: Services::new(Clock::from_env()),
-        leases: Leases::new(state.leases()),
+        services: Services::new(clock.clone()),
+        leases: Leases::new(state.leases(), clock),
         initializing: Mutex::default(),
     });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
@@ -259,6 +260,19 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
         // Checked before any Lease is granted, so that a request bound to fail stores none.
         let health_port_name = declared.health_port_name(name)?;
         ports::check(name, &declared.run, declared.ports.keys())?;
+        // Only a Repository declaring Pinned branches needs to know the branch.
+        let branch = if config.pinned.is_empty() {
+            None
+        } else {
+            topology::branch(&worktree)?
+        };
+        let pinned = branch
+            .as_deref()
+            .and_then(|branch| config.pinned.get_key_value(branch))
+            .map(|(branch, pinned)| PinnedBranch {
+                name: branch,
+                ports: pinned.ports.get(name),
+            });
         // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
         let leases = registry.leases.grant(&LeaseRequest {
             topology: &topology,
@@ -266,6 +280,9 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
             ports: &declared.ports,
             range: config.settings.port_range,
             declared: &config.declared_ports(),
+            pinned,
+            expiry: config.settings.lease_expiry,
+            running: &registry.services.running(),
         })?;
         let health_port = health_port_name.map(|port_name| {
             *leases

@@ -96,6 +96,12 @@ pub(crate) fn git_dir(worktree: &Path) -> Result<PathBuf, TopologyError> {
     canonicalize(Path::new(OsStr::from_bytes(&output)))
 }
 
+/// The branch checked out in the Worktree rooted at `worktree`, `None` on a detached `HEAD`.
+pub(crate) fn branch(worktree: &Path) -> Result<Option<String>, TopologyError> {
+    let output = git(worktree, &["branch", "--show-current"])?;
+    Ok((!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned()))
+}
+
 /// Every Worktree of a Repository, in the order of `git worktree list`.
 ///
 /// The first entry of a bare Repository is the bare directory itself, which is no Worktree and is skipped, so no

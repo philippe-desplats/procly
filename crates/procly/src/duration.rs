@@ -1,4 +1,4 @@
-//! Durations written the way `timeout(1)` accepts them: `90`, `90s`, `500ms`, `5m`, `1h`.
+//! Durations written the way `timeout(1)` accepts them: `90`, `90s`, `500ms`, `5m`, `1h`, `30d`.
 
 use std::time::Duration;
 
@@ -8,15 +8,16 @@ pub(crate) fn parse(text: &str) -> Result<Duration, String> {
     let (number, unit) = text.split_at(split);
     let number: u64 = number
         .parse()
-        .map_err(|_| format!("invalid duration {text:?}, expected a number followed by ms, s, m or h"))?;
+        .map_err(|_| format!("invalid duration {text:?}, expected a number followed by ms, s, m, h or d"))?;
     let duration = match unit {
         "ms" => Duration::from_millis(number),
         "" | "s" => Duration::from_secs(number),
         "m" => Duration::from_secs(number.saturating_mul(60)),
         "h" => Duration::from_secs(number.saturating_mul(3600)),
+        "d" => Duration::from_secs(number.saturating_mul(86_400)),
         _ => {
             return Err(format!(
-                "invalid duration unit {unit:?} in {text:?}, expected ms, s, m or h"
+                "invalid duration unit {unit:?} in {text:?}, expected ms, s, m, h or d"
             ));
         }
     };
@@ -51,12 +52,13 @@ mod tests {
         assert_eq!(parse("500ms"), Ok(Duration::from_millis(500)));
         assert_eq!(parse("5m"), Ok(Duration::from_mins(5)));
         assert_eq!(parse("1h"), Ok(Duration::from_hours(1)));
+        assert_eq!(parse("30d"), Ok(Duration::from_hours(30 * 24)));
     }
 
     #[test]
     fn rejects_zero_unknown_units_and_missing_numbers() {
         assert!(parse("0s").is_err());
-        assert!(parse("5d").is_err());
+        assert!(parse("5w").is_err());
         assert!(parse("s").is_err());
         assert!(parse("").is_err());
         assert!(parse("-1s").is_err());
