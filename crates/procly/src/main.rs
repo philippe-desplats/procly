@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
-use crate::protocol::{InitReport, JobEnd, Request, Response, ServiceEnd};
+use crate::protocol::{InitReport, JobEnd, Request, Response, ServiceEnd, StartOutcome};
 use crate::state_dir::StateDir;
 
 /// The exit code of `wait` for a Job killed on timeout, and of `up` for a Service never healthy, the one
@@ -63,10 +63,11 @@ enum Command {
     /// its name, `started` or `reused`, its URL and its port on one line.
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
-                            (it exited, was killed by a signal or was stopped by `procly down`), 4 when it listened \
-                            on another port than its Lease (Port mismatch) and its process tree was stopped, 124 \
-                            when it did not become healthy within its health timeout and its process tree was \
-                            stopped, 125 when Procly itself fails. See docs/exit-codes.md."
+                            (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
+                            until Procly gave up restarting it), 4 when it listened on another port than its Lease \
+                            (Port mismatch) and its process tree was stopped, 124 when it did not become healthy \
+                            within its health timeout and its process tree was stopped, 125 when Procly itself \
+                            fails. See docs/exit-codes.md."
     )]
     Up { service: String },
     /// Stop a Service of the current Worktree, or all of its Services without an argument, with their whole
@@ -214,16 +215,29 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
             outcome,
             port,
             url,
+            needs,
         } => {
-            match (url, port) {
-                (Some(url), Some(port)) => println!("{service} {} {url} port {port}", outcome.as_str()),
-                _ => println!("{service} {}", outcome.as_str()),
+            // Stdout is the requested Service alone, what it needed is told on stderr.
+            for need in needs {
+                eprintln!(
+                    "{} (needed by {service})",
+                    reached(&need.service, need.outcome, need.url, need.port)
+                );
             }
+            println!("{}", reached(&service, outcome, url, port));
             Ok(ExitCode::SUCCESS)
         }
         Response::Unhealthy {
-            service, end, output, ..
+            service,
+            end,
+            output,
+            needed_by,
+            ..
         } => {
+            let service = match needed_by {
+                Some(needed_by) => format!("{service}, needed by {needed_by},"),
+                None => service,
+            };
             let (why, code) = match end {
                 ServiceEnd::Exited { code } => (
                     format!("exited with code {code} before it became healthy"),
@@ -235,6 +249,17 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                 ),
                 ServiceEnd::Stopped => (
                     "was stopped by procly down before it became healthy".to_owned(),
+                    EXIT_SERVICE_ENDED,
+                ),
+                ServiceEnd::Idle { timeout_ms } => (
+                    format!(
+                        "was stopped after {} idle",
+                        duration::format(Duration::from_millis(timeout_ms))
+                    ),
+                    EXIT_SERVICE_ENDED,
+                ),
+                ServiceEnd::Failed { restarts } => (
+                    format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
                     EXIT_SERVICE_ENDED,
                 ),
                 ServiceEnd::PortMismatch { leased, actual } => (
@@ -261,6 +286,14 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(code))
         }
         other => unexpected(other),
+    }
+}
+
+/// Where to reach a Service that is up: its name, `started` or `reused`, its URL and its port.
+fn reached(service: &str, outcome: StartOutcome, url: Option<String>, port: Option<u16>) -> String {
+    match (url, port) {
+        (Some(url), Some(port)) => format!("{service} {} {url} port {port}", outcome.as_str()),
+        _ => format!("{service} {}", outcome.as_str()),
     }
 }
 

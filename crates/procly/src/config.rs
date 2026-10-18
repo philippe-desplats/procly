@@ -36,6 +36,10 @@ pub(crate) enum ConfigError {
     AmbiguousHealthPort { service: String, names: Vec<String> },
     #[error("health.port of service {service} is {name}, which is not one of its Port names")]
     UnknownHealthPort { service: String, name: String },
+    #[error("service {service} needs {need}, which is not declared")]
+    UnknownNeed { service: String, need: String },
+    #[error("services need each other in a loop: {}", .cycle.join(" -> "))]
+    NeedsCycle { cycle: Vec<String> },
     #[error("worktree.copy lists {path:?}, which is not a path inside the Worktree")]
     WorktreeCopyPath { path: String },
     #[error("the user settings {path} holds only [settings], move [{key}] to a procly.toml")]
@@ -79,6 +83,18 @@ pub(crate) struct Settings {
     /// How long `up` waits for a Service to become healthy before stopping it.
     #[serde(default = "default_health_timeout", deserialize_with = "duration")]
     pub(crate) health_timeout: Duration,
+    /// How many times a crashed Service is restarted before it is given up on.
+    #[serde(default = "default_restart_attempts")]
+    pub(crate) restart_attempts: u32,
+    /// The delay before the first restart of a crashed Service, doubled before each next one.
+    #[serde(default = "default_restart_delay", deserialize_with = "duration")]
+    pub(crate) restart_delay: Duration,
+    /// Whether a Service that printed nothing and used almost no CPU for `idle_timeout` is stopped.
+    #[serde(default = "default_idle_stop")]
+    pub(crate) idle_stop: bool,
+    /// How long a Service must be idle to be stopped.
+    #[serde(default = "default_idle_timeout", deserialize_with = "duration")]
+    pub(crate) idle_timeout: Duration,
     /// Where the Leases of Worktrees other than the Main worktree are drawn from.
     #[serde(default = "default_port_range", deserialize_with = "range")]
     pub(crate) port_range: Range,
@@ -88,6 +104,10 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             health_timeout: default_health_timeout(),
+            restart_attempts: default_restart_attempts(),
+            restart_delay: default_restart_delay(),
+            idle_stop: default_idle_stop(),
+            idle_timeout: default_idle_timeout(),
             port_range: default_port_range(),
         }
     }
@@ -104,6 +124,50 @@ pub(crate) struct ServiceConfig {
     pub(crate) ports: BTreeMap<String, u16>,
     #[serde(default)]
     pub(crate) health: HealthConfig,
+    /// The Services started first, and healthy, before this one.
+    #[serde(default)]
+    pub(crate) needs: Vec<String>,
+    #[serde(default)]
+    pub(crate) restart: RestartConfig,
+    #[serde(default)]
+    pub(crate) idle: IdleConfig,
+}
+
+/// Overrides `settings.idle_stop` and `settings.idle_timeout` for one Service.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdleConfig {
+    /// `false` keeps the Service running however long it stays idle.
+    pub(crate) stop: Option<bool>,
+    #[serde(default, deserialize_with = "optional_duration")]
+    pub(crate) timeout: Option<Duration>,
+}
+
+/// Overrides `settings.restart_attempts` and `settings.restart_delay` for one Service.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RestartConfig {
+    pub(crate) attempts: Option<u32>,
+    #[serde(default, deserialize_with = "optional_duration")]
+    pub(crate) delay: Option<Duration>,
+}
+
+/// How a Service that crashed after it was healthy is restarted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RestartPolicy {
+    /// How many restarts in a row are tried before the Service is given up on, 0 never restarts it.
+    pub(crate) attempts: u32,
+    /// The delay before the first restart.
+    pub(crate) delay: Duration,
+}
+
+impl RestartPolicy {
+    /// The delay before the `restart`th restart in a row, counting from 1: the delay doubles each time.
+    pub(crate) fn delay_before(&self, restart: u32) -> Duration {
+        // Capped well below overflow, a delay doubled 31 times is years long already.
+        let doublings = restart.saturating_sub(1).min(31);
+        self.delay.saturating_mul(1 << doublings)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -170,6 +234,58 @@ impl HealthConfig {
 }
 
 impl Config {
+    /// How `service` is restarted when it crashes.
+    pub(crate) fn restart_policy(&self, service: &ServiceConfig) -> RestartPolicy {
+        RestartPolicy {
+            attempts: service.restart.attempts.unwrap_or(self.settings.restart_attempts),
+            delay: service.restart.delay.unwrap_or(self.settings.restart_delay),
+        }
+    }
+
+    /// How long `service` may stay idle before it is stopped, `None` when it never is.
+    pub(crate) fn idle_timeout(&self, service: &ServiceConfig) -> Option<Duration> {
+        service
+            .idle
+            .stop
+            .unwrap_or(self.settings.idle_stop)
+            .then(|| service.idle.timeout.unwrap_or(self.settings.idle_timeout))
+    }
+
+    /// The Services to bring up for `service`, each one after everything it needs and `service` last. A Service
+    /// needed through several paths appears once.
+    pub(crate) fn start_order(&self, service: &str) -> Result<Vec<String>, ConfigError> {
+        let mut order = Vec::new();
+        self.visit(service, &mut Vec::new(), &mut order)?;
+        Ok(order)
+    }
+
+    /// Depth-first walk of the needs of `name`, `path` being the Services being visited above it.
+    fn visit(&self, name: &str, path: &mut Vec<String>, order: &mut Vec<String>) -> Result<(), ConfigError> {
+        if let Some(start) = path.iter().position(|visiting| visiting == name) {
+            let mut cycle = path[start..].to_vec();
+            cycle.push(name.to_owned());
+            return Err(ConfigError::NeedsCycle { cycle });
+        }
+        if order.iter().any(|done| done == name) {
+            return Ok(());
+        }
+        let Some(declared) = self.services.get(name) else {
+            // The caller checks the requested Service, so only a need can be missing here.
+            let service = path.last().cloned().unwrap_or_default();
+            return Err(ConfigError::UnknownNeed {
+                service,
+                need: name.to_owned(),
+            });
+        };
+        path.push(name.to_owned());
+        for need in &declared.needs {
+            self.visit(need, path, order)?;
+        }
+        path.pop();
+        order.push(name.to_owned());
+        Ok(())
+    }
+
     /// Every port declared in the configuration, which the Range skips so that it never hands out the port a
     /// Main worktree expects.
     pub(crate) fn declared_ports(&self) -> std::collections::BTreeSet<u16> {
@@ -188,6 +304,23 @@ impl Config {
 /// Long enough for a dev server compiling a large app on its first start.
 fn default_health_timeout() -> Duration {
     Duration::from_mins(1)
+}
+
+fn default_idle_stop() -> bool {
+    true
+}
+
+/// Long enough to cover an agent thinking between 2 uses of its dev server.
+fn default_idle_timeout() -> Duration {
+    Duration::from_mins(30)
+}
+
+fn default_restart_attempts() -> u32 {
+    5
+}
+
+fn default_restart_delay() -> Duration {
+    Duration::from_secs(1)
 }
 
 fn default_port_range() -> Range {
@@ -330,6 +463,121 @@ mod tests {
             unknown.health_port_name("web"),
             Err(ConfigError::UnknownHealthPort { name, .. }) if name == "api"
         ));
+    }
+
+    fn parsed(text: &str) -> Config {
+        Value::Table(table(text)).try_into().unwrap()
+    }
+
+    #[test]
+    fn the_needs_of_a_service_start_before_it_and_once_each() {
+        let config = parsed(
+            "[services.web]\nrun = 'x'\nneeds = ['api', 'cache']\n\
+             [services.api]\nrun = 'x'\nneeds = ['db', 'cache']\n\
+             [services.cache]\nrun = 'x'\n\
+             [services.db]\nrun = 'x'\n",
+        );
+        assert_eq!(config.start_order("web").unwrap(), ["db", "cache", "api", "web"]);
+        assert_eq!(config.start_order("cache").unwrap(), ["cache"]);
+    }
+
+    #[test]
+    fn a_need_that_is_not_declared_is_an_error_naming_both_services() {
+        let config = parsed("[services.web]\nrun = 'x'\nneeds = ['db']\n");
+        assert!(matches!(
+            config.start_order("web"),
+            Err(ConfigError::UnknownNeed { service, need }) if service == "web" && need == "db"
+        ));
+    }
+
+    #[test]
+    fn needs_that_loop_back_are_an_error_listing_the_cycle() {
+        let config = parsed(
+            "[services.web]\nrun = 'x'\nneeds = ['api']\n\
+             [services.api]\nrun = 'x'\nneeds = ['db']\n\
+             [services.db]\nrun = 'x'\nneeds = ['api']\n",
+        );
+        assert!(matches!(
+            config.start_order("web"),
+            Err(ConfigError::NeedsCycle { cycle }) if cycle == ["api", "db", "api"]
+        ));
+        let itself = parsed("[services.web]\nrun = 'x'\nneeds = ['web']\n");
+        assert!(matches!(
+            itself.start_order("web"),
+            Err(ConfigError::NeedsCycle { cycle }) if cycle == ["web", "web"]
+        ));
+    }
+
+    #[test]
+    fn a_service_restarts_five_times_from_one_second_unless_configured_otherwise() {
+        let config = parsed("[services.web]\nrun = 'x'\n");
+        assert_eq!(
+            config.restart_policy(&config.services["web"]),
+            RestartPolicy {
+                attempts: 5,
+                delay: Duration::from_secs(1)
+            }
+        );
+    }
+
+    #[test]
+    fn the_restart_of_a_service_overrides_the_settings_key_by_key() {
+        let config = parsed(
+            "[settings]\nrestart_attempts = 3\nrestart_delay = '2s'\n\
+             [services.web]\nrun = 'x'\nrestart = { attempts = 0 }\n\
+             [services.api]\nrun = 'x'\nrestart = { delay = '500ms' }\n\
+             [services.db]\nrun = 'x'\n",
+        );
+        let policy = |name: &str| config.restart_policy(&config.services[name]);
+        assert_eq!(
+            (policy("web").attempts, policy("web").delay),
+            (0, Duration::from_secs(2))
+        );
+        assert_eq!(
+            (policy("api").attempts, policy("api").delay),
+            (3, Duration::from_millis(500))
+        );
+        assert_eq!((policy("db").attempts, policy("db").delay), (3, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn the_delay_before_a_restart_doubles_each_time() {
+        let policy = RestartPolicy {
+            attempts: 5,
+            delay: Duration::from_secs(1),
+        };
+        let delays: Vec<_> = (1..=5).map(|restart| policy.delay_before(restart)).collect();
+        assert_eq!(delays, [1, 2, 4, 8, 16].map(Duration::from_secs),);
+        // Never overflows, however many restarts are allowed.
+        assert!(policy.delay_before(u32::MAX) >= Duration::from_secs(16));
+    }
+
+    #[test]
+    fn a_service_stops_after_30_minutes_idle_unless_configured_otherwise() {
+        let config = parsed("[services.web]\nrun = 'x'\n");
+        assert_eq!(
+            config.idle_timeout(&config.services["web"]),
+            Some(Duration::from_mins(30))
+        );
+    }
+
+    #[test]
+    fn the_idle_stop_of_a_service_overrides_the_settings_key_by_key() {
+        let config = parsed(
+            "[settings]\nidle_timeout = '1h'\n\
+             [services.web]\nrun = 'x'\nidle = { timeout = '5m' }\n\
+             [services.api]\nrun = 'x'\nidle = { stop = false }\n\
+             [services.db]\nrun = 'x'\n",
+        );
+        let idle = |name: &str| config.idle_timeout(&config.services[name]);
+        assert_eq!(idle("web"), Some(Duration::from_mins(5)));
+        assert_eq!(idle("api"), None);
+        assert_eq!(idle("db"), Some(Duration::from_hours(1)));
+
+        let off = parsed("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\nidle = { stop = true }\n");
+        assert_eq!(off.idle_timeout(&off.services["web"]), Some(Duration::from_mins(30)));
+        let off = parsed("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\n");
+        assert_eq!(off.idle_timeout(&off.services["web"]), None);
     }
 
     fn worktree(text: &str) -> WorktreeConfig {

@@ -14,14 +14,23 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::clock::Clock;
+use super::cpu::group_cpu;
 use super::health::HealthCheck;
+use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
 use super::process_group::{DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group};
+use crate::config::RestartPolicy;
 use crate::output::{self, OutputBuffer};
 use crate::protocol::{ServiceEnd, StartOutcome};
 
 /// How long the health check waits between 2 probes.
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
+/// How often the Daemon looks at a Service to tell whether it is idle.
+const IDLE_INTERVAL: Duration = Duration::from_secs(10);
+/// How long a restarted Service must stay healthy for the next crash to count as a first one again, instead of
+/// one more in a row.
+const STABLE_RUN: Duration = Duration::from_mins(1);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ServiceError {
@@ -46,6 +55,11 @@ pub(crate) struct ServiceSpec {
     pub(crate) env: Vec<(String, String)>,
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
+    /// The root of the Worktree the Service runs in, named in the Daemon log.
+    pub(crate) worktree: PathBuf,
+    pub(crate) restart: RestartPolicy,
+    /// How long the Service may be idle before it is stopped, `None` to leave it running however long it is.
+    pub(crate) idle: Option<Duration>,
     /// The port of every Lease of the Service, which may listen on all of them.
     pub(crate) lease_ports: Vec<u16>,
 }
@@ -54,8 +68,9 @@ pub(crate) struct ServiceSpec {
 type ServiceKey = (PathBuf, String);
 
 /// Every Service the Daemon started, running or ended.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Services {
+    clock: Clock,
     table: Mutex<HashMap<ServiceKey, Arc<Service>>>,
     /// Held from the lookup to the insert, so that 2 concurrent requests never both start the Service.
     starting: Mutex<()>,
@@ -64,8 +79,7 @@ pub(crate) struct Services {
 #[derive(Debug)]
 pub(crate) struct Service {
     port: Option<u16>,
-    /// The leader of the process group holding the Service's tree, so its pid is also the group id.
-    pid: Pid,
+    /// The output of every run of the Service, restarts included.
     output: Arc<Mutex<OutputBuffer>>,
     state: watch::Sender<ServiceState>,
     /// Set once to ask the task watching the process to stop its tree, with the end to report once it is gone.
@@ -88,10 +102,20 @@ pub(crate) enum Start {
 enum ServiceState {
     Starting,
     Healthy,
+    /// The process crashed and its restart is waiting out the delay.
+    Restarting,
     Ended(ServiceEnd),
 }
 
 impl Services {
+    pub(crate) fn new(clock: Clock) -> Self {
+        Self {
+            clock,
+            table: Mutex::default(),
+            starting: Mutex::default(),
+        }
+    }
+
     /// Returns the running Service `name` of `worktree`, or spawns it from the spec built by `spec`, without
     /// waiting for it to be healthy. A Service being stopped is no Reuse, it still holds its port until it ends.
     /// Must run inside the Tokio runtime.
@@ -118,7 +142,7 @@ impl Services {
                 }
             });
         }
-        let service = spawn(spec()?)?;
+        let service = spawn(spec()?, self.clock.clone())?;
         self.table().insert(key, Arc::clone(&service));
         Ok(Start::Ready {
             service,
@@ -172,17 +196,19 @@ impl Service {
         self.port
     }
 
-    /// Waits until the Service is healthy, or returns how it ended before.
+    /// Waits until the Service is healthy, restarts included, or returns how it ended before.
     pub(crate) async fn healthy(&self) -> Result<(), ServiceEnd> {
         let mut state = self.state.subscribe();
         let state = *state
-            .wait_for(|state| *state != ServiceState::Starting)
+            .wait_for(|state| matches!(state, ServiceState::Healthy | ServiceState::Ended(_)))
             .await
             .expect("the service holds its own state sender, so the channel never closes");
         match state {
             ServiceState::Healthy => Ok(()),
             ServiceState::Ended(end) => Err(end),
-            ServiceState::Starting => unreachable!("wait_for returned on a state other than Starting"),
+            ServiceState::Starting | ServiceState::Restarting => {
+                unreachable!("wait_for returned on a state that is neither Healthy nor Ended")
+            }
         }
     }
 
@@ -220,7 +246,29 @@ impl Service {
     }
 }
 
-fn spawn(spec: ServiceSpec) -> Result<Arc<Service>, ServiceError> {
+/// One run of the process of a Service.
+struct Process {
+    child: Box<dyn ChildWrapper>,
+    /// The leader of the process group holding the tree, so its pid is also the group id.
+    pgid: Pid,
+    pumps: Vec<JoinHandle<()>>,
+}
+
+fn spawn(spec: ServiceSpec, clock: Clock) -> Result<Arc<Service>, ServiceError> {
+    let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
+    let process = launch(&spec, &output)?;
+    let service = Arc::new(Service {
+        port: spec.health.port,
+        output,
+        state: watch::Sender::new(ServiceState::Starting),
+        stop: watch::Sender::new(None),
+    });
+    tokio::spawn(supervise(Arc::clone(&service), spec, clock, process));
+    Ok(service)
+}
+
+/// Starts the process of the Service, writing its output into `output`.
+fn launch(spec: &ServiceSpec, output: &Arc<Mutex<OutputBuffer>>) -> Result<Process, ServiceError> {
     let mut command = CommandWrap::with_new("/bin/sh", |command| {
         command
             .arg("-c")
@@ -239,57 +287,146 @@ fn spawn(spec: ServiceSpec) -> Result<Arc<Service>, ServiceError> {
         cwd: spec.cwd.clone(),
         source,
     })?;
-    let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()).map(Pid::from_raw) else {
+    let Some(pgid) = child.id().and_then(|pid| i32::try_from(pid).ok()).map(Pid::from_raw) else {
         // Unreachable on Unix, where every spawned child has a pid, but never leave a child unreaped.
         tokio::spawn(async move { Box::into_pin(child.kill()).await });
-        return Err(ServiceError::NoPid { service: spec.name });
+        return Err(ServiceError::NoPid {
+            service: spec.name.clone(),
+        });
     };
 
-    let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
     // Both pipes are drained continuously, a full pipe would block a chatty Service.
     let mut pumps = Vec::new();
     if let Some(stdout) = child.stdout().take() {
-        pumps.push(tokio::spawn(pump(stdout, Arc::clone(&output))));
+        pumps.push(tokio::spawn(pump(stdout, Arc::clone(output))));
     }
     if let Some(stderr) = child.stderr().take() {
-        pumps.push(tokio::spawn(pump(stderr, Arc::clone(&output))));
+        pumps.push(tokio::spawn(pump(stderr, Arc::clone(output))));
     }
-    let service = Arc::new(Service {
-        port: spec.health.port,
-        pid,
-        output,
-        state: watch::Sender::new(ServiceState::Starting),
-        stop: watch::Sender::new(None),
-    });
-    tokio::spawn(supervise(Arc::clone(&service), child, pumps));
-    tokio::spawn(check_health(
-        Arc::clone(&service),
-        spec.health,
-        spec.lease_ports,
-        spec.health_timeout,
-    ));
-    Ok(service)
+    Ok(Process { child, pgid, pumps })
 }
 
-async fn supervise(service: Arc<Service>, mut child: Box<dyn ChildWrapper>, pumps: Vec<JoinHandle<()>>) {
+/// Watches the process of the Service until it ends for good: stopped, never healthy, or crashed more often than
+/// its restart policy allows.
+///
+/// A process that crashes after the Service was healthy once is restarted, after a delay that doubles with each
+/// crash in a row. One that dies before the Service was ever healthy is not: whoever asked for it is told at once
+/// that it cannot start.
+async fn supervise(service: Arc<Service>, spec: ServiceSpec, clock: Clock, first: Process) {
     let mut stop = service.stop.subscribe();
-    let exited = tokio::select! {
-        status = child.wait() => Some(status),
-        _ = stop.wait_for(Option::is_some) => None,
-    };
-    let end = if let Some(status) = exited {
-        end_of(status.expect("waiting fails only when the daemon lost track of its own child"))
-    } else {
-        stop_tree(child.as_mut()).await;
-        stop.borrow()
-            .expect("the tree is stopped only once a stop was requested")
-    };
-    // Members of the group still running once the leader has ended would keep holding the port.
-    let pgid = service.pid;
-    let _ = tokio::task::spawn_blocking(move || kill_group(pgid)).await;
-    // The last lines tell why a Service died, they must be read before anyone is told it ended.
-    let _ = tokio::time::timeout(DRAIN_TIMEOUT, join_all(pumps)).await;
-    service.state.send_replace(ServiceState::Ended(end));
+    let mut process = first;
+    let mut ever_healthy = false;
+    // How many restarts in a row were needed.
+    let mut restarts = 0;
+    loop {
+        let started = clock.now();
+        let monitor = tokio::spawn(monitor(
+            Arc::clone(&service),
+            Watch {
+                label: format!("service {} of {}", spec.name, spec.worktree.display()),
+                health: spec.health.clone(),
+                health_timeout: spec.health_timeout,
+                lease_ports: spec.lease_ports.clone(),
+                idle: spec.idle,
+                pgid: process.pgid,
+            },
+            clock.clone(),
+        ));
+        let exited = tokio::select! {
+            status = process.child.wait() => Some(status),
+            _ = stop.wait_for(Option::is_some) => None,
+        };
+        monitor.abort();
+        let healthy = *service.state.borrow() == ServiceState::Healthy;
+        ever_healthy |= healthy;
+        let exited_by_itself = exited.is_some();
+        let ended = if let Some(status) = exited {
+            end_of(status.expect("waiting fails only when the daemon lost track of its own child"))
+        } else {
+            stop_tree(process.child.as_mut()).await;
+            stop.borrow()
+                .expect("the tree is stopped only once a stop was requested")
+        };
+        // Members of the group still running once the leader has ended would keep holding the port.
+        let pgid = process.pgid;
+        let _ = tokio::task::spawn_blocking(move || kill_group(pgid)).await;
+        // The last lines tell why a Service died, they must be read before anyone is told it ended.
+        let _ = tokio::time::timeout(DRAIN_TIMEOUT, join_all(process.pumps)).await;
+
+        let crashed = exited_by_itself && !service.is_stopping();
+        if !(crashed && ever_healthy && spec.restart.attempts > 0) {
+            service.state.send_replace(ServiceState::Ended(ended));
+            return;
+        }
+        if healthy && clock.now().saturating_sub(started) >= STABLE_RUN {
+            restarts = 0;
+        }
+        let mut why = describe(ended);
+        let next = loop {
+            restarts += 1;
+            if restarts > spec.restart.attempts {
+                eprintln!(
+                    "service {} of {} gave up after {} restarts, the last time it {why}",
+                    spec.name,
+                    spec.worktree.display(),
+                    spec.restart.attempts
+                );
+                let end = ServiceEnd::Failed {
+                    restarts: spec.restart.attempts,
+                };
+                service.state.send_replace(ServiceState::Ended(end));
+                return;
+            }
+            let delay = spec.restart.delay_before(restarts);
+            let plan = format!(
+                "{why}, restarting in {} (restart {restarts} of {})",
+                crate::duration::format(delay),
+                spec.restart.attempts
+            );
+            eprintln!("service {} of {} {plan}", spec.name, spec.worktree.display());
+            output::lock(&service.output).push(format!("procly: the service {plan}\n").as_bytes());
+            service.state.send_replace(ServiceState::Restarting);
+            let stopped = tokio::select! {
+                () = clock.sleep(delay) => false,
+                _ = stop.wait_for(Option::is_some) => true,
+            };
+            if stopped {
+                // A stop during the delay cancels the restart, there is no process left to stop.
+                let end = stop
+                    .borrow()
+                    .expect("the stop was requested, which is what ended the wait");
+                service.state.send_replace(ServiceState::Ended(end));
+                return;
+            }
+            match launch(&spec, &service.output) {
+                Ok(process) => break process,
+                Err(error) => {
+                    let cause = std::error::Error::source(&error)
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    eprintln!("{error}: {cause}");
+                    why = format!("could not be started again: {cause}");
+                }
+            }
+        };
+        process = next;
+        service.state.send_replace(ServiceState::Starting);
+    }
+}
+
+/// What a process did, for the Daemon log.
+fn describe(end: ServiceEnd) -> String {
+    match end {
+        ServiceEnd::Exited { code } => format!("exited with code {code}"),
+        ServiceEnd::Signaled { signal } => format!("was killed by signal {signal}"),
+        ServiceEnd::HealthTimeout { .. }
+        | ServiceEnd::Stopped
+        | ServiceEnd::Idle { .. }
+        | ServiceEnd::PortMismatch { .. }
+        | ServiceEnd::Failed { .. } => {
+            unreachable!("only a process that exited by itself is described")
+        }
+    }
 }
 
 /// Stops the leader of the process group: `SIGTERM` to the whole group, then `SIGKILL` after the stop timeout.
@@ -305,53 +442,133 @@ async fn stop_tree(child: &mut dyn ChildWrapper) {
     }
 }
 
+/// What the task watching a run of the process needs to know about it.
+struct Watch {
+    /// Names the Service in the Daemon log.
+    label: String,
+    health: HealthCheck,
+    health_timeout: Duration,
+    /// The port of every Lease of the Service.
+    lease_ports: Vec<u16>,
+    idle: Option<Duration>,
+    pgid: Pid,
+}
+
+/// Watches one run of the process: its health first, then its idleness.
+async fn monitor(service: Arc<Service>, watch: Watch, clock: Clock) {
+    if !check_health(
+        &service,
+        &watch.health,
+        &watch.lease_ports,
+        watch.pgid,
+        watch.health_timeout,
+    )
+    .await
+    {
+        return;
+    }
+    if let Some(timeout) = watch.idle {
+        stop_when_idle(&service, &watch.label, watch.pgid, timeout, &clock).await;
+    }
+}
+
 /// Marks the Service healthy once its health check passes and its process group listens on the Lease the check
-/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch.
-async fn check_health(service: Arc<Service>, check: HealthCheck, lease_ports: Vec<u16>, timeout: Duration) {
+/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. Returns whether the
+/// Service turned healthy.
+async fn check_health(
+    service: &Service,
+    check: &HealthCheck,
+    lease_ports: &[u16],
+    pgid: Pid,
+    timeout: Duration,
+) -> bool {
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if *state.borrow_and_update() != ServiceState::Starting {
-            return;
+            return false;
         }
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
-            match ownership(&service, check.port, &lease_ports).await {
+            match ownership(pgid, check.port, lease_ports).await {
                 Ownership::Listening => {
                     // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
-                    service.state.send_if_modified(|state| {
+                    return service.state.send_if_modified(|state| {
                         let healthy = *state == ServiceState::Starting && !service.is_stopping();
                         if healthy {
                             *state = ServiceState::Healthy;
                         }
                         healthy
                     });
-                    return;
                 }
                 Ownership::Elsewhere(mismatch) => {
                     service.request_stop(mismatch);
-                    return;
+                    return false;
                 }
                 Ownership::Pending => {}
             }
         }
         if tokio::time::Instant::now() >= deadline {
             // Only now when nothing answers, a Service may open another port, such as a debugger, long before its Lease.
-            let end = match ownership(&service, check.port, &lease_ports).await {
+            let end = match ownership(pgid, check.port, lease_ports).await {
                 Ownership::Elsewhere(mismatch) => mismatch,
                 Ownership::Listening | Ownership::Pending => ServiceEnd::HealthTimeout {
                     timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
                 },
             };
             service.request_stop(end);
-            return;
+            return false;
         }
         tokio::select! {
             () = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + HEALTH_INTERVAL)) => {}
             _ = state.changed() => {}
         }
     }
+}
+
+/// Stops the Service once it has printed nothing and used almost no CPU for `timeout`.
+async fn stop_when_idle(service: &Service, label: &str, pgid: Pid, timeout: Duration, clock: &Clock) {
+    let origin = std::time::Instant::now();
+    let mut tracker = None;
+    let mut failed = false;
+    loop {
+        match look(service, pgid, clock, origin).await {
+            Ok(sample) => {
+                let tracker = tracker.get_or_insert_with(|| IdleTracker::new(timeout, sample));
+                if tracker.is_idle(sample) {
+                    eprintln!(
+                        "{label} stopped after {} idle: it printed nothing and used under 1% of a CPU",
+                        crate::duration::format(timeout)
+                    );
+                    service.request_stop(ServiceEnd::Idle {
+                        timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                    });
+                    return;
+                }
+            }
+            // Never stop a Service on a guess, and say so once rather than at every look.
+            Err(error) if !failed => {
+                failed = true;
+                eprintln!("{label} cannot be checked for idleness, it is left running: cannot read CPU time: {error}");
+            }
+            Err(_) => {}
+        }
+        clock.sleep(IDLE_INTERVAL).await;
+    }
+}
+
+/// One look at the Service: what it printed and the CPU time of its tree.
+async fn look(service: &Service, pgid: Pid, clock: &Clock, origin: std::time::Instant) -> io::Result<Sample> {
+    let cpu = tokio::task::spawn_blocking(move || group_cpu(pgid))
+        .await
+        .map_err(io::Error::other)??;
+    Ok(Sample {
+        now: clock.now(),
+        real: origin.elapsed(),
+        written: output::lock(&service.output).written(),
+        cpu,
+    })
 }
 
 /// Whether the process group of a Service listens on the Lease its health check probes.
@@ -365,11 +582,10 @@ enum Ownership {
     Pending,
 }
 
-async fn ownership(service: &Service, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {
+async fn ownership(pgid: Pid, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {
     let Some(leased) = leased else {
         return Ownership::Listening;
     };
-    let pgid = service.pid;
     let listening = tokio::task::spawn_blocking(move || listening_ports(pgid))
         .await
         .ok()

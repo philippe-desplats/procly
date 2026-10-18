@@ -11,6 +11,8 @@ pub(crate) const CAPACITY: usize = 1024 * 1024;
 pub(crate) struct OutputBuffer {
     bytes: VecDeque<u8>,
     capacity: usize,
+    /// Every byte ever pushed, including the ones dropped since.
+    written: u64,
 }
 
 impl OutputBuffer {
@@ -18,10 +20,12 @@ impl OutputBuffer {
         Self {
             bytes: VecDeque::new(),
             capacity,
+            written: 0,
         }
     }
 
     pub(crate) fn push(&mut self, chunk: &[u8]) {
+        self.written += chunk.len() as u64;
         self.bytes.extend(chunk);
         if self.bytes.len() <= self.capacity {
             return;
@@ -31,6 +35,12 @@ impl OutputBuffer {
         if let Some(newline) = self.bytes.iter().position(|&byte| byte == b'\n') {
             self.bytes.drain(..=newline);
         }
+    }
+
+    /// How many bytes were ever pushed, which grows with every line even once the buffer is full and drops the
+    /// oldest ones.
+    pub(crate) fn written(&self) -> u64 {
+        self.written
     }
 
     /// The buffered output as text, with the terminal's `\r\n` line endings turned back into `\n`.
@@ -71,6 +81,14 @@ mod tests {
         let mut buffer = OutputBuffer::new(4);
         buffer.push(b"abcdefgh");
         assert_eq!(buffer.text(), "efgh");
+    }
+
+    #[test]
+    fn counts_every_byte_ever_pushed_even_the_ones_dropped() {
+        let mut buffer = OutputBuffer::new(4);
+        buffer.push(b"abcdefgh");
+        buffer.push(b"ij");
+        assert_eq!(buffer.written(), 10);
     }
 
     #[test]
