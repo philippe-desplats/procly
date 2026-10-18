@@ -432,7 +432,7 @@ fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
     // Without waiting for the Grace period, since the Repository is going back to how it was.
     assert_success(&output);
     assert!(
-        stdout(&output).contains("stopped db (container, its volumes are kept)"),
+        stdout(&output).contains("stopped db (Compose service, its volumes are kept)"),
         "{}",
         stdout(&output)
     );

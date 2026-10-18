@@ -34,6 +34,12 @@ pub(crate) enum ManagedError {
         #[source]
         source: io::Error,
     },
+    #[error("cannot remove {path}")]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 /// What a request to write a block did to the file.
@@ -133,7 +139,7 @@ impl ManagedBlocks {
                 Planned::Edited => return Ok(Removal::Edited),
                 Planned::Absent => Removal::Absent,
                 Planned::Remove(rest) if rest.is_empty() => {
-                    fs::remove_file(file).map_err(|source| ManagedError::Write {
+                    fs::remove_file(file).map_err(|source| ManagedError::Remove {
                         path: file.to_owned(),
                         source,
                     })?;
@@ -186,6 +192,16 @@ impl ManagedBlocks {
         self.with_table(|table| {
             Ok(table.get(&(file.to_owned(), block.to_owned())).map(String::as_str)
                 == Some(fingerprint(content).as_str()))
+        })
+    }
+
+    /// Whether the block `block` of `file` was recorded as another content than `content`. A block that was never
+    /// recorded has not been edited as far as the record knows, so this is false for it.
+    pub(crate) fn departs_from_record(&self, file: &Path, block: &str, content: &str) -> Result<bool, ManagedError> {
+        self.with_table(|table| {
+            Ok(table
+                .get(&(file.to_owned(), block.to_owned()))
+                .is_some_and(|recorded| *recorded != fingerprint(content)))
         })
     }
 

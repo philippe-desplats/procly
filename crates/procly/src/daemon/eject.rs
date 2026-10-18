@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use super::agent::{INSTRUCTION_FILES, RULES, SETTINGS, contained, rules};
 use super::compose::ComposeError;
-use super::environment::{ENV_FILE, EXCLUDE_FILE, EXCLUSIONS, GITIGNORE_FILE, exclusion_lines};
+use super::environment::{ENV_BLOCK, ENV_FILE, EXCLUDE_FILE, EXCLUSIONS, GITIGNORE_FILE, exclusion_lines};
 use super::hook::{self, HookError};
 use super::managed::{self, ManagedBlocks, ManagedError, Removal};
 use super::{Registry, requester};
@@ -71,14 +71,12 @@ async fn eject(registry: &Arc<Registry>, cwd: PathBuf, peer: Option<i32>) -> Res
     eprintln!("eject of {} requested by {who}", topology.git_common_dir.display());
 
     let mut report = EjectReport::default();
-    for worktree in &worktrees {
-        for (service, process) in registry.services.stop(&worktree.path, None) {
-            process.ended().await;
-            report.stopped.push(Stopped {
-                service,
-                worktree: Some(worktree.path.clone()),
-            });
-        }
+    for ((worktree, service), process) in registry.services.stop_repository(&topology.git_common_dir) {
+        process.ended().await;
+        report.stopped.push(Stopped {
+            service,
+            worktree: Some(worktree),
+        });
     }
     for service in registry
         .composes
@@ -164,20 +162,23 @@ fn remove_written(
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(source) => return Err(EjectError::Read { path: file, source }),
         };
-        if envfile::is_generated(&text) {
+        // Intact while it starts with its header and holds what Procly last wrote, a line added since is an edit.
+        let edited = !envfile::is_generated(&text) || registry.managed.departs_from_record(&file, ENV_BLOCK, &text)?;
+        if edited {
+            outcome.left.push(Left {
+                kind: Written::EnvFile,
+                file,
+            });
+        } else {
             fs::remove_file(&file).map_err(|source| EjectError::Remove {
                 path: file.clone(),
                 source,
             })?;
+            registry.managed.forget_block(&file, ENV_BLOCK)?;
             outcome.removed.push(Removed {
                 kind: Written::EnvFile,
                 file,
                 deleted: true,
-            });
-        } else {
-            outcome.left.push(Left {
-                kind: Written::EnvFile,
-                file,
             });
         }
     }

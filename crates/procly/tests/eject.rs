@@ -108,7 +108,7 @@ fn summary(output: &Output) -> Vec<String> {
 #[test]
 fn a_managed_block_the_developer_edited_is_left_untouched_and_described_in_the_prompt() {
     let procly = Procly::new();
-    let (main, _, before) = repository(&procly);
+    let (main, _, _) = repository(&procly);
     adopt_procly(&procly, &main);
     let edited_rules = read(&main.join("AGENTS.md")).replace("Never start", "Please avoid starting");
     write(&main.join("AGENTS.md"), &edited_rules);
@@ -149,8 +149,24 @@ fn a_managed_block_the_developer_edited_is_left_untouched_and_described_in_the_p
         assert!(prompt.contains(&item), "{item} is not in the prompt: {prompt}");
     }
     assert!(stderr(&output).contains("4 items were edited"), "{}", stderr(&output));
-    // What the developer wrote stays where it was before Procly, nothing else of the Repository changed.
-    assert!(before.instructions.len() < edited_rules.len());
+}
+
+#[test]
+fn an_env_file_the_developer_added_a_line_to_is_left_and_described() {
+    let procly = Procly::new();
+    let (main, _, _) = repository(&procly);
+    adopt_procly(&procly, &main);
+    let edited = format!("{}MY_OWN=1\n", read(&main.join(".env.procly")));
+    write(&main.join(".env.procly"), &edited);
+
+    let output = eject(&procly, &main);
+
+    assert_eq!(read(&main.join(".env.procly")), edited);
+    assert!(
+        summary(&output).contains(&format!("left env file {}, edited", main.join(".env.procly").display())),
+        "{}",
+        stdout(&output)
+    );
 }
 
 #[test]
@@ -162,7 +178,10 @@ fn a_second_eject_finds_nothing_to_remove() {
 
     let output = eject(&procly, &main);
 
-    assert_eq!(stdout(&output), "left Docker volumes and Logical resources\n");
+    assert_eq!(
+        stdout(&output),
+        "left Docker volumes and Logical resources\nleft the files copied by worktree init and the state of the Daemon, Leases and off\n"
+    );
     assert_eq!(stderr(&output), "");
 }
 

@@ -565,11 +565,9 @@ fn switch(state: &StateDir, off: bool) -> anyhow::Result<ExitCode> {
 /// to the coding agent instead.
 fn eject(state: &StateDir, agent: Option<AgentCli>) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    let Response::Eject(report) = (match client::send(state, &Request::Eject { cwd })? {
-        response @ Response::Eject(_) => response,
+    let report = match client::send(state, &Request::Eject { cwd })? {
+        Response::Eject(report) => report,
         other => return unexpected(other),
-    }) else {
-        unreachable!("the answer was matched as an eject report just above")
     };
     print(&eject_summary(&report))?;
     let Some(prompt) = &report.prompt else {
@@ -586,7 +584,7 @@ fn eject(state: &StateDir, agent: Option<AgentCli>) -> anyhow::Result<ExitCode> 
             eprintln!(
                 "procly: {} edited, left as it is, the prompt below describes what to undo, `procly eject --agent \
                  <cli>` hands it to your coding agent",
-                blocks(report.left.len())
+                items_were(report.left.len())
             );
             print(&format!("\n{prompt}"))?;
             Ok(ExitCode::SUCCESS)
@@ -611,7 +609,7 @@ fn eject(state: &StateDir, agent: Option<AgentCli>) -> anyhow::Result<ExitCode> 
 }
 
 /// `1 item was` or `3 items were`, for the items eject left.
-fn blocks(count: usize) -> String {
+fn items_were(count: usize) -> String {
     match count {
         1 => "1 item was".to_owned(),
         _ => format!("{count} items were"),
@@ -624,7 +622,11 @@ fn eject_summary(report: &EjectReport) -> String {
     for stopped in &report.stopped {
         let _ = match &stopped.worktree {
             Some(worktree) => writeln!(text, "stopped {} of {}", stopped.service, worktree.display()),
-            None => writeln!(text, "stopped {} (container, its volumes are kept)", stopped.service),
+            None => writeln!(
+                text,
+                "stopped {} (Compose service, its volumes are kept)",
+                stopped.service
+            ),
         };
     }
     for removed in &report.removed {
@@ -644,6 +646,7 @@ fn eject_summary(report: &EjectReport) -> String {
         let _ = writeln!(text, "left {} {}, edited", left.kind.as_str(), left.file.display());
     }
     text.push_str("left Docker volumes and Logical resources\n");
+    text.push_str("left the files copied by worktree init and the state of the Daemon, Leases and off\n");
     text
 }
 

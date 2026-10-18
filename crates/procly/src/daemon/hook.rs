@@ -139,6 +139,8 @@ pub(super) fn remove(managed: &ManagedBlocks, file: &Path) -> Result<Removal, Ho
         return Ok(Removal::Absent);
     };
     let Some(at) = groups.iter().position(is_guard) else {
+        // The developer took the Guard out by hand, so its fingerprint describes nothing anymore.
+        managed.forget_block(file, BLOCK)?;
         return Ok(Removal::Absent);
     };
     if groups[at] != group() && !managed.is_recorded(file, BLOCK, &compact(&groups[at]))? {
@@ -148,7 +150,7 @@ pub(super) fn remove(managed: &ManagedBlocks, file: &Path) -> Result<Removal, Ho
     prune_empty_hooks(&mut settings);
     let deleted = settings.as_object().is_some_and(Map::is_empty);
     if deleted {
-        fs::remove_file(file).map_err(|source| ManagedError::Write {
+        fs::remove_file(file).map_err(|source| ManagedError::Remove {
             path: file.to_owned(),
             source,
         })?;

@@ -244,7 +244,7 @@ pub(crate) struct Left {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Stopped {
     pub(crate) service: String,
-    /// The Worktree it ran for, `None` for a container, which belongs to the Repository.
+    /// The Worktree it ran for, `None` for a Compose service, whose container belongs to the Repository.
     pub(crate) worktree: Option<PathBuf>,
 }
 

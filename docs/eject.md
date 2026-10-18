@@ -5,13 +5,14 @@ Procly can always be removed (ADR 0008). `procly eject` stops the Services of th
 ```console
 $ procly eject
 stopped web of /home/me/app
-stopped db (container, its volumes are kept)
+stopped db (Compose service, its volumes are kept)
 removed rules /home/me/app/AGENTS.md
 removed guard /home/me/app/.claude/settings.json, the file held nothing else and was deleted
 removed exclusions /home/me/app/.git/info/exclude
 removed env file /home/me/app/.env.procly
 left rules /home/me/app/docs/agents.md, edited
 left Docker volumes and Logical resources
+left the files copied by worktree init and the state of the Daemon, Leases and off
 
 procly: 1 item was edited, left as it is, the prompt below describes what to undo, `procly eject --agent <cli>` hands it to your coding agent
 Procly was ejected from the git repository whose common git directory is /home/me/app/.git. ...
@@ -31,7 +32,13 @@ It acts on the whole Repository, whatever Worktree it runs in.
 
 A file that held nothing else once its block was gone is deleted, since only Procly can have created it, and so are the directories that leaves empty inside the Worktree. Every other byte of a file stays as it was. A file that links out of the Repository is never written, as for `agent install`.
 
-A block counts as intact when its content is the one Procly recorded the fingerprint of, or the one Procly writes today when the record was lost. Anything else is a block you edited. An Env file counts as Procly's while it starts with its header.
+A block counts as intact when its content is the one Procly recorded the fingerprint of, or the one Procly writes today when the record was lost. Anything else is a block you edited. An Env file counts as Procly's while it starts with its header and holds what Procly last wrote, so a line you added to it is an edit.
+
+Eject cannot know how a file looked before Procly wrote into it, so it restores the text around a block and nothing else. 3 cases come back slightly different from the original:
+
+- A file that did not end with a line break gets one, because Procly added it before its block.
+- An instruction file, `.gitignore` or settings file that existed and was empty is deleted with its block.
+- A settings file with another layout than 2 spaces of indentation keeps the 2 spaces `agent install` gave it.
 
 ## What it leaves
 

@@ -179,6 +179,23 @@ impl Services {
         stopping
     }
 
+    /// Asks every running Service of the Repository whose common git directory is `git_common_dir` to stop, whatever
+    /// its Worktree, including one git no longer lists. Returns them sorted by Worktree and name, to wait for with
+    /// [`Service::ended`].
+    pub(crate) fn stop_repository(&self, git_common_dir: &Path) -> Vec<(ServiceKey, Arc<Service>)> {
+        let mut stopping: Vec<_> = self
+            .table()
+            .iter()
+            .filter(|(_, service)| service.topology.git_common_dir == git_common_dir && service.is_running())
+            .map(|(key, service)| (key.clone(), Arc::clone(service)))
+            .collect();
+        stopping.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (_, service) in &stopping {
+            service.request_stop(ServiceEnd::Stopped);
+        }
+        stopping
+    }
+
     /// The Worktree root and the name of every running Service.
     pub(crate) fn running(&self) -> BTreeSet<ServiceKey> {
         self.table()
