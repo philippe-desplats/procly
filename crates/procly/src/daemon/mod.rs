@@ -1,7 +1,10 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
+mod clock;
+mod cpu;
 mod environment;
 mod health;
+mod idle;
 mod job;
 mod lease;
 mod listeners;
@@ -26,6 +29,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
+use self::clock::Clock;
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
@@ -33,7 +37,7 @@ use self::managed::ManagedBlocks;
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
 use crate::ports;
-use crate::protocol::{self, Request, Response, StartOutcome};
+use crate::protocol::{self, Request, Response, StartOutcome, UpService};
 use crate::state_dir::StateDir;
 use crate::topology;
 
@@ -98,7 +102,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
 
     let registry = Arc::new(Registry {
         jobs: Jobs::default(),
-        services: Services::default(),
+        services: Services::new(Clock::from_env()),
         leases: Leases::new(state.leases()),
         managed: ManagedBlocks::new(state.managed_blocks()),
         mirroring: Mutex::default(),
@@ -203,27 +207,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
             cwd,
             env,
             gitignore,
-        } => loop {
-            let (registry, start_name, cwd, env) = (Arc::clone(registry), name.clone(), cwd.clone(), env.clone());
-            // Resolving the Topology runs git, and reading the configuration, writing files and forking are blocking.
-            let started =
-                tokio::task::spawn_blocking(move || start_service(&registry, &start_name, &cwd, env, gitignore)).await;
-            match started {
-                Ok(Ok(Start::Ready { service, outcome })) => break up(name, &service, outcome).await,
-                // Its tree still holds the port, a new one could not bind it.
-                Ok(Ok(Start::Stopping(service))) => service.ended().await,
-                Ok(Err(error)) => {
-                    break Response::Error {
-                        message: format!("{error:#}"),
-                    };
-                }
-                Err(error) => {
-                    break Response::Error {
-                        message: format!("the service could not be started: {error}"),
-                    };
-                }
-            }
-        },
+        } => up(registry, name, cwd, env, gitignore).await,
         Request::Env { service, cwd } => {
             let registry = Arc::clone(registry);
             // Resolving the Topology runs git, and reading the configuration and the Leases are blocking.
@@ -323,6 +307,9 @@ fn start_service(
             lease_ports: injected.leases.values().copied().collect(),
             health_timeout: config.health_timeout(declared),
             name: name.to_owned(),
+            worktree: worktree.clone(),
+            restart: config.restart_policy(declared),
+            idle: config.idle_timeout(declared),
         })
     })
 }
@@ -399,21 +386,108 @@ fn declared<'a>(config: &'a config::Config, worktree: &Path, name: &str) -> anyh
     })
 }
 
-/// Waits for the Service to be healthy and answers with where to reach it.
-async fn up(name: String, service: &Service, outcome: StartOutcome) -> Response {
-    match service.healthy().await {
-        Ok(()) => Response::Up {
-            service: name,
+/// Brings up the Services `name` needs, each one healthy before the next starts, then `name`, and answers with
+/// where to reach it. Stops at the first Service that does not become healthy.
+async fn up(
+    registry: &Arc<Registry>,
+    name: String,
+    cwd: PathBuf,
+    env: Vec<(String, String)>,
+    gitignore: bool,
+) -> Response {
+    let planned = {
+        let (cwd, name) = (cwd.clone(), name.clone());
+        // Resolving the Topology runs git, and reading the configuration is blocking.
+        tokio::task::spawn_blocking(move || start_order(&cwd, &name)).await
+    };
+    let order = match planned {
+        Ok(Ok(order)) => order,
+        Ok(Err(error)) => {
+            return Response::Error {
+                message: format!("{error:#}"),
+            };
+        }
+        Err(error) => {
+            return Response::Error {
+                message: format!("the service could not be started: {error}"),
+            };
+        }
+    };
+    let Some((target, needed)) = order.split_last() else {
+        return Response::Error {
+            message: format!("no service {name} to start"),
+        };
+    };
+    let mut needs = Vec::new();
+    for current in needed.iter().chain(std::iter::once(target)) {
+        let (service, outcome) = match start(registry, current, &cwd, &env, gitignore).await {
+            Ok(started) => started,
+            Err(response) => return *response,
+        };
+        if let Err(end) = service.healthy().await {
+            return Response::Unhealthy {
+                service: current.clone(),
+                outcome,
+                end,
+                output: service.output(),
+                needed_by: (current != target).then(|| target.clone()),
+            };
+        }
+        let reached = UpService {
+            service: current.clone(),
             outcome,
             port: service.port(),
             url: service.port().map(|port| format!("http://localhost:{port}")),
-        },
-        Err(end) => Response::Unhealthy {
-            service: name,
-            outcome,
-            end,
-            output: service.output(),
-        },
+        };
+        if current == target {
+            return Response::Up {
+                service: reached.service,
+                outcome: reached.outcome,
+                port: reached.port,
+                url: reached.url,
+                needs,
+            };
+        }
+        needs.push(reached);
+    }
+    unreachable!("the loop returns on its last Service, which is the target")
+}
+
+/// The Services to bring up for `name`, needs first.
+fn start_order(cwd: &Path, name: &str) -> anyhow::Result<Vec<String>> {
+    let worktree = worktree_of(cwd)?;
+    let config = read_config(&worktree)?;
+    declared(&config, &worktree, name)?;
+    Ok(config.start_order(name)?)
+}
+
+/// Starts the Service `name`, or finds it running. A Service being stopped still holds its port, so this waits
+/// for its tree to be gone and asks again.
+async fn start(
+    registry: &Arc<Registry>,
+    name: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    gitignore: bool,
+) -> Result<(Arc<Service>, StartOutcome), Box<Response>> {
+    loop {
+        let (registry, name, cwd, env) = (Arc::clone(registry), name.to_owned(), cwd.to_owned(), env.to_owned());
+        // Resolving the Topology runs git, and reading the configuration and forking are blocking.
+        let started = tokio::task::spawn_blocking(move || start_service(&registry, &name, &cwd, env, gitignore)).await;
+        match started {
+            Ok(Ok(Start::Ready { service, outcome })) => return Ok((service, outcome)),
+            Ok(Ok(Start::Stopping(service))) => service.ended().await,
+            Ok(Err(error)) => {
+                return Err(Box::new(Response::Error {
+                    message: format!("{error:#}"),
+                }));
+            }
+            Err(error) => {
+                return Err(Box::new(Response::Error {
+                    message: format!("the service could not be started: {error}"),
+                }));
+            }
+        }
     }
 }
 

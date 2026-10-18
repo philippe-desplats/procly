@@ -27,6 +27,8 @@ pub struct Procly {
     state_dir: TempDir,
     config_dir: TempDir,
     scratch: TempDir,
+    /// The file the Daemon reads its clock from, set by [`Procly::with_clock`].
+    clock: Option<PathBuf>,
 }
 
 impl Procly {
@@ -48,7 +50,33 @@ impl Procly {
             state_dir,
             config_dir,
             scratch,
+            clock: None,
         }
+    }
+
+    /// Like [`Procly::new`], with a Daemon whose clock stands still until [`Procly::advance_clock`] moves it, so
+    /// that backoff and idle stop are tested without waiting.
+    pub fn with_clock() -> Self {
+        let mut procly = Self::new();
+        let clock = procly.state_dir().join("test-clock");
+        procly.clock = Some(clock);
+        procly.advance_clock(Duration::ZERO);
+        procly
+    }
+
+    /// Moves the clock of the Daemon forward by `by`. The file is replaced, so the Daemon never reads half of it.
+    pub fn advance_clock(&self, by: Duration) {
+        let clock = self.clock.as_ref().expect("the test was built with Procly::with_clock");
+        let now: u64 = std::fs::read_to_string(clock).map_or(0, |text| text.trim().parse().unwrap_or(0));
+        let next = now + u64::try_from(by.as_millis()).expect("a duration in milliseconds fits in u64");
+        let pending = clock.with_extension("next");
+        std::fs::write(&pending, next.to_string()).expect("write the next clock reading");
+        std::fs::rename(&pending, clock).expect("replace the clock reading");
+    }
+
+    /// What the Daemon logged so far.
+    pub fn daemon_log(&self) -> String {
+        std::fs::read_to_string(self.state_dir().join("daemon.log")).unwrap_or_default()
     }
 
     pub fn state_dir(&self) -> &Path {
@@ -72,6 +100,10 @@ impl Procly {
             .env("PROCLY_STATE_DIR", self.state_dir())
             .env("PROCLY_CONFIG_DIR", self.config_dir())
             .current_dir(self.scratch());
+        if let Some(clock) = &self.clock {
+            // Set on every command: the Daemon takes the environment of the one that starts it.
+            command.env("PROCLY_TEST_CLOCK", clock);
+        }
         command
     }
 
