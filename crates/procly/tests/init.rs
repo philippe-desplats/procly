@@ -625,3 +625,64 @@ fn init_run_from_a_subdirectory_or_a_secondary_worktree_writes_at_the_root_of_th
     assert!(feature.join("procly.toml").is_file());
     assert!(!main.join("procly.toml").exists());
 }
+
+#[test]
+fn a_double_star_workspace_pattern_reaches_packages_at_any_depth() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            ("package.json", r#"{"name": "acme", "workspaces": ["apps/**"]}"#),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "vite"}}"#,
+            ),
+            (
+                "apps/group/api/package.json",
+                r#"{"name": "api", "scripts": {"dev": "node api.js"}}"#,
+            ),
+            (
+                "apps/group/api/node_modules/dep/package.json",
+                r#"{"name": "dep", "scripts": {"dev": "x"}}"#,
+            ),
+        ],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert!(proposal.contains("cd apps/web && npm run dev"), "{proposal}");
+    assert!(proposal.contains("cd apps/group/api && npm run dev"), "{proposal}");
+    assert!(!proposal.contains("dep"), "{proposal}");
+}
+
+#[test]
+fn a_postgres_with_credentials_the_bundled_driver_does_not_know_stays_shared() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "compose.yaml",
+            "\
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: secret
+    ports: ['5432:5432']
+  plain:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ['5433:5432']
+",
+        )],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert!(!proposal.contains("[services.db.resources"), "{proposal}");
+    assert!(proposal.contains("[services.plain.resources.dev]"), "{proposal}");
+    assert_eq!(proposal.matches("driver").count(), 1, "{proposal}");
+}

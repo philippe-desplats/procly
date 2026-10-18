@@ -31,7 +31,7 @@ struct Technology {
     ports: &'static [(u16, &'static str)],
 }
 
-const TECHNOLOGIES: [Technology; 7] = [
+const TECHNOLOGIES: &[Technology] = &[
     Technology {
         images: &["postgres", "postgresql", "postgis", "pgvector", "timescaledb"],
         driver: Some("postgres"),
@@ -69,6 +69,23 @@ const TECHNOLOGIES: [Technology; 7] = [
     },
 ];
 
+impl Technology {
+    /// The Port name of its well-known port `target`.
+    fn port_name(&self, target: u16) -> Option<&'static str> {
+        self.ports
+            .iter()
+            .find(|(known, _)| *known == target)
+            .map(|(_, name)| *name)
+    }
+
+    /// The first of its well-known Port names that `named` holds, the one its health check probes.
+    fn probed<'a>(&self, named: &'a [String]) -> Option<&'a String> {
+        self.ports
+            .iter()
+            .find_map(|(_, name)| named.iter().find(|candidate| candidate == name))
+    }
+}
+
 /// The technology an image reference runs, `ghcr.io/acme/postgres:17@sha256:…` being `postgres`.
 fn technology(image: &str) -> Option<&'static Technology> {
     let name = image.split('@').next()?.rsplit('/').next()?.split(':').next()?;
@@ -86,6 +103,11 @@ struct Published {
     target: u16,
 }
 
+/// The variable and the default of `NAME:-default` or `NAME-default`, the inside of a `${…}`.
+fn split_default(inner: &str) -> Option<(&str, &str)> {
+    inner.split_once(":-").or_else(|| inner.split_once('-'))
+}
+
 /// The host side of a published port: a number, or a variable with a numeric default.
 fn host_port(text: &str) -> Option<(Option<String>, u16)> {
     let text = text.trim();
@@ -93,7 +115,7 @@ fn host_port(text: &str) -> Option<(Option<String>, u16)> {
         return Some((None, port));
     }
     let inner = text.strip_prefix("${")?.strip_suffix('}')?;
-    let (variable, default) = inner.split_once(":-").or_else(|| inner.split_once('-'))?;
+    let (variable, default) = split_default(inner)?;
     let mut chars = variable.chars();
     let identifier = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -176,28 +198,39 @@ fn published(service: &Value) -> Vec<Published> {
         .collect()
 }
 
-/// The value of the environment variable `name` of a compose service, whether the file writes `environment` as a
-/// table or as a list, and the default of a `${NAME:-default}` value.
-fn environment(service: &Value, name: &str) -> Option<String> {
-    let value = match service.get("environment")? {
+/// The value the compose file writes for the environment variable `name` of a service, whether it writes
+/// `environment` as a table or as a list.
+fn declared_environment(service: &Value, name: &str) -> Option<String> {
+    match service.get("environment")? {
         Value::Mapping(table) => match table.get(name)? {
-            Value::String(text) => text.clone(),
-            Value::Number(number) => number.to_string(),
-            _ => return None,
+            Value::String(text) => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
         },
         Value::Sequence(list) => list
             .iter()
             .filter_map(Value::as_str)
-            .find_map(|entry| entry.strip_prefix(name)?.strip_prefix('=').map(str::to_owned))?,
-        _ => return None,
-    };
+            .find_map(|entry| entry.strip_prefix(name)?.strip_prefix('=').map(str::to_owned)),
+        _ => None,
+    }
+}
+
+/// The value of the environment variable `name` of a compose service, the default of a `${NAME:-default}` value
+/// when that is what the file writes.
+fn environment(service: &Value, name: &str) -> Option<String> {
+    let value = declared_environment(service, name)?;
     match value.strip_prefix("${").and_then(|rest| rest.strip_suffix('}')) {
-        Some(inner) => inner
-            .split_once(":-")
-            .or_else(|| inner.split_once('-'))
-            .map(|(_, default)| default.to_owned()),
+        Some(inner) => split_default(inner).map(|(_, default)| default.to_owned()),
         None => Some(value),
     }
+}
+
+/// Whether a Postgres service has the credentials of the bundled Driver, which builds its URLs for the user and the
+/// password `postgres`. A value the file reads from a variable is not known to be them.
+fn has_bundled_credentials(service: &Value) -> bool {
+    ["POSTGRES_USER", "POSTGRES_PASSWORD"]
+        .iter()
+        .all(|name| declared_environment(service, name).is_none_or(|value| value == "postgres"))
 }
 
 /// A name for a Logical resource in the Main worktree: lowercase letters, digits and single underscores, starting
@@ -231,13 +264,7 @@ fn port_name(mapping: &Published, technology: Option<&Technology>, alone: bool) 
         .and_then(|variable| variable.strip_prefix("PORT_"))
         .map(|rest| service_name(&rest.to_lowercase(), "").replace('-', "_"))
         .filter(|name| !name.is_empty());
-    let well_known = technology.and_then(|technology| {
-        technology
-            .ports
-            .iter()
-            .find(|(target, _)| *target == mapping.target)
-            .map(|(_, name)| (*name).to_owned())
-    });
+    let well_known = technology.and_then(|technology| technology.port_name(mapping.target).map(str::to_owned));
     from_variable.or(well_known).unwrap_or_else(|| {
         if alone {
             "port".to_owned()
@@ -279,62 +306,64 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
     let mut variables = BTreeSet::new();
     for (name, service) in services {
         let Some(name) = name.as_str() else { continue };
-        let ports = published(service);
-        let technology = service.get("image").and_then(Value::as_str).and_then(technology);
         proposal.add_with(&service_name(name, "compose"), |own| {
-            let mut entry = ServiceEntry {
-                compose: Some(name.to_owned()),
-                ..ServiceEntry::default()
-            };
-            let mut named = Vec::new();
-            for mapping in &ports {
-                let mut port_name = port_name(mapping, technology, ports.len() == 1);
-                while entry.ports.contains_key(&port_name) {
-                    port_name.push('_');
-                }
-                entry.ports.insert(port_name.clone(), mapping.port);
-                // Procly sets `PORT` and `PORT_<NAME>` itself, so a compose file reading one needs no Derived variable.
-                if let Some(variable) = mapping.variable.as_deref()
-                    && variable != "PORT"
-                    && !variable.starts_with("PORT_")
-                    && variables.insert(variable.to_owned())
-                {
-                    entry
-                        .env
-                        .insert(variable.to_owned(), format!("{{services.{own}.ports.{port_name}}}"));
-                }
-                named.push(port_name);
-            }
-            if let [first, _, ..] = named.as_slice() {
-                // Among several Port names, the health check needs the one to probe, the best known one first.
-                let probed = technology
-                    .and_then(|technology| {
-                        technology
-                            .ports
-                            .iter()
-                            .find_map(|(_, name)| named.iter().find(|n| n == name))
-                    })
-                    .unwrap_or(first);
-                entry.health = Some(HealthEntry { port: probed.clone() });
-            }
-            // A Logical resource is reached through the Lease, so a container with no port stays Shared.
-            if let Some(driver) = technology
-                .and_then(|technology| technology.driver)
-                .filter(|_| !named.is_empty())
-            {
-                entry.driver = Some(driver.to_owned());
-                let database = environment(service, "POSTGRES_DB").unwrap_or_default();
-                entry.resources.insert(
-                    "dev".to_owned(),
-                    ResourceEntry {
-                        name: resource_name(&database),
-                    },
-                );
-            }
-            entry
+            compose_service(name, own, service, &mut variables)
         });
     }
     Ok(())
+}
+
+/// The Compose service `own` for the service `name` of the compose file, whose definition is `service`. `variables`
+/// holds the ones an earlier service already derives.
+fn compose_service(name: &str, own: &str, service: &Value, variables: &mut BTreeSet<String>) -> ServiceEntry {
+    let ports = published(service);
+    let technology = service.get("image").and_then(Value::as_str).and_then(technology);
+    let mut entry = ServiceEntry {
+        compose: Some(name.to_owned()),
+        ..ServiceEntry::default()
+    };
+    let mut named = Vec::new();
+    for mapping in &ports {
+        let mut port_name = port_name(mapping, technology, ports.len() == 1);
+        while entry.ports.contains_key(&port_name) {
+            port_name.push('_');
+        }
+        entry.ports.insert(port_name.clone(), mapping.port);
+        // Procly sets `PORT` and `PORT_<NAME>` itself, so a compose file reading one needs no Derived variable.
+        if let Some(variable) = mapping.variable.as_deref()
+            && variable != "PORT"
+            && !variable.starts_with("PORT_")
+            && variables.insert(variable.to_owned())
+        {
+            entry
+                .env
+                .insert(variable.to_owned(), format!("{{services.{own}.ports.{port_name}}}"));
+        }
+        named.push(port_name);
+    }
+    if let [first, _, ..] = named.as_slice() {
+        // Among several Port names, the health check needs the one to probe, the best known one first.
+        let probed = technology
+            .and_then(|technology| technology.probed(&named))
+            .unwrap_or(first);
+        entry.health = Some(HealthEntry { port: probed.clone() });
+    }
+    // A Logical resource is reached through the Lease and the credentials of its Driver, so a container with no port,
+    // or with credentials the bundled Driver does not know, stays Shared.
+    if let Some(driver) = technology
+        .and_then(|technology| technology.driver)
+        .filter(|_| !named.is_empty() && has_bundled_credentials(service))
+    {
+        entry.driver = Some(driver.to_owned());
+        let database = environment(service, "POSTGRES_DB").unwrap_or_default();
+        entry.resources.insert(
+            "dev".to_owned(),
+            ResourceEntry {
+                name: resource_name(&database),
+            },
+        );
+    }
+    entry
 }
 
 #[cfg(test)]

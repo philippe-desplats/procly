@@ -41,37 +41,37 @@ pub(crate) enum ProposalError {
 /// One `[services.<name>]` table of the proposal. The fields are written in the order they are declared here, the keys
 /// before the tables.
 #[derive(Debug, Default, Serialize)]
-pub(crate) struct ServiceEntry {
+struct ServiceEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) run: Option<String>,
+    run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) compose: Option<String>,
+    compose: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) covers: Option<Vec<String>>,
+    covers: Option<Vec<String>>,
     /// The Driver that gives each Worktree its own Logical resources, a Compose service without one runs Shared.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) driver: Option<String>,
+    driver: Option<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) env: BTreeMap<String, String>,
+    env: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) health: Option<HealthEntry>,
+    health: Option<HealthEntry>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) ports: BTreeMap<String, u16>,
+    ports: BTreeMap<String, u16>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) resources: BTreeMap<String, ResourceEntry>,
+    resources: BTreeMap<String, ResourceEntry>,
 }
 
 /// The `health` table of a Service that declares several Port names.
 #[derive(Debug, Serialize)]
-pub(crate) struct HealthEntry {
+struct HealthEntry {
     /// The Port name the health check probes.
-    pub(crate) port: String,
+    port: String,
 }
 
 /// One Logical resource of a Compose service.
 #[derive(Debug, Serialize)]
-pub(crate) struct ResourceEntry {
-    pub(crate) name: String,
+struct ResourceEntry {
+    name: String,
 }
 
 impl ServiceEntry {
@@ -114,7 +114,7 @@ fn unique(taken: &BTreeSet<&String>, base: &str) -> String {
     (2..=u32::MAX)
         .map(|n| format!("{base}-{n}"))
         .find(|candidate| !taken.contains(candidate))
-        .expect("an unbounded range always yields a free name")
+        .expect("a proposal holds far fewer Services than there are numbers to try")
 }
 
 /// A Service name made of what a package or compose name holds that a placeholder can carry: lowercase letters,

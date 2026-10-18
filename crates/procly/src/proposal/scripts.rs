@@ -58,9 +58,9 @@ fn read_package(dir: &Path) -> Result<Option<Value>, ProposalError> {
         .map_err(|source| ProposalError::Json { path, source })
 }
 
-/// A package of the Worktree with a `dev` script.
+/// A package of the Worktree with a `dev` script, which becomes a Service.
 #[derive(Debug)]
-struct App {
+struct Package {
     /// Where the package sits, relative to the root of the Worktree. Empty for the root itself.
     dir: PathBuf,
     name: String,
@@ -68,7 +68,7 @@ struct App {
     script: String,
 }
 
-impl App {
+impl Package {
     /// Reads the package in `dir`, `None` when it has no `dev` script.
     fn read(worktree: &Path, dir: PathBuf) -> Result<Option<Self>, ProposalError> {
         let Some(package) = read_package(&worktree.join(&dir))? else {
@@ -82,7 +82,7 @@ impl App {
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let name = package.get("name").and_then(Value::as_str).unwrap_or(&fallback);
         Ok(Some(Self {
-            name: service_name(name, &service_name(&fallback, "app")),
+            name: service_name(name, &service_name(&fallback, "service")),
             script: script.to_owned(),
             dir,
         }))
@@ -235,7 +235,7 @@ fn workspace_patterns(worktree: &Path, root: &Value) -> Result<Vec<String>, Prop
 }
 
 /// The directories, relative to the root of the Worktree, that a workspace pattern names. A segment is a directory
-/// name or `*` for any directory, which is as far as the patterns of the package managers go that Procly reads.
+/// name, `*` for any directory or `**` for any depth of them.
 fn expand(worktree: &Path, pattern: &str) -> Result<Vec<PathBuf>, ProposalError> {
     let mut dirs = vec![PathBuf::new()];
     for segment in pattern
@@ -244,7 +244,10 @@ fn expand(worktree: &Path, pattern: &str) -> Result<Vec<PathBuf>, ProposalError>
     {
         let mut next = Vec::new();
         for dir in dirs {
-            if segment == "*" {
+            if segment == "**" {
+                next.push(dir.clone());
+                descendants(worktree, &dir, &mut next, 0)?;
+            } else if segment == "*" {
                 next.extend(subdirectories(worktree, &dir)?);
             } else if !segment.contains('*') && worktree.join(&dir).join(segment).is_dir() {
                 next.push(dir.join(segment));
@@ -253,6 +256,21 @@ fn expand(worktree: &Path, pattern: &str) -> Result<Vec<PathBuf>, ProposalError>
         dirs = next;
     }
     Ok(dirs)
+}
+
+/// How deep `**` looks, so that a symlink loop ends.
+const MAX_DEPTH: usize = 8;
+
+/// Adds to `found` every directory below `dir`, at any depth, in name order.
+fn descendants(worktree: &Path, dir: &Path, found: &mut Vec<PathBuf>, depth: usize) -> Result<(), ProposalError> {
+    if depth == MAX_DEPTH {
+        return Ok(());
+    }
+    for child in subdirectories(worktree, dir)? {
+        found.push(child.clone());
+        descendants(worktree, &child, found, depth + 1)?;
+    }
+    Ok(())
 }
 
 /// The directories inside `dir`, hidden ones and `node_modules` left out, in name order.
@@ -279,7 +297,7 @@ fn subdirectories(worktree: &Path, dir: &Path) -> Result<Vec<PathBuf>, ProposalE
 }
 
 /// The packages of the workspaces the Worktree declares that have a `dev` script, in the order of their directories.
-fn workspace_apps(worktree: &Path, root: &Value) -> Result<Vec<App>, ProposalError> {
+fn workspace_packages(worktree: &Path, root: &Value) -> Result<Vec<Package>, ProposalError> {
     let mut included = BTreeSet::new();
     let mut excluded = BTreeSet::new();
     for pattern in workspace_patterns(worktree, root)? {
@@ -288,11 +306,11 @@ fn workspace_apps(worktree: &Path, root: &Value) -> Result<Vec<App>, ProposalErr
             None => included.extend(expand(worktree, &pattern)?),
         }
     }
-    let mut apps = Vec::new();
+    let mut packages = Vec::new();
     for dir in included.difference(&excluded).filter(|dir| !dir.as_os_str().is_empty()) {
-        apps.extend(App::read(worktree, dir.clone())?);
+        packages.extend(Package::read(worktree, dir.clone())?);
     }
-    Ok(apps)
+    Ok(packages)
 }
 
 /// Adds the Services the `dev` scripts of the Worktree rooted at `worktree` call for: one per workspace package with
@@ -303,21 +321,21 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
         return Ok(());
     };
     let manager = Manager::of(worktree);
-    let apps = workspace_apps(worktree, &root)?;
-    let root_app = App::read(worktree, PathBuf::new())?;
-    if apps.is_empty() {
-        if let Some(app) = root_app {
-            proposal.add(&app.name, app.service(manager));
+    let packages = workspace_packages(worktree, &root)?;
+    let root_package = Package::read(worktree, PathBuf::new())?;
+    if packages.is_empty() {
+        if let Some(package) = root_package {
+            proposal.add(&package.name, package.service(manager));
         }
         return Ok(());
     }
-    let mut covers: Vec<String> = apps
+    let mut covers: Vec<String> = packages
         .iter()
-        .map(|app| proposal.add(&app.name, app.service(manager)))
+        .map(|package| proposal.add(&package.name, package.service(manager)))
         .collect();
-    if root_app.is_some() {
+    if root_package.is_some() {
         covers.sort();
-        // The Group runs the root script as it is: the apps it covers get their ports from their own Leases.
+        // The Group runs the root script as it is: the Services it covers get their ports from their own Leases.
         proposal.add(
             "dev",
             ServiceEntry {
@@ -384,14 +402,14 @@ mod tests {
 
     #[test]
     fn the_binaries_of_the_package_and_of_the_root_are_put_on_the_path() {
-        let app = |dir: &str| App {
+        let package = |dir: &str| Package {
             dir: PathBuf::from(dir),
             name: "x".to_owned(),
             script: String::new(),
         };
-        assert_eq!(app("").bins(), "export PATH=\"$PWD/node_modules/.bin:$PATH\"");
+        assert_eq!(package("").bins(), "export PATH=\"$PWD/node_modules/.bin:$PATH\"");
         assert_eq!(
-            app("apps/web").bins(),
+            package("apps/web").bins(),
             "export PATH=\"$PWD/node_modules/.bin:$PWD/../../node_modules/.bin:$PATH\""
         );
     }

@@ -29,9 +29,9 @@ The proposal declares what the Worktree states and leaves out what it would have
 
 A package with a `dev` script becomes a Process service named after the package, without its scope (`@acme/web` is `web`). It runs from the root of the Worktree, through the package manager that its lockfile tells (`pnpm-lock.yaml`, `bun.lock` or `bun.lockb`, `yarn.lock`, else npm): `cd apps/web && pnpm run dev`.
 
-A Worktree is a monorepo when it declares workspaces. Procly reads the `workspaces` of the root `package.json`, as a list or as a table with `packages`, and the `packages` of `pnpm-workspace.yaml`. A pattern is a path whose segments are names or a lone `*`, such as `apps/*`, and a `!` pattern leaves directories out. Hidden directories and `node_modules` are not looked into. A workspace package with a `dev` script becomes a Service, and the `dev` script of the root package becomes a Group named `dev` that covers all of them, so that the command the team already runs stays one command. A monorepo whose root has no `dev` script gets its Services and no Group.
+A Worktree is a monorepo when it declares workspaces. Procly reads the `workspaces` of the root `package.json`, as a list or as a table with `packages`, and the `packages` of `pnpm-workspace.yaml`. A pattern is a path whose segments are names, a lone `*` for any directory or a lone `**` for any depth of them, such as `apps/*` or `packages/**`, and a `!` pattern leaves directories out. Hidden directories and `node_modules` are not looked into. A workspace package with a `dev` script becomes a Service, and the `dev` script of the root package becomes a Group named `dev` that covers all of them, so that the command the team already runs stays one command. A monorepo whose root has no `dev` script gets its Services and no Group.
 
-A name that is taken gets a number, so an app called `dev` leaves `dev` to itself and the Group becomes `dev-2`.
+A name that is taken gets a number, so a package called `dev` leaves `dev` to itself and the Group becomes `dev-2`.
 
 ### Ports named in a script
 
@@ -39,7 +39,7 @@ A `dev` script that names one port, with `--port 3001`, `--port=3001`, `-p 3001`
 
 A port below 1024, a script that names several different ports, and any other way of writing a port are not taken, the Service then runs through the package manager and declares no port. Add `ports = { http = <port> }` and the placeholder where the script reads its port, so that parallel Worktrees do not share it.
 
-A Group runs the `dev` script of the root as it is. The Services it covers get their Leases in `PORT_<SERVICE>_<NAME>`, but a script that writes its port still binds that port in a Worktree other than the Main one, which `up` then reports as a Port mismatch. Point the root command at the Leases, or start the apps one by one.
+A Group runs the `dev` script of the root as it is. The Services it covers get their Leases in `PORT_<SERVICE>_<NAME>`, but a script that writes its port still binds that port in a Worktree other than the Main one, which `up` then reports as a Port mismatch. Point the root command at the Leases, or start the Services one by one.
 
 ## The compose file
 
@@ -50,6 +50,6 @@ Procly looks for `compose.yaml`, `compose.yml`, `docker-compose.yaml` and `docke
 - A service that publishes several ports gets the `health` port that its technology probes, else the first.
 - Ports with no host port, ranges, UDP ports and variables without a default are left out.
 
-Known technologies run in the mode that keeps their data apart at the least cost, see [Logical resources and Drivers](configuration.md#logical-resources-and-drivers). A Postgres image (`postgres`, `postgis`, `pgvector`, `timescaledb` and `postgresql`) that publishes a port is proposed Logical, with the Driver `postgres` and a `dev` resource named after its `POSTGRES_DB`, else `postgres`. The Services that use the database still have to read it, for example `DATABASE_URL = "{services.postgres.resources.dev.url}"` in their `env`. Every other service is proposed Shared. Redis is Shared until a bundled Driver gives it Logical resources.
+Known technologies run in the mode that keeps their data apart at the least cost, see [Logical resources and Drivers](configuration.md#logical-resources-and-drivers). A Postgres image (`postgres`, `postgis`, `pgvector`, `timescaledb` and `postgresql`) that publishes a port is proposed Logical when its `POSTGRES_USER` and `POSTGRES_PASSWORD` are unset or `postgres`, the credentials the bundled Driver builds its URLs with, otherwise it is Shared, with the Driver `postgres` and a `dev` resource named after its `POSTGRES_DB`, else `postgres`. The Services that use the database still have to read it, for example `DATABASE_URL = "{services.postgres.resources.dev.url}"` in their `env`. Every other service is proposed Shared. Redis is Shared until a bundled Driver gives it Logical resources.
 
 An image is recognised by its name alone, wherever it comes from and whatever its tag.
