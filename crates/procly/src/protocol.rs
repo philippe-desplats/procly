@@ -63,6 +63,22 @@ pub(crate) enum Request {
         /// The environment of the requesting command, handed to the setup commands as for `Run`.
         env: Vec<(String, String)>,
     },
+    /// Writes the Rules block into the instruction file of the Worktree holding `cwd`, and the Guard into its Claude
+    /// Code settings.
+    AgentInstall {
+        cwd: PathBuf,
+        /// The instruction file for the Rules block, inside the Worktree. Without it, `AGENTS.md` or `CLAUDE.md`.
+        file: Option<PathBuf>,
+    },
+    /// Makes the Guards and Rules blocks of the Repository holding `cwd` stand aside, or stand again with `off` unset.
+    Switch {
+        cwd: PathBuf,
+        off: bool,
+    },
+    /// Asks whether the Guard of the Repository holding `cwd` stands, once it met a command it knows.
+    Guard {
+        cwd: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -124,9 +140,63 @@ pub(crate) enum Response {
         /// The recent output of the command, to tell why.
         output: String,
     },
+    /// The Rules block and the Guard are written, or were already.
+    AgentInstall(InstallReport),
+    /// The Repository is Off or On, and its Rules blocks say so.
+    Switched(SwitchReport),
+    /// Whether the Guard stands for the Repository, and the Services it declares for the Worktree.
+    Guard {
+        off: bool,
+        services: Vec<String>,
+    },
     Error {
         message: String,
     },
+}
+
+/// What a request to write a Managed block did to the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BlockOutcome {
+    /// The block was added or updated.
+    Written,
+    /// The file already held exactly this block.
+    Unchanged,
+    /// The block holds something Procly did not write, so it was left as it is.
+    Edited,
+}
+
+impl BlockOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Unchanged => "unchanged",
+            Self::Edited => "edited",
+        }
+    }
+}
+
+/// A Managed block and what became of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct BlockReport {
+    pub(crate) file: PathBuf,
+    pub(crate) outcome: BlockOutcome,
+}
+
+/// What `agent install` wrote.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct InstallReport {
+    pub(crate) rules: BlockReport,
+    pub(crate) guard: BlockReport,
+    /// Whether the Repository is Off, in which case the Rules block says so.
+    pub(crate) off: bool,
+}
+
+/// What `off` and `on` did to the Rules blocks of the Repository.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SwitchReport {
+    pub(crate) off: bool,
+    pub(crate) rules: Vec<BlockReport>,
 }
 
 /// A healthy Service `up` brought up or found running.

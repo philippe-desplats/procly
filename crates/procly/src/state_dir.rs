@@ -91,6 +91,11 @@ impl StateDir {
         self.path.join("services.json")
     }
 
+    /// The document listing the Repositories that are Off.
+    pub(crate) fn off(&self) -> PathBuf {
+        self.path.join("off.json")
+    }
+
     /// The document holding the fingerprint of every Managed block Procly wrote.
     pub(crate) fn managed_blocks(&self) -> PathBuf {
         self.path.join("managed-blocks.json")

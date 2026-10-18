@@ -4,6 +4,7 @@ mod daemon;
 mod derived;
 mod duration;
 mod envfile;
+mod guard;
 mod output;
 mod ports;
 mod protocol;
@@ -12,7 +13,7 @@ mod status;
 mod topology;
 mod unit;
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -20,7 +21,9 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
-use crate::protocol::{InitReport, JobEnd, Released, Request, Response, ServiceEnd, StartOutcome};
+use crate::protocol::{
+    BlockOutcome, BlockReport, InitReport, JobEnd, Released, Request, Response, ServiceEnd, StartOutcome,
+};
 use crate::state_dir::StateDir;
 
 /// The exit code of `wait` for a Job killed on timeout, and of `up` for a Service never healthy, the one
@@ -116,9 +119,45 @@ enum Command {
         #[command(subcommand)]
         command: UnitCommand,
     },
+    /// Steer coding agents to Procly: write the Rules block into the instruction file of the current Worktree, and the
+    /// Guard into its Claude Code settings. Nothing is written unless you run this.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Make the Guards and Rules blocks of this Repository stand aside, so that its agents start dev servers and
+    /// containers as they did before Procly. Nothing is removed, `procly on` brings them back.
+    Off,
+    /// Bring back the Guards and Rules blocks of this Repository after `procly off`.
+    On,
+    /// The Claude Code hook that blocks the dev-server and compose commands Procly runs instead, and answers with
+    /// the Procly command to run. It reads the tool call on its standard input and always exits 0.
+    #[command(
+        after_help = "Registered by `procly agent install` as a PreToolUse hook. A command it does not know is let \
+                      through without asking the Daemon, and so is every command while the Repository is off or when \
+                      the Daemon cannot answer. See docs/agents.md."
+    )]
+    Guard,
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    /// Write the Rules block into `AGENTS.md` (or `CLAUDE.md` when that is the only instruction file) and the Guard
+    /// into `.claude/settings.json`, both inside the current Worktree. Run it again to update them, a block you
+    /// edited is left as it is.
+    #[command(
+        after_help = "Exit codes: 0 when the blocks are written, also when they already were or were left as they are \
+                      because you edited them, 125 when Procly itself fails, such as for a settings file that is not \
+                      JSON or an instruction file outside the Worktree. See docs/agents.md and docs/exit-codes.md."
+    )]
+    Install {
+        /// The instruction file for the Rules block, inside the Worktree. Defaults to `AGENTS.md`, then `CLAUDE.md`.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -161,6 +200,10 @@ fn main() -> ExitCode {
 }
 
 fn execute(command: Command) -> anyhow::Result<ExitCode> {
+    // A hook that fails must not stop the agent, so the Guard answers for itself.
+    if let Command::Guard = command {
+        return Ok(guard_hook());
+    }
     let state = StateDir::resolve()?;
     match command {
         Command::Run { timeout, command } => {
@@ -217,6 +260,12 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             command: WorktreeCommand::Init { path },
         } => worktree_init(&state, path),
         Command::Unit { command } => unit(&state, &command),
+        Command::Agent {
+            command: AgentCommand::Install { file },
+        } => agent_install(&state, file),
+        Command::Off => switch(&state, true),
+        Command::On => switch(&state, false),
+        Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Daemon => {
             daemon::run(&state)?;
             Ok(ExitCode::SUCCESS)
@@ -441,6 +490,80 @@ fn let_go(released: &Released) -> String {
         ),
         1 => format!("{service} released, 1 other Worktree still needs it"),
         _ => format!("{service} released, {others} other Worktrees still need it"),
+    }
+}
+
+/// Runs `agent install`, printing what became of the Rules block and of the Guard.
+fn agent_install(state: &StateDir, file: Option<PathBuf>) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let file = file.map(|file| cwd.join(file));
+    match client::send(state, &Request::AgentInstall { cwd, file })? {
+        Response::AgentInstall(report) => {
+            print_block("rules", &report.rules);
+            print_block("guard", &report.guard);
+            if report.off {
+                eprintln!("procly: this Repository is off, the Rules block says so, `procly on` turns it back on");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
+/// Runs `off` or `on`, printing the new state and what became of the Rules blocks.
+fn switch(state: &StateDir, off: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    match client::send(state, &Request::Switch { cwd, off })? {
+        Response::Switched(report) => {
+            println!("{}", if report.off { "off" } else { "on" });
+            for block in &report.rules {
+                print_block("rules", block);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
+/// Runs the Guard for a Claude Code `PreToolUse` hook: reads the tool call on stdin and, for a command it knows while
+/// the Repository is not off, denies it with the Procly command to run. Whatever else happens, the command is let
+/// through, since a Guard that breaks must not break the agent.
+fn guard_hook() -> ExitCode {
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return ExitCode::SUCCESS;
+    }
+    let Some(call) = guard::tool_call(&input) else {
+        return ExitCode::SUCCESS;
+    };
+    let Some(recognized) = guard::recognize(&call.command) else {
+        return ExitCode::SUCCESS;
+    };
+    let asked = StateDir::resolve().map_err(anyhow::Error::from).and_then(|state| {
+        let cwd = match call.cwd {
+            Some(cwd) => cwd,
+            None => std::env::current_dir().context("cannot read the current directory")?,
+        };
+        Ok(client::send(&state, &Request::Guard { cwd })?)
+    });
+    match asked {
+        Ok(Response::Guard { off: false, services }) => println!("{}", guard::denial(&recognized, &services)),
+        Ok(Response::Guard { off: true, .. }) => {}
+        Ok(Response::Error { message }) => eprintln!("procly guard: {message}, letting the command through"),
+        Ok(other) => eprintln!("procly guard: unexpected answer {other:?}, letting the command through"),
+        Err(error) => eprintln!("procly guard: {error:#}, letting the command through"),
+    }
+    ExitCode::SUCCESS
+}
+
+/// One line on stdout for a Managed block, and on stderr why one the user edited was left as it is.
+fn print_block(name: &str, block: &BlockReport) {
+    println!("{name} {} {}", block.file.display(), block.outcome.as_str());
+    if block.outcome == BlockOutcome::Edited {
+        eprintln!(
+            "procly: the {name} block in {} was edited, left as it is",
+            block.file.display()
+        );
     }
 }
 
