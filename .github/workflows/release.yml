@@ -1,0 +1,181 @@
+name: Release
+
+# A tag named v<version> builds the binaries, publishes them with their checksums to GitHub Releases
+# and updates the Homebrew tap. Nothing runs on a branch or a pull request.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Check the tag against the crate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      # The binary reports the version of Cargo.toml, so a tag that disagrees with it would publish a release
+      # whose `procly --version` is not the release.
+      - id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          crate="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "procly") | .version')"
+          if [ "${tag}" != "v${crate}" ]; then
+            echo "::error::the tag ${tag} does not match the version ${crate} of crates/procly/Cargo.toml"
+            exit 1
+          fi
+          echo "version=${crate}" >> "${GITHUB_OUTPUT}"
+          case "${crate}" in
+            *-*) echo "prerelease=true" >> "${GITHUB_OUTPUT}" ;;
+            *) echo "prerelease=false" >> "${GITHUB_OUTPUT}" ;;
+          esac
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      # rustup reads rust-toolchain.toml and installs the pinned toolchain.
+      - run: rustup toolchain install
+      # Every runner builds for its own architecture, so no cross toolchain is involved. Only `procly` is shipped,
+      # `procly-test-server` is a fixture of the tests.
+      - run: cargo build --release --locked --bin procly
+      - name: Check that the binary reports the released version
+        run: |
+          reported="$(./target/release/procly --version)"
+          if [ "${reported}" != "procly ${VERSION}" ]; then
+            echo "::error::the binary reports '${reported}', expected 'procly ${VERSION}'"
+            exit 1
+          fi
+      - name: Package the binary with its checksum
+        run: |
+          name="procly-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp target/release/procly "dist/${name}/procly"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          cd dist
+          if command -v sha256sum > /dev/null; then
+            sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          else
+            shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: procly-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish to GitHub Releases
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: procly-*
+          merge-multiple: true
+      # One file holds the 4 checksums, so `sha256sum --check` verifies whatever the user downloaded.
+      - name: Gather the checksums
+        working-directory: dist
+        run: |
+          cat procly-*.tar.gz.sha256 | sort -k 2 > SHA256SUMS
+          rm procly-*.tar.gz.sha256
+          test "$(wc -l < SHA256SUMS)" -eq 4
+          cat SHA256SUMS
+      - name: Create the release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "Procly ${VERSION}" \
+            --generate-notes \
+            --verify-tag \
+            --prerelease="${PRERELEASE}"
+      # Handed to the next job, which renders the Homebrew formula from the checksums.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
+  homebrew:
+    name: Update the Homebrew tap
+    needs: [version, release]
+    # A prerelease is never offered through `brew install`.
+    if: needs.version.outputs.prerelease == 'false'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAP_REPOSITORY: philippe-desplats/homebrew-procly
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: checksums
+          path: dist
+      # The token needs write access to the tap only, see docs/releasing.md.
+      - name: Check the tap credentials
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            echo "::error::the secret HOMEBREW_TAP_TOKEN is not set, the GitHub release is published but the tap is not updated, see docs/releasing.md"
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Render the formula
+        run: |
+          mkdir -p tap/Formula
+          scripts/render-formula.sh "${VERSION}" dist/SHA256SUMS > tap/Formula/procly.rb
+          cat tap/Formula/procly.rb
+      - name: Push the formula
+        working-directory: tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/procly.rb
+          if git diff --cached --quiet; then
+            echo "the formula already is at ${VERSION}"
+            exit 0
+          fi
+          git commit -m "procly ${VERSION}"
+          git push origin HEAD
