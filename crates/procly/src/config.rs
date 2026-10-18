@@ -65,7 +65,9 @@ pub(crate) enum ConfigError {
     },
     #[error("service {service} sets `driver` but declares no `resources` for it to create")]
     DriverWithoutResources { service: String },
-    #[error("driver {name:?} of service {service} must be a file name: lowercase letters, digits, hyphens and underscores")]
+    #[error(
+        "driver {name:?} of service {service} must be a file name: lowercase letters, digits, hyphens and underscores"
+    )]
     DriverName { service: String, name: String },
     #[error("service {service} declares `resources` but sets no `driver` to create them")]
     ResourcesWithoutDriver { service: String },
@@ -1080,9 +1082,7 @@ mod tests {
     #[test]
     fn a_driver_is_named_by_a_file_name_that_cannot_leave_the_directory_of_drivers() {
         for bad in ["../x", "a/b", "A", "", "a.b", "a b"] {
-            let text = format!(
-                "compose = 'db'\ndriver = '{bad}'\nresources = {{ dev = {{ name = 'app' }} }}\n"
-            );
+            let text = format!("compose = 'db'\ndriver = '{bad}'\nresources = {{ dev = {{ name = 'app' }} }}\n");
             assert!(
                 matches!(
                     service(&text).kind("db"),
@@ -1102,7 +1102,9 @@ mod tests {
             other => panic!("{text:?} gave {other:?}"),
         };
         let with = |key: &str, name: &str, seed: &str| {
-            format!("compose = 'db'\ndriver = 'd'\nresources = {{ \"{key}\" = {{ name = '{name}', seed = {seed} }} }}\n")
+            format!(
+                "compose = 'db'\ndriver = 'd'\nresources = {{ \"{key}\" = {{ name = '{name}', seed = {seed} }} }}\n"
+            )
         };
         for bad in ["App", "a b", "a;b", "a-b", "", "app\"", "$(x)", "é"] {
             assert_eq!(

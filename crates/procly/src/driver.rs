@@ -287,13 +287,18 @@ mod tests {
         assert!(driver.resource_name("app", "feature", false).is_ok());
         assert!(matches!(
             driver.resource_name("application", "feature", false),
-            Err(DriverError::NameTooLong { length: 19, max: 12, .. })
+            Err(DriverError::NameTooLong {
+                length: 19,
+                max: 12,
+                ..
+            })
         ));
     }
 
     #[test]
     fn the_url_reads_the_lease_of_the_health_port_or_of_a_port_name() {
-        let driver = driver("url = 'x://h:{port}/{resource}?admin={ports.admin}'\ncheck = 'c'\ncreate = 'n'\ndrop = 'd'\n");
+        let driver =
+            driver("url = 'x://h:{port}/{resource}?admin={ports.admin}'\ncheck = 'c'\ncreate = 'n'\ndrop = 'd'\n");
         assert_eq!(
             driver.url("app", &leases(), Some(24000)).unwrap(),
             "x://h:24000/app?admin=24001"
@@ -317,7 +322,11 @@ mod tests {
     #[test]
     fn a_command_gets_the_resource_and_the_template_and_keeps_every_other_brace() {
         assert_eq!(
-            Driver::command("cp -r /data/{template} /data/{resource} && echo ${HOME} {}", "app_x", Some("base")),
+            Driver::command(
+                "cp -r /data/{template} /data/{resource} && echo ${HOME} {}",
+                "app_x",
+                Some("base")
+            ),
             "cp -r /data/base /data/app_x && echo ${HOME} {}"
         );
     }

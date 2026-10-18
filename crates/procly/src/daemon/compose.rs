@@ -669,7 +669,9 @@ impl Docker {
             if let Seed::Command { run, timeout } = &wanted.seed
                 && let Err(reason) = run_seed(provision, wanted, run, *timeout).await
             {
-                let outcome = self.drop_created(provision, name, &script(&provision.driver.drop)).await;
+                let outcome = self
+                    .drop_created(provision, name, &script(&provision.driver.drop))
+                    .await;
                 eprintln!(
                     "the seed of resource {name} of service {} failed ({reason}), {outcome}",
                     self.service

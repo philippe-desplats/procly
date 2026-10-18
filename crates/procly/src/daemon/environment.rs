@@ -16,8 +16,8 @@ use super::lease::{LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts, Resource};
-use crate::driver::{Driver, DriverError};
 use crate::driver;
+use crate::driver::{Driver, DriverError};
 use crate::envfile;
 use crate::ports::{self, PortsError};
 use crate::topology::{self, Topology, TopologyError};
@@ -178,13 +178,16 @@ fn referenced_resources(
     Ok(table)
 }
 
+/// A Driver and the Logical resources it creates for a Worktree, by key.
+pub(super) type DriverResources = (Driver, BTreeMap<String, Resource>);
+
 /// The Driver of the Compose service `name` and its Logical resources in the Worktree, `None` when it has no Driver.
 pub(super) fn logical_resources(
     topology: &Topology,
     name: &str,
     declared: &ServiceConfig,
     leases: &BTreeMap<String, u16>,
-) -> Result<Option<(Driver, BTreeMap<String, Resource>)>, EnvironmentError> {
+) -> Result<Option<DriverResources>, EnvironmentError> {
     let Some(driver) = &declared.driver else {
         return Ok(None);
     };

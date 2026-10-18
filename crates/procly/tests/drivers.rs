@@ -287,7 +287,10 @@ fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver
 
     assert_success(&first);
     let port = fixture.port;
-    assert_eq!(stdout(&first), format!("db started http://localhost:{port} port {port}\n"));
+    assert_eq!(
+        stdout(&first),
+        format!("db started http://localhost:{port} port {port}\n")
+    );
     // Several Logical resources per Service, under the names of the configuration in the Main worktree.
     assert_eq!(resources(&fixture.project), ["app", "app_test"]);
     let container = fixture.project.container();
@@ -295,7 +298,10 @@ fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver
     let second = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
 
     assert_success(&second);
-    assert_eq!(stdout(&second), format!("db reused http://localhost:{port} port {port}\n"));
+    assert_eq!(
+        stdout(&second),
+        format!("db reused http://localhost:{port} port {port}\n")
+    );
     assert_eq!(
         resources(&fixture.project),
         ["app", "app_app_other", "app_test", "app_test_app_other"]
@@ -365,17 +371,22 @@ fn docker_a_seed_that_fails_drops_the_resource_it_just_created_so_that_the_next_
     let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let failing = |run: &str| {
-        format!(
-            "[services.db.resources.filled]\nname = 'app_filled'\nseed = {{ run = \"{run}\", timeout = '1m' }}\n"
-        )
+        format!("[services.db.resources.filled]\nname = 'app_filled'\nseed = {{ run = \"{run}\", timeout = '1m' }}\n")
     };
-    fs::write(fixture.main.join("procly.local.toml"), failing("echo no luck >&2; exit 7")).expect("write the config");
+    fs::write(
+        fixture.main.join("procly.local.toml"),
+        failing("echo no luck >&2; exit 7"),
+    )
+    .expect("write the config");
 
     let failed = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
 
     assert_eq!(failed.status.code(), Some(125));
     let message = stderr(&failed);
-    assert!(message.contains("the seed of resource app_filled of service db failed"), "{message}");
+    assert!(
+        message.contains("the seed of resource app_filled of service db failed"),
+        "{message}"
+    );
     assert!(message.contains("exited with 7"), "{message}");
     assert!(message.contains("no luck"), "{message}");
     assert!(message.contains("has been dropped"), "{message}");
@@ -436,7 +447,11 @@ fn docker_a_template_seed_needs_a_driver_with_a_copy_command_and_an_existing_tem
     write_driver_file(&fixture.main.join(".procly/drivers"), "dir", &no_copy);
     let refused = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
     assert_eq!(refused.status.code(), Some(125));
-    assert!(stderr(&refused).contains("has no `copy` command"), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("has no `copy` command"),
+        "{}",
+        stderr(&refused)
+    );
 }
 
 /// A compose file whose service `db` is the Postgres image, healthy once the final server accepts TCP connections.
@@ -456,17 +471,23 @@ fn postgres_fixture(resources: &str) -> Fixture {
 /// What a query prints on database `database` of the container, unaligned and without headers.
 fn query(project: &Project, database: &str, sql: &str) -> String {
     project
-        .exec(&format!("psql --username postgres --dbname {database} --tuples-only --no-align --command \"{sql}\" 2>&1"))
+        .exec(&format!(
+            "psql --username postgres --dbname {database} --tuples-only --no-align --command \"{sql}\" 2>&1"
+        ))
         .trim()
         .to_owned()
 }
 
 /// The databases of the container Procly created for the Repository, sorted.
 fn databases(project: &Project) -> Vec<String> {
-    query(project, "postgres", "SELECT datname FROM pg_database WHERE datname LIKE 'app%' ORDER BY 1")
-        .lines()
-        .map(str::to_owned)
-        .collect()
+    query(
+        project,
+        "postgres",
+        "SELECT datname FROM pg_database WHERE datname LIKE 'app%' ORDER BY 1",
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect()
 }
 
 #[test]
@@ -502,7 +523,11 @@ fn docker_postgres_each_seed_variant_produces_the_expected_content() {
     // The template is a database that exists already, with a table and a row.
     let project = &fixture.project;
     project.exec("createdb --username postgres app_base");
-    query(project, "app_base", "CREATE TABLE people (name text); INSERT INTO people VALUES ('ada')");
+    query(
+        project,
+        "app_base",
+        "CREATE TABLE people (name text); INSERT INTO people VALUES ('ada')",
+    );
     let seed = format!(
         "docker compose -p {} exec -T db psql --username postgres --dbname $PROCLY_RESOURCE_NAME --command \
          'CREATE TABLE seeded (n int); INSERT INTO seeded VALUES (42)'",
