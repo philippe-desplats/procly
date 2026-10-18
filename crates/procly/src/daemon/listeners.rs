@@ -45,7 +45,6 @@ mod tests {
     fn reads_the_port_of_every_listening_address_once() {
         let output = "p4242\nf3\nn127.0.0.1:5173\nf4\nn[::1]:5173\nf5\nn*:24000\np4243\nf6\nn*:9229\n";
         assert_eq!(ports(output), [5173, 9229, 24000]);
-        assert!(ports("").is_empty());
+        assert_eq!(ports(""), Vec::<u16>::new());
     }
-
 }

@@ -17,7 +17,10 @@ pub(crate) struct Range {
 impl Range {
     /// Below the ephemeral ports of Linux (from 32768) and macOS (from 49152), which the system hands out to
     /// outgoing connections, and above the ports dev servers and databases use by default.
-    pub(crate) const DEFAULT: Self = Self { start: 24000, end: 24999 };
+    pub(crate) const DEFAULT: Self = Self {
+        start: 24000,
+        end: 24999,
+    };
 
     /// Every port of the Range, in increasing order.
     pub(crate) fn ports(self) -> std::ops::RangeInclusive<u16> {
@@ -53,7 +56,9 @@ impl fmt::Display for Range {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PortsError {
-    #[error("the command of service {service} uses the placeholder {{ports.{name}}}, but {name} is not one of its Port names")]
+    #[error(
+        "the command of service {service} uses the placeholder {{ports.{name}}}, but {name} is not one of its Port names"
+    )]
     UnknownPlaceholder { service: String, name: String },
     #[error("Port name {name:?} of service {service} must be made of lowercase letters, digits and underscores")]
     InvalidPortName { service: String, name: String },
@@ -69,7 +74,11 @@ pub(crate) fn environment(
     let mut variables = Vec::with_capacity(leases.len() + 1);
     for (name, port) in leases {
         // Lowercase only, so that 2 Port names never map to the same variable.
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
             return Err(PortsError::InvalidPortName {
                 service: service.to_owned(),
                 name: name.clone(),
@@ -91,9 +100,7 @@ pub(crate) fn render(service: &str, command: &str, leases: &BTreeMap<String, u16
     let mut rest = command;
     while let Some(start) = rest.find(PLACEHOLDER_PREFIX) {
         let after = &rest[start + PLACEHOLDER_PREFIX.len()..];
-        let name_len = after
-            .find(|c: char| !is_port_name_char(c))
-            .unwrap_or(after.len());
+        let name_len = after.find(|c: char| !is_port_name_char(c)).unwrap_or(after.len());
         if name_len == 0 || !after[name_len..].starts_with('}') {
             // Not a placeholder, such as `{ports.}` or `{ports.a b}`: copy the opening brace and look further.
             rendered.push_str(&rest[..=start]);
@@ -129,7 +136,13 @@ mod tests {
     #[test]
     fn a_range_reads_its_bounds_inclusive() {
         let range: Range = "24000-24999".parse().unwrap();
-        assert_eq!(range, Range { start: 24000, end: 24999 });
+        assert_eq!(
+            range,
+            Range {
+                start: 24000,
+                end: 24999
+            }
+        );
         assert_eq!(range.ports().count(), 1000);
         assert_eq!(range.to_string(), "24000-24999");
         assert_eq!("8080-8080".parse::<Range>().unwrap().ports().count(), 1);
@@ -152,7 +165,10 @@ mod tests {
                 ("PORT".to_owned(), "24000".to_owned()),
             ]
         );
-        assert!(environment("worker", &BTreeMap::new(), None).unwrap().is_empty());
+        assert_eq!(
+            environment("worker", &BTreeMap::new(), None).unwrap(),
+            Vec::<(String, String)>::new()
+        );
     }
 
     #[test]
@@ -160,7 +176,10 @@ mod tests {
         for name in ["Http", "api-http", ""] {
             let leases = BTreeMap::from([(name.to_owned(), 24000)]);
             assert!(
-                matches!(environment("web", &leases, None), Err(PortsError::InvalidPortName { .. })),
+                matches!(
+                    environment("web", &leases, None),
+                    Err(PortsError::InvalidPortName { .. })
+                ),
                 "{name:?} was accepted"
             );
         }
@@ -169,7 +188,12 @@ mod tests {
     #[test]
     fn each_placeholder_becomes_the_leased_port_of_its_port_name() {
         assert_eq!(
-            render("web", "vite --port {ports.http} --strictPort && serve {ports.test}", &leases()).unwrap(),
+            render(
+                "web",
+                "vite --port {ports.http} --strictPort && serve {ports.test}",
+                &leases()
+            )
+            .unwrap(),
             "vite --port 24000 --strictPort && serve 24001"
         );
     }

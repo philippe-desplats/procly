@@ -52,6 +52,10 @@ struct Document<T> {
 /// Reads the document at `path`, `None` when it does not exist yet. A document of an older version is read as it
 /// is, a newer one is refused rather than misread.
 pub(crate) fn load<T: DeserializeOwned>(path: &Path, version: u32) -> Result<Option<T>, StoreError> {
+    #[derive(Deserialize)]
+    struct Version {
+        version: u32,
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -66,10 +70,6 @@ pub(crate) fn load<T: DeserializeOwned>(path: &Path, version: u32) -> Result<Opt
         path: path.to_owned(),
         source,
     };
-    #[derive(Deserialize)]
-    struct Version {
-        version: u32,
-    }
     let Version { version: found } = serde_json::from_str(&text).map_err(parse_error)?;
     if found > version {
         return Err(StoreError::Version {
@@ -132,9 +132,21 @@ mod tests {
         let path = dir.path().join("items.json");
         assert_eq!(load::<Body>(&path, 1).unwrap(), None);
 
-        save(&path, 1, &Body { items: vec![24000, 24001] }).unwrap();
+        save(
+            &path,
+            1,
+            &Body {
+                items: vec![24000, 24001],
+            },
+        )
+        .unwrap();
 
-        assert_eq!(load::<Body>(&path, 1).unwrap(), Some(Body { items: vec![24000, 24001] }));
+        assert_eq!(
+            load::<Body>(&path, 1).unwrap(),
+            Some(Body {
+                items: vec![24000, 24001]
+            })
+        );
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("{\n  \"version\": 1,\n"), "{text}");
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
@@ -146,7 +158,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("items.json");
         fs::write(&path, "{\"version\": 2, \"items\": []}").unwrap();
-        assert!(matches!(load::<Body>(&path, 1), Err(StoreError::Version { found: 2, .. })));
+        assert!(matches!(
+            load::<Body>(&path, 1),
+            Err(StoreError::Version { found: 2, .. })
+        ));
 
         fs::write(&path, "{\"version\": 1, \"items\": [").unwrap();
         let error = load::<Body>(&path, 1).unwrap_err();

@@ -262,7 +262,12 @@ fn spawn(spec: ServiceSpec) -> Result<Arc<Service>, ServiceError> {
         stop: watch::Sender::new(None),
     });
     tokio::spawn(supervise(Arc::clone(&service), child, pumps));
-    tokio::spawn(check_health(Arc::clone(&service), spec.health, spec.leases, spec.health_timeout));
+    tokio::spawn(check_health(
+        Arc::clone(&service),
+        spec.health,
+        spec.leases,
+        spec.health_timeout,
+    ));
     Ok(service)
 }
 
@@ -345,22 +350,24 @@ async fn check_health(service: Arc<Service>, check: HealthCheck, leases: Vec<u16
 
 /// The Port mismatch of the Service, when its process group listens on the port of none of its Leases and not on
 /// the one its health check probes. `None` as long as its listeners cannot tell otherwise.
-async fn port_mismatch(service: &Service, check: &HealthCheck, leases: &[u16]) -> Option<ServiceEnd> {
+async fn port_mismatch(service: &Service, check: &HealthCheck, lease_ports: &[u16]) -> Option<ServiceEnd> {
     let leased = check.port?;
     let pgid = service.pid;
-    let listening = tokio::task::spawn_blocking(move || listening_ports(pgid)).await.ok()??;
-    mismatched_port(leased, leases, &listening).map(|actual| ServiceEnd::PortMismatch { leased, actual })
+    let listening = tokio::task::spawn_blocking(move || listening_ports(pgid))
+        .await
+        .ok()??;
+    mismatched_port(leased, lease_ports, &listening).map(|actual| ServiceEnd::PortMismatch { leased, actual })
 }
 
 /// The port the Service listens on instead of its Lease `leased`, the lowest one when it listens on several.
 ///
 /// A Service listening on no port at all tells nothing, it may run a container publishing the port from another
 /// process, so it is no Port mismatch.
-fn mismatched_port(leased: u16, leases: &[u16], listening: &[u16]) -> Option<u16> {
+fn mismatched_port(leased: u16, lease_ports: &[u16], listening: &[u16]) -> Option<u16> {
     if listening.contains(&leased) {
         return None;
     }
-    listening.iter().copied().find(|port| !leases.contains(port))
+    listening.iter().copied().find(|port| !lease_ports.contains(port))
 }
 
 fn end_of(status: ExitStatus) -> ServiceEnd {

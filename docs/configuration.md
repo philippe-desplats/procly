@@ -15,7 +15,7 @@ Tables merge key by key and any other value replaces the one below, so a local f
 health_timeout = "2m"
 
 [services.web]
-run = "pnpm --filter web dev"
+run = "pnpm --filter web dev --port {ports.http}"
 ports = { http = 3000 }
 
 [services.web.health]
@@ -32,6 +32,7 @@ run = "pnpm --filter worker start"
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `health_timeout` | `"1m"` | How long `up` waits for a Service to become healthy before stopping it and exiting with 124. |
+| `port_range` | `"24000-24999"` | The Range, bounds included, from which Worktrees other than the Main worktree draw their Leases. The default sits below the ephemeral ports of Linux and macOS. |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, or a bare number of seconds.
 
@@ -41,12 +42,28 @@ A Process service. The name is the one given to `procly up` and `procly down`.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `run` | yes | The command, run by `/bin/sh -c` at the root of the Worktree, in its own process group, with the environment of the `procly up` that started it. |
-| `ports` | no | The port of each Port name, such as `{ http = 3000 }`. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
+| `run` | yes | The command, run by `/bin/sh -c` at the root of the Worktree, in its own process group, with the environment of the `procly up` that started it. Each `{ports.<name>}` in it is replaced with the leased port of that Port name, for tools that ignore `PORT`. |
+| `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
+
+## Ports and Leases
+
+Each Port name of a Service gets a Lease in each Worktree, a port that stays the same across restarts of the Service and of the Daemon:
+
+- The Main worktree gets the declared port, unless another Lease or a Foreign process holds it.
+- Any other Worktree, and the Main worktree when its declared port is taken, gets the first port of `settings.port_range` that no Lease holds, that no Service declares, and that nothing listens on, checked with a real `bind`.
+
+The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
+
+| Variable | Value |
+| --- | --- |
+| `PORT` | The Lease of the Port name the health check probes. |
+| `PORT_<NAME>` | The Lease of each Port name, its name in uppercase, such as `PORT_HTTP`. |
+
+Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process group of the Service listens on. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
 
 ## `[services.<name>.health]`
 
-Health is a TCP connection to the port of the Service, on `127.0.0.1` or `::1`, optionally followed by an HTTP `GET`.
+Health is a TCP connection to the Lease of the Service, on `127.0.0.1` or `::1`, optionally followed by an HTTP `GET`.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

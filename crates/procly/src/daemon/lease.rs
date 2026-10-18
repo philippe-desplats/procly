@@ -20,7 +20,9 @@ const DOCUMENT_VERSION: u32 = 1;
 pub(crate) enum LeaseError {
     #[error(transparent)]
     Store(#[from] StoreError),
-    #[error("no port of the Range {range} is free for Port name {port_name} of service {service}, widen settings.port_range")]
+    #[error(
+        "no port of the Range {range} is free for Port name {port_name} of service {service}, widen settings.port_range"
+    )]
     RangeExhausted {
         service: String,
         port_name: String,
@@ -110,7 +112,13 @@ impl Leases {
     fn read(&self) -> Result<Table, StoreError> {
         let document = store::load::<LeaseDocument>(&self.path, DOCUMENT_VERSION)?;
         Ok(document
-            .map(|document| document.leases.into_iter().map(|lease| (lease.key, lease.port)).collect())
+            .map(|document| {
+                document
+                    .leases
+                    .into_iter()
+                    .map(|lease| (lease.key, lease.port))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -143,7 +151,10 @@ fn grant_in(
         };
         let current = table.get(&key).copied();
         let held_elsewhere = |port: u16| table.iter().any(|(other, &leased)| leased == port && *other != key);
-        let port = if request.topology.worktree.main && current != Some(declared) && !held_elsewhere(declared) && is_free(declared)
+        let port = if request.topology.worktree.main
+            && current != Some(declared)
+            && !held_elsewhere(declared)
+            && is_free(declared)
         {
             declared
         } else if let Some(current) = current {
@@ -177,10 +188,12 @@ fn is_free(port: u16) -> bool {
     match TcpSocket::new_v6().and_then(|socket| socket.bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))) {
         Ok(()) => true,
         // A host without IPv6 has nothing listening on it.
-        Err(error) => matches!(
-            error.raw_os_error(),
-            Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
-        ) || error.kind() == io::ErrorKind::Unsupported,
+        Err(error) => {
+            matches!(
+                error.raw_os_error(),
+                Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
+            ) || error.kind() == io::ErrorKind::Unsupported
+        }
     }
 }
 
@@ -200,7 +213,10 @@ mod tests {
         }
     }
 
-    const RANGE: Range = Range { start: 24000, end: 24009 };
+    const RANGE: Range = Range {
+        start: 24000,
+        end: 24009,
+    };
 
     fn grant(table: &mut Table, topology: &Topology, ports: &[(&str, u16)], is_free: impl Fn(u16) -> bool) -> Vec<u16> {
         let ports: BTreeMap<String, u16> = ports.iter().map(|&(name, port)| (name.to_owned(), port)).collect();
@@ -218,9 +234,18 @@ mod tests {
     #[test]
     fn the_main_worktree_gets_the_declared_port_and_another_worktree_the_first_of_the_range() {
         let mut table = Table::new();
-        assert_eq!(grant(&mut table, &topology("/src/app", true), &[("http", 3000)], |_| true), [3000]);
-        assert_eq!(grant(&mut table, &topology("/src/app-a", false), &[("http", 3000)], |_| true), [24000]);
-        assert_eq!(grant(&mut table, &topology("/src/app-b", false), &[("http", 3000)], |_| true), [24001]);
+        assert_eq!(
+            grant(&mut table, &topology("/src/app", true), &[("http", 3000)], |_| true),
+            [3000]
+        );
+        assert_eq!(
+            grant(&mut table, &topology("/src/app-a", false), &[("http", 3000)], |_| true),
+            [24000]
+        );
+        assert_eq!(
+            grant(&mut table, &topology("/src/app-b", false), &[("http", 3000)], |_| true),
+            [24001]
+        );
     }
 
     #[test]
@@ -229,21 +254,30 @@ mod tests {
         let other = topology("/src/app-a", false);
         assert_eq!(grant(&mut table, &other, &[("http", 3000)], |_| true), [24000]);
         // The Service itself holds its port while it runs.
-        assert_eq!(grant(&mut table, &other, &[("http", 3000)], |port| port != 24000), [24000]);
+        assert_eq!(
+            grant(&mut table, &other, &[("http", 3000)], |port| port != 24000),
+            [24000]
+        );
     }
 
     #[test]
     fn a_busy_port_is_skipped_and_the_main_worktree_falls_back_to_the_range() {
         let mut table = Table::new();
         let busy = |port| port != 3000 && port != 24000;
-        assert_eq!(grant(&mut table, &topology("/src/app", true), &[("http", 3000)], busy), [24001]);
+        assert_eq!(
+            grant(&mut table, &topology("/src/app", true), &[("http", 3000)], busy),
+            [24001]
+        );
     }
 
     #[test]
     fn the_main_worktree_gets_its_declared_port_back_once_it_is_free() {
         let mut table = Table::new();
         let main = topology("/src/app", true);
-        assert_eq!(grant(&mut table, &main, &[("http", 3000)], |port| port != 3000), [24000]);
+        assert_eq!(
+            grant(&mut table, &main, &[("http", 3000)], |port| port != 3000),
+            [24000]
+        );
         assert_eq!(grant(&mut table, &main, &[("http", 3000)], |_| true), [3000]);
         assert_eq!(grant(&mut table, &main, &[("http", 4000)], |_| true), [4000]);
     }
@@ -252,8 +286,14 @@ mod tests {
     fn each_port_name_gets_its_own_lease_and_the_range_skips_declared_ports() {
         let mut table = Table::new();
         let ports = [("http", 24000), ("test", 24001)];
-        assert_eq!(grant(&mut table, &topology("/src/app-a", false), &ports, |_| true), [24002, 24003]);
-        assert_eq!(grant(&mut table, &topology("/src/app", true), &ports, |_| true), [24000, 24001]);
+        assert_eq!(
+            grant(&mut table, &topology("/src/app-a", false), &ports, |_| true),
+            [24002, 24003]
+        );
+        assert_eq!(
+            grant(&mut table, &topology("/src/app", true), &ports, |_| true),
+            [24000, 24001]
+        );
     }
 
     #[test]

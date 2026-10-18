@@ -147,7 +147,11 @@ fn an_unreadable_lease_document_fails_up_with_125_naming_it() {
     let output = procly.procly_in(&main, &["up", "web"]);
 
     assert_eq!(output.status.code(), Some(125));
-    assert!(common::stderr(&output).contains("leases.json"), "{}", common::stderr(&output));
+    assert!(
+        common::stderr(&output).contains("leases.json"),
+        "{}",
+        common::stderr(&output)
+    );
 }
 
 #[test]
@@ -177,7 +181,10 @@ fn each_port_name_gets_its_own_lease_injected_as_port_and_a_per_name_variable() 
     assert_eq!((port, port_http), (http, http));
     assert_eq!(placeholder, port_test);
     assert_ne!(port_test, http);
-    assert!((start..=end).contains(&port_test), "{port_test} is outside {start}-{end}");
+    assert!(
+        (start..=end).contains(&port_test),
+        "{port_test} is outside {start}-{end}"
+    );
 }
 
 /// A `procly.toml` declaring `web` with `port` for `http`, whose command listens on `actual` instead.

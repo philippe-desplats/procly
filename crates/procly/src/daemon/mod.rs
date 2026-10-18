@@ -192,8 +192,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
         } => loop {
             let (registry, start_name, cwd, env) = (Arc::clone(registry), name.clone(), cwd.clone(), env.clone());
             // Resolving the Topology runs git, and reading the configuration and forking are blocking.
-            let started =
-                tokio::task::spawn_blocking(move || start_service(&registry, &start_name, &cwd, env)).await;
+            let started = tokio::task::spawn_blocking(move || start_service(&registry, &start_name, &cwd, env)).await;
             match started {
                 Ok(Ok(Start::Ready { service, outcome })) => break up(name, &service, outcome).await,
                 // Its tree still holds the port, a new one could not bind it.
