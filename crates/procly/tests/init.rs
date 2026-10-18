@@ -387,3 +387,241 @@ fn a_hardcoded_port_in_the_dev_script_of_the_root_package_is_replaced_too() {
     );
     assert_loads(&procly, &main, "shop");
 }
+
+const COMPOSE: &str = r#"
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: shop
+    ports:
+      - "${DB_PORT:-5432}:5432"
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+"#;
+
+#[test]
+fn compose_services_are_proposed_shared_or_logical_with_their_ports() {
+    let procly = Procly::new();
+    let main = repository(&procly, &[("compose.yaml", COMPOSE)]);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(
+        stdout(&output),
+        "\
+# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.
+
+[services.mailpit]
+compose = \"mailpit\"
+
+[services.mailpit.health]
+port = \"smtp\"
+
+[services.mailpit.ports]
+http = 8025
+smtp = 1025
+
+[services.postgres]
+compose = \"postgres\"
+driver = \"postgres\"
+
+[services.postgres.env]
+DB_PORT = \"{services.postgres.ports.db}\"
+
+[services.postgres.ports]
+db = 5432
+
+[services.postgres.resources.dev]
+name = \"shop\"
+
+[services.redis]
+compose = \"redis\"
+
+[services.redis.ports]
+redis = 6379
+"
+    );
+    for service in ["postgres", "redis", "mailpit"] {
+        assert_loads(&procly, &main, service);
+    }
+}
+
+#[test]
+fn a_port_the_compose_file_reads_from_a_variable_procly_sets_needs_no_env_and_names_the_port() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "docker-compose.yml",
+            "services:\n  db:\n    image: pgvector/pgvector:pg16\n    ports:\n      - '127.0.0.1:${PORT_DB:-5432}:5432'\n",
+        )],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert!(proposal.contains("[services.db.ports]\ndb = 5432\n"), "{proposal}");
+    assert!(!proposal.contains("env"), "{proposal}");
+    assert_loads(&procly, &main, "db");
+}
+
+#[test]
+fn long_mappings_merge_keys_and_mappings_without_a_host_port_are_read() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "compose.yml",
+            "\
+x-defaults: &defaults
+  restart: unless-stopped
+services:
+  mq:
+    <<: *defaults
+    image: rabbitmq:3-management
+    ports:
+      - target: 5672
+        published: '${AMQP_PORT:-5672}'
+      - target: 15672
+        published: 15672
+      - 4369
+      - '9999/udp'
+      - '127.0.0.1:8000-8010:8000'
+  worker:
+    <<: *defaults
+    build: .
+",
+        )],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert!(
+        proposal.contains("[services.mq.ports]\namqp = 5672\nhttp = 15672\n"),
+        "{proposal}"
+    );
+    assert!(
+        proposal.contains("[services.mq.env]\nAMQP_PORT = \"{services.mq.ports.amqp}\"\n"),
+        "{proposal}"
+    );
+    assert!(
+        proposal.contains("[services.mq.health]\nport = \"amqp\"\n"),
+        "{proposal}"
+    );
+    assert!(
+        proposal.contains("[services.worker]\ncompose = \"worker\"\n"),
+        "{proposal}"
+    );
+    assert_loads(&procly, &main, "mq");
+    assert_loads(&procly, &main, "worker");
+}
+
+#[test]
+fn a_postgres_that_publishes_no_port_stays_shared_and_a_variable_two_services_read_is_derived_once() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "compose.yaml",
+            "\
+services:
+  internal:
+    image: postgres:17
+  one:
+    image: nginx
+    ports: ['${HTTP_PORT:-8080}:80']
+  two:
+    image: nginx
+    ports: ['${HTTP_PORT:-8081}:80']
+",
+        )],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert!(!proposal.contains("driver"), "{proposal}");
+    assert_eq!(proposal.matches("HTTP_PORT").count(), 1, "{proposal}");
+    for service in ["internal", "one", "two"] {
+        assert_loads(&procly, &main, service);
+    }
+}
+
+#[test]
+fn a_compose_service_named_like_an_app_gets_a_name_of_its_own_and_keeps_its_compose_name() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            (
+                "package.json",
+                r#"{"name": "api", "scripts": {"dev": "node server.js"}}"#,
+            ),
+            (
+                "compose.yaml",
+                "services:\n  api:\n    image: nginx\n    ports: ['8080:80']\n",
+            ),
+        ],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert!(
+        proposal.contains("[services.api]\nrun = \"npm run dev\"\n"),
+        "{proposal}"
+    );
+    assert!(proposal.contains("[services.api-2]\ncompose = \"api\"\n"), "{proposal}");
+    assert_loads(&procly, &main, "api");
+    assert_loads(&procly, &main, "api-2");
+}
+
+#[test]
+fn a_compose_file_that_is_not_yaml_is_refused_naming_the_file_and_nothing_is_written() {
+    let procly = Procly::new();
+    let main = repository(&procly, &[("compose.yaml", "services: [unclosed\n")]);
+
+    let output = procly.procly_in(&main, &["init"]);
+
+    assert_eq!(output.status.code(), Some(125));
+    assert!(stderr(&output).contains("invalid YAML in"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("compose.yaml"), "{}", stderr(&output));
+    assert!(!main.join("procly.toml").exists());
+}
+
+#[test]
+fn a_package_json_that_is_not_json_is_refused_naming_the_file() {
+    let procly = Procly::new();
+    let main = repository(&procly, &[("package.json", "{ not json")]);
+
+    let output = procly.procly_in(&main, &["init"]);
+
+    assert_eq!(output.status.code(), Some(125));
+    assert!(stderr(&output).contains("invalid JSON in"), "{}", stderr(&output));
+}
+
+#[test]
+fn init_run_from_a_subdirectory_or_a_secondary_worktree_writes_at_the_root_of_that_worktree() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "package.json",
+            r#"{"name": "shop", "scripts": {"dev": "node server.js"}}"#,
+        )],
+    );
+    common::git(&main, &["add", "package.json"]);
+    common::git(&main, &["commit", "--quiet", "--message", "add the package"]);
+    let feature = common::git_worktree_add(&main, "feature");
+    fs::create_dir(feature.join("deep")).unwrap();
+
+    init(&procly, &feature.join("deep"));
+
+    assert!(feature.join("procly.toml").is_file());
+    assert!(!main.join("procly.toml").exists());
+}

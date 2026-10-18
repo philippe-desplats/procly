@@ -115,12 +115,13 @@ impl App {
 
     /// Puts the binaries of the package and of the root of the Worktree on the `PATH`, where a package manager would.
     fn bins(&self) -> String {
-        let mut bins = String::from("$PWD/node_modules/.bin");
         let depth = self.dir.components().count();
-        if depth > 0 {
-            bins.push_str(&format!(":$PWD/{}node_modules/.bin", "../".repeat(depth)));
-        }
-        format!("export PATH=\"{bins}:$PATH\"")
+        let root = if depth == 0 {
+            String::new()
+        } else {
+            format!(":$PWD/{}node_modules/.bin", "../".repeat(depth))
+        };
+        format!("export PATH=\"$PWD/node_modules/.bin{root}:$PATH\"")
     }
 }
 
@@ -326,4 +327,105 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bound(script: &str) -> Option<(u16, String)> {
+        bind_port(script)
+    }
+
+    #[test]
+    fn a_port_after_a_flag_or_an_assignment_is_replaced_by_the_placeholder() {
+        for (script, port, replaced) in [
+            ("next dev --port 3001", 3001, "next dev --port {ports.http}"),
+            ("vite --port=5173 --host", 5173, "vite --port={ports.http} --host"),
+            ("serve -p 4000 .", 4000, "serve -p {ports.http} ."),
+            ("PORT=3333 node server.js", 3333, "PORT={ports.http} node server.js"),
+            (
+                "cross-env PORT=\"1080\" mailer",
+                1080,
+                "cross-env PORT=\"{ports.http}\" mailer",
+            ),
+            (
+                "a --port 3000 && b --port 3000",
+                3000,
+                "a --port {ports.http} && b --port {ports.http}",
+            ),
+        ] {
+            assert_eq!(bound(script), Some((port, replaced.to_owned())), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_script_without_exactly_one_port_above_the_lowest_is_left_alone() {
+        for script in [
+            "node server.js",
+            "a --port 3000 & b --port 3001",
+            "jest -p 2",
+            "tsc -p tsconfig.json",
+            "next dev --port",
+            "serve --port 3000;",
+            "NODE_PORT=3000 node server.js",
+            "vite --port 70000",
+        ] {
+            assert_eq!(bound(script), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn a_directory_is_one_shell_word() {
+        assert_eq!(shell_word("apps/web"), "apps/web");
+        assert_eq!(shell_word("apps/my app"), "'apps/my app'");
+        assert_eq!(shell_word("apps/it's"), "'apps/it'\\''s'");
+    }
+
+    #[test]
+    fn the_binaries_of_the_package_and_of_the_root_are_put_on_the_path() {
+        let app = |dir: &str| App {
+            dir: PathBuf::from(dir),
+            name: "x".to_owned(),
+            script: String::new(),
+        };
+        assert_eq!(app("").bins(), "export PATH=\"$PWD/node_modules/.bin:$PATH\"");
+        assert_eq!(
+            app("apps/web").bins(),
+            "export PATH=\"$PWD/node_modules/.bin:$PWD/../../node_modules/.bin:$PATH\""
+        );
+    }
+
+    #[test]
+    fn the_package_manager_is_read_from_the_lockfile() {
+        let worktree = tempfile::tempdir().unwrap();
+        assert_eq!(Manager::of(worktree.path()), Manager::Npm);
+        for (lockfile, manager) in [
+            ("yarn.lock", Manager::Yarn),
+            ("bun.lockb", Manager::Bun),
+            ("bun.lock", Manager::Bun),
+            ("pnpm-lock.yaml", Manager::Pnpm),
+        ] {
+            fs::write(worktree.path().join(lockfile), "").unwrap();
+            assert_eq!(Manager::of(worktree.path()), manager, "{lockfile}");
+        }
+    }
+
+    #[test]
+    fn a_workspace_pattern_names_directories_by_name_or_with_a_star() {
+        let worktree = tempfile::tempdir().unwrap();
+        for dir in ["apps/web", "apps/api", "apps/.hidden", "apps/node_modules", "tools/cli"] {
+            fs::create_dir_all(worktree.path().join(dir)).unwrap();
+        }
+        let dirs = |pattern: &str| expand(worktree.path(), pattern).unwrap();
+        assert_eq!(dirs("apps/*"), [PathBuf::from("apps/api"), PathBuf::from("apps/web")]);
+        assert_eq!(dirs("./tools/cli/"), [PathBuf::from("tools/cli")]);
+        assert_eq!(dirs("*/web"), [PathBuf::from("apps/web")]);
+        assert_eq!(dirs("missing/*"), Vec::<PathBuf>::new());
+        assert_eq!(
+            dirs("apps/w*"),
+            Vec::<PathBuf>::new(),
+            "only whole-segment stars are read"
+        );
+    }
 }

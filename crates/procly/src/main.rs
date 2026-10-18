@@ -158,8 +158,15 @@ enum Command {
                       the Daemon cannot answer. See docs/agents.md."
     )]
     Guard,
-    /// Propose a `procly.toml` for this Worktree from its package scripts and its compose file, print it on stdout and
-    /// write it to the root of the Worktree. A `procly.toml` that exists is never overwritten.
+    /// Propose a `procly.toml` for this Worktree from the `dev` scripts of its `package.json` files and its compose
+    /// file, print it on stdout and write it to the root of the Worktree. A `procly.toml` that exists is never
+    /// overwritten.
+    #[command(
+        after_help = "Exit codes: 0 when the proposal is printed, also when a procly.toml existed and was left as it \
+                      is, 125 when Procly itself fails, such as for a Worktree with no dev script and no compose \
+                      file, a package.json or compose file that cannot be read, or a directory that is not in a \
+                      git Repository. See docs/init.md and docs/exit-codes.md."
+    )]
     Init,
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
