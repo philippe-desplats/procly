@@ -252,3 +252,118 @@ fn a_service_that_never_became_healthy_is_not_restarted() {
     std::thread::sleep(std::time::Duration::from_millis(300));
     assert_eq!(start_count(&starts), 1);
 }
+
+/// A Service running the test server on `port`, with `extra` as more keys of its table and tables.
+fn server_on(name: &str, port: u16, extra: &str) -> String {
+    format!(
+        "[services.{name}]\nrun = '{server} --port {port}'\nports = {{ http = {port} }}\n{extra}",
+        server = test_server().display()
+    )
+}
+
+/// Gives the Daemon time to take its first look at the Services that just became healthy, which it does as soon
+/// as they are, so that the clock moves after it.
+fn let_the_daemon_look(duration_ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+}
+
+#[test]
+fn an_idle_service_stops_after_its_timeout_says_why_and_is_not_restarted() {
+    let procly = Procly::with_clock();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let starts = procly.scratch().join("starts");
+    let config = format!(
+        "[services.web]\nrun = 'echo start >> {starts}; exec {server} --port {port}'\nports = {{ http = {port} }}\n\
+         [services.web.idle]\ntimeout = '10m'\n",
+        starts = starts.display(),
+        server = test_server().display()
+    );
+    write(&main, "procly.toml", &config);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let_the_daemon_look(300);
+
+    procly.advance_clock(std::time::Duration::from_mins(9));
+    let_the_daemon_look(300);
+    assert!(listens(port), "stopped before the 10 minutes of idleness");
+    procly.advance_clock(std::time::Duration::from_secs(60));
+
+    common::eventually("the idle service to stop", || !listens(port));
+    common::eventually("the daemon to say why", || {
+        procly
+            .daemon_log()
+            .contains("stopped after 10m idle: it printed nothing and used under 1% of a CPU")
+    });
+    let output = procly.procly_in(&main, &["down", "web"]);
+    assert_eq!(stdout(&output), "web not running\n");
+    // An idle stop is no crash.
+    procly.advance_clock(std::time::Duration::from_secs(3600));
+    let_the_daemon_look(300);
+    assert_eq!(start_count(&starts), 1);
+    let output = procly.procly_in(&main, &["up", "web"]);
+    assert_eq!(
+        stdout(&output),
+        format!("web started http://localhost:{port} port {port}\n")
+    );
+}
+
+#[test]
+fn a_service_that_prints_or_uses_cpu_is_not_idle_while_a_silent_one_stops() {
+    let procly = Procly::with_clock();
+    let main = git_repository(procly.scratch(), "app");
+    let (chatty, quiet) = (free_port(), free_port());
+    let busy_pid = procly.scratch().join("busy.pid");
+    let idle = "[services.NAME.idle]\ntimeout = '10m'\n";
+    let config = format!(
+        "[services.chatty]\nrun = 'while :; do echo tick; sleep 0.1; done & exec {server} --port {chatty}'\n\
+         ports = {{ http = {chatty} }}\n{}\
+         [services.busy]\nrun = 'echo $$ > {busy_pid}; while :; do :; done'\n{}{}",
+        idle.replace("NAME", "chatty"),
+        idle.replace("NAME", "busy"),
+        server_on("quiet", quiet, &idle.replace("NAME", "quiet")),
+        server = test_server().display(),
+        busy_pid = busy_pid.display()
+    );
+    write(&main, "procly.toml", &config);
+    for service in ["chatty", "busy", "quiet"] {
+        assert_success(&procly.procly_in(&main, &["up", service]));
+    }
+    let busy = common::read_pid(&busy_pid);
+    // The busy loop must have used a measurable share of CPU, which `ps` counts in whole seconds on Linux.
+    let_the_daemon_look(2500);
+
+    procly.advance_clock(std::time::Duration::from_mins(10));
+
+    common::eventually("the silent service to stop", || !listens(quiet));
+    let_the_daemon_look(500);
+    assert!(listens(chatty), "a service that prints was stopped");
+    assert!(common::is_alive(busy), "a service that uses CPU was stopped");
+}
+
+#[test]
+fn idle_stop_is_set_in_the_settings_and_can_be_disabled_per_service() {
+    let procly = Procly::with_clock();
+    let main = git_repository(procly.scratch(), "app");
+    let (kept, dropped) = (free_port(), free_port());
+    std::fs::write(
+        procly.config_dir().join("config.toml"),
+        "[settings]\nidle_timeout = '5m'\n",
+    )
+    .unwrap();
+    let config = format!(
+        "{}{}",
+        server_on("kept", kept, "[services.kept.idle]\nstop = false\n"),
+        server_on("dropped", dropped, "")
+    );
+    write(&main, "procly.toml", &config);
+    for service in ["kept", "dropped"] {
+        assert_success(&procly.procly_in(&main, &["up", service]));
+    }
+    let_the_daemon_look(300);
+
+    procly.advance_clock(std::time::Duration::from_mins(5));
+
+    common::eventually("the service on the settings timeout to stop", || !listens(dropped));
+    let_the_daemon_look(500);
+    assert!(listens(kept), "a service with idle stop disabled was stopped");
+}

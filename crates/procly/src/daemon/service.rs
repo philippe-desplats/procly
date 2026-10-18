@@ -15,7 +15,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::clock::Clock;
+use super::cpu::group_cpu;
 use super::health::HealthCheck;
+use super::idle::{IdleTracker, Sample};
 use super::process_group::{DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group};
 use crate::config::RestartPolicy;
 use crate::output::{self, OutputBuffer};
@@ -23,6 +25,8 @@ use crate::protocol::{ServiceEnd, StartOutcome};
 
 /// How long the health check waits between 2 probes.
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
+/// How often the Daemon looks at a Service to tell whether it is idle.
+const IDLE_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a restarted Service must stay healthy for the next crash to count as a first one again, instead of
 /// one more in a row.
 const STABLE_RUN: Duration = Duration::from_mins(1);
@@ -53,6 +57,8 @@ pub(crate) struct ServiceSpec {
     /// The root of the Worktree the Service runs in, named in the Daemon log.
     pub(crate) worktree: PathBuf,
     pub(crate) restart: RestartPolicy,
+    /// How long the Service may be idle before it is stopped, `None` to leave it running however long it is.
+    pub(crate) idle: Option<Duration>,
 }
 
 /// A Service runs at most once per Worktree: it is keyed by the root of its Worktree and its name.
@@ -311,16 +317,22 @@ async fn supervise(service: Arc<Service>, spec: ServiceSpec, clock: Clock, first
     let mut restarts = 0;
     loop {
         let started = clock.now();
-        let health = tokio::spawn(check_health(
+        let monitor = tokio::spawn(monitor(
             Arc::clone(&service),
-            spec.health.clone(),
-            spec.health_timeout,
+            Watch {
+                label: format!("service {} of {}", spec.name, spec.worktree.display()),
+                health: spec.health.clone(),
+                health_timeout: spec.health_timeout,
+                idle: spec.idle,
+                pgid: process.pgid,
+            },
+            clock.clone(),
         ));
         let exited = tokio::select! {
             status = process.child.wait() => Some(status),
             _ = stop.wait_for(Option::is_some) => None,
         };
-        health.abort();
+        monitor.abort();
         let healthy = *service.state.borrow() == ServiceState::Healthy;
         ever_healthy |= healthy;
         let exited_by_itself = exited.is_some();
@@ -403,7 +415,10 @@ fn describe(end: ServiceEnd) -> String {
     match end {
         ServiceEnd::Exited { code } => format!("exited with code {code}"),
         ServiceEnd::Signaled { signal } => format!("was killed by signal {signal}"),
-        ServiceEnd::HealthTimeout { .. } | ServiceEnd::Stopped | ServiceEnd::Failed { .. } => {
+        ServiceEnd::HealthTimeout { .. }
+        | ServiceEnd::Stopped
+        | ServiceEnd::Idle { .. }
+        | ServiceEnd::Failed { .. } => {
             unreachable!("only a process that exited by itself is described")
         }
     }
@@ -422,37 +437,101 @@ async fn stop_tree(child: &mut dyn ChildWrapper) {
     }
 }
 
+/// What the task watching a run of the process needs to know about it.
+struct Watch {
+    /// Names the Service in the Daemon log.
+    label: String,
+    health: HealthCheck,
+    health_timeout: Duration,
+    idle: Option<Duration>,
+    pgid: Pid,
+}
+
+/// Watches one run of the process: its health first, then its idleness.
+async fn monitor(service: Arc<Service>, watch: Watch, clock: Clock) {
+    if !check_health(&service, &watch.health, watch.health_timeout).await {
+        return;
+    }
+    if let Some(timeout) = watch.idle {
+        stop_when_idle(&service, &watch.label, watch.pgid, timeout, &clock).await;
+    }
+}
+
 /// Marks the Service healthy once its health check passes, and stops it once `timeout` has passed without.
-async fn check_health(service: Arc<Service>, check: HealthCheck, timeout: Duration) {
+/// Returns whether the Service turned healthy.
+async fn check_health(service: &Service, check: &HealthCheck, timeout: Duration) -> bool {
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if *state.borrow_and_update() != ServiceState::Starting {
-            return;
+            return false;
         }
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
-            service.state.send_if_modified(|state| {
+            return service.state.send_if_modified(|state| {
                 let healthy = *state == ServiceState::Starting && !service.is_stopping();
                 if healthy {
                     *state = ServiceState::Healthy;
                 }
                 healthy
             });
-            return;
         }
         if tokio::time::Instant::now() >= deadline {
             service.request_stop(ServiceEnd::HealthTimeout {
                 timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             });
-            return;
+            return false;
         }
         tokio::select! {
             () = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + HEALTH_INTERVAL)) => {}
             _ = state.changed() => {}
         }
     }
+}
+
+/// Stops the Service once it has printed nothing and used almost no CPU for `timeout`.
+async fn stop_when_idle(service: &Service, label: &str, pgid: Pid, timeout: Duration, clock: &Clock) {
+    let origin = std::time::Instant::now();
+    let mut tracker = None;
+    let mut failed = false;
+    loop {
+        match look(service, pgid, clock, origin).await {
+            Ok(sample) => {
+                let tracker = tracker.get_or_insert_with(|| IdleTracker::new(timeout, sample));
+                if tracker.is_idle(sample) {
+                    eprintln!(
+                        "{label} stopped after {} idle: it printed nothing and used under 1% of a CPU",
+                        crate::duration::format(timeout)
+                    );
+                    service.request_stop(ServiceEnd::Idle {
+                        timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                    });
+                    return;
+                }
+            }
+            // Never stop a Service on a guess, and say so once rather than at every look.
+            Err(error) if !failed => {
+                failed = true;
+                eprintln!("{label} cannot be checked for idleness, it is left running: cannot read CPU time: {error}");
+            }
+            Err(_) => {}
+        }
+        clock.sleep(IDLE_INTERVAL).await;
+    }
+}
+
+/// One look at the Service: what it printed and the CPU time of its tree.
+async fn look(service: &Service, pgid: Pid, clock: &Clock, origin: std::time::Instant) -> io::Result<Sample> {
+    let cpu = tokio::task::spawn_blocking(move || group_cpu(pgid))
+        .await
+        .map_err(io::Error::other)??;
+    Ok(Sample {
+        now: clock.now(),
+        real: origin.elapsed(),
+        written: output::lock(&service.output).written(),
+        cpu,
+    })
 }
 
 fn end_of(status: ExitStatus) -> ServiceEnd {

@@ -70,6 +70,12 @@ pub(crate) struct Settings {
     /// The delay before the first restart of a crashed Service, doubled before each next one.
     #[serde(default = "default_restart_delay", deserialize_with = "duration")]
     pub(crate) restart_delay: Duration,
+    /// Whether a Service that printed nothing and used almost no CPU for `idle_timeout` is stopped.
+    #[serde(default = "default_idle_stop")]
+    pub(crate) idle_stop: bool,
+    /// How long a Service must be idle to be stopped.
+    #[serde(default = "default_idle_timeout", deserialize_with = "duration")]
+    pub(crate) idle_timeout: Duration,
 }
 
 impl Default for Settings {
@@ -78,6 +84,8 @@ impl Default for Settings {
             health_timeout: default_health_timeout(),
             restart_attempts: default_restart_attempts(),
             restart_delay: default_restart_delay(),
+            idle_stop: default_idle_stop(),
+            idle_timeout: default_idle_timeout(),
         }
     }
 }
@@ -98,6 +106,18 @@ pub(crate) struct ServiceConfig {
     pub(crate) needs: Vec<String>,
     #[serde(default)]
     pub(crate) restart: RestartConfig,
+    #[serde(default)]
+    pub(crate) idle: IdleConfig,
+}
+
+/// Overrides `settings.idle_stop` and `settings.idle_timeout` for one Service.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IdleConfig {
+    /// `false` keeps the Service running however long it stays idle.
+    pub(crate) stop: Option<bool>,
+    #[serde(default, deserialize_with = "optional_duration")]
+    pub(crate) timeout: Option<Duration>,
 }
 
 /// Overrides `settings.restart_attempts` and `settings.restart_delay` for one Service.
@@ -184,6 +204,15 @@ impl Config {
         }
     }
 
+    /// How long `service` may stay idle before it is stopped, `None` when it never is.
+    pub(crate) fn idle_timeout(&self, service: &ServiceConfig) -> Option<Duration> {
+        service
+            .idle
+            .stop
+            .unwrap_or(self.settings.idle_stop)
+            .then(|| service.idle.timeout.unwrap_or(self.settings.idle_timeout))
+    }
+
     /// The Services to bring up for `service`, each one after everything it needs and `service` last. A Service
     /// needed through several paths appears once.
     pub(crate) fn start_order(&self, service: &str) -> Result<Vec<String>, ConfigError> {
@@ -228,6 +257,15 @@ impl Config {
 /// Long enough for a dev server compiling a large app on its first start.
 fn default_health_timeout() -> Duration {
     Duration::from_mins(1)
+}
+
+fn default_idle_stop() -> bool {
+    true
+}
+
+/// Long enough to cover an agent thinking between 2 uses of its dev server.
+fn default_idle_timeout() -> Duration {
+    Duration::from_mins(30)
 }
 
 fn default_restart_attempts() -> u32 {
@@ -452,6 +490,34 @@ mod tests {
         assert_eq!(delays, [1, 2, 4, 8, 16].map(Duration::from_secs),);
         // Never overflows, however many restarts are allowed.
         assert!(policy.delay_before(u32::MAX) >= Duration::from_secs(16));
+    }
+
+    #[test]
+    fn a_service_stops_after_30_minutes_idle_unless_configured_otherwise() {
+        let config = config("[services.web]\nrun = 'x'\n");
+        assert_eq!(
+            config.idle_timeout(&config.services["web"]),
+            Some(Duration::from_mins(30))
+        );
+    }
+
+    #[test]
+    fn the_idle_stop_of_a_service_overrides_the_settings_key_by_key() {
+        let config = config(
+            "[settings]\nidle_timeout = '1h'\n\
+             [services.web]\nrun = 'x'\nidle = { timeout = '5m' }\n\
+             [services.api]\nrun = 'x'\nidle = { stop = false }\n\
+             [services.db]\nrun = 'x'\n",
+        );
+        let idle = |name: &str| config.idle_timeout(&config.services[name]);
+        assert_eq!(idle("web"), Some(Duration::from_mins(5)));
+        assert_eq!(idle("api"), None);
+        assert_eq!(idle("db"), Some(Duration::from_hours(1)));
+
+        let off = self::config("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\nidle = { stop = true }\n");
+        assert_eq!(off.idle_timeout(&off.services["web"]), Some(Duration::from_mins(30)));
+        let off = self::config("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\n");
+        assert_eq!(off.idle_timeout(&off.services["web"]), None);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
 mod clock;
+mod cpu;
 mod health;
+mod idle;
 mod job;
 mod process_group;
 mod requester;
@@ -253,6 +255,7 @@ fn start_service(services: &Services, name: &str, cwd: &Path, env: Vec<(String, 
             name: name.to_owned(),
             worktree: worktree.clone(),
             restart: config.restart_policy(declared),
+            idle: config.idle_timeout(declared),
         })
     })
 }

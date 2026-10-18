@@ -117,6 +117,10 @@ pub(crate) enum ServiceEnd {
     },
     /// `down` stopped the Service.
     Stopped,
+    /// The Service printed nothing and used almost no CPU for `timeout_ms`, and was stopped.
+    Idle {
+        timeout_ms: u64,
+    },
     /// The Service crashed again after being restarted `restarts` times, which is as often as it may be.
     Failed {
         restarts: u32,

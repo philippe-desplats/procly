@@ -58,7 +58,8 @@ enum Command {
     /// its name, `started` or `reused`, its URL and its port on one line.
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
-                            (it exited, was killed by a signal or was stopped by `procly down`), 124 when it did not \
+                            (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
+                            until Procly gave up restarting it), 124 when it did not \
                             become healthy within its health timeout and its process tree was stopped, 125 when \
                             Procly itself fails. See docs/exit-codes.md."
     )]
@@ -219,6 +220,13 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                 ),
                 ServiceEnd::Stopped => (
                     "was stopped by procly down before it became healthy".to_owned(),
+                    EXIT_SERVICE_ENDED,
+                ),
+                ServiceEnd::Idle { timeout_ms } => (
+                    format!(
+                        "was stopped after {} idle",
+                        duration::format(Duration::from_millis(timeout_ms))
+                    ),
                     EXIT_SERVICE_ENDED,
                 ),
                 ServiceEnd::Failed { restarts } => (
