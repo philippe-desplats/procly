@@ -13,3 +13,13 @@ fn version_flag_prints_the_package_version() {
         concat!("procly ", env!("CARGO_PKG_VERSION"), "\n")
     );
 }
+
+#[test]
+fn a_usage_error_exits_2() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .arg("up")
+        .output()
+        .expect("the procly binary runs");
+
+    assert_eq!(output.status.code(), Some(2));
+}

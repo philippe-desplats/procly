@@ -1,6 +1,10 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
+mod health;
 mod job;
+mod process_group;
+mod requester;
+mod service;
 mod status;
 
 use std::fs::{self, File, Permissions, TryLockError};
@@ -15,10 +19,20 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
+use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
+use self::service::{Service, ServiceSpec, Services, Start};
+use crate::config;
 use crate::protocol::{self, Request, Response, StartOutcome};
 use crate::state_dir::StateDir;
 use crate::topology;
+
+/// Every Job and Service the Daemon owns.
+#[derive(Debug, Default)]
+struct Registry {
+    jobs: Jobs,
+    services: Services,
+}
 
 /// Runs the Daemon until it receives `SIGTERM` or `SIGINT`.
 ///
@@ -66,14 +80,14 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", state.pid().display()))?;
     eprintln!("procly daemon {} listening on {}", std::process::id(), socket.display());
 
-    let jobs = Arc::new(Jobs::default());
+    let registry = Arc::new(Registry::default());
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot handle SIGINT")?;
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    tokio::spawn(handle(stream, Arc::clone(&jobs)));
+                    tokio::spawn(handle(stream, Arc::clone(&registry)));
                 }
                 Err(error) => {
                     eprintln!("cannot accept a connection: {error}");
@@ -86,18 +100,23 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     }
 
     eprintln!("procly daemon {} stopping", std::process::id());
-    jobs.kill_all();
+    // Signalling a Job's group sleeps between attempts, which must not park a runtime worker.
+    let jobs = Arc::clone(&registry);
+    let _ = tokio::task::spawn_blocking(move || jobs.jobs.kill_all()).await;
+    registry.services.stop_all().await;
     remove_if_present(&socket)?;
     remove_if_present(&state.pid())?;
     Ok(())
 }
 
-async fn handle(stream: UnixStream, jobs: Arc<Jobs>) {
+async fn handle(stream: UnixStream, registry: Arc<Registry>) {
+    // Read from the kernel, so the Daemon log names the real requester whatever the request claims.
+    let peer = stream.peer_cred().ok().and_then(|credentials| credentials.pid());
     let (reader, mut writer) = stream.into_split();
     let mut line = String::new();
     let response = match BufReader::new(reader).read_line(&mut line).await {
         Ok(_) => match protocol::decode::<Request>(&line) {
-            Ok(request) => dispatch(request, &jobs).await,
+            Ok(request) => dispatch(request, &registry, peer).await,
             Err(error) => Response::Error {
                 message: error.to_string(),
             },
@@ -117,7 +136,9 @@ async fn handle(stream: UnixStream, jobs: Arc<Jobs>) {
     let _ = writer.write_all(line.as_bytes()).await;
 }
 
-async fn dispatch(request: Request, jobs: &Arc<Jobs>) -> Response {
+/// Answers one request. `peer` is the pid of the requesting command, when the kernel tells it.
+async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>) -> Response {
+    let jobs = &registry.jobs;
     match request {
         Request::Run {
             command,
@@ -125,10 +146,10 @@ async fn dispatch(request: Request, jobs: &Arc<Jobs>) -> Response {
             env,
             timeout_ms,
         } => {
-            let jobs = Arc::clone(jobs);
+            let registry = Arc::clone(registry);
             // Resolving the Topology runs git, and opening a terminal and forking are blocking system calls.
             let started = tokio::task::spawn_blocking(move || {
-                start_job(&jobs, command, &cwd, env, Duration::from_millis(timeout_ms))
+                start_job(&registry.jobs, command, &cwd, env, Duration::from_millis(timeout_ms))
             });
             match started.await {
                 Ok(Ok((job, outcome))) => Response::Run { job, outcome },
@@ -154,9 +175,40 @@ async fn dispatch(request: Request, jobs: &Arc<Jobs>) -> Response {
             Some(job) => Response::Logs { output: job.output() },
             None => unknown_job(&id),
         },
+        Request::Up {
+            service: name,
+            cwd,
+            env,
+        } => loop {
+            let (registry, start_name, cwd, env) = (Arc::clone(registry), name.clone(), cwd.clone(), env.clone());
+            // Resolving the Topology runs git, and reading the configuration and forking are blocking.
+            let started =
+                tokio::task::spawn_blocking(move || start_service(&registry.services, &start_name, &cwd, env)).await;
+            match started {
+                Ok(Ok(Start::Ready { service, outcome })) => break up(name, &service, outcome).await,
+                // Its tree still holds the port, a new one could not bind it.
+                Ok(Ok(Start::Stopping(service))) => service.ended().await,
+                Ok(Err(error)) => {
+                    break Response::Error {
+                        message: format!("{error:#}"),
+                    };
+                }
+                Err(error) => {
+                    break Response::Error {
+                        message: format!("the service could not be started: {error}"),
+                    };
+                }
+            }
+        },
+        Request::Down { service, cwd } => match down(Arc::clone(registry), service, cwd, peer).await {
+            Ok(stopped) => Response::Down { stopped },
+            Err(error) => Response::Error {
+                message: format!("{error:#}"),
+            },
+        },
         Request::Status { cwd, all } => {
-            let jobs = Arc::clone(jobs);
-            match tokio::task::spawn_blocking(move || status::report(&jobs, &cwd, all)).await {
+            let registry = Arc::clone(registry);
+            match tokio::task::spawn_blocking(move || status::report(&registry.jobs, &cwd, all)).await {
                 Ok(Ok(report)) => Response::Status(report),
                 Ok(Err(error)) => Response::Error {
                     message: format!("{error:#}"),
@@ -191,6 +243,102 @@ fn start_job(
         timeout,
     };
     Ok(jobs.start(&spec)?)
+}
+
+fn start_service(services: &Services, name: &str, cwd: &Path, env: Vec<(String, String)>) -> anyhow::Result<Start> {
+    let worktree = worktree_of(cwd)?;
+    services.start(&worktree, name, || {
+        let config = read_config(&worktree)?;
+        let declared = declared(&config, &worktree, name)?;
+        Ok(ServiceSpec {
+            command: declared.run.clone(),
+            cwd: worktree.clone(),
+            env,
+            health: HealthCheck {
+                port: declared.health_port(name)?,
+                http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
+            },
+            health_timeout: config.health_timeout(declared),
+            name: name.to_owned(),
+        })
+    })
+}
+
+/// Stops the Services, logging who asked, and returns their names once their trees are gone.
+async fn down(
+    registry: Arc<Registry>,
+    service: Option<String>,
+    cwd: PathBuf,
+    peer: Option<i32>,
+) -> anyhow::Result<Vec<String>> {
+    // Resolving the Topology runs git, and naming the requester runs ps.
+    let (worktree, who) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        Ok((worktree_of(&cwd)?, requester::describe(peer, &cwd)))
+    })
+    .await
+    .context("the request could not be read")??;
+    let stopping = registry.services.stop(&worktree, service.as_deref());
+    if let (Some(name), true) = (&service, stopping.is_empty()) {
+        // Nothing to stop is fine for a declared Service, and a typo for any other.
+        let (name, worktree) = (name.clone(), worktree.clone());
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            declared(&read_config(&worktree)?, &worktree, &name).map(|_| ())
+        })
+        .await
+        .context("the configuration could not be read")??;
+    }
+    for (name, _) in &stopping {
+        eprintln!("down {name} of {} requested by {who}", worktree.display());
+    }
+    let mut stopped = Vec::new();
+    for (name, service) in stopping {
+        service.ended().await;
+        stopped.push(name);
+    }
+    Ok(stopped)
+}
+
+/// The root of the Worktree holding `cwd`, where its Services are declared.
+fn worktree_of(cwd: &Path) -> anyhow::Result<PathBuf> {
+    let cwd = topology::canonicalize(cwd)?;
+    match topology::resolve(&cwd)? {
+        Some(topology) => Ok(topology.worktree.path),
+        None => anyhow::bail!(
+            "{} is not in a git repository, and Services are declared per Repository",
+            cwd.display()
+        ),
+    }
+}
+
+fn read_config(worktree: &Path) -> anyhow::Result<config::Config> {
+    Ok(config::load(config::user_settings().as_deref(), worktree)?)
+}
+
+fn declared<'a>(config: &'a config::Config, worktree: &Path, name: &str) -> anyhow::Result<&'a config::ServiceConfig> {
+    config.services.get(name).with_context(|| {
+        format!(
+            "no service {name} is declared in {}",
+            worktree.join(config::VERSIONED_FILE).display()
+        )
+    })
+}
+
+/// Waits for the Service to be healthy and answers with where to reach it.
+async fn up(name: String, service: &Service, outcome: StartOutcome) -> Response {
+    match service.healthy().await {
+        Ok(()) => Response::Up {
+            service: name,
+            outcome,
+            port: service.port(),
+            url: service.port().map(|port| format!("http://localhost:{port}")),
+        },
+        Err(end) => Response::Unhealthy {
+            service: name,
+            outcome,
+            end,
+            output: service.output(),
+        },
+    }
 }
 
 fn unknown_job(id: &str) -> Response {

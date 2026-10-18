@@ -25,6 +25,7 @@ pub const DEADLINE: Duration = Duration::from_secs(10);
 #[derive(Debug)]
 pub struct Procly {
     state_dir: TempDir,
+    config_dir: TempDir,
     scratch: TempDir,
 }
 
@@ -35,15 +36,28 @@ impl Procly {
             .prefix("pcl")
             .tempdir()
             .expect("create state dir");
+        let config_dir = tempfile::Builder::new()
+            .prefix("pcl-config")
+            .tempdir()
+            .expect("create config dir");
         let scratch = tempfile::Builder::new()
             .prefix("pcl-work")
             .tempdir()
             .expect("create scratch dir");
-        Self { state_dir, scratch }
+        Self {
+            state_dir,
+            config_dir,
+            scratch,
+        }
     }
 
     pub fn state_dir(&self) -> &Path {
         self.state_dir.path()
+    }
+
+    /// The directory of the user settings, so that no test reads the developer's real ones.
+    pub fn config_dir(&self) -> &Path {
+        self.config_dir.path()
     }
 
     /// A directory the test may use as a working directory or to exchange files with a Job.
@@ -56,12 +70,22 @@ impl Procly {
         let mut command = Command::new(env!("CARGO_BIN_EXE_procly"));
         command
             .env("PROCLY_STATE_DIR", self.state_dir())
+            .env("PROCLY_CONFIG_DIR", self.config_dir())
             .current_dir(self.scratch());
         command
     }
 
     pub fn procly(&self, args: &[&str]) -> Output {
         self.command().args(args).output().expect("the procly binary runs")
+    }
+
+    /// Runs `procly` with the given arguments from `dir`.
+    pub fn procly_in(&self, dir: &Path, args: &[&str]) -> Output {
+        self.command()
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("the procly binary runs")
     }
 
     /// Runs `procly run` with the given arguments and returns the Job identifier it printed.
@@ -202,18 +226,26 @@ pub fn free_port() -> u16 {
 
 /// Sends `GET <path>` to the test server on `port`, retrying until it accepts connections, and returns the body.
 pub fn http_get(port: u16, path: &str) -> String {
-    let mut body = None;
+    let response = http_response(port, path);
+    let (_, body) = response.split_once("\r\n\r\n").expect("the response has a body");
+    body.to_owned()
+}
+
+/// Sends `GET <path>` to the test server on `port`, retrying until it accepts connections, and returns the whole
+/// response.
+pub fn http_response(port: u16, path: &str) -> String {
+    let mut response = None;
     eventually(&format!("the test server on port {port}"), || {
         let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
             return false;
         };
         let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        let mut response = String::new();
-        if stream.write_all(request.as_bytes()).is_err() || stream.read_to_string(&mut response).is_err() {
+        let mut text = String::new();
+        if stream.write_all(request.as_bytes()).is_err() || stream.read_to_string(&mut text).is_err() {
             return false;
         }
-        body = response.split_once("\r\n\r\n").map(|(_, body)| body.to_owned());
-        body.is_some()
+        response = Some(text);
+        true
     });
-    body.expect("the response was read")
+    response.expect("the response was read")
 }

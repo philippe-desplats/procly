@@ -1,6 +1,10 @@
-//! The bounded buffer holding the recent output of a Job.
+//! The bounded buffer holding the recent output of a Job or a Service.
 
 use std::collections::VecDeque;
+use std::sync::{Mutex, MutexGuard};
+
+/// The recent output kept per Job or Service.
+pub(crate) const CAPACITY: usize = 1024 * 1024;
 
 /// A ring buffer of raw output bytes that drops its oldest lines once full.
 #[derive(Debug)]
@@ -34,6 +38,13 @@ impl OutputBuffer {
         let (front, back) = self.bytes.as_slices();
         String::from_utf8_lossy(&[front, back].concat()).replace("\r\n", "\n")
     }
+}
+
+/// Locks a shared output buffer.
+pub(crate) fn lock(output: &Mutex<OutputBuffer>) -> MutexGuard<'_, OutputBuffer> {
+    output
+        .lock()
+        .expect("an output buffer mutex is never poisoned, no code panics while holding it")
 }
 
 #[cfg(test)]

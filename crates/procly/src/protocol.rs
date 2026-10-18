@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 2;
+pub(crate) const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -29,6 +29,19 @@ pub(crate) enum Request {
     Logs {
         job: String,
     },
+    /// Starts a declared Service of the Worktree holding `cwd`, or finds it running, and answers once it is healthy.
+    Up {
+        service: String,
+        cwd: PathBuf,
+        /// The environment of the requesting command, as for `Run`.
+        env: Vec<(String, String)>,
+    },
+    /// Stops a Service of the Worktree holding `cwd`, or every Service of it without `service`, and answers once
+    /// their trees are gone.
+    Down {
+        service: Option<String>,
+        cwd: PathBuf,
+    },
     /// The Topology and the Jobs of the Worktree holding `cwd`, or of every Worktree with `all`.
     Status {
         cwd: PathBuf,
@@ -39,11 +52,58 @@ pub(crate) enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "response", rename_all = "snake_case")]
 pub(crate) enum Response {
-    Run { job: String, outcome: StartOutcome },
-    Ended { output: String, end: JobEnd },
-    Logs { output: String },
+    Run {
+        job: String,
+        outcome: StartOutcome,
+    },
+    Ended {
+        output: String,
+        end: JobEnd,
+    },
+    Logs {
+        output: String,
+    },
     Status(StatusReport),
-    Error { message: String },
+    /// The Service is healthy.
+    Up {
+        service: String,
+        outcome: StartOutcome,
+        port: Option<u16>,
+        url: Option<String>,
+    },
+    /// The Service ended before it became healthy.
+    Unhealthy {
+        service: String,
+        outcome: StartOutcome,
+        end: ServiceEnd,
+        /// The recent output of the Service, to tell why.
+        output: String,
+    },
+    /// The Services `down` stopped, by name.
+    Down {
+        stopped: Vec<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Why a Service ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ServiceEnd {
+    Exited {
+        code: i32,
+    },
+    Signaled {
+        signal: i32,
+    },
+    /// The Service did not become healthy in time, and its whole process tree was stopped.
+    HealthTimeout {
+        timeout_ms: u64,
+    },
+    /// `down` stopped the Service.
+    Stopped,
 }
 
 /// Whether a start request started new work or ended in Reuse.
@@ -170,7 +230,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":2,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":3,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 
@@ -184,7 +244,7 @@ mod tests {
 
     #[test]
     fn another_protocol_version_is_refused_before_its_body_is_read() {
-        let line = r#"{"version":3,"request":"teleport"}"#;
-        assert!(matches!(decode::<Request>(line), Err(DecodeError::Version(3))));
+        let line = r#"{"version":99,"request":"teleport"}"#;
+        assert!(matches!(decode::<Request>(line), Err(DecodeError::Version(99))));
     }
 }
