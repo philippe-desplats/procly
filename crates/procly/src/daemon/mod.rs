@@ -100,10 +100,11 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", state.pid().display()))?;
     eprintln!("procly daemon {} listening on {}", std::process::id(), socket.display());
 
+    let clock = Clock::from_env();
     let registry = Arc::new(Registry {
         jobs: Jobs::default(),
-        services: Services::new(Clock::from_env()),
-        leases: Leases::new(state.leases()),
+        services: Services::new(clock.clone()),
+        leases: Leases::new(state.leases(), clock),
         managed: ManagedBlocks::new(state.managed_blocks()),
         mirroring: Mutex::default(),
         initializing: Mutex::default(),
@@ -273,7 +274,7 @@ fn start_job(
 }
 
 fn start_service(
-    registry: &Registry,
+    registry: &Arc<Registry>,
     name: &str,
     cwd: &Path,
     env: Vec<(String, String)>,
@@ -288,7 +289,7 @@ fn start_service(
         environment::check(name, declared(&config, &worktree, name)?)?;
         environment::mirror(registry, &topology, &config, gitignore)?;
     }
-    registry.services.start(&worktree, name, || {
+    let start = registry.services.start::<anyhow::Error>(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
         // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
@@ -311,7 +312,23 @@ fn start_service(
             restart: config.restart_policy(declared),
             idle: config.idle_timeout(declared),
         })
-    })
+    })?;
+    if let Start::Ready {
+        service,
+        outcome: StartOutcome::Started,
+    } = &start
+    {
+        // Dated again once it ends, so that a Service which ran longer than the expiry keeps its Leases.
+        let (registry, service, name) = (Arc::clone(registry), Arc::clone(service), name.to_owned());
+        tokio::spawn(async move {
+            service.ended().await;
+            let touched = tokio::task::spawn_blocking(move || registry.leases.touch(&worktree, &name)).await;
+            if let Ok(Err(error)) = touched {
+                eprintln!("cannot date the Leases of a service that ended: {error:#}");
+            }
+        });
+    }
+    Ok(start)
 }
 
 /// The variables Procly injects into the Service `name` of the Worktree holding `cwd`.

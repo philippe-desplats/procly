@@ -21,7 +21,7 @@ needs = ["api"]
 
 [services.api]
 run = "pnpm --filter api dev"
-ports = { http = 4000 }
+ports = { http = { port = 4000, pool = [4100, 4101] } }
 
 [services.api.restart]
 attempts = 3
@@ -49,6 +49,11 @@ run = "pnpm --filter worker start"
 [worktree]
 copy = [".env", "certs"]
 setup = ["pnpm install"]
+
+[pinned.develop]
+
+[pinned.staging.ports]
+web = { http = 3200 }
 ```
 
 ## `[settings]`
@@ -61,8 +66,9 @@ setup = ["pnpm install"]
 | `idle_stop` | `true` | Whether a Service that printed nothing and used almost no CPU for `idle_timeout` is stopped. |
 | `idle_timeout` | `"30m"` | How long a Service must be idle to be stopped. |
 | `port_range` | `"24000-24999"` | The Range, bounds included, from which Worktrees other than the Main worktree draw their Leases. The default sits below the ephemeral ports of Linux and macOS. |
+| `lease_expiry` | `"30d"` | How long a Lease that no Service used is kept. Past it, the Lease is dropped and its port returns to the Range. Leases of Pinned branches never expire. |
 
-Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, or a bare number of seconds.
+Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
 ## `[services.<name>]`
 
@@ -71,7 +77,7 @@ A Process service. The name is the one given to `procly up` and `procly down`.
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `run` | yes | The command, run by `/bin/sh -c` at the root of the Worktree, in its own process group, with the environment of the `procly up` that started it. Each `{ports.<name>}` in it is replaced with the leased port of that Port name, for tools that ignore `PORT`. |
-| `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
+| `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`, or a table with the declared port and a Pool, such as `{ http = { port = 3000, pool = [3100, 3101] } }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
 | `env` | no | The Derived variables of the Service, see [Derived variables](#derived-variables). |
 | `needs` | no | The names of the Services to start first, such as `["db", "api"]`. See below. |
 
@@ -88,9 +94,12 @@ If a need does not become healthy, `up` stops there and exits with the code of t
 Each Port name of a Service gets a Lease in each Worktree, a port that stays the same across restarts of the Service and of the Daemon:
 
 - The Main worktree gets the declared port, unless another Lease or a Foreign process holds it.
-- Any other Worktree, and the Main worktree when its declared port is taken, gets the first port of `settings.port_range` that no Lease holds, that no Service declares, and that nothing listens on, checked with a real `bind`.
+- Any other Worktree, and the Main worktree when its declared port is taken, gets the first port of the Pool of the Port name that no Lease holds and that nothing listens on, checked with a real `bind`. A Pool is a short list of ports registered once with third parties, such as OAuth or WebAuthn callbacks, so that they keep working in secondary Worktrees.
+- Without a Pool, or once every port of the Pool is taken, it gets the first port of `settings.port_range` that no Lease holds, that the configuration does not declare, Pools included, and that nothing listens on.
 
-One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way. Every other Lease stays the same across restarts.
+A Lease that no Service used for `settings.lease_expiry` is dropped, and its port returns to the Range. The Lease of a running Service counts as used.
+
+One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way, and a Pinned branch does the same toward its explicit port. Every other Lease stays the same across restarts.
 
 The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
 
@@ -182,6 +191,15 @@ A Service that printed nothing and used under 1% of a CPU (averaged since it las
 | --- | --- | --- |
 | `stop` | `settings.idle_stop` | `false` keeps this Service running however long it stays idle. |
 | `timeout` | `settings.idle_timeout` | How long this Service must be idle to be stopped. |
+
+## `[pinned.<branch>]`
+
+A Pinned branch, such as a long-lived `develop`. The Leases of a Worktree on that branch are bound to the branch name rather than to the Worktree, so a Worktree of the branch removed and recreated, even at another path, gets the same ports. They never expire. The Main worktree is the exception: it keeps Leases of its own whatever its branch, since its declared ports are already fixed. A detached `HEAD` is on no branch, so its Worktree gets Leases of its own too. Quote a branch name holding a `/`, such as `[pinned."release/1.0"]`.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `ports` | no | Explicit ports by Service then Port name, such as `{ web = { http = 3200 } }`, for fixed addresses. An explicit port is taken whenever no other Lease and nothing else holds it, otherwise the Port name falls back to its Pool then the Range, and gets its explicit port back once it is free. A Port name without an explicit port gets its Lease as in any Worktree. Naming a Service or a Port name that is not declared is an error. |
+
 ## `[worktree]`
 
 What `procly worktree init` does in a fresh Worktree, see [Preparing a Worktree](worktree-init.md). Lists replace the ones of the level below instead of adding to them.
