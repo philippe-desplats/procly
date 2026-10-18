@@ -10,6 +10,7 @@ mod foreign;
 mod health;
 mod hook;
 mod idle;
+mod index;
 mod job;
 mod lease;
 mod listeners;
@@ -41,6 +42,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use self::clock::Clock;
 use self::compose::{ComposeError, ComposeSpec, Composes, PlannedResource, Published, ResourcePlan};
 use self::health::{HealthCheck, HttpCheck};
+use self::index::Indexes;
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
 use self::managed::ManagedBlocks;
@@ -60,6 +62,7 @@ struct Registry {
     services: Services,
     composes: Composes,
     leases: Arc<Leases>,
+    indexes: Indexes,
     managed: ManagedBlocks,
     offs: Offs,
     /// Held while the Rules block and the Guard are written or switched, so that an install and `off` never cross.
@@ -152,6 +155,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         services: Services::new(clock.clone(), ServiceRecords::new(state.services())),
         composes: Composes::new(clock.clone(), Arc::clone(&leases)),
         leases,
+        indexes: Indexes::new(state.indexes()),
         managed: ManagedBlocks::new(state.managed_blocks()),
         offs: Offs::new(state.off()),
         agent: Mutex::default(),
@@ -618,7 +622,9 @@ fn plan_resources(
     }
     // The Leases are the ones the container runs on, granted already, so they stay as they are.
     let injected = environment::injected(registry, topology, &config, name, declared, false)?;
-    let Some((driver, resources)) = environment::logical_resources(topology, name, declared, &injected.leases)? else {
+    let Some((driver, resources)) =
+        environment::logical_resources(registry, topology, &config, name, declared, &injected.leases)?
+    else {
         return Ok(None);
     };
     let wanted = resources

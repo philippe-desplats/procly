@@ -17,7 +17,10 @@ pub(crate) const REPOSITORY_DIR: &str = ".procly/drivers";
 pub(crate) const USER_DIR: &str = "drivers";
 
 /// The Drivers that ship with Procly, in the format any other Driver uses.
-const BUNDLED: [(&str, &str); 1] = [("postgres", include_str!("../drivers/postgres.toml"))];
+const BUNDLED: [(&str, &str); 2] = [
+    ("postgres", include_str!("../drivers/postgres.toml")),
+    ("redis", include_str!("../drivers/redis.toml")),
+];
 
 /// The directory of the Drivers of the user, next to the user settings. `None` when none of the variables that locate
 /// them is set.
@@ -48,10 +51,49 @@ pub(crate) enum DriverError {
         length: usize,
         max: usize,
     },
+    #[error("invalid Driver {origin}: {reason}")]
+    Index { origin: String, reason: &'static str },
+    #[error(
+        "resource {resource} of service {service} sets no `name`, which the {driver} Driver needs to name it in the container"
+    )]
+    NameRequired {
+        driver: String,
+        service: String,
+        resource: String,
+    },
+    #[error(
+        "resource {resource} of service {service} sets `name`, but the {driver} Driver numbers its resources itself, remove it"
+    )]
+    NameNotUsed {
+        driver: String,
+        service: String,
+        resource: String,
+    },
     #[error("the URL of Driver {driver} uses {{port}}, but the service declares no Port name")]
     NoPort { driver: String },
     #[error("the URL of Driver {driver} uses {{ports.{name}}}, but {name} is not one of the Port names of the service")]
     UnknownPort { driver: String, name: String },
+}
+
+/// The number of indexes of a Driver file that numbers its resources, which needs a capacity and has no names to
+/// shorten.
+fn index_capacity(file: &DriverFile, origin: &str) -> Result<Option<u32>, DriverError> {
+    if !file.index {
+        return Ok(None);
+    }
+    let refused = |reason| DriverError::Index {
+        origin: origin.to_owned(),
+        reason,
+    };
+    match file.capacity {
+        Some(capacity) if capacity > 0 => {
+            if file.max_length.is_some() {
+                return Err(refused("`max_length` is for names, and `index` numbers the resources"));
+            }
+            Ok(Some(capacity))
+        }
+        _ => Err(refused("`index` needs a `capacity` of at least 1")),
+    }
 }
 
 /// What a Driver file holds.
@@ -63,8 +105,12 @@ struct DriverFile {
     url: String,
     /// The longest name the technology accepts for a resource, refused rather than silently truncated.
     max_length: Option<usize>,
-    /// How many resources the container holds at most, read here and enforced by the Drivers that allocate indexes.
+    /// How many resources the container holds at most, enforced for the Drivers that number their resources.
     capacity: Option<u32>,
+    /// Whether the resources are the numbers 0 to `capacity` minus 1, handed out by Procly one per resource and
+    /// Worktree, such as the databases of a Redis server, which exist from the start.
+    #[serde(default)]
+    index: bool,
     /// A command run in the container, succeeding once it accepts the commands below.
     ready: Option<String>,
     /// A command run in the container, succeeding when the resource exists.
@@ -83,8 +129,8 @@ pub(crate) struct Driver {
     pub(crate) name: String,
     url: String,
     max_length: Option<usize>,
-    /// Parsed for the Drivers that allocate indexes, whose capacity is enforced by the ticket that adds them.
-    capacity: Option<u32>,
+    /// The number of indexes of a Driver that numbers its resources.
+    index_capacity: Option<u32>,
     pub(crate) ready: Option<String>,
     pub(crate) check: String,
     pub(crate) create: String,
@@ -121,17 +167,23 @@ impl Driver {
             origin: origin.to_owned(),
             source,
         })?;
+        let index_capacity = index_capacity(&file, origin)?;
         Ok(Self {
             name: name.to_owned(),
             url: file.url,
             max_length: file.max_length,
-            capacity: file.capacity,
+            index_capacity,
             ready: file.ready,
             check: file.check,
             create: file.create,
             copy: file.copy,
             drop: file.drop,
         })
+    }
+
+    /// How many indexes the container holds when the Driver numbers its resources, `None` when it names them.
+    pub(crate) fn index_capacity(&self) -> Option<u32> {
+        self.index_capacity
     }
 
     /// The name of a resource in a Worktree: the declared name in the Main worktree, which keeps the names of the
@@ -231,6 +283,44 @@ mod tests {
             postgres.url("app", &leases(), Some(24000)).unwrap(),
             "postgresql://postgres:postgres@localhost:24000/app"
         );
+    }
+
+    #[test]
+    fn the_bundled_redis_driver_numbers_its_resources_and_holds_16_of_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let redis = Driver::load("redis", dir.path(), None).unwrap();
+        assert_eq!(redis.name, "redis");
+        assert_eq!(redis.index_capacity(), Some(16));
+        assert!(redis.ready.is_some());
+        assert_eq!(
+            redis.url("3", &leases(), Some(24000)).unwrap(),
+            "redis://localhost:24000/3"
+        );
+        assert_eq!(
+            Driver::load("postgres", dir.path(), None).unwrap().index_capacity(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_driver_numbers_its_resources_only_with_a_capacity_and_without_a_maximum_length() {
+        let numbered = |extra: &str| Driver::parse("t", &format!("{MINIMAL}{extra}"), "t");
+        assert_eq!(
+            numbered("index = true\ncapacity = 4\n").unwrap().index_capacity(),
+            Some(4)
+        );
+        // `capacity` alone only describes a container, the resources keep their names.
+        assert_eq!(numbered("capacity = 4\n").unwrap().index_capacity(), None);
+        for bad in [
+            "index = true\n",
+            "index = true\ncapacity = 0\n",
+            "index = true\ncapacity = 4\nmax_length = 9\n",
+        ] {
+            assert!(
+                matches!(numbered(bad), Err(DriverError::Index { .. })),
+                "{bad:?} was accepted"
+            );
+        }
     }
 
     #[test]

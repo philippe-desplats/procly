@@ -597,3 +597,220 @@ fn docker_resources_a_worktree_cannot_create_never_stop_a_container_other_worktr
     // The Main worktree is still counted, it keeps the container until it lets go.
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
 }
+
+/// The bundled Redis Driver with a capacity of `capacity` indexes, as a Repository that raises or lowers it writes it.
+fn redis_driver(capacity: u32) -> String {
+    include_str!("../drivers/redis.toml").replace("capacity = 16", &format!("capacity = {capacity}"))
+}
+
+/// A `procly.toml` with a Redis Compose service `cache` holding one resource, and an `api` reading its URL. `settings`
+/// is the text of a `[settings]` table or nothing, and `isolation` the line of the Service that sets its mode or nothing.
+fn redis_config(settings: &str, isolation: &str, port: u16) -> String {
+    format!(
+        "{settings}[services.cache]\ncompose = 'redis'\ndriver = 'redis'\n{isolation}ports = {{ redis = {port} }}\n\
+         [services.cache.resources.main]\n\
+         [services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n\
+         [services.api.env]\nREDIS_URL = '{{services.cache.resources.main.url}}'\n\
+         REDIS_DB = '{{services.cache.resources.main.name}}'\n",
+        server = test_server().display(),
+        api = free_port(),
+    )
+}
+
+/// A Repository `app` with `others` more Worktrees named `app-a`, `app-b`, and so on, all holding `config` and the
+/// Redis Driver of `capacity` indexes, as a Driver of the Repository.
+fn redis_repository(procly: &Procly, config: &str, capacity: u32, others: usize) -> (PathBuf, Vec<PathBuf>) {
+    let main = git_repository(procly.scratch(), "app");
+    let others: Vec<_> = (0..others)
+        .map(|n| {
+            git_worktree_add(
+                &main,
+                &format!("app-{}", char::from(b'a' + u8::try_from(n).expect("a few Worktrees"))),
+            )
+        })
+        .collect();
+    for worktree in std::iter::once(&main).chain(&others) {
+        fs::write(worktree.join("procly.toml"), config).expect("write the config");
+        write_driver_file(&worktree.join(".procly/drivers"), "redis", &redis_driver(capacity));
+    }
+    (main, others)
+}
+
+/// The Redis database index `procly env api` puts in the URL.
+fn redis_index(procly: &Procly, worktree: &Path) -> u32 {
+    let url = exported(&procly.procly_in(worktree, &["env", "api"]), "REDIS_URL");
+    url.rsplit('/')
+        .next()
+        .and_then(|index| index.parse().ok())
+        .unwrap_or_else(|| panic!("no database index at the end of {url}"))
+}
+
+#[test]
+fn redis_2_worktrees_get_distinct_database_indexes_and_the_main_worktree_keeps_the_lowest() {
+    let procly = Procly::new();
+    let port = free_port();
+    let (main, others) = redis_repository(&procly, &redis_config("", "", port), 16, 2);
+
+    // The Main worktree asks last, and still has the index every app that never picks one reads.
+    let in_a = redis_index(&procly, &others[0]);
+    let in_b = redis_index(&procly, &others[1]);
+    let in_main = redis_index(&procly, &main);
+
+    assert_eq!([in_main, in_a, in_b], [0, 1, 2]);
+    let url = exported(&procly.procly_in(&others[0], &["env", "api"]), "REDIS_URL");
+    assert_eq!(url, format!("redis://localhost:{port}/1"));
+    // The name of a resource a Driver numbers is its index.
+    assert_eq!(
+        exported(&procly.procly_in(&others[0], &["env", "api"]), "REDIS_DB"),
+        "1"
+    );
+
+    // The indexes are the same after the Daemon restarted, whichever Worktree asks first.
+    procly.stop_daemon();
+    assert_eq!(redis_index(&procly, &others[1]), 2);
+    assert_eq!(redis_index(&procly, &others[0]), 1);
+    assert_eq!(redis_index(&procly, &main), 0);
+}
+
+#[test]
+fn a_container_with_no_redis_index_left_is_a_clear_error_naming_both_ways_out() {
+    let procly = Procly::new();
+    let (main, others) = redis_repository(&procly, &redis_config("", "", free_port()), 2, 2);
+    assert_eq!(redis_index(&procly, &main), 0);
+    assert_eq!(redis_index(&procly, &others[0]), 1);
+
+    let full = procly.procly_in(&others[1], &["env", "api"]);
+
+    assert_eq!(full.status.code(), Some(125));
+    let message = stderr(&full);
+    assert!(
+        message.contains("all 2 indexes of service cache are taken"),
+        "{message}"
+    );
+    assert!(message.contains(".procly/drivers/redis.toml"), "{message}");
+    assert!(message.contains("isolation = \"shared\""), "{message}");
+    // The Worktrees that have an index keep it.
+    assert_eq!(redis_index(&procly, &others[0]), 1);
+}
+
+#[test]
+fn the_isolation_of_the_repository_config_overrides_the_logical_default_of_the_service() {
+    let indexes = |settings: &str, isolation: &str| {
+        let procly = Procly::new();
+        let (main, others) = redis_repository(&procly, &redis_config(settings, isolation, free_port()), 16, 2);
+        [&main, &others[0], &others[1]].map(|worktree| redis_index(&procly, worktree))
+    };
+
+    // Logical by default, with a Driver.
+    assert_eq!(indexes("", ""), [0, 1, 2]);
+    // Shared by the Service, or by the Repository for every Service with a Driver: the same index everywhere.
+    assert_eq!(indexes("", "isolation = 'shared'\n"), [0, 0, 0]);
+    assert_eq!(indexes("[settings]\nisolation = 'shared'\n", ""), [0, 0, 0]);
+    // The Service wins over the Repository.
+    assert_eq!(
+        indexes("[settings]\nisolation = 'shared'\n", "isolation = 'logical'\n"),
+        [0, 1, 2]
+    );
+    assert_eq!(
+        indexes("[settings]\nisolation = 'logical'\n", "isolation = 'shared'\n"),
+        [0, 0, 0]
+    );
+}
+
+#[test]
+fn a_shared_redis_service_gives_every_worktree_the_same_index_and_uses_no_other_capacity() {
+    let procly = Procly::new();
+    // A container holding a single index, 3 Worktrees on it.
+    let config = redis_config("", "isolation = 'shared'\n", free_port());
+    let (main, others) = redis_repository(&procly, &config, 1, 2);
+
+    // The Worktree that asks first is not the Main worktree, and its index is the one the Main worktree reads.
+    assert_eq!(redis_index(&procly, &others[1]), 0);
+    assert_eq!(redis_index(&procly, &others[0]), 0);
+    assert_eq!(redis_index(&procly, &main), 0);
+}
+
+#[test]
+fn a_shared_service_with_a_postgres_driver_gives_every_worktree_the_names_of_the_main_worktree() {
+    let procly = Procly::new();
+    let (main, other, port) = repository(&procly, "postgres");
+    let shared =
+        config(port, "postgres").replace("driver = 'postgres'\n", "driver = 'postgres'\nisolation = 'shared'\n");
+    fs::write(other.join("procly.toml"), shared).expect("write the config");
+
+    let in_other = procly.procly_in(&other, &["env", "api"]);
+    let in_main = procly.procly_in(&main, &["env", "api"]);
+
+    let url = |name: &str| format!("postgresql://postgres:postgres@localhost:{port}/{name}");
+    // The Worktree that shares reads the Main worktree's database, and the Main worktree is not changed.
+    assert_eq!(exported(&in_other, "DATABASE_URL"), url("app"));
+    assert_eq!(exported(&in_other, "TEST_DATABASE_URL"), url("app_test"));
+    assert_eq!(exported(&in_main, "DATABASE_URL"), url("app"));
+}
+
+#[test]
+fn a_resource_name_is_refused_for_a_driver_that_numbers_and_required_for_one_that_names() {
+    let procly = Procly::new();
+    let (main, _) = redis_repository(&procly, &redis_config("", "", free_port()), 16, 0);
+    let named = redis_config("", "", free_port()).replace("resources.main]\n", "resources.main]\nname = 'app'\n");
+    fs::write(main.join("procly.toml"), named).expect("write the config");
+
+    let refused = procly.procly_in(&main, &["env", "api"]);
+
+    assert_eq!(refused.status.code(), Some(125));
+    let message = stderr(&refused);
+    assert!(message.contains("numbers its resources itself, remove it"), "{message}");
+
+    let nameless = config(free_port(), "postgres").replace("name = 'app'\n", "");
+    fs::write(main.join("procly.toml"), nameless).expect("write the config");
+    let required = procly.procly_in(&main, &["env", "api"]);
+    assert_eq!(required.status.code(), Some(125));
+    assert!(
+        stderr(&required).contains("sets no `name`, which the postgres Driver needs"),
+        "{}",
+        stderr(&required)
+    );
+}
+
+/// A compose file whose service `db` is the Redis image, healthy once the server answers.
+fn redis_compose(project: &str) -> String {
+    format!(
+        "name: {project}\nservices:\n  db:\n    image: redis:7-alpine\n    ports:\n      - \"${{DB_PORT:-1}}:6379\"\n    healthcheck:\n      \
+         test: [\"CMD-SHELL\", \"redis-cli ping | grep -q PONG\"]\n      interval: 1s\n      timeout: 3s\n      retries: 60\n"
+    )
+}
+
+#[test]
+fn docker_redis_2_worktrees_keep_their_keys_in_distinct_databases_of_one_container() {
+    if !require_docker() {
+        return;
+    }
+    let api = "[services.db.resources.main]\n[services.api]\nrun = 'true'\n[services.api.env]\n\
+               REDIS_URL = '{services.db.resources.main.url}'\n";
+    let fixture = commit_and_add_worktree(logical_fixture(redis_compose, "redis", api));
+    let index = |worktree: &Path| {
+        let url = exported(&fixture.procly.procly_in(worktree, &["env", "api"]), "REDIS_URL");
+        url.rsplit('/').next().expect("an index").to_owned()
+    };
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let container = fixture.project.container();
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    assert_eq!(fixture.project.container(), container);
+
+    let (in_main, in_other) = (index(&fixture.main), index(&fixture.other));
+    assert_eq!((in_main.as_str(), in_other.as_str()), ("0", "1"));
+    let redis = |database: &str, command: &str| {
+        fixture
+            .project
+            .exec(&format!("redis-cli -n {database} {command}"))
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(redis(&in_main, "set session main-worktree"), "OK");
+    // The other Worktree finds nothing under the key, and its own key never reaches the Main worktree.
+    assert_eq!(redis(&in_other, "get session"), "");
+    assert_eq!(redis(&in_other, "set session other-worktree"), "OK");
+    assert_eq!(redis(&in_main, "get session"), "main-worktree");
+    assert_eq!(redis(&in_other, "get session"), "other-worktree");
+}
