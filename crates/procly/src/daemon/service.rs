@@ -204,6 +204,11 @@ impl Services {
         }
     }
 
+    /// The process group of every running Service.
+    pub(crate) fn process_groups(&self) -> Vec<i32> {
+        self.records.process_groups()
+    }
+
     /// The records of the running Services, which a new Daemon reconciles before it starts any.
     pub(crate) fn records(&self) -> Arc<ServiceRecords> {
         Arc::clone(&self.records)

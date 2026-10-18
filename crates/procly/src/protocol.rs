@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 10;
+pub(crate) const PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -144,6 +144,73 @@ pub(crate) enum Response {
     },
     Error {
         message: String,
+    },
+    /// What the Service needs is held outside Procly, which never stops it.
+    Conflict {
+        service: String,
+        conflicts: Vec<Conflict>,
+        /// The Service that needs this one, when `up` was asked for that one instead.
+        needed_by: Option<String>,
+    },
+}
+
+/// Something started outside Procly that holds what a Service needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Conflict {
+    pub(crate) held: Held,
+    pub(crate) occupant: Occupant,
+    /// The command that frees what the Service needs, which Procly never runs itself. `None` when the occupant
+    /// cannot be named.
+    pub(crate) stop: Option<String>,
+}
+
+/// What an occupant holds that a Service needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Held {
+    /// The port of a Lease of the Service.
+    Port { port: u16 },
+    /// The name the container of the Compose service gets.
+    ContainerName { name: String },
+    /// The Compose service itself, whose container runs with matching labels but publishes `ports` instead of the
+    /// Leases `leased`.
+    Service { ports: Vec<u16>, leased: Vec<u16> },
+}
+
+/// What holds a port or a name, as Docker and `lsof` tell it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Occupant {
+    /// A container, with its compose labels when it has them.
+    Container {
+        name: String,
+        project: Option<String>,
+        service: Option<String>,
+    },
+    Process {
+        pid: i32,
+        command: String,
+    },
+    /// Something answers on the port that neither Docker nor `lsof` can name, such as a process of another user.
+    Unknown,
+}
+
+/// A dev process or container running in a Worktree that Procly did not start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ForeignProcess {
+    /// A process listening on TCP ports, whose working directory is in the Worktree.
+    Process {
+        pid: i32,
+        command: String,
+        ports: Vec<u16>,
+    },
+    /// A running container of a compose project whose directory is in the Worktree.
+    Container {
+        name: String,
+        project: String,
+        service: String,
+        ports: Vec<u16>,
     },
 }
 
@@ -293,6 +360,8 @@ pub(crate) struct WorktreeStatus {
     pub(crate) worktree: Worktree,
     pub(crate) services: Vec<ServiceStatus>,
     pub(crate) jobs: Vec<JobStatus>,
+    /// What runs in the Worktree without Procly having started it.
+    pub(crate) foreign: Vec<ForeignProcess>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,7 +484,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":10,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":11,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

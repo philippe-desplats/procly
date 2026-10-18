@@ -7,7 +7,9 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::duration;
-use crate::protocol::{JobEnd, JobState, JobStatus, ServiceEnd, ServiceState, ServiceStatus, StatusReport};
+use crate::protocol::{
+    ForeignProcess, JobEnd, JobState, JobStatus, ServiceEnd, ServiceState, ServiceStatus, StatusReport,
+};
 
 /// The version of the `--json` schema, bumped on any incompatible change, independently of the socket protocol.
 pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
@@ -40,6 +42,9 @@ pub(crate) fn text(report: &StatusReport) -> String {
             let _ = writeln!(text, "  worktree {}{main} {}", worktree.slug, worktree.path.display());
             for service in &status.services {
                 service_line(&mut text, service);
+            }
+            for foreign in &status.foreign {
+                foreign_line(&mut text, foreign);
             }
             if status.jobs.is_empty() {
                 text.push_str("    no jobs\n");
@@ -75,6 +80,30 @@ fn service_line(text: &mut String, service: &ServiceStatus) {
         ""
     };
     let _ = writeln!(text, "    service {} {state}{reattached}", service.service);
+}
+
+fn foreign_line(text: &mut String, foreign: &ForeignProcess) {
+    let (what, ports) = match foreign {
+        ForeignProcess::Process { pid, command, ports } => (format!("process {pid} {command}"), ports),
+        ForeignProcess::Container {
+            name,
+            project,
+            service,
+            ports,
+        } => (
+            format!("container {name} (compose project {project}, service {service})"),
+            ports,
+        ),
+    };
+    let ports = match ports.as_slice() {
+        [] => String::new(),
+        [port] => format!(" port {port}"),
+        ports => {
+            let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+            format!(" ports {}", ports.join(", "))
+        }
+    };
+    let _ = writeln!(text, "    foreign {what}{ports}, started outside Procly");
 }
 
 /// How a Service ended, after `ended: `.
@@ -175,6 +204,19 @@ mod tests {
                                 },
                             ),
                         ],
+                        foreign: vec![
+                            ForeignProcess::Process {
+                                pid: 4242,
+                                command: "node".to_owned(),
+                                ports: vec![5173],
+                            },
+                            ForeignProcess::Container {
+                                name: "app-db-1".to_owned(),
+                                project: "app".to_owned(),
+                                service: "db".to_owned(),
+                                ports: vec![5432, 5433],
+                            },
+                        ],
                     },
                     WorktreeStatus {
                         worktree: Worktree {
@@ -184,6 +226,7 @@ mod tests {
                         },
                         services: vec![],
                         jobs: vec![],
+                        foreign: vec![],
                     },
                 ],
             }],
@@ -211,6 +254,9 @@ mod tests {
             text(&report),
             "repository /src/app/.git\n\
              \x20 worktree app (main) /src/app\n\
+             \x20   foreign process 4242 node port 5173, started outside Procly\n\
+             \x20   foreign container app-db-1 (compose project app, service db) ports 5432, 5433, started outside \
+             Procly\n\
              \x20   job 3f9a1c2e running: sleep 30\n\
              \x20   job 0b1c2d3e exited 101 in crates/api: cargo test\n\
              \x20 worktree app_login /src/app-login\n\

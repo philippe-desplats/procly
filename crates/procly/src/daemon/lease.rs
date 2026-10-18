@@ -1,6 +1,7 @@
 //! Leases: the port each Port name of each Service gets in each Worktree, or for each Pinned branch (ADR 0006).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -114,6 +115,20 @@ pub(crate) struct LeaseRequest<'a> {
     /// Keeps a Lease already granted as it is, even where a freed preferred port would take it back. For a request
     /// that does not start the Service, as the Service may run on that Lease right now.
     pub(crate) keep: bool,
+    /// For a Compose service, whether a preferred port that is not free is held by its own container started outside
+    /// Procly, so that the Lease is the port Adoption then finds the container on.
+    pub(crate) claimed: Option<Claimed<'a>>,
+}
+
+/// Tells whether the container of the Service itself holds a port. Asked about the preferred port only, since each
+/// question runs `docker`.
+#[derive(Clone, Copy)]
+pub(crate) struct Claimed<'a>(pub(crate) &'a dyn Fn(u16) -> bool);
+
+impl fmt::Debug for Claimed<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Claimed(..)")
+    }
 }
 
 /// The Pinned branch a Worktree is on.
@@ -275,13 +290,15 @@ fn grant_in(
                 .any(|(other, granted)| granted.port == port && *other != key)
         };
         let available = |port: u16| !held_elsewhere(port) && is_free(port);
+        let claimed = |port: u16| !held_elsewhere(port) && request.claimed.is_some_and(|claimed| (claimed.0)(port));
         let explicit = request
             .pinned
             .and_then(|pinned| pinned.ports)
             .and_then(|ports| ports.get(port_name).copied());
         let preferred = explicit.or_else(|| request.topology.worktree.main.then_some(declared.port));
-        let port = if let Some(preferred) =
-            preferred.filter(|&port| !(request.keep && current.is_some()) && current != Some(port) && available(port))
+        let port = if let Some(preferred) = preferred.filter(|&port| {
+            !(request.keep && current.is_some()) && current != Some(port) && (available(port) || claimed(port))
+        })
         {
             preferred
         } else if let Some(current) = current {
@@ -367,6 +384,7 @@ mod tests {
             expiry: 30 * DAY,
             running,
             keep: false,
+            claimed: None,
         }
     }
 
@@ -437,6 +455,28 @@ mod tests {
         );
         assert_eq!(grant(&mut table, &main, &[("http", 3000)], |_| true), [3000]);
         assert_eq!(grant(&mut table, &main, &[("http", 4000)], |_| true), [4000]);
+    }
+
+    #[test]
+    fn a_declared_port_the_container_of_the_service_holds_is_its_lease_and_no_other_port_is_asked_about() {
+        let mut table = Table::new();
+        let main = topology("/src/app", true);
+        let ports = port_configs(&[("db", 5432)]);
+        let (declared, running) = (BTreeSet::from([5432]), BTreeSet::new());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let holds = |port: u16| {
+            asked.borrow_mut().push(port);
+            port == 5432
+        };
+        let request = LeaseRequest {
+            claimed: Some(Claimed(&holds)),
+            ..request(&main, &ports, &declared, &running)
+        };
+        assert_eq!(
+            grant_in(&mut table, &request, Duration::ZERO, |_| false).unwrap()["db"],
+            5432
+        );
+        assert_eq!(*asked.borrow(), [5432]);
     }
 
     #[test]

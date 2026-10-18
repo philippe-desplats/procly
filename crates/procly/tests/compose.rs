@@ -415,3 +415,172 @@ fn a_service_that_is_both_a_process_and_a_compose_service_is_refused() {
     assert_eq!(output.status.code(), Some(125));
     assert!(stderr(&output).contains("exactly one of `run`"), "{}", stderr(&output));
 }
+
+/// Starts the service `db` of the project with plain `docker compose`, as an agent bypassing Procly would, publishing
+/// it on `port`.
+fn compose_up_outside_procly(fixture: &Fixture, port: u16) {
+    let output = Command::new("docker")
+        .args(["compose", "up", "--detach", "--wait", "db"])
+        .current_dir(&fixture.main)
+        .env("DB_PORT", port.to_string())
+        .output()
+        .expect("docker runs");
+    assert_success(&output);
+}
+
+/// A container started with plain `docker run`, removed when the test ends, passed or failed.
+struct Foreign {
+    name: String,
+}
+
+impl Foreign {
+    /// Runs a container named `name` that does nothing, publishing `port` when given.
+    fn run(name: &str, port: Option<u16>) -> Self {
+        let mut args = vec!["run".to_owned(), "--detach".to_owned(), "--name".to_owned(), name.to_owned()];
+        if let Some(port) = port {
+            args.extend(["--publish".to_owned(), format!("{port}:80")]);
+        }
+        args.extend(["alpine".to_owned(), "sleep".to_owned(), "600".to_owned()]);
+        let output = Command::new("docker").args(&args).output().expect("docker runs");
+        assert_success(&output);
+        Self { name: name.to_owned() }
+    }
+
+    fn is_running(&self) -> bool {
+        let output = Command::new("docker")
+            .args(["ps", "--quiet", "--filter", &format!("name=^{}$", self.name)])
+            .output()
+            .expect("docker runs");
+        !stdout(&output).trim().is_empty()
+    }
+}
+
+impl Drop for Foreign {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["rm", "--force", &self.name]).output();
+    }
+}
+
+/// Runs the stop command a conflict printed, which follows `stop it with ` up to the closing backtick.
+fn run_stop_command(stderr: &str) {
+    let command = stderr
+        .split("with `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("no stop command in {stderr}"));
+    let output = Command::new("sh").args(["-c", command]).output().expect("sh runs");
+    assert_success(&output);
+}
+
+#[test]
+fn docker_a_container_started_by_plain_docker_compose_with_matching_labels_is_adopted_as_reused() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    compose_up_outside_procly(&fixture, port);
+    let container = fixture.project.container();
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db reused http://localhost:{port} port {port}\n")
+    );
+    // The very container started outside Procly, neither recreated nor restarted.
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.is_running());
+    let env = stdout(&fixture.procly.procly_in(&fixture.other, &["env", "db"]));
+    assert!(env.contains(&format!("export DB_PORT='{port}'\n")), "{env}");
+}
+
+#[test]
+fn docker_a_container_holding_the_lease_without_matching_labels_is_a_conflict_procly_never_stops() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    // Granted first, so that the Lease is the port the other container takes.
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["env", "db"]));
+    let foreign = Foreign::run(&format!("{}-occupant", fixture.project.name), Some(port));
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "port {port} of its Lease is held by container {} started outside Procly, stop it with `docker stop {}`",
+            foreign.name, foreign.name
+        )),
+        "{error}"
+    );
+    assert!(foreign.is_running(), "Procly stopped a container it does not own");
+    assert!(fixture.project.container().is_empty(), "Procly created the container anyway");
+
+    run_stop_command(&error);
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+}
+
+#[test]
+fn docker_a_container_holding_the_container_name_without_matching_labels_is_a_conflict() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let foreign = Foreign::run(&format!("{}-db-1", fixture.project.name), None);
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "container name {} is held by a container compose did not create for this service, stop and remove it \
+             with `docker rm --force {}`",
+            foreign.name, foreign.name
+        )),
+        "{error}"
+    );
+    assert!(foreign.is_running(), "Procly stopped a container it does not own");
+
+    run_stop_command(&error);
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+}
+
+#[test]
+fn docker_the_service_running_outside_procly_on_another_port_than_its_lease_is_a_conflict_left_running() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let elsewhere = free_port();
+    compose_up_outside_procly(&fixture, elsewhere);
+    let container = fixture.project.container();
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    let error = stderr(&output);
+    let project = &fixture.project.name;
+    assert!(
+        error.contains(&format!(
+            "compose service db already runs outside Procly in container {project}-db-1, publishing port {elsewhere} \
+             instead of its Lease, port {}, stop it with `docker compose --project-name {project} stop db`",
+            fixture.port
+        )),
+        "{error}"
+    );
+    // Neither stopped nor recreated with the Lease.
+    assert!(fixture.project.is_running());
+    assert_eq!(fixture.project.container(), container);
+    assert!(listens(elsewhere));
+
+    run_stop_command(&error);
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("db started "), "{}", stdout(&output));
+}
