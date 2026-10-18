@@ -90,6 +90,8 @@ Each Port name of a Service gets a Lease in each Worktree, a port that stays the
 
 A Lease that no Service used for `settings.lease_expiry` is dropped, and its port returns to the Range. The Lease of a running Service counts as used.
 
+One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way. Every other Lease stays the same across restarts.
+
 The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
 
 | Variable | Value |
