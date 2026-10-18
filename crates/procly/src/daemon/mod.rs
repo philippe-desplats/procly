@@ -58,7 +58,7 @@ impl Registry {
     /// Waits until the Services recorded by the previous Daemon are reconciled, which the first request touching
     /// Services runs if the Daemon has not finished it yet. A request that starts, stops or reports Services waits
     /// for it, so that it never starts a Service still running from before the restart.
-    async fn reconciled(&self) -> Result<(), Response> {
+    async fn reconciled(&self) -> Result<(), String> {
         self.reconciled
             .get_or_init(|| async {
                 reconcile::run(&self.services)
@@ -67,7 +67,6 @@ impl Registry {
             })
             .await
             .clone()
-            .map_err(|message| Response::Error { message })
     }
 }
 
@@ -129,7 +128,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     tokio::spawn({
         let registry = Arc::clone(&registry);
         async move {
-            if let Err(Response::Error { message }) = registry.reconciled().await {
+            if let Err(message) = registry.reconciled().await {
                 eprintln!("cannot reconcile the services of the previous daemon: {message}");
             }
         }
@@ -195,9 +194,9 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
     if matches!(
         request,
         Request::Up { .. } | Request::Down { .. } | Request::Status { .. }
-    ) && let Err(response) = registry.reconciled().await
+    ) && let Err(message) = registry.reconciled().await
     {
-        return response;
+        return Response::Error { message };
     }
     match request {
         Request::Run {

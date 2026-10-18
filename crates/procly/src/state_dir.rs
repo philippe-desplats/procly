@@ -61,6 +61,10 @@ impl StateDir {
             })
     }
 
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     pub(crate) fn socket(&self) -> PathBuf {
         self.path.join("procly.sock")
     }

@@ -26,6 +26,10 @@ _Avoid_: worktree id, suffix
 The single per-user authority that owns every service, lease and logical resource across all Repositories and Worktrees.
 _Avoid_: server, supervisor, backend
 
+**Session unit**:
+The launchd agent on macOS, or the systemd user unit on Linux, that starts the Daemon with the user's session and restarts it when it crashes.
+_Avoid_: service unit, autostart, daemon service
+
 ### Services
 
 **Service**:
