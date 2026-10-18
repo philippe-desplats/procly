@@ -134,10 +134,10 @@ pub(crate) struct ComposeSpec {
 
 /// The Logical resources of one Worktree in the container of a Compose service, and what it takes to create them.
 #[derive(Debug)]
-pub(crate) struct Provision {
+pub(crate) struct ResourcePlan {
     pub(crate) driver: Driver,
     pub(crate) topology: Topology,
-    pub(crate) resources: Vec<Wanted>,
+    pub(crate) resources: Vec<PlannedResource>,
     /// The environment of a command Seed: the caller's, then what the Service receives.
     pub(crate) env: Vec<(String, String)>,
     /// Where command Seeds run, as Jobs so that their process tree is killed on timeout or when the Daemon stops.
@@ -148,7 +148,7 @@ pub(crate) struct Provision {
 
 /// A Logical resource a Worktree needs.
 #[derive(Debug)]
-pub(crate) struct Wanted {
+pub(crate) struct PlannedResource {
     pub(crate) key: String,
     pub(crate) resource: Resource,
     pub(crate) seed: Seed,
@@ -229,7 +229,7 @@ impl Composes {
     /// Makes sure the container of the Compose service `key` runs for `worktree`, and waits until it is healthy.
     ///
     /// A container that Procly started and that still runs is a Reuse, whatever the Worktree. Otherwise `prepare`
-    /// builds what it takes to start it, on a blocking thread. Either way, `provision` builds the Logical resources
+    /// builds what it takes to start it, on a blocking thread. Either way, `plan` builds the Logical resources
     /// of the Worktree, which are created in the container when it lacks them.
     pub(crate) async fn up<P, R>(
         &self,
@@ -237,11 +237,11 @@ impl Composes {
         worktree: PathBuf,
         grace: Duration,
         prepare: P,
-        provision: R,
+        plan: R,
     ) -> Result<Brought, ComposeError>
     where
         P: FnOnce() -> anyhow::Result<ComposeSpec> + Send + 'static,
-        R: FnOnce() -> anyhow::Result<Option<Provision>> + Send + 'static,
+        R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
     {
         let container = self.container(&key);
         let _commands = container.commands.lock().await;
@@ -251,7 +251,7 @@ impl Composes {
             && alive.docker.is_running().await
         {
             // A Worktree whose resources cannot be created is not counted, it is not up.
-            alive.docker.provision(wanted(provision).await?.as_ref()).await?;
+            alive.docker.create_resources(planned(plan).await?.as_ref()).await?;
             alive.grace = grace;
             let port = alive.port;
             let mut state = container.state();
@@ -277,13 +277,21 @@ impl Composes {
             None => wait_healthy(&spec.health, spec.health_timeout.saturating_sub(began.elapsed())).await,
         };
         if health.is_ok() {
-            let provisioned = match wanted(provision).await {
-                Ok(wanted) => docker.provision(wanted.as_ref()).await,
+            let created = match planned(plan).await {
+                Ok(planned) => docker.create_resources(planned.as_ref()).await,
                 Err(error) => Err(error),
             };
-            if let Err(error) = provisioned {
-                // A container that started but cannot hold the resources would be left running with nobody counting it.
-                let _ = docker.stop().await;
+            if let Err(error) = created {
+                let needed = !container.state().worktrees.is_empty();
+                if needed {
+                    // Restarted after it was stopped from outside Procly: the Worktrees that already need it keep it,
+                    // whatever one Worktree could not create in it.
+                    container.state().alive = Some(Alive { docker, port, grace });
+                } else {
+                    // A container that started but cannot hold the resources would be left running with nobody
+                    // counting it.
+                    let _ = docker.stop().await;
+                }
                 return Err(error);
             }
         }
@@ -404,11 +412,11 @@ impl Container {
 }
 
 /// What the Worktree needs in the container, built on a blocking thread.
-async fn wanted<R>(provision: R) -> Result<Option<Provision>, ComposeError>
+async fn planned<R>(plan: R) -> Result<Option<ResourcePlan>, ComposeError>
 where
-    R: FnOnce() -> anyhow::Result<Option<Provision>> + Send + 'static,
+    R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
 {
-    Ok(tokio::task::spawn_blocking(provision)
+    Ok(tokio::task::spawn_blocking(plan)
         .await
         .map_err(|error| anyhow::anyhow!("the resources could not be worked out: {error}"))??)
 }
@@ -497,8 +505,8 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Option<ServiceEnd>), Compo
 
 /// Runs the command Seed of a resource on the host, at the root of the Worktree, as a Job. It reads the resource in
 /// `PROCLY_RESOURCE_URL`, `PROCLY_RESOURCE_NAME` and `PROCLY_RESOURCE`, the key of the resource.
-async fn run_seed(provision: &Provision, wanted: &Wanted, run: &str, timeout: Duration) -> Result<(), String> {
-    let mut env = provision.env.clone();
+async fn run_seed(plan: &ResourcePlan, wanted: &PlannedResource, run: &str, timeout: Duration) -> Result<(), String> {
+    let mut env = plan.env.clone();
     env.extend([
         ("PROCLY_RESOURCE".to_owned(), wanted.key.clone()),
         ("PROCLY_RESOURCE_NAME".to_owned(), wanted.resource.name.clone()),
@@ -506,20 +514,20 @@ async fn run_seed(provision: &Provision, wanted: &Wanted, run: &str, timeout: Du
     ]);
     let spec = JobSpec {
         fingerprint: Fingerprint {
-            topology: Some(provision.topology.clone()),
-            cwd: provision.topology.worktree.path.clone(),
+            topology: Some(plan.topology.clone()),
+            cwd: plan.topology.worktree.path.clone(),
             command: run.to_owned(),
         },
         env,
         timeout,
     };
-    let jobs = Arc::clone(&provision.jobs);
+    let jobs = Arc::clone(&plan.jobs);
     // Opening a terminal and forking are blocking system calls.
     let (id, _) = tokio::task::spawn_blocking(move || jobs.start(&spec))
         .await
         .map_err(|error| format!("cannot run the seed command: {error}"))?
         .map_err(|error| format!("cannot run the seed command: {error}"))?;
-    let job = provision
+    let job = plan
         .jobs
         .get(&id)
         .ok_or_else(|| "the seed command vanished from the job table".to_owned())?;
@@ -632,46 +640,49 @@ impl Docker {
     ///
     /// A resource that exists is left as it is, whatever it holds. One created here whose command Seed fails is
     /// dropped again, so that the next `up` seeds it afresh instead of finding it and keeping it empty.
-    async fn provision(&self, provision: Option<&Provision>) -> Result<(), ComposeError> {
-        let Some(provision) = provision else {
+    async fn create_resources(&self, plan: Option<&ResourcePlan>) -> Result<(), ComposeError> {
+        let Some(plan) = plan else {
             return Ok(());
         };
-        if let Some(ready) = &provision.driver.ready {
-            self.wait_ready(provision, ready).await?;
+        if let Some(ready) = &plan.driver.ready {
+            self.wait_ready(plan, ready).await?;
         }
-        for wanted in &provision.resources {
+        for wanted in &plan.resources {
             let name = &wanted.resource.name;
-            let template = match &wanted.seed {
-                Seed::Template(template) => Some(template.as_str()),
-                _ => None,
-            };
+            let template = wanted.seed.template();
             let script = |command: &str| Driver::command(command, name, template);
-            let exists = self
-                .exec(&script(&provision.driver.check))
-                .await
-                .is_ok_and(|output| output.status.success());
-            if exists {
-                continue;
+            // A check that cannot run says nothing about the resource: creating on its word could hit one that exists,
+            // and a failed Seed would then drop it.
+            match self.exec(&script(&plan.driver.check)).await {
+                Ok(output) if output.status.success() => continue,
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(ComposeError::Resource {
+                        service: self.service.clone(),
+                        driver: plan.driver.name.clone(),
+                        step: "check",
+                        name: name.clone(),
+                        reason: error.to_string(),
+                    });
+                }
             }
-            let creating = match (template, &provision.driver.copy) {
+            let creating = match (template, &plan.driver.copy) {
                 (Some(_), Some(copy)) => copy,
                 (Some(template), None) => {
                     return Err(ComposeError::NoCopy {
                         service: self.service.clone(),
-                        driver: provision.driver.name.clone(),
+                        driver: plan.driver.name.clone(),
                         name: name.clone(),
                         template: template.to_owned(),
                     });
                 }
-                (None, _) => &provision.driver.create,
+                (None, _) => &plan.driver.create,
             };
-            self.driver_step(provision, "create", name, &script(creating)).await?;
+            self.driver_step(plan, "create", name, &script(creating)).await?;
             if let Seed::Command { run, timeout } = &wanted.seed
-                && let Err(reason) = run_seed(provision, wanted, run, *timeout).await
+                && let Err(reason) = run_seed(plan, wanted, run, *timeout).await
             {
-                let outcome = self
-                    .drop_created(provision, name, &script(&provision.driver.drop))
-                    .await;
+                let outcome = self.drop_created(plan, name, &script(&plan.driver.drop)).await;
                 eprintln!(
                     "the seed of resource {name} of service {} failed ({reason}), {outcome}",
                     self.service
@@ -689,8 +700,8 @@ impl Docker {
     }
 
     /// Drops a resource this very request created, and says what became of it.
-    async fn drop_created(&self, provision: &Provision, name: &str, script: &str) -> String {
-        match self.driver_step(provision, "drop", name, script).await {
+    async fn drop_created(&self, plan: &ResourcePlan, name: &str, script: &str) -> String {
+        match self.driver_step(plan, "drop", name, script).await {
             Ok(()) => format!(
                 "the resource {name} was created by this request and has been dropped, so the next `procly up` seeds it again"
             ),
@@ -702,8 +713,8 @@ impl Docker {
     }
 
     /// Polls the container until the Driver finds it ready to create resources, or `ready_timeout` has passed.
-    async fn wait_ready(&self, provision: &Provision, ready: &str) -> Result<(), ComposeError> {
-        let deadline = Instant::now() + provision.ready_timeout;
+    async fn wait_ready(&self, plan: &ResourcePlan, ready: &str) -> Result<(), ComposeError> {
+        let deadline = Instant::now() + plan.ready_timeout;
         loop {
             let reason = match self.exec(ready).await {
                 Ok(output) if output.status.success() => return Ok(()),
@@ -713,7 +724,7 @@ impl Docker {
             if Instant::now() >= deadline {
                 return Err(ComposeError::NotReady {
                     service: self.service.clone(),
-                    driver: provision.driver.name.clone(),
+                    driver: plan.driver.name.clone(),
                     reason,
                 });
             }
@@ -724,7 +735,7 @@ impl Docker {
     /// Runs a command of the Driver in the container, failing with what it printed.
     async fn driver_step(
         &self,
-        provision: &Provision,
+        plan: &ResourcePlan,
         step: &'static str,
         name: &str,
         script: &str,
@@ -736,7 +747,7 @@ impl Docker {
         };
         Err(ComposeError::Resource {
             service: self.service.clone(),
-            driver: provision.driver.name.clone(),
+            driver: plan.driver.name.clone(),
             step,
             name: name.to_owned(),
             reason,

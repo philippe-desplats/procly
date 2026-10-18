@@ -33,7 +33,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
 use self::clock::Clock;
-use self::compose::{ComposeSpec, Composes, Provision, Published, Wanted};
+use self::compose::{ComposeSpec, Composes, PlannedResource, Published, ResourcePlan};
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
@@ -425,11 +425,11 @@ async fn up_compose(
         let (registry, name, topology, env) = (Arc::clone(registry), name.to_owned(), topology.clone(), env.clone());
         move || prepare_compose(&registry, &name, &topology, env)
     };
-    let provision = {
+    let plan = {
         let (registry, name) = (Arc::clone(registry), name.to_owned());
-        move || prepare_provision(&registry, &name, &topology, env)
+        move || plan_resources(&registry, &name, &topology, env)
     };
-    match registry.composes.up(key, worktree, grace, prepare, provision).await {
+    match registry.composes.up(key, worktree, grace, prepare, plan).await {
         Ok(brought) => Ok(Running::Compose {
             outcome: brought.outcome,
             port: brought.port,
@@ -491,12 +491,12 @@ fn prepare_compose(
 
 /// The Logical resources the Worktree needs in the container of the Compose service `name`, `None` when the service
 /// has no Driver. Worked out on every `up`, a Reuse included, since each Worktree has resources of its own.
-fn prepare_provision(
+fn plan_resources(
     registry: &Arc<Registry>,
     name: &str,
     topology: &topology::Topology,
     env: Vec<(String, String)>,
-) -> anyhow::Result<Option<Provision>> {
+) -> anyhow::Result<Option<ResourcePlan>> {
     let worktree = &topology.worktree.path;
     let config = read_config(worktree)?;
     let declared = declared(&config, worktree, name)?;
@@ -510,7 +510,7 @@ fn prepare_provision(
     };
     let wanted = resources
         .into_iter()
-        .map(|(key, resource)| Wanted {
+        .map(|(key, resource)| PlannedResource {
             seed: declared.resources[&key].seed.clone(),
             key,
             resource,
@@ -518,7 +518,7 @@ fn prepare_provision(
         .collect();
     let mut env = env;
     env.extend(injected.variables);
-    Ok(Some(Provision {
+    Ok(Some(ResourcePlan {
         driver,
         topology: topology.clone(),
         resources: wanted,

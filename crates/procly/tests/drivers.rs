@@ -50,13 +50,13 @@ fn repository(procly: &Procly, driver: &str) -> (PathBuf, PathBuf, u16) {
     (main, other, port)
 }
 
+/// A Driver that only has a URL, for the tests that read it.
 fn write_driver(dir: &Path, name: &str, url: &str) {
-    fs::create_dir_all(dir).expect("create the Drivers directory");
-    fs::write(
-        dir.join(format!("{name}.toml")),
-        format!("url = '{url}'\ncheck = 'true'\ncreate = 'true'\ndrop = 'true'\n"),
-    )
-    .expect("write the Driver");
+    write_driver_file(
+        dir,
+        name,
+        &format!("url = '{url}'\ncheck = 'true'\ncreate = 'true'\ndrop = 'true'\n"),
+    );
 }
 
 #[test]
@@ -170,6 +170,13 @@ impl Project {
             .try_docker(&["exec", "-T", "db", "sh", "-c", script])
             .expect("docker runs");
         stdout(&output)
+    }
+
+    fn is_running(&self) -> bool {
+        let output = self
+            .try_docker(&["ps", "--status", "running", "--services"])
+            .expect("docker runs");
+        stdout(&output).lines().any(|service| service == "db")
     }
 
     fn container(&self) -> String {
@@ -550,4 +557,31 @@ fn docker_postgres_each_seed_variant_produces_the_expected_content() {
     assert_eq!(query(project, "app_copied", "SELECT name FROM people"), "ada");
     assert_eq!(query(project, "app_filled", "SELECT n FROM seeded"), "42");
     assert_eq!(query(project, "app_filled", tables), "1");
+}
+
+#[test]
+fn docker_resources_a_worktree_cannot_create_never_stop_a_container_other_worktrees_still_need() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    // The container was stopped from outside Procly, so the next `up` starts it again for the Worktree that needs it.
+    assert!(fixture.project.try_docker(&["stop", "db"]).unwrap().status.success());
+    assert!(!fixture.project.is_running());
+    fs::write(
+        fixture.other.join("procly.local.toml"),
+        "[services.db.resources.broken]\nname = 'app_broken'\nseed = { run = 'exit 1' }\n",
+    )
+    .expect("write the config");
+
+    let failed = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+
+    assert_eq!(failed.status.code(), Some(125));
+    assert!(
+        fixture.project.is_running(),
+        "a seed of one Worktree stopped the container the Main worktree needs"
+    );
+    // The Main worktree is still counted, it keeps the container until it lets go.
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
 }

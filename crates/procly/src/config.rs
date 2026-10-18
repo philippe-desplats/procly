@@ -291,6 +291,16 @@ pub(crate) enum Seed {
     Command { run: String, timeout: Duration },
 }
 
+impl Seed {
+    /// The resource a new resource is copied from, `None` for the other Seeds.
+    pub(crate) fn template(&self) -> Option<&str> {
+        match self {
+            Self::Template(template) => Some(template),
+            _ => None,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for Seed {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         /// The table form, deserialized as declared so that a misspelt key is named in the error.
@@ -493,20 +503,17 @@ impl ServiceConfig {
             });
         }
         for (key, resource) in &self.resources {
-            let template = match &resource.seed {
-                Seed::Template(template) => Some(template),
-                _ => None,
-            };
+            let template = resource.seed.template();
             // The name is followed by `__` and the slug in other Worktrees, a template is an existing name as it is.
-            let unsafe_name = std::iter::once(key)
+            let unsafe_name = std::iter::once(key.as_str())
                 .chain(template)
                 .find(|text| !is_resource_name(text))
-                .or_else(|| Some(&resource.name).filter(|name| !is_declared_name(name)));
+                .or_else(|| Some(resource.name.as_str()).filter(|name| !is_declared_name(name)));
             if let Some(text) = unsafe_name {
                 return Err(ConfigError::ResourceName {
                     service: name.to_owned(),
                     resource: key.clone(),
-                    name: text.clone(),
+                    name: text.to_owned(),
                 });
             }
         }
@@ -1139,7 +1146,11 @@ mod tests {
             );
         }
         // A template is an existing resource, written as it is.
-        assert!(service(&with("dev", "app", "{ template = 'base__2' }")).kind("db").is_ok());
+        assert!(
+            service(&with("dev", "app", "{ template = 'base__2' }"))
+                .kind("db")
+                .is_ok()
+        );
     }
 
     #[test]

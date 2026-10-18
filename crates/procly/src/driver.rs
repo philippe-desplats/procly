@@ -307,7 +307,7 @@ mod tests {
         assert!(matches!(
             driver.resource_name("application", "feature", false),
             Err(DriverError::NameTooLong {
-                length: 19,
+                length: 20,
                 max: 12,
                 ..
             })

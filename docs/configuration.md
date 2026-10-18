@@ -182,13 +182,13 @@ A command Seed that fails, or reaches its timeout, drops the resource that same 
 
 ### Where resources are created
 
-`procly up` creates the resources of its own Worktree once the container is healthy, whether it started the container or found it running for another Worktree. It waits for the Driver to find the container ready (`ready`, up to the health timeout), then for each resource it runs the Driver's `check` and, when the resource is absent, its `create` or `copy`. Resources are created one container command at a time, so 2 Worktrees running `procly up` together never race. A container that was just started and cannot hold the resources is stopped again, as for a failed health check.
+`procly up` creates the resources of its own Worktree once the container is healthy, whether it started the container or found it running for another Worktree. It waits for the Driver to find the container ready (`ready`, up to the health timeout), then for each resource it runs the Driver's `check` and, when the resource is absent, its `create` or `copy`. Resources are created one container command at a time, so 2 Worktrees running `procly up` together never race, and they wait for each other, a command Seed included. A container that was just started for no other Worktree and cannot hold the resources is stopped again, as for a failed health check. One that other Worktrees already need keeps running.
 
 The URL of a resource is worked out from the Lease of the Service and the name of the resource, so `procly env` and the Env file show it without starting anything. A template reads it with `{services.db.resources.dev.url}`, and the name with `{services.db.resources.dev.name}`, see [Derived variables](#derived-variables).
 
 ### Drivers
 
-A Driver is a TOML file named after the technology. Postgres ships with Procly as `postgres.toml` in the same format, so a new technology is a file, with no new release. Procly reads `<name>.toml` from the first of these places that has it:
+A Driver is a TOML file named after the technology. Postgres ships with Procly as `postgres.toml` in the same format, so a new technology is a file, with no new release. Procly reads `<name>.toml` from the first of these places that has it, in the Worktree that runs `procly up`:
 
 1. `.procly/drivers/` at the root of the Worktree, versioned with the Repository.
 2. `drivers/` in the directory that holds the user settings, next to `config.toml`.
@@ -197,8 +197,8 @@ A Driver is a TOML file named after the technology. Postgres ships with Procly a
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `url` | yes | The connection URL. `{resource}` is the name of the resource, `{port}` the Lease the health check of the Service probes, and `{ports.<name>}` the Lease of a Port name. The host is written in the URL, usually `localhost`. |
-| `check` | yes | A command that succeeds when the resource exists. |
-| `create` | yes | A command that creates an empty resource. |
+| `check` | yes | A command that succeeds when the resource exists and fails when it does not. A `check` that cannot run at all (the container does not answer, or the command runs past its time limit) is an error, never read as an absent resource. |
+| `create` | yes | A command that creates an empty resource, and fails when it exists already. `check` decides whether to run it, and the drop of a failed Seed relies on it never meeting a resource that was there before. |
 | `copy` | no | A command that creates `{resource}` as a copy of `{template}`, needed by the Seed `template`. |
 | `drop` | yes | A command that removes the resource, run only to undo a resource whose Seed failed. |
 | `ready` | no | A command that succeeds once the container accepts the commands above. Procly runs it every quarter of a second until it succeeds. |
