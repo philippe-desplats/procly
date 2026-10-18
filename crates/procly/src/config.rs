@@ -63,6 +63,16 @@ pub(crate) enum ConfigError {
         kind: &'static str,
         other: &'static str,
     },
+    #[error("service {service} is a Group and must cover at least one service")]
+    EmptyGroup { service: String },
+    #[error("group {group} covers {service}, which is not declared")]
+    UnknownCovered { group: String, service: String },
+    #[error("group {group} covers {service}, which is not a Process service that runs on its own")]
+    CoveredNotProcess { group: String, service: String },
+    #[error("{service} is covered by 2 groups ({}), a service runs under one group at most", .groups.join(" and "))]
+    CoveredTwice { service: String, groups: Vec<String> },
+    #[error("no service is declared, there is nothing to start")]
+    NoServices,
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
     Invalid {
         files: Vec<PathBuf>,
@@ -162,6 +172,10 @@ pub(crate) struct ServiceConfig {
     /// The service of the compose file a Compose service maps to.
     #[serde(default)]
     pub(crate) compose: Option<String>,
+    /// The Services a Group covers: the Group runs `run` as one unit with the environment of all of them. Only a
+    /// Process service can set it.
+    #[serde(default)]
+    pub(crate) covers: Option<Vec<String>>,
     /// The declared port and the Pool of each Port name.
     #[serde(default)]
     pub(crate) ports: BTreeMap<String, PortConfig>,
@@ -319,6 +333,11 @@ pub(crate) enum ServiceKind<'a> {
     Process {
         run: &'a str,
     },
+    /// A Process service that runs the Services it covers as one unit.
+    Group {
+        run: &'a str,
+        covers: &'a [String],
+    },
     /// A service of the compose file of the Repository.
     Compose {
         service: &'a str,
@@ -340,9 +359,33 @@ impl ServiceConfig {
                 if self.grace_period.is_some() {
                     return Err(wrong_key("grace_period", "a Process service", "a Compose service"));
                 }
-                Ok(ServiceKind::Process { run })
+                let Some(covers) = &self.covers else {
+                    return Ok(ServiceKind::Process { run });
+                };
+                // Its Leases and Derived variables are the ones of the Services it covers.
+                let group = "a Group";
+                let other = "a Process service or a Compose service";
+                if !self.ports.is_empty() {
+                    return Err(wrong_key("ports", group, other));
+                }
+                if !self.env.is_empty() {
+                    return Err(wrong_key("env", group, other));
+                }
+                // Healthy once the Services it covers are, only the timeout is its own.
+                if self.health.port_name.is_some() || self.health.http().is_some() {
+                    return Err(wrong_key("health", group, other));
+                }
+                if covers.is_empty() {
+                    return Err(ConfigError::EmptyGroup {
+                        service: name.to_owned(),
+                    });
+                }
+                Ok(ServiceKind::Group { run, covers })
             }
             (None, Some(service)) => {
+                if self.covers.is_some() {
+                    return Err(wrong_key("covers", "a Compose service", "a Group"));
+                }
                 let restart = &self.restart;
                 if restart.attempts.is_some() || restart.delay.is_some() {
                     return Err(wrong_key("restart", "a Compose service", "a Process service"));
@@ -407,11 +450,40 @@ impl Config {
             .then(|| service.idle.timeout.unwrap_or(self.settings.idle_timeout))
     }
 
+    /// The Group that covers `service`, if any.
+    pub(crate) fn group_of(&self, service: &str) -> Option<&str> {
+        self.services
+            .iter()
+            .find(|(_, declared)| {
+                declared
+                    .covers
+                    .as_ref()
+                    .is_some_and(|covers| covers.iter().any(|c| c == service))
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
     /// The Services to bring up for `service`, each one after everything it needs and `service` last. A Service
     /// needed through several paths appears once.
+    ///
+    /// A Group starts what it needs and what the Services it covers need, but not the Services it covers: they run
+    /// as the Group, and a need that points to a Service of the same Group is the Group itself.
     pub(crate) fn start_order(&self, service: &str) -> Result<Vec<String>, ConfigError> {
         let mut order = Vec::new();
         self.visit(service, &mut Vec::new(), &mut order)?;
+        Ok(order)
+    }
+
+    /// The Services `up` without arguments brings up: every declared Service that no Group covers, a Group standing
+    /// for the Services it covers, each one after everything it needs.
+    pub(crate) fn start_order_all(&self) -> Result<Vec<String>, ConfigError> {
+        if self.services.is_empty() {
+            return Err(ConfigError::NoServices);
+        }
+        let mut order = Vec::new();
+        for name in self.services.keys().filter(|name| self.group_of(name).is_none()) {
+            self.visit(name, &mut Vec::new(), &mut order)?;
+        }
         Ok(order)
     }
 
@@ -436,6 +508,14 @@ impl Config {
         path.push(name.to_owned());
         for need in &declared.needs {
             self.visit(need, path, order)?;
+        }
+        for covered in declared.covers.iter().flatten() {
+            let Some(covered) = self.services.get(covered) else {
+                continue;
+            };
+            for need in covered.needs.iter().filter(|need| self.group_of(need) != Some(name)) {
+                self.visit(need, path, order)?;
+            }
         }
         path.pop();
         order.push(name.to_owned());
@@ -472,6 +552,40 @@ impl Config {
                         branch: branch.clone(),
                         service: service.clone(),
                         port_name: port_name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fails on a Group that covers a Service that is not declared, not a Process service that runs on its own, or
+    /// that another Group covers too, so that a Group and the Services it covers never overlap.
+    fn validate_groups(&self) -> Result<(), ConfigError> {
+        let mut covered_by: BTreeMap<&str, &str> = BTreeMap::new();
+        for (group, declared) in &self.services {
+            for service in declared.covers.iter().flatten() {
+                match self.services.get(service) {
+                    None => {
+                        return Err(ConfigError::UnknownCovered {
+                            group: group.clone(),
+                            service: service.clone(),
+                        });
+                    }
+                    Some(covered) if covered.run.is_none() || covered.covers.is_some() => {
+                        return Err(ConfigError::CoveredNotProcess {
+                            group: group.clone(),
+                            service: service.clone(),
+                        });
+                    }
+                    Some(_) => {}
+                }
+                if let Some(other) = covered_by.insert(service, group) {
+                    let mut groups = vec![group.clone(), other.to_owned()];
+                    groups.sort();
+                    return Err(ConfigError::CoveredTwice {
+                        service: service.clone(),
+                        groups,
                     });
                 }
             }
@@ -592,6 +706,7 @@ pub(crate) fn load(user_settings: Option<&Path>, worktree: &Path) -> Result<Conf
         .map_err(|source| ConfigError::Invalid { files, source })?;
     config.worktree.validate()?;
     config.validate()?;
+    config.validate_groups()?;
     config.validate_pinned()?;
     Ok(config)
 }
@@ -960,5 +1075,104 @@ mod tests {
         let mut base = table("a = { b = 1 }\nc = 2\n");
         merge(&mut base, table("a = 3\nc = { d = 4 }\n"));
         assert_eq!(base, table("a = 3\nc = { d = 4 }\n"));
+    }
+
+    const MONOREPO: &str = "[services.web]\nrun = 'x'\nports = { http = 3000 }\n\
+                            [services.api]\nrun = 'x'\nports = { http = 4000 }\n\
+                            [services.dev]\nrun = 'turbo dev'\ncovers = ['web', 'api']\n";
+
+    #[test]
+    fn a_process_service_that_covers_services_is_a_group() {
+        let config = parsed(MONOREPO);
+        assert_eq!(
+            config.services["dev"].kind("dev").unwrap(),
+            ServiceKind::Group {
+                run: "turbo dev",
+                covers: &["web".to_owned(), "api".to_owned()]
+            }
+        );
+        assert_eq!(config.group_of("web"), Some("dev"));
+        assert_eq!(config.group_of("api"), Some("dev"));
+        assert_eq!(config.group_of("dev"), None);
+    }
+
+    #[test]
+    fn a_group_refuses_the_keys_that_belong_to_the_services_it_covers() {
+        let key = |text: &str| match service(text).kind("dev") {
+            Err(ConfigError::KeyOfOtherKind { key, .. }) => key,
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        assert_eq!(key("run = 'x'\ncovers = ['web']\nports = { http = 3000 }\n"), "ports");
+        assert_eq!(key("run = 'x'\ncovers = ['web']\nenv = { A = 'b' }\n"), "env");
+        assert_eq!(key("run = 'x'\ncovers = ['web']\nhealth = { path = '/' }\n"), "health");
+        assert_eq!(key("compose = 'db'\ncovers = ['web']\n"), "covers");
+        assert!(
+            service("run = 'x'\ncovers = ['web']\nhealth = { timeout = '5s' }\n")
+                .kind("dev")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_group_covers_at_least_one_service() {
+        assert!(matches!(
+            service("run = 'x'\ncovers = []\n").kind("dev"),
+            Err(ConfigError::EmptyGroup { service }) if service == "dev"
+        ));
+    }
+
+    #[test]
+    fn a_group_covers_declared_process_services_that_no_other_group_covers() {
+        let check = |text: &str| parsed(text).validate_groups();
+        assert!(check(MONOREPO).is_ok());
+        assert!(matches!(
+            check("[services.dev]\nrun = 'x'\ncovers = ['web']\n"),
+            Err(ConfigError::UnknownCovered { group, service }) if group == "dev" && service == "web"
+        ));
+        assert!(matches!(
+            check("[services.db]\ncompose = 'pg'\n[services.dev]\nrun = 'x'\ncovers = ['db']\n"),
+            Err(ConfigError::CoveredNotProcess { group, service }) if group == "dev" && service == "db"
+        ));
+        assert!(matches!(
+            check("[services.web]\nrun = 'x'\ncovers = ['web']\n"),
+            Err(ConfigError::CoveredNotProcess { group, service }) if group == "web" && service == "web"
+        ));
+        assert!(matches!(
+            check(&format!("{MONOREPO}[services.all]\nrun = 'x'\ncovers = ['api']\n")),
+            Err(ConfigError::CoveredTwice { service, groups }) if service == "api" && groups == ["all", "dev"]
+        ));
+    }
+
+    #[test]
+    fn starting_a_group_starts_what_it_and_the_services_it_covers_need_but_not_the_covered_services() {
+        let config = parsed(
+            "[services.web]\nrun = 'x'\nneeds = ['api', 'db']\n\
+             [services.api]\nrun = 'x'\nneeds = ['db']\n\
+             [services.db]\nrun = 'x'\n\
+             [services.queue]\nrun = 'x'\n\
+             [services.dev]\nrun = 'x'\ncovers = ['web', 'api']\nneeds = ['queue']\n",
+        );
+        // `api` is covered by the group that `web` is in, so it does not start apart from the group.
+        assert_eq!(config.start_order("dev").unwrap(), ["queue", "db", "dev"]);
+        assert_eq!(config.start_order("web").unwrap(), ["db", "api", "web"]);
+    }
+
+    #[test]
+    fn up_without_arguments_starts_every_service_no_group_covers_needs_first() {
+        let config = parsed(
+            "[services.web]\nrun = 'x'\nneeds = ['api']\n\
+             [services.api]\nrun = 'x'\n\
+             [services.db]\ncompose = 'pg'\n\
+             [services.worker]\nrun = 'x'\nneeds = ['db']\n",
+        );
+        assert_eq!(config.start_order_all().unwrap(), ["api", "db", "web", "worker"]);
+
+        let grouped = parsed(&format!("{MONOREPO}[services.db]\ncompose = 'pg'\n"));
+        assert_eq!(grouped.start_order_all().unwrap(), ["db", "dev"]);
+    }
+
+    #[test]
+    fn up_without_arguments_needs_a_declared_service() {
+        assert!(matches!(parsed("").start_order_all(), Err(ConfigError::NoServices)));
     }
 }

@@ -68,7 +68,7 @@ pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Optio
     let health_port_name = declared.health_port_name(name)?;
     // A Compose service has no command, so no placeholder either.
     let command = match declared.kind(name)? {
-        ServiceKind::Process { run } => run,
+        ServiceKind::Process { run } | ServiceKind::Group { run, .. } => run,
         ServiceKind::Compose { .. } => "",
     };
     ports::check(name, command, declared.ports.keys())?;
