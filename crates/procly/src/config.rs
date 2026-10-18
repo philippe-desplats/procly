@@ -63,6 +63,34 @@ pub(crate) enum ConfigError {
         kind: &'static str,
         other: &'static str,
     },
+    #[error("service {service} is a Group and must cover at least one service")]
+    EmptyGroup { service: String },
+    #[error("group {group} covers {service}, which is not declared")]
+    UnknownCovered { group: String, service: String },
+    #[error("group {group} covers {service}, which is not a Process service that runs on its own")]
+    CoveredNotProcess { group: String, service: String },
+    #[error("group {group} needs {service}, which it covers, and a Group already starts the Services it covers")]
+    GroupNeedsCovered { group: String, service: String },
+    #[error("{service} is covered by 2 groups ({}), a service runs under one group at most", .groups.join(" and "))]
+    CoveredTwice { service: String, groups: Vec<String> },
+    #[error("no service is declared, there is nothing to start")]
+    NoServices,
+    #[error("service {service} sets `driver` but declares no `resources` for it to create")]
+    DriverWithoutResources { service: String },
+    #[error(
+        "driver {name:?} of service {service} must be a file name: lowercase letters, digits, hyphens and underscores"
+    )]
+    DriverName { service: String, name: String },
+    #[error("service {service} declares `resources` but sets no `driver` to create them")]
+    ResourcesWithoutDriver { service: String },
+    #[error(
+        "resource {resource} of service {service} has {name:?}, which must start with a lowercase letter and hold only lowercase letters, digits and underscores, never 2 in a row and never at the end for a name"
+    )]
+    ResourceName {
+        service: String,
+        resource: String,
+        name: String,
+    },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
     Invalid {
         files: Vec<PathBuf>,
@@ -162,12 +190,22 @@ pub(crate) struct ServiceConfig {
     /// The service of the compose file a Compose service maps to.
     #[serde(default)]
     pub(crate) compose: Option<String>,
+    /// The Services a Group covers: the Group runs `run` as one unit with the environment of all of them. Only a
+    /// Process service can set it.
+    #[serde(default)]
+    pub(crate) covers: Option<Vec<String>>,
     /// The declared port and the Pool of each Port name.
     #[serde(default)]
     pub(crate) ports: BTreeMap<String, PortConfig>,
     /// Overrides `settings.grace_period` for this Compose service.
     #[serde(default, deserialize_with = "optional_duration")]
     pub(crate) grace_period: Option<Duration>,
+    /// The Driver that creates the Logical resources of a Compose service in its container.
+    #[serde(default)]
+    pub(crate) driver: Option<String>,
+    /// The Logical resources each Worktree gets in the container, by key.
+    #[serde(default)]
+    pub(crate) resources: BTreeMap<String, ResourceConfig>,
     #[serde(default)]
     pub(crate) health: HealthConfig,
     /// The Derived variables of the Service: each value is a template over Leases and Worktree facts, rendered into
@@ -241,6 +279,96 @@ impl PortConfig {
     /// A declared port without a Pool, the meaning of the bare form `http = 3000`.
     pub(crate) fn declared(port: u16) -> Self {
         Self { port, pool: Vec::new() }
+    }
+}
+
+/// How long a command Seed may run before it is killed.
+const DEFAULT_SEED_TIMEOUT: Duration = Duration::from_mins(10);
+
+/// One Logical resource of a Compose service, created by its Driver in each Worktree.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResourceConfig {
+    /// The name in the Main worktree, other Worktrees append their slug to it.
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) seed: Seed,
+}
+
+/// The initial content of a new Logical resource.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) enum Seed {
+    /// Nothing, the resource starts as the Driver creates it.
+    #[default]
+    Empty,
+    /// A copy of the resource of that name, which already exists in the container.
+    Template(String),
+    /// What a command run on the host, at the root of the Worktree, leaves in the resource.
+    Command { run: String, timeout: Duration },
+}
+
+impl Seed {
+    /// The resource a new resource is copied from, `None` for the other Seeds.
+    pub(crate) fn template(&self) -> Option<&str> {
+        match self {
+            Self::Template(template) => Some(template),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Seed {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The table form, deserialized as declared so that a misspelt key is named in the error.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SeedTable {
+            template: Option<String>,
+            run: Option<String>,
+            #[serde(default, deserialize_with = "optional_duration")]
+            timeout: Option<Duration>,
+        }
+
+        struct SeedVisitor;
+
+        impl<'de> Visitor<'de> for SeedVisitor {
+            type Value = Seed;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("\"empty\", or a table with `template`, or with `run` and an optional `timeout`")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Seed, E> {
+                match value {
+                    "empty" => Ok(Seed::Empty),
+                    other => Err(E::invalid_value(Unexpected::Str(other), &self)),
+                }
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Seed, A::Error> {
+                let table = SeedTable::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                match table {
+                    SeedTable {
+                        template: Some(name),
+                        run: None,
+                        timeout: None,
+                    } => Ok(Seed::Template(name)),
+                    SeedTable {
+                        template: None,
+                        run: Some(run),
+                        timeout,
+                    } => Ok(Seed::Command {
+                        run,
+                        timeout: timeout.unwrap_or(DEFAULT_SEED_TIMEOUT),
+                    }),
+                    _ => Err(de::Error::custom(
+                        "a seed table sets `template`, or `run` with an optional `timeout`, and nothing else",
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(SeedVisitor)
     }
 }
 
@@ -319,6 +447,11 @@ pub(crate) enum ServiceKind<'a> {
     Process {
         run: &'a str,
     },
+    /// A Process service that runs the Services it covers as one unit.
+    Group {
+        run: &'a str,
+        covers: &'a [String],
+    },
     /// A service of the compose file of the Repository.
     Compose {
         service: &'a str,
@@ -340,9 +473,39 @@ impl ServiceConfig {
                 if self.grace_period.is_some() {
                     return Err(wrong_key("grace_period", "a Process service", "a Compose service"));
                 }
-                Ok(ServiceKind::Process { run })
+                if self.driver.is_some() {
+                    return Err(wrong_key("driver", "a Process service", "a Compose service"));
+                }
+                if !self.resources.is_empty() {
+                    return Err(wrong_key("resources", "a Process service", "a Compose service"));
+                }
+                let Some(covers) = &self.covers else {
+                    return Ok(ServiceKind::Process { run });
+                };
+                // Its Leases and Derived variables are the ones of the Services it covers.
+                let group = "a Group";
+                let other = "the Services a Group covers";
+                if !self.ports.is_empty() {
+                    return Err(wrong_key("ports", group, other));
+                }
+                if !self.env.is_empty() {
+                    return Err(wrong_key("env", group, other));
+                }
+                // Healthy once the Services it covers are, only the timeout is its own.
+                if self.health.port_name.is_some() || self.health.http().is_some() {
+                    return Err(wrong_key("health", group, other));
+                }
+                if covers.is_empty() {
+                    return Err(ConfigError::EmptyGroup {
+                        service: name.to_owned(),
+                    });
+                }
+                Ok(ServiceKind::Group { run, covers })
             }
             (None, Some(service)) => {
+                if self.covers.is_some() {
+                    return Err(wrong_key("covers", "a Compose service", "a Group"));
+                }
                 let restart = &self.restart;
                 if restart.attempts.is_some() || restart.delay.is_some() {
                     return Err(wrong_key("restart", "a Compose service", "a Process service"));
@@ -351,12 +514,55 @@ impl ServiceConfig {
                 if idle.stop.is_some() || idle.timeout.is_some() {
                     return Err(wrong_key("idle", "a Compose service", "a Process service"));
                 }
+                self.validate_resources(name)?;
                 Ok(ServiceKind::Compose { service })
             }
             _ => Err(ConfigError::ServiceKind {
                 service: name.to_owned(),
             }),
         }
+    }
+
+    /// Fails on a Driver without resources or resources without a Driver, and on a key or a name that is not safe to
+    /// put in a command run inside the container.
+    fn validate_resources(&self, name: &str) -> Result<(), ConfigError> {
+        match (&self.driver, self.resources.is_empty()) {
+            (Some(_), true) => {
+                return Err(ConfigError::DriverWithoutResources {
+                    service: name.to_owned(),
+                });
+            }
+            (None, false) => {
+                return Err(ConfigError::ResourcesWithoutDriver {
+                    service: name.to_owned(),
+                });
+            }
+            _ => {}
+        }
+        if let Some(driver) = &self.driver
+            && !is_driver_name(driver)
+        {
+            return Err(ConfigError::DriverName {
+                service: name.to_owned(),
+                name: driver.clone(),
+            });
+        }
+        for (key, resource) in &self.resources {
+            let template = resource.seed.template();
+            // The name is followed by `__` and the slug in other Worktrees, a template is an existing name as it is.
+            let unsafe_name = std::iter::once(key.as_str())
+                .chain(template)
+                .find(|text| !is_resource_name(text))
+                .or_else(|| Some(resource.name.as_str()).filter(|name| !is_declared_name(name)));
+            if let Some(text) = unsafe_name {
+                return Err(ConfigError::ResourceName {
+                    service: name.to_owned(),
+                    resource: key.clone(),
+                    name: text.to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The Port name the health check of the Service `name` probes, `None` when it declares no Port name.
@@ -407,12 +613,50 @@ impl Config {
             .then(|| service.idle.timeout.unwrap_or(self.settings.idle_timeout))
     }
 
+    /// The Group that covers `service`, if any.
+    pub(crate) fn group_of(&self, service: &str) -> Option<&str> {
+        self.services
+            .iter()
+            .find(|(_, declared)| {
+                declared
+                    .covers
+                    .as_ref()
+                    .is_some_and(|covers| covers.iter().any(|c| c == service))
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
     /// The Services to bring up for `service`, each one after everything it needs and `service` last. A Service
     /// needed through several paths appears once.
+    ///
+    /// A Group starts what it needs and what the Services it covers need, but not the Services it covers: they run
+    /// as the Group, and a need that points to a Service of the same Group is the Group itself.
     pub(crate) fn start_order(&self, service: &str) -> Result<Vec<String>, ConfigError> {
         let mut order = Vec::new();
         self.visit(service, &mut Vec::new(), &mut order)?;
         Ok(order)
+    }
+
+    /// The Services `up` without arguments brings up: every declared Service that no Group covers, a Group standing
+    /// for the Services it covers, each one after everything it needs.
+    pub(crate) fn start_order_all(&self) -> Result<Vec<String>, ConfigError> {
+        if self.services.is_empty() {
+            return Err(ConfigError::NoServices);
+        }
+        let mut order = Vec::new();
+        for name in self.services.keys().filter(|name| self.group_of(name).is_none()) {
+            self.visit(name, &mut Vec::new(), &mut order)?;
+        }
+        Ok(order)
+    }
+
+    /// What `dependent` starts to have its need `need` running: the Group covering `need` when the dependent is
+    /// outside that Group, since a covered Service runs as the Group and a Group never starts over it running alone.
+    fn standing_for<'a>(&'a self, need: &'a str, dependent: &str) -> &'a str {
+        match self.group_of(need) {
+            Some(group) if group != dependent && self.group_of(dependent) != Some(group) => group,
+            _ => need,
+        }
     }
 
     /// Depth-first walk of the needs of `name`, `path` being the Services being visited above it.
@@ -435,7 +679,15 @@ impl Config {
         };
         path.push(name.to_owned());
         for need in &declared.needs {
-            self.visit(need, path, order)?;
+            self.visit(self.standing_for(need, name), path, order)?;
+        }
+        for covered in declared.covers.iter().flatten() {
+            let Some(covered) = self.services.get(covered) else {
+                continue;
+            };
+            for need in covered.needs.iter().filter(|need| self.group_of(need) != Some(name)) {
+                self.visit(self.standing_for(need, name), path, order)?;
+            }
         }
         path.pop();
         order.push(name.to_owned());
@@ -479,6 +731,50 @@ impl Config {
         Ok(())
     }
 
+    /// Fails on a Group that covers a Service that is not declared, not a Process service that runs on its own, or
+    /// that another Group covers too, so that a Group and the Services it covers never overlap.
+    fn validate_groups(&self) -> Result<(), ConfigError> {
+        let mut covered_by: BTreeMap<&str, &str> = BTreeMap::new();
+        for (group, declared) in &self.services {
+            if let Some(service) = declared
+                .needs
+                .iter()
+                .find(|need| declared.covers.iter().flatten().any(|covered| covered == *need))
+            {
+                return Err(ConfigError::GroupNeedsCovered {
+                    group: group.clone(),
+                    service: service.clone(),
+                });
+            }
+            for service in declared.covers.iter().flatten() {
+                match self.services.get(service) {
+                    None => {
+                        return Err(ConfigError::UnknownCovered {
+                            group: group.clone(),
+                            service: service.clone(),
+                        });
+                    }
+                    Some(covered) if covered.run.is_none() || covered.covers.is_some() => {
+                        return Err(ConfigError::CoveredNotProcess {
+                            group: group.clone(),
+                            service: service.clone(),
+                        });
+                    }
+                    Some(_) => {}
+                }
+                if let Some(other) = covered_by.insert(service, group) {
+                    let mut groups = vec![group.clone(), other.to_owned()];
+                    groups.sort();
+                    return Err(ConfigError::CoveredTwice {
+                        service: service.clone(),
+                        groups,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// How long the Compose service `service` keeps running once no Worktree needs it.
     pub(crate) fn grace_period(&self, service: &ServiceConfig) -> Duration {
         service.grace_period.unwrap_or(self.settings.grace_period)
@@ -496,6 +792,28 @@ impl Config {
     pub(crate) fn health_timeout(&self, service: &ServiceConfig) -> Duration {
         service.health.timeout.unwrap_or(self.settings.health_timeout)
     }
+}
+
+/// Whether `text` can name a resource in the Main worktree: a resource name that holds no `__` and does not end with
+/// `_`, so that the `__` before the slug is always the first one.
+fn is_declared_name(text: &str) -> bool {
+    is_resource_name(text) && !text.contains("__") && !text.ends_with('_')
+}
+
+/// Whether `text` can name the file of a Driver without leaving the directory that holds it.
+fn is_driver_name(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// Whether `text` is a lowercase letter then lowercase letters, digits and underscores: a word every Driver can use as
+/// a resource name, and one that needs no quoting in a shell command.
+fn is_resource_name(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// Long enough for a dev server compiling a large app on its first start.
@@ -592,6 +910,7 @@ pub(crate) fn load(user_settings: Option<&Path>, worktree: &Path) -> Result<Conf
         .map_err(|source| ConfigError::Invalid { files, source })?;
     config.worktree.validate()?;
     config.validate()?;
+    config.validate_groups()?;
     config.validate_pinned()?;
     Ok(config)
 }
@@ -839,6 +1158,138 @@ mod tests {
     }
 
     #[test]
+    fn a_compose_service_declares_a_driver_and_its_logical_resources_with_their_seeds() {
+        let config = parsed(
+            "[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\n\
+             [services.db.resources.dev]\nname = 'app'\n\
+             [services.db.resources.test]\nname = 'app_test'\nseed = 'empty'\n\
+             [services.db.resources.copy]\nname = 'app_copy'\nseed = { template = 'app_template' }\n\
+             [services.db.resources.filled]\nname = 'app_filled'\nseed = { run = 'make seed', timeout = '2m' }\n\
+             [services.db.resources.quick]\nname = 'app_quick'\nseed = { run = 'make seed' }\n",
+        );
+        let db = &config.services["db"];
+        assert_eq!(db.driver.as_deref(), Some("postgres"));
+        let seed = |key: &str| db.resources[key].seed.clone();
+        assert_eq!(db.resources["dev"].name, "app");
+        assert_eq!(seed("dev"), Seed::Empty);
+        assert_eq!(seed("test"), Seed::Empty);
+        assert_eq!(seed("copy"), Seed::Template("app_template".to_owned()));
+        assert_eq!(
+            seed("filled"),
+            Seed::Command {
+                run: "make seed".to_owned(),
+                timeout: Duration::from_mins(2)
+            }
+        );
+        assert_eq!(
+            seed("quick"),
+            Seed::Command {
+                run: "make seed".to_owned(),
+                timeout: Duration::from_mins(10)
+            }
+        );
+        assert!(db.kind("db").is_ok());
+    }
+
+    #[test]
+    fn a_seed_is_empty_a_template_or_a_command_and_nothing_else() {
+        for seed in [
+            "'full'",
+            "{ template = 'a', run = 'b' }",
+            "{}",
+            "{ timeout = '1m' }",
+            "{ template = 'a', timeout = '1m' }",
+            "{ copy = 'a' }",
+        ] {
+            let text = format!(
+                "[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\n[services.db.resources.dev]\nname = 'app'\nseed = {seed}\n"
+            );
+            assert!(
+                Value::Table(table(&text)).try_into::<Config>().is_err(),
+                "seed {seed} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_driver_belongs_to_a_compose_service_that_declares_resources_for_it() {
+        let key = |text: &str| match service(text).kind("db") {
+            Err(ConfigError::KeyOfOtherKind { key, .. }) => key,
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        assert_eq!(key("run = 'x'\ndriver = 'postgres'\n"), "driver");
+        assert_eq!(key("run = 'x'\nresources = { dev = { name = 'app' } }\n"), "resources");
+        assert!(matches!(
+            service("compose = 'db'\ndriver = 'postgres'\n").kind("db"),
+            Err(ConfigError::DriverWithoutResources { service }) if service == "db"
+        ));
+        assert!(matches!(
+            service("compose = 'db'\nresources = { dev = { name = 'app' } }\n").kind("db"),
+            Err(ConfigError::ResourcesWithoutDriver { service }) if service == "db"
+        ));
+    }
+
+    #[test]
+    fn a_driver_is_named_by_a_file_name_that_cannot_leave_the_directory_of_drivers() {
+        for bad in ["../x", "a/b", "A", "", "a.b", "a b"] {
+            let text = format!("compose = 'db'\ndriver = '{bad}'\nresources = {{ dev = {{ name = 'app' }} }}\n");
+            assert!(
+                matches!(
+                    service(&text).kind("db"),
+                    Err(ConfigError::DriverName { name, .. }) if name == bad
+                ),
+                "{bad:?}"
+            );
+        }
+        let ok = "compose = 'db'\ndriver = 'my-db_2'\nresources = { dev = { name = 'app' } }\n";
+        assert!(service(ok).kind("db").is_ok());
+    }
+
+    #[test]
+    fn a_resource_key_and_name_are_lowercase_words_that_are_safe_in_a_shell_command() {
+        let name = |text: &str| match service(text).kind("db") {
+            Err(ConfigError::ResourceName { resource, name, .. }) => (resource, name),
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        let with = |key: &str, name: &str, seed: &str| {
+            format!(
+                "compose = 'db'\ndriver = 'd'\nresources = {{ \"{key}\" = {{ name = '{name}', seed = {seed} }} }}\n"
+            )
+        };
+        for bad in ["App", "a b", "a;b", "a-b", "", "app\"", "$(x)", "é"] {
+            assert_eq!(
+                name(&with("dev", bad, "'empty'")),
+                ("dev".to_owned(), bad.to_owned()),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            name(&with("dev", "app", "{ template = 'a b' }")),
+            ("dev".to_owned(), "a b".to_owned())
+        );
+        assert_eq!(
+            name(&with("De v", "app", "'empty'")),
+            ("De v".to_owned(), "De v".to_owned())
+        );
+        assert!(service(&with("dev_2", "app_2", "'empty'")).kind("db").is_ok());
+        // The Worktree slug is appended after a double underscore, which names never hold so that 2 Worktrees never
+        // share a resource.
+        for bad in ["app__x", "app_"] {
+            assert_eq!(
+                name(&with("dev", bad, "'empty'")),
+                ("dev".to_owned(), bad.to_owned()),
+                "{bad:?}"
+            );
+        }
+        // A template is an existing resource, written as it is.
+        assert!(
+            service(&with("dev", "app", "{ template = 'base__2' }"))
+                .kind("db")
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn loading_refuses_a_service_that_is_neither_a_process_nor_a_compose_service() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -960,5 +1411,134 @@ mod tests {
         let mut base = table("a = { b = 1 }\nc = 2\n");
         merge(&mut base, table("a = 3\nc = { d = 4 }\n"));
         assert_eq!(base, table("a = 3\nc = { d = 4 }\n"));
+    }
+
+    const MONOREPO: &str = "[services.web]\nrun = 'x'\nports = { http = 3000 }\n\
+                            [services.api]\nrun = 'x'\nports = { http = 4000 }\n\
+                            [services.dev]\nrun = 'turbo dev'\ncovers = ['web', 'api']\n";
+
+    #[test]
+    fn a_process_service_that_covers_services_is_a_group() {
+        let config = parsed(MONOREPO);
+        assert_eq!(
+            config.services["dev"].kind("dev").unwrap(),
+            ServiceKind::Group {
+                run: "turbo dev",
+                covers: &["web".to_owned(), "api".to_owned()]
+            }
+        );
+        assert_eq!(config.group_of("web"), Some("dev"));
+        assert_eq!(config.group_of("api"), Some("dev"));
+        assert_eq!(config.group_of("dev"), None);
+    }
+
+    #[test]
+    fn a_group_refuses_the_keys_that_belong_to_the_services_it_covers() {
+        let key = |text: &str| match service(text).kind("dev") {
+            Err(ConfigError::KeyOfOtherKind { key, .. }) => key,
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        assert_eq!(key("run = 'x'\ncovers = ['web']\nports = { http = 3000 }\n"), "ports");
+        assert_eq!(key("run = 'x'\ncovers = ['web']\nenv = { A = 'b' }\n"), "env");
+        assert_eq!(key("run = 'x'\ncovers = ['web']\nhealth = { path = '/' }\n"), "health");
+        assert_eq!(key("compose = 'db'\ncovers = ['web']\n"), "covers");
+        assert!(
+            service("run = 'x'\ncovers = ['web']\nhealth = { timeout = '5s' }\n")
+                .kind("dev")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_group_covers_at_least_one_service() {
+        assert!(matches!(
+            service("run = 'x'\ncovers = []\n").kind("dev"),
+            Err(ConfigError::EmptyGroup { service }) if service == "dev"
+        ));
+    }
+
+    #[test]
+    fn a_group_covers_declared_process_services_that_no_other_group_covers() {
+        let check = |text: &str| parsed(text).validate_groups();
+        assert!(check(MONOREPO).is_ok());
+        assert!(matches!(
+            check("[services.dev]\nrun = 'x'\ncovers = ['web']\n"),
+            Err(ConfigError::UnknownCovered { group, service }) if group == "dev" && service == "web"
+        ));
+        assert!(matches!(
+            check("[services.db]\ncompose = 'pg'\n[services.dev]\nrun = 'x'\ncovers = ['db']\n"),
+            Err(ConfigError::CoveredNotProcess { group, service }) if group == "dev" && service == "db"
+        ));
+        assert!(matches!(
+            check("[services.web]\nrun = 'x'\ncovers = ['web']\n"),
+            Err(ConfigError::CoveredNotProcess { group, service }) if group == "web" && service == "web"
+        ));
+        assert!(matches!(
+            check(&format!("{MONOREPO}[services.all]\nrun = 'x'\ncovers = ['api']\n")),
+            Err(ConfigError::CoveredTwice { service, groups }) if service == "api" && groups == ["all", "dev"]
+        ));
+    }
+
+    #[test]
+    fn starting_a_group_starts_what_it_and_the_services_it_covers_need_but_not_the_covered_services() {
+        let config = parsed(
+            "[services.web]\nrun = 'x'\nneeds = ['api', 'db']\n\
+             [services.api]\nrun = 'x'\nneeds = ['db']\n\
+             [services.db]\nrun = 'x'\n\
+             [services.queue]\nrun = 'x'\n\
+             [services.dev]\nrun = 'x'\ncovers = ['web', 'api']\nneeds = ['queue']\n",
+        );
+        // `api` is covered by the group that `web` is in, so it does not start apart from the group.
+        assert_eq!(config.start_order("dev").unwrap(), ["queue", "db", "dev"]);
+        assert_eq!(config.start_order("web").unwrap(), ["db", "api", "web"]);
+    }
+
+    #[test]
+    fn up_without_arguments_starts_every_service_no_group_covers_needs_first() {
+        let config = parsed(
+            "[services.web]\nrun = 'x'\nneeds = ['api']\n\
+             [services.api]\nrun = 'x'\n\
+             [services.db]\ncompose = 'pg'\n\
+             [services.worker]\nrun = 'x'\nneeds = ['db']\n",
+        );
+        assert_eq!(config.start_order_all().unwrap(), ["api", "db", "web", "worker"]);
+
+        let grouped = parsed(&format!("{MONOREPO}[services.db]\ncompose = 'pg'\n"));
+        assert_eq!(grouped.start_order_all().unwrap(), ["db", "dev"]);
+    }
+
+    #[test]
+    fn a_need_on_a_covered_service_is_the_group_for_a_service_outside_it() {
+        let config = parsed(
+            "[services.api]\nrun = 'x'\n\
+             [services.web]\nrun = 'x'\n\
+             [services.app]\nrun = 'x'\nneeds = ['api']\n\
+             [services.dev]\nrun = 'x'\ncovers = ['api', 'web']\n",
+        );
+        // `api` only runs as `dev`, a Group that cannot start over `api` running alone.
+        assert_eq!(config.start_order("app").unwrap(), ["dev", "app"]);
+        assert_eq!(config.start_order_all().unwrap(), ["dev", "app"]);
+        // A Service of the Group itself still needs the Service alone.
+        let inside = parsed(
+            "[services.api]\nrun = 'x'\n\
+             [services.web]\nrun = 'x'\nneeds = ['api']\n\
+             [services.dev]\nrun = 'x'\ncovers = ['api', 'web']\n",
+        );
+        assert_eq!(inside.start_order("web").unwrap(), ["api", "web"]);
+    }
+
+    #[test]
+    fn a_group_does_not_need_a_service_it_covers() {
+        let config =
+            parsed("[services.web]\nrun = 'x'\n[services.dev]\nrun = 'x'\ncovers = ['web']\nneeds = ['web']\n");
+        assert!(matches!(
+            config.validate_groups(),
+            Err(ConfigError::GroupNeedsCovered { group, service }) if group == "dev" && service == "web"
+        ));
+    }
+
+    #[test]
+    fn up_without_arguments_needs_a_declared_service() {
+        assert!(matches!(parsed("").start_order_all(), Err(ConfigError::NoServices)));
     }
 }

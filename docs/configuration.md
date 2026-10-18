@@ -87,6 +87,7 @@ A Process service (`run`) or a Compose service (`compose`). The name is the one 
 | `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`, or a table with the declared port and a Pool, such as `{ http = { port = 3000, pool = [3100, 3101] } }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
 | `env` | no | The Derived variables of the Service, see [Derived variables](#derived-variables). |
 | `needs` | no | The names of the Services to start first, such as `["db", "api"]`. See below. |
+| `covers` | no | The names of the Services this Process service covers, which makes it a Group. See [Groups](#groups). |
 
 ### `needs`
 
@@ -95,6 +96,45 @@ A Process service (`run`) or a Compose service (`compose`). The name is the one 
 If a need does not become healthy, `up` stops there and exits with the code of that failure (3, 4 or 124). The Service you asked for is not started. A need that is not declared, or needs that loop back to each other, make `up` fail with 125 before anything starts.
 
 `needs` is about starting. `procly down web` leaves what `web` needs running, and a restart of `web` does not start its needs again.
+
+## Groups
+
+A Group is a Process service that covers other Services. It runs one command, usually the monorepo-wide dev command, as one unit, so a team can adopt Procly without splitting that command into one per app. The Services it covers stay declared with their own Port names, Derived variables and health settings, which is where the Group takes its Leases and variables from.
+
+```toml
+[services.web]
+run = "pnpm --filter web dev --port {ports.http}"
+ports = { http = 3000 }
+env = { WEB_URL = "http://localhost:{services.web.ports.http}" }
+
+[services.api]
+run = "pnpm --filter api dev --port {ports.http}"
+ports = { http = 4000 }
+
+[services.dev]
+run = "turbo dev"
+covers = ["web", "api"]
+```
+
+`procly up dev` starts `turbo dev` in a process group of its own, with the environment of the caller and then, for every covered Service:
+
+- Its Leases, as `PORT_<SERVICE>_<NAME>`, such as `PORT_WEB_HTTP` and `PORT_API_HTTP`. The plain `PORT` and `PORT_<NAME>` of a Service would collide between 2 covered Services, so a Group gets none of them. A Service name is written in upper case, every character that is not a letter or a digit becoming an underscore.
+- Its Derived variables, such as `WEB_URL`.
+- `PROCLY=1` and `PROCLY_SERVICE`, the name of the Group.
+
+The Group is healthy once every covered Service answers its health check on its Lease, as it would on its own. If one never does, `up` stops the tree of the Group and exits with 124. A Port mismatch on any Lease is reported as for a Service. `procly env dev` prints the same variables without starting anything.
+
+A Group and the Services it covers never run side by side in one Worktree:
+
+- `procly up web` while `dev` runs starts nothing and answers `web reused (via dev) http://localhost:3000 port 3000`, with the Lease of `web`.
+- `procly up dev` while `web` or `api` runs on its own is refused with exit code 125, and starts nothing. Stop them with `procly down web` first.
+- `procly down web` while `dev` runs is refused with exit code 125 and points to `procly down dev`, since `web` is not a process of its own.
+
+`up dev` starts what `dev` needs and what the Services it covers need, but not the covered Services. A need that points to a Service of the same Group is the Group itself, and a Service outside the Group that needs a covered Service starts the Group instead, since a Group never starts over a covered Service that runs alone. A Group refuses `ports`, `env`, and the `health` keys `port`, `path` and `status`, which are the ones of the Services it covers, and `health.timeout` is its own. It does not need a Service it covers, and it covers at least 1 Service, each one a declared Process service that is not itself a Group, and no Service is covered by 2 Groups. The Leases of a covered Service count as used as long as its Group runs, and are dated again when it ends.
+
+## `procly up` without arguments
+
+`procly up` starts every declared Service that no Group covers, each one after the Services it needs, and waits for each to be healthy before the next one starts. A Group stands for the Services it covers. It replaces the monorepo-wide dev command, with the Leases and the environment of each Service. Stdout holds one line per Service, in the order they came up, `started` or `reused`, with the URL and the port when the Service has one. A Service that does not become healthy stops the sequence and `up` exits with its code (3, 4 or 124), as for a single Service. An empty configuration makes it fail with 125.
 
 ## Compose services
 
@@ -121,14 +161,93 @@ services:
 | `compose` | none | The name of the service in the compose file. |
 | `env` | none | The Derived variables of the Service, rendered and handed to `docker compose` for the compose file to interpolate, see [Derived variables](#derived-variables). `PORT_<NAME>` is always set too. |
 | `grace_period` | `settings.grace_period` | How long the container keeps running once no Worktree needs it. |
+| `driver` | none | The Driver that creates a Logical resource per Worktree inside the container, see [Logical resources and Drivers](#logical-resources-and-drivers). |
+| `resources` | none | The Logical resources each Worktree gets, required with `driver` and an error without it. |
 
 `restart` and `idle` are for Process services and are errors on a Compose service. `needs` and `health` work as they do for a Process service, `up` waits until the container runs, or is healthy when the compose file defines a health check, and then until the health check of Procly passes.
 
-The container is in Shared mode, the only mode of this version: one container serves every Worktree of the Repository, from the compose file of the Main worktree and under the compose project name that file gives. Its Leases are the ones of the Main worktree, so every Worktree reads the same ports, from `procly up` and from `procly env`. A Pinned branch never changes them, and they do not expire while the container runs, nor right after it stops. The Leases reach the compose file through the environment of `docker compose`: `PORT_<NAME>`, `PORT`, the Derived variables of the Service, `PROCLY` and `PROCLY_SERVICE`. The compose file must publish each Lease, which Procly checks with `docker compose config`, and `procly up` fails with 125 naming the variables the compose file may interpolate when it does not.
+The container is in Shared mode when the Service sets no `driver`, and in Logical mode when it does, see [Logical resources and Drivers](#logical-resources-and-drivers). In both, one container serves every Worktree of the Repository, from the compose file of the Main worktree and under the compose project name that file gives. Its Leases are the ones of the Main worktree, so every Worktree reads the same ports, from `procly up` and from `procly env`. A Pinned branch never changes them, and they do not expire while the container runs, nor right after it stops. The Leases reach the compose file through the environment of `docker compose`: `PORT_<NAME>`, `PORT`, the Derived variables of the Service, `PROCLY` and `PROCLY_SERVICE`. The compose file must publish each Lease, which Procly checks with `docker compose config`, and `procly up` fails with 125 naming the variables the compose file may interpolate when it does not.
 
 Containers are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting.
 
 `procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon stops the containers it started when it exits, since it would lose count of the Worktrees that need them.
+
+## Logical resources and Drivers
+
+A Compose service that sets `driver` stays one container for every Worktree (Logical mode, ADR 0005), and each Worktree also gets its own Logical resources inside it, such as a Postgres database. The Driver creates them, `procly up` makes sure they exist, and the connection URL of each one reaches the Services as a Derived variable.
+
+```toml
+[services.db]
+compose = "postgres"
+driver = "postgres"
+ports = { db = 5432 }
+env = { DB_PORT = "{services.db.ports.db}" }
+
+[services.db.resources.dev]
+name = "app"
+
+[services.db.resources.test]
+name = "app_test"
+seed = { template = "app_template" }
+
+[services.api]
+run = "pnpm --filter api dev"
+needs = ["db"]
+
+[services.api.env]
+DATABASE_URL = "{services.db.resources.dev.url}"
+TEST_DATABASE_URL = "{services.db.resources.test.url}"
+```
+
+A Service with `driver` declares at least one resource, and a Service with `resources` sets a `driver`. Both keys are for Compose services only.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | required | The name of the resource in the Main worktree. Any other Worktree appends `__` and its Worktree slug, so `app` is `app__app_other` in a Worktree in `app-other`, and 2 resources never share a name. It starts with a lowercase letter and holds lowercase letters, digits and underscores, never 2 in a row and none at the end, since it is put in commands run in the container. |
+| `seed` | `"empty"` | The initial content of a new resource, see below. |
+
+The key of the resource (`dev` and `test` above) is how templates name it. It follows the same rules as `name`.
+
+### Seeds
+
+A Seed applies when Procly creates the resource, never to one that exists already. A resource that exists is left as it is, whatever it holds.
+
+| Seed | Content of the new resource |
+| --- | --- |
+| `seed = "empty"` | Nothing, as the Driver creates it. |
+| `seed = { template = "app_template" }` | A copy of the resource of that name, which must exist in the container and is used as it is written, without the Worktree slug. The Driver needs a `copy` command. For Postgres the template database must have no open connection. |
+| `seed = { run = "pnpm db:migrate", timeout = "5m" }` | What a command leaves in the resource. It runs on the host, by `/bin/sh -c` at the root of the Worktree, as a Job, so its process tree is killed when it reaches `timeout` (`10m` by default). It receives `PROCLY_RESOURCE_URL`, `PROCLY_RESOURCE_NAME` and `PROCLY_RESOURCE`, the key of the resource, on top of the environment of the `procly up` and of the Service. |
+
+A command Seed that fails, or reaches its timeout, drops the resource that same `procly up` just created, so that the next `procly up` seeds it again rather than finding it and keeping it empty. `procly up` then exits with 125, and the error and the Daemon log say that the resource was dropped, or the command to drop it when that failed. Procly never drops a resource that existed before the request, and nothing else ever drops one.
+
+### Where resources are created
+
+`procly up` creates the resources of its own Worktree once the container is healthy, whether it started the container or found it running for another Worktree. It waits for the Driver to find the container ready (`ready`, up to the health timeout), then for each resource it runs the Driver's `check` and, when the resource is absent, its `create` or `copy`. Resources are created one container command at a time, so 2 Worktrees running `procly up` together never race, and they wait for each other, a command Seed included. A container that was just started for no other Worktree and cannot hold the resources is stopped again, as for a failed health check. One that other Worktrees already need keeps running.
+
+The URL of a resource is worked out from the Lease of the Service and the name of the resource, so `procly env` and the Env file show it without starting anything. A template reads it with `{services.db.resources.dev.url}`, and the name with `{services.db.resources.dev.name}`, see [Derived variables](#derived-variables).
+
+### Drivers
+
+A Driver is a TOML file named after the technology. Postgres ships with Procly as `postgres.toml` in the same format, so a new technology is a file, with no new release. Procly reads `<name>.toml` from the first of these places that has it, in the Worktree that runs `procly up`:
+
+1. `.procly/drivers/` at the root of the Worktree, versioned with the Repository.
+2. `drivers/` in the directory that holds the user settings, next to `config.toml`.
+3. The Drivers bundled with Procly.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `url` | yes | The connection URL. `{resource}` is the name of the resource, `{port}` the Lease the health check of the Service probes, and `{ports.<name>}` the Lease of a Port name. The host is written in the URL, usually `localhost`. |
+| `check` | yes | A command that succeeds when the resource exists and fails when it does not. A `check` that cannot run at all (the container does not answer, or the command runs past its time limit) is an error, never read as an absent resource. |
+| `create` | yes | A command that creates an empty resource, and fails when it exists already. `check` decides whether to run it, and the drop of a failed Seed relies on it never meeting a resource that was there before. |
+| `copy` | no | A command that creates `{resource}` as a copy of `{template}`, needed by the Seed `template`. |
+| `drop` | yes | A command that removes the resource, run only to undo a resource whose Seed failed. |
+| `ready` | no | A command that succeeds once the container accepts the commands above. Procly runs it every quarter of a second until it succeeds. |
+| `max_length` | no | The longest name the technology accepts. A longer name is an error rather than silently cut, which would make 2 Worktrees share a resource. |
+| `capacity` | no | How many resources the container holds at most. It is read and not enforced by the Drivers that name their resources. |
+
+Commands run in the container of the Compose service with `docker compose exec`, by `sh -c`. `{resource}` and `{template}` are replaced by the names, which hold only lowercase letters, digits and underscores, and every other brace is left alone, so `${POSTGRES_USER}` reaches the shell of the container. A command that runs past 5 minutes is stopped. An unknown key in a Driver file is an error, and so is a Driver that no place holds, which names the places searched.
+
+The bundled Postgres Driver creates one database per resource with `createdb`, as the user `${POSTGRES_USER:-postgres}` of the container, and builds `postgresql://postgres:postgres@localhost:{port}/{resource}`. A Repository whose container uses other credentials copies the file to `.procly/drivers/postgres.toml` and edits the URL.
 
 ## Ports and Leases
 
@@ -166,12 +285,14 @@ SESSION_COOKIE = "web_{worktree.slug}"
 | Placeholder | Replaced with |
 | --- | --- |
 | `{services.<service>.ports.<port name>}` | The Lease of that Port name of that Service in this Worktree, granted if the Service has none yet, whether it runs or not. |
+| `{services.<service>.resources.<key>.url}` | The connection URL of that Logical resource of that Compose service in this Worktree, see [Logical resources and Drivers](#logical-resources-and-drivers). It reads the Lease of the Service, granted if it has none yet. |
+| `{services.<service>.resources.<key>.name}` | The name of that Logical resource in this Worktree. |
 | `{worktree.slug}` | The Worktree slug, such as `app_other` for a Worktree in `app-other`. |
 | `{worktree.is_main}` | `true` in the Main worktree, `false` elsewhere. |
 
 Every other brace is left as it is, so `${HOME}` and JSON survive. A brace that opens like a placeholder of Procly (`{worktree.`, `{services.` or `{ports.`) and names nothing is an error, so that a typo never reaches a process as a literal. The own Lease of a Service is written `{services.<its name>.ports.<port name>}` in a template, the shorter `{ports.<name>}` works in `run` only.
 
-A name must be letters, digits and underscores, not starting with a digit. `PORT`, `PORT_*`, `PROCLY` and `PROCLY_SERVICE` are Procly's own and cannot be derived. An invalid template, a Service or a Port name that is not declared, or 2 Services giving one variable 2 different templates fail `procly up` and `procly env` with exit code 125, before any process starts.
+A name must be letters, digits and underscores, not starting with a digit. `PORT`, `PORT_*`, `PROCLY` and `PROCLY_SERVICE` are Procly's own and cannot be derived. An invalid template, a Service, a Port name or a resource that is not declared, or 2 Services giving one variable 2 different templates fail `procly up` and `procly env` with exit code 125, before any process starts.
 
 The variables are injected into the environment of the Service, so they win over the same name in the environment of the caller and over the `.env` of the Repository, which no step of Procly reads or writes. This holds for AdonisJS, Next.js and `dotenv-cli`, see ADR 0007.
 

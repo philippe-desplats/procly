@@ -12,10 +12,13 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use super::Registry;
+use super::health::{HealthCheck, HttpCheck};
 use super::lease::{LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
-use crate::derived::{Derived, DerivedError, Facts};
+use crate::derived::{Derived, DerivedError, Facts, Resource};
+use crate::driver;
+use crate::driver::{Driver, DriverError};
 use crate::envfile;
 use crate::ports::{self, PortsError};
 use crate::topology::{self, Topology, TopologyError};
@@ -28,6 +31,8 @@ pub(super) enum EnvironmentError {
     Ports(#[from] PortsError),
     #[error(transparent)]
     Derived(#[from] DerivedError),
+    #[error(transparent)]
+    Driver(#[from] DriverError),
     #[error(transparent)]
     Lease(#[from] LeaseError),
     #[error(transparent)]
@@ -70,7 +75,7 @@ pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Optio
     let health_port_name = declared.health_port_name(name)?;
     // A Compose service has no command, so no placeholder either.
     let command = match declared.kind(name)? {
-        ServiceKind::Process { run } => run,
+        ServiceKind::Process { run } | ServiceKind::Group { run, .. } => run,
         ServiceKind::Compose { .. } => "",
     };
     ports::check(name, command, declared.ports.keys())?;
@@ -102,7 +107,8 @@ pub(super) fn injected(
             .expect("a Lease is granted for every Port name, the health one included")
     });
 
-    let facts = facts(topology, &table);
+    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let facts = facts(topology, &table, &resources);
     let mut variables = ports::environment(&leases, health_port);
     variables.extend(derived.render(name, &facts)?);
     variables.push(("PROCLY".to_owned(), "1".to_owned()));
@@ -112,6 +118,91 @@ pub(super) fn injected(
         leases,
         health_port,
     })
+}
+
+/// What a Group receives on top of the environment of its caller.
+#[derive(Debug)]
+pub(super) struct InjectedGroup {
+    /// In the order they are set: the Leases of each covered Service, their Derived variables, then `PROCLY` and
+    /// `PROCLY_SERVICE`.
+    pub(super) variables: Vec<(String, String)>,
+    /// The port of every Lease of the covered Services.
+    pub(super) lease_ports: Vec<u16>,
+    /// The health check of each covered Service, which the Group passes once all of them do.
+    pub(super) checks: Vec<HealthCheck>,
+}
+
+/// The variables Procly injects into the Group `name`, granting the Leases of the Services it covers.
+///
+/// Each covered Service has `PORT` and `PORT_<NAME>` of its own, which would collide in one environment, so the
+/// Group gets `PORT_<SERVICE>_<NAME>` instead, such as `PORT_WEB_HTTP`. Their Derived variables are injected as they
+/// are, they are named apart already. `starting` is as for [`injected`].
+pub(super) fn injected_group(
+    registry: &Registry,
+    topology: &Topology,
+    config: &Config,
+    name: &str,
+    covers: &[String],
+    starting: bool,
+) -> Result<InjectedGroup, EnvironmentError> {
+    let derived = Derived::from_config(&config.services)?;
+    let branch = pinned_branch(topology, config)?;
+    let mut table = grant_referenced(registry, topology, config, branch, &derived)?;
+    let mut variables = Vec::new();
+    let mut lease_ports = Vec::new();
+    let mut checks = Vec::new();
+    for service in covers {
+        let declared = config
+            .services
+            .get(service)
+            .expect("the configuration was validated, so a covered Service is declared");
+        let health_port_name = check(service, declared)?;
+        let leases = grant(registry, topology, config, branch, service, &declared.ports, !starting)?;
+        for (port_name, port) in &leases {
+            variables.push((
+                format!("PORT_{}_{}", identifier(service), port_name.to_ascii_uppercase()),
+                port.to_string(),
+            ));
+            lease_ports.push(*port);
+        }
+        checks.push(HealthCheck {
+            port: health_port_name.and_then(|port_name| leases.get(port_name).copied()),
+            http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
+            covered: Vec::new(),
+        });
+        table.insert(service.clone(), leases);
+    }
+    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let facts = facts(topology, &table, &resources);
+    for service in covers {
+        for variable in derived.render(service, &facts)? {
+            // Two covered Services may share a variable, they were checked to give it one template.
+            if !variables.contains(&variable) {
+                variables.push(variable);
+            }
+        }
+    }
+    variables.push(("PROCLY".to_owned(), "1".to_owned()));
+    variables.push(("PROCLY_SERVICE".to_owned(), name.to_owned()));
+    Ok(InjectedGroup {
+        variables,
+        lease_ports,
+        checks,
+    })
+}
+
+/// The name of a Service as part of a variable name: upper case, every other character an underscore.
+fn identifier(service: &str) -> String {
+    service
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Writes the Env file of the Worktree and makes git ignore it, and `procly.local.toml`, with a Managed block.
@@ -131,7 +222,8 @@ pub(super) fn mirror(
         .expect("the mirroring mutex is never poisoned, no code panics while holding it");
     let derived = Derived::from_config(&config.services)?;
     let table = grant_referenced(registry, topology, config, pinned_branch(topology, config)?, &derived)?;
-    let variables = derived.render_all(&facts(topology, &table))?;
+    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let variables = derived.render_all(&facts(topology, &table, &resources))?;
     // Excluded first, so that the Env file is never visible to git, not even for a moment.
     exclude(registry, topology, gitignore)?;
     let text = envfile::env_file(&variables);
@@ -142,12 +234,74 @@ pub(super) fn mirror(
     Ok(())
 }
 
-fn facts<'a>(topology: &'a Topology, leases: &'a BTreeMap<String, BTreeMap<String, u16>>) -> Facts<'a> {
+fn facts<'a>(
+    topology: &'a Topology,
+    leases: &'a BTreeMap<String, BTreeMap<String, u16>>,
+    resources: &'a BTreeMap<String, BTreeMap<String, Resource>>,
+) -> Facts<'a> {
     Facts {
         slug: &topology.worktree.slug,
         is_main: topology.worktree.main,
         leases,
+        resources,
     }
+}
+
+/// The Logical resources of the Worktree for every Compose service some template reads one of. Only names and URLs are
+/// worked out here, creating the resources is for `up` of the Compose service.
+fn referenced_resources(
+    topology: &Topology,
+    config: &Config,
+    derived: &Derived,
+    leases: &BTreeMap<String, BTreeMap<String, u16>>,
+) -> Result<BTreeMap<String, BTreeMap<String, Resource>>, EnvironmentError> {
+    let mut table = BTreeMap::new();
+    for service in derived.resource_services() {
+        let declared = config
+            .services
+            .get(service)
+            .expect("Derived::from_config checked that every referenced Service is declared");
+        let service_leases = leases
+            .get(service)
+            .expect("the Leases of every Service a template refers to are granted before its resources");
+        if let Some((_, resources)) = logical_resources(topology, service, declared, service_leases)? {
+            table.insert(service.to_owned(), resources);
+        }
+    }
+    Ok(table)
+}
+
+/// A Driver and the Logical resources it creates for a Worktree, by key.
+pub(super) type DriverResources = (Driver, BTreeMap<String, Resource>);
+
+/// The Driver of the Compose service `name` and its Logical resources in the Worktree, `None` when it has no Driver.
+pub(super) fn logical_resources(
+    topology: &Topology,
+    name: &str,
+    declared: &ServiceConfig,
+    leases: &BTreeMap<String, u16>,
+) -> Result<Option<DriverResources>, EnvironmentError> {
+    let Some(driver) = &declared.driver else {
+        return Ok(None);
+    };
+    let worktree = &topology.worktree;
+    let driver = Driver::load(driver, &worktree.path, driver::user_dir().as_deref())?;
+    let health_port = declared
+        .health_port_name(name)?
+        .and_then(|port_name| leases.get(port_name).copied());
+    let mut resources = BTreeMap::new();
+    for (key, resource) in &declared.resources {
+        let resource_name = driver.resource_name(&resource.name, &worktree.slug, worktree.main)?;
+        let url = driver.url(&resource_name, leases, health_port)?;
+        resources.insert(
+            key.clone(),
+            Resource {
+                name: resource_name,
+                url,
+            },
+        );
+    }
+    Ok(Some((driver, resources)))
 }
 
 /// The Pinned branch the Worktree is on, as the configuration names it, `None` when its branch is not pinned.
