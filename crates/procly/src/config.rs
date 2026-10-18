@@ -487,6 +487,15 @@ impl Config {
         Ok(order)
     }
 
+    /// What `dependent` starts to have its need `need` running: the Group covering `need` when the dependent is
+    /// outside that Group, since a covered Service runs as the Group and a Group never starts over it running alone.
+    fn standing_for<'a>(&'a self, need: &'a str, dependent: &str) -> &'a str {
+        match self.group_of(need) {
+            Some(group) if group != dependent && self.group_of(dependent) != Some(group) => group,
+            _ => need,
+        }
+    }
+
     /// Depth-first walk of the needs of `name`, `path` being the Services being visited above it.
     fn visit(&self, name: &str, path: &mut Vec<String>, order: &mut Vec<String>) -> Result<(), ConfigError> {
         if let Some(start) = path.iter().position(|visiting| visiting == name) {
@@ -507,14 +516,14 @@ impl Config {
         };
         path.push(name.to_owned());
         for need in &declared.needs {
-            self.visit(need, path, order)?;
+            self.visit(self.standing_for(need, name), path, order)?;
         }
         for covered in declared.covers.iter().flatten() {
             let Some(covered) = self.services.get(covered) else {
                 continue;
             };
             for need in covered.needs.iter().filter(|need| self.group_of(need) != Some(name)) {
-                self.visit(need, path, order)?;
+                self.visit(self.standing_for(need, name), path, order)?;
             }
         }
         path.pop();
@@ -1169,6 +1178,26 @@ mod tests {
 
         let grouped = parsed(&format!("{MONOREPO}[services.db]\ncompose = 'pg'\n"));
         assert_eq!(grouped.start_order_all().unwrap(), ["db", "dev"]);
+    }
+
+    #[test]
+    fn a_need_on_a_covered_service_is_the_group_for_a_service_outside_it() {
+        let config = parsed(
+            "[services.api]\nrun = 'x'\n\
+             [services.web]\nrun = 'x'\n\
+             [services.app]\nrun = 'x'\nneeds = ['api']\n\
+             [services.dev]\nrun = 'x'\ncovers = ['api', 'web']\n",
+        );
+        // `api` only runs as `dev`, a Group that cannot start over `api` running alone.
+        assert_eq!(config.start_order("app").unwrap(), ["dev", "app"]);
+        assert_eq!(config.start_order_all().unwrap(), ["dev", "app"]);
+        // A Service of the Group itself still needs the Service alone.
+        let inside = parsed(
+            "[services.api]\nrun = 'x'\n\
+             [services.web]\nrun = 'x'\nneeds = ['api']\n\
+             [services.dev]\nrun = 'x'\ncovers = ['api', 'web']\n",
+        );
+        assert_eq!(inside.start_order("web").unwrap(), ["api", "web"]);
     }
 
     #[test]

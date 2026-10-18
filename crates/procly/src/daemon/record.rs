@@ -33,6 +33,9 @@ pub(crate) struct ServiceRecord {
     /// Groups existed, where no Service is one.
     #[serde(default)]
     pub(crate) covers: Vec<String>,
+    /// The port each Service a Group covers is probed on, which the Group must still listen on to be re-attached.
+    #[serde(default)]
+    pub(crate) covered_ports: Vec<u16>,
     /// How long the Service may be idle before it is stopped.
     pub(crate) idle_ms: Option<u64>,
 }

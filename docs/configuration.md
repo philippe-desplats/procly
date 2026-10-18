@@ -130,7 +130,7 @@ A Group and the Services it covers never run side by side in one Worktree:
 - `procly up dev` while `web` or `api` runs on its own is refused with exit code 125, and starts nothing. Stop them with `procly down web` first.
 - `procly down web` while `dev` runs is refused with exit code 125 and points to `procly down dev`, since `web` is not a process of its own.
 
-`up dev` starts what `dev` needs and what the Services it covers need, but not the covered Services. A need that points to a Service of the same Group is the Group itself. A Group refuses `ports`, `env`, and the `health` keys `port`, `path` and `status`, which are the ones of the Services it covers, and `health.timeout` is its own. It covers at least 1 Service, each one a declared Process service that is not itself a Group, and no Service is covered by 2 Groups. The Leases of a covered Service count as used as long as its Group runs, and are dated again when it ends.
+`up dev` starts what `dev` needs and what the Services it covers need, but not the covered Services. A need that points to a Service of the same Group is the Group itself, and a Service outside the Group that needs a covered Service starts the Group instead, since a Group never starts over a covered Service that runs alone. A Group refuses `ports`, `env`, and the `health` keys `port`, `path` and `status`, which are the ones of the Services it covers, and `health.timeout` is its own. It covers at least 1 Service, each one a declared Process service that is not itself a Group, and no Service is covered by 2 Groups. The Leases of a covered Service count as used as long as its Group runs, and are dated again when it ends.
 
 ## `procly up` without arguments
 

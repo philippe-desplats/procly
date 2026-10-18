@@ -337,3 +337,38 @@ fn the_leases_of_the_services_a_group_covers_are_dated_again_once_it_ends() {
         leased
     );
 }
+
+#[test]
+fn a_group_that_no_longer_listens_on_the_lease_of_a_covered_service_is_not_reattached() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let (server, web_pid) = (test_server(), procly.scratch().join("web-pid"));
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = '{server} --port {web}'\nports = {{ http = {web} }}\n\
+             [services.api]\nrun = '{server} --port {api}'\nports = {{ http = {api} }}\n\
+             [services.dev]\ncovers = ['web', 'api']\n\
+             run = '{server} --port $PORT_WEB_HTTP & echo $! > {web_pid}; exec {server} --port $PORT_API_HTTP'\n",
+            server = server.display(),
+            web_pid = web_pid.display(),
+        ),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    procly.kill_daemon();
+    // `web` dies while no Daemon watches, the leader of the Group and `api` live on.
+    nix::sys::signal::kill(common::read_pid(&web_pid), nix::sys::signal::Signal::SIGKILL).expect("kill web");
+    eventually("web is gone", || !listens(web));
+
+    let output = procly.procly_in(&main, &["up", "api"]);
+
+    assert_success(&output);
+    // Not `reused (via dev)`: the Group was stopped, and `api` starts on its own.
+    assert_eq!(
+        stdout(&output),
+        format!("api started http://localhost:{api} port {api}\n")
+    );
+    assert!(listens(api));
+}

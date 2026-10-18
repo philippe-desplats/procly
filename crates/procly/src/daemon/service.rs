@@ -443,6 +443,7 @@ fn record_of(spec: &ServiceSpec) -> ServiceRecord {
         port: spec.health.port,
         lease_ports: spec.lease_ports.clone(),
         covers: spec.covers.clone(),
+        covered_ports: spec.health.covered.iter().filter_map(|covered| covered.port).collect(),
         idle_ms: spec
             .idle
             .map(|idle| u64::try_from(idle.as_millis()).unwrap_or(u64::MAX)),
