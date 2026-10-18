@@ -183,4 +183,5 @@ _Avoid_: uninstall, teardown
 - "shared" first covered both a plain shared container and a shared container with per-Worktree databases. Resolved: they are 2 distinct modes, **Shared** and **Logical**.
 - "server" in Portly meant any supervised command. Resolved: Procly says **Service** for declared work and **Job** for ad hoc commands, and "server" is retired.
 - "temporary job" in Portly was a background command with a deadline. Resolved: Procly calls it a **Job**, deduplicated by its **Fingerprint**, which Portly's did not do.
+- "workspace" names the Cargo workspace in build files and Rust rules, never a Worktree. "supervisor" describes what Procly is, the running process is the **Daemon**.
 - "reserved ports" was used both for OAuth callback ports and for ports kept by `develop`. Resolved: the first is a **Pool**, the second is a **Pinned branch**.

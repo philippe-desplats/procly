@@ -17,3 +17,17 @@ The 5 default triage labels: `needs-triage`, `needs-info`, `ready-to-build`, `ne
 ### Domain docs
 
 Single-context: `GLOSSARY.md` and `docs/adr/` at the repository root. See `docs/conventions/domain.md`.
+
+## Rust and Tauri
+
+Procly is a Rust workspace (ADR 0002): crates live under `crates/`, the toolchain is pinned in `rust-toolchain.toml`.
+
+Read the project rules before writing code in their area:
+
+- `docs/rules/rust.md`: crate layout, errors, async runtime, unsafe, tests, checks.
+- `docs/rules/processes.md`: spawning, stopping, output capture and PTYs for supervised processes.
+- `docs/rules/tauri.md`: Tauri v2 conventions for the desktop app.
+
+The official docs of `process-wrap`, `portable-pty` and Tauri v2 are vendored and indexed in `docs/reference/README.md`, at the versions the project depends on. Read the API there rather than from memory. Regenerate them with `make docs`.
+
+Run `make check` (format, Clippy and rustdoc with warnings denied, tests) before pushing. The CI runs the same targets on macOS and Linux.
