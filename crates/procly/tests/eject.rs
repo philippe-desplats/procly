@@ -398,3 +398,71 @@ fn an_unknown_agent_is_a_usage_error() {
 
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }
+
+/// A Repository whose `procly.toml` and `files` are committed as they are, byte for byte, before Procly sees them.
+fn repository_with_files(procly: &Procly, files: &[(&str, &str)]) -> (PathBuf, u16) {
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    write(
+        &main.join("procly.toml"),
+        &format!(
+            "[services.web]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {port} }}\n",
+            test_server().display()
+        ),
+    );
+    for (name, text) in files {
+        write(&main.join(name), text);
+    }
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "--quiet", "--message", "app"]);
+    (main, port)
+}
+
+#[test]
+fn an_instruction_file_without_a_final_line_break_comes_back_without_one() {
+    let procly = Procly::new();
+    let (main, _) = repository_with_files(&procly, &[("AGENTS.md", "# App\n\nBuild with make.")]);
+    adopt_procly(&procly, &main);
+
+    eject(&procly, &main);
+
+    assert_eq!(
+        fs::read(main.join("AGENTS.md")).expect("read"),
+        b"# App\n\nBuild with make."
+    );
+    assert_eq!(git_output(&main, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_tracked_empty_instruction_file_and_settings_file_stay_empty_files() {
+    let procly = Procly::new();
+    let (main, _) = repository_with_files(&procly, &[("AGENTS.md", ""), (".claude/settings.json", "")]);
+    adopt_procly(&procly, &main);
+    assert!(read(&main.join("AGENTS.md")).contains(RULES_OPEN));
+
+    let output = eject(&procly, &main);
+
+    for file in ["AGENTS.md", ".claude/settings.json"] {
+        assert_eq!(
+            fs::read(main.join(file)).expect("the file is still there"),
+            b"",
+            "{file}"
+        );
+    }
+    assert_eq!(git_output(&main, &["status", "--porcelain"]), "");
+    assert!(!stdout(&output).contains("was deleted"), "{}", stdout(&output));
+}
+
+#[test]
+fn a_settings_file_indented_with_4_spaces_comes_back_byte_for_byte() {
+    let procly = Procly::new();
+    let own = "{\n    \"model\": \"opus\",\n    \"hooks\": {\n        \"PreToolUse\": [\n            {\n                \"matcher\": \"Edit\",\n                \"hooks\": [\n                    {\n                        \"type\": \"command\",\n                        \"command\": \"lint\"\n                    }\n                ]\n            }\n        ]\n    }\n}\n";
+    let (main, _) = repository_with_files(&procly, &[("AGENTS.md", INSTRUCTIONS), (".claude/settings.json", own)]);
+    adopt_procly(&procly, &main);
+    assert!(read(&main.join(".claude/settings.json")).contains("procly guard"));
+
+    eject(&procly, &main);
+
+    assert_eq!(read(&main.join(".claude/settings.json")), own);
+    assert_eq!(git_output(&main, &["status", "--porcelain"]), "");
+}

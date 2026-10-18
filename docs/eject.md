@@ -34,11 +34,7 @@ A file that held nothing else once its block was gone is deleted, since only Pro
 
 A block counts as intact when its content is the one Procly recorded the fingerprint of, or the one Procly writes today when the record was lost. Anything else is a block you edited. An Env file counts as Procly's while it starts with its header and holds what Procly last wrote, so a line you added to it is an edit.
 
-Eject cannot know how a file looked before Procly wrote into it, so it restores the text around a block and nothing else. 3 cases come back slightly different from the original:
-
-- A file that did not end with a line break gets one, because Procly added it before its block.
-- An instruction file, `.gitignore` or settings file that existed and was empty is deleted with its block.
-- A settings file with another layout than 2 spaces of indentation keeps the 2 spaces `agent install` gave it.
+Procly records how each file looked just before it first wrote into it, so that eject gives it back to the byte when nothing else in it changed: a file that did not end with a line break ends without one again, an instruction file, `.gitignore` or settings file that existed empty stays an empty file, and a settings file keeps the layout and indentation it had. The settings file is kept whole in the state directory for that. When you changed the file around the block, eject removes the block and keeps your changes, and the settings file is written again with 2 spaces of indentation. A block recorded by a Procly that did not keep this, or after the state directory was lost, is removed with the text around it as it is.
 
 ## What it leaves
 

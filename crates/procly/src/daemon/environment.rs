@@ -230,7 +230,7 @@ pub(super) fn mirror(
     write_env_file(&topology.worktree.path, &text)?;
     registry
         .managed
-        .record(&topology.worktree.path.join(ENV_FILE), ENV_BLOCK, &text)?;
+        .record(&topology.worktree.path.join(ENV_FILE), ENV_BLOCK, &text, None)?;
     Ok(())
 }
 
