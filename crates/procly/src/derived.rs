@@ -1,7 +1,8 @@
 //! Derived variables: environment variables whose values are templates over Leases and Worktree facts (ADR 0007).
 //!
-//! A template holds 3 kinds of placeholder, `{services.<service>.ports.<port name>}` for the Lease of a Port name of
-//! a Service, `{worktree.slug}` and `{worktree.is_main}`. Every other brace is left alone, but a brace that opens like
+//! A template holds 4 kinds of placeholder, `{services.<service>.ports.<port name>}` for the Lease of a Port name of
+//! a Service, `{services.<service>.resources.<key>.name}` and `.url` for a Logical resource of a Compose service,
+//! `{worktree.slug}` and `{worktree.is_main}`. Every other brace is left alone, but a brace that opens like
 //! ours and names nothing is an error, so that a typo never reaches a process as a literal.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +24,15 @@ pub(crate) struct Facts<'a> {
     pub(crate) is_main: bool,
     /// Service, then Port name, then leased port.
     pub(crate) leases: &'a BTreeMap<String, BTreeMap<String, u16>>,
+    /// Service, then resource key, then the Logical resource of this Worktree.
+    pub(crate) resources: &'a BTreeMap<String, BTreeMap<String, Resource>>,
+}
+
+/// A Logical resource of a Compose service in one Worktree, as a template reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Resource {
+    pub(crate) name: String,
+    pub(crate) url: String,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -34,7 +44,7 @@ pub(crate) enum DerivedError {
     #[error("service {service} cannot derive {name}, Procly injects it itself")]
     ReservedName { service: String, name: String },
     #[error(
-        "Derived variable {name} of service {service} holds the placeholder {{{placeholder}}}, which is none of {{services.<service>.ports.<port name>}}, {{worktree.slug}} and {{worktree.is_main}}"
+        "Derived variable {name} of service {service} holds the placeholder {{{placeholder}}}, which is none of {{services.<service>.ports.<port name>}}, {{services.<service>.resources.<key>.name}}, {{services.<service>.resources.<key>.url}}, {{worktree.slug}} and {{worktree.is_main}}"
     )]
     UnknownPlaceholder {
         service: String,
@@ -57,6 +67,15 @@ pub(crate) enum DerivedError {
         port_name: String,
     },
     #[error(
+        "Derived variable {name} of service {service} refers to resource {resource}, which service {referenced} does not declare"
+    )]
+    UnknownResource {
+        service: String,
+        name: String,
+        referenced: String,
+        resource: String,
+    },
+    #[error(
         "services {first} and {second} give Derived variable {name} different templates, the Env file holds one value per variable"
     )]
     Conflict {
@@ -66,6 +85,8 @@ pub(crate) enum DerivedError {
     },
     #[error("no Lease for Port name {port_name} of service {service}")]
     MissingLease { service: String, port_name: String },
+    #[error("no Logical resource {resource} known for service {service}")]
+    MissingResource { service: String, resource: String },
 }
 
 /// A brace of a template that opens like a placeholder of ours and is none.
@@ -78,6 +99,8 @@ pub(crate) struct UnknownPlaceholder(pub(crate) String);
 enum Part {
     Text(String),
     Port { service: String, port_name: String },
+    ResourceName { service: String, resource: String },
+    ResourceUrl { service: String, resource: String },
     WorktreeSlug,
     WorktreeIsMain,
 }
@@ -128,6 +151,16 @@ impl Template {
         })
     }
 
+    /// Every Logical resource the template reads, as the Service and the resource key.
+    fn resource_references(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.parts.iter().filter_map(|part| match part {
+            Part::ResourceName { service, resource } | Part::ResourceUrl { service, resource } => {
+                Some((service.as_str(), resource.as_str()))
+            }
+            _ => None,
+        })
+    }
+
     pub(crate) fn render(&self, facts: &Facts<'_>) -> Result<String, DerivedError> {
         let mut rendered = String::new();
         for part in &self.parts {
@@ -145,6 +178,21 @@ impl Template {
                             port_name: port_name.clone(),
                         })?;
                     rendered.push_str(&port.to_string());
+                }
+                Part::ResourceName { service, resource } | Part::ResourceUrl { service, resource } => {
+                    let found = facts
+                        .resources
+                        .get(service)
+                        .and_then(|resources| resources.get(resource))
+                        .ok_or_else(|| DerivedError::MissingResource {
+                            service: service.clone(),
+                            resource: resource.clone(),
+                        })?;
+                    rendered.push_str(if matches!(part, Part::ResourceName { .. }) {
+                        &found.name
+                    } else {
+                        &found.url
+                    });
                 }
             }
         }
@@ -168,6 +216,16 @@ fn placeholder(name: &str) -> Option<Part> {
             service: service.to_owned(),
             port_name: port_name.to_owned(),
         },
+        ["services", service, "resources", resource, field @ ("name" | "url")]
+            if is_name(service) && is_name(resource) =>
+        {
+            let (service, resource) = (service.to_owned(), resource.to_owned());
+            if field == "name" {
+                Part::ResourceName { service, resource }
+            } else {
+                Part::ResourceUrl { service, resource }
+            }
+        }
         _ => return None,
     })
 }
@@ -239,6 +297,23 @@ impl Derived {
                         });
                     }
                 }
+                for (referenced, resource) in template.resource_references() {
+                    let Some(target) = configured.get(referenced) else {
+                        return Err(DerivedError::UnknownService {
+                            service: service_name,
+                            name: variable,
+                            referenced: referenced.to_owned(),
+                        });
+                    };
+                    if !target.resources.contains_key(resource) {
+                        return Err(DerivedError::UnknownResource {
+                            service: service_name,
+                            name: variable,
+                            referenced: referenced.to_owned(),
+                            resource: resource.to_owned(),
+                        });
+                    }
+                }
                 match declared_by.get(name.as_str()) {
                     Some((first, first_text)) if first_text != text => {
                         return Err(DerivedError::Conflict {
@@ -259,12 +334,28 @@ impl Derived {
         Ok(Self { services })
     }
 
-    /// Every Service some template reads a Lease of, whose Leases must be granted before rendering.
+    /// Every Service some template reads a Lease of, or a resource of whose URL holds a port, whose Leases must be
+    /// granted before rendering.
     pub(crate) fn referenced(&self) -> BTreeSet<&str> {
         self.services
             .values()
             .flat_map(BTreeMap::values)
-            .flat_map(|template| template.references().map(|(service, _)| service))
+            .flat_map(|template| {
+                template
+                    .references()
+                    .chain(template.resource_references())
+                    .map(|(service, _)| service)
+            })
+            .collect()
+    }
+
+    /// Every Service some template reads a Logical resource of, whose names and URLs must be worked out before
+    /// rendering.
+    pub(crate) fn resource_services(&self) -> BTreeSet<&str> {
+        self.services
+            .values()
+            .flat_map(BTreeMap::values)
+            .flat_map(|template| template.resource_references().map(|(service, _)| service))
             .collect()
     }
 
@@ -314,6 +405,7 @@ mod tests {
                 slug,
                 is_main,
                 leases: &leases,
+                resources: &BTreeMap::new(),
             })
             .unwrap()
     }
@@ -389,6 +481,7 @@ mod tests {
             slug: "app_other",
             is_main: false,
             leases: &leases,
+            resources: &BTreeMap::new(),
         };
         assert_eq!(
             derived.render("web", &facts).unwrap(),
@@ -465,6 +558,7 @@ mod tests {
             slug: "s",
             is_main: true,
             leases: &leases,
+            resources: &BTreeMap::new(),
         };
         assert_eq!(
             derived_same.render_all(&facts).unwrap(),
@@ -482,6 +576,112 @@ mod tests {
         );
     }
 
+    const DB_AND_API: &str = "[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\nports = { db = 5432 }\n\
+        [services.db.resources.dev]\nname = 'app'\n\
+        [services.api]\nrun = 'api'\n\
+        [services.api.env]\nDATABASE_URL = '{services.db.resources.dev.url}'\nDATABASE_NAME = '{services.db.resources.dev.name}'\n";
+
+    fn resources() -> BTreeMap<String, BTreeMap<String, Resource>> {
+        BTreeMap::from([(
+            "db".to_owned(),
+            BTreeMap::from([(
+                "dev".to_owned(),
+                Resource {
+                    name: "app_other".to_owned(),
+                    url: "postgresql://localhost:24000/app_other".to_owned(),
+                },
+            )]),
+        )])
+    }
+
+    #[test]
+    fn a_template_embeds_the_name_and_the_connection_url_of_a_logical_resource() {
+        let derived = derived(DB_AND_API).unwrap();
+        let (leases, resources) = (leases(), resources());
+        let facts = Facts {
+            slug: "other",
+            is_main: false,
+            leases: &leases,
+            resources: &resources,
+        };
+        assert_eq!(
+            derived.render("api", &facts).unwrap(),
+            [
+                ("DATABASE_NAME".to_owned(), "app_other".to_owned()),
+                (
+                    "DATABASE_URL".to_owned(),
+                    "postgresql://localhost:24000/app_other".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_service_holding_a_resource_a_template_reads_is_listed_with_its_resources() {
+        let derived = derived(DB_AND_API).unwrap();
+        assert_eq!(derived.resource_services().into_iter().collect::<Vec<_>>(), ["db"]);
+        // Its URL holds a port, so its Leases are granted before rendering.
+        assert_eq!(derived.referenced().into_iter().collect::<Vec<_>>(), ["db"]);
+    }
+
+    #[test]
+    fn a_template_must_refer_to_a_declared_resource_of_a_declared_service() {
+        let unknown_service = derived("[services.web]\nrun = 'x'\nenv = { A = '{services.db.resources.dev.url}' }\n");
+        assert_eq!(
+            unknown_service.unwrap_err(),
+            DerivedError::UnknownService {
+                service: "web".to_owned(),
+                name: "A".to_owned(),
+                referenced: "db".to_owned()
+            }
+        );
+        let unknown_resource = derived(&DB_AND_API.replace("resources.dev.url", "resources.test.url"));
+        assert_eq!(
+            unknown_resource.unwrap_err(),
+            DerivedError::UnknownResource {
+                service: "api".to_owned(),
+                name: "DATABASE_URL".to_owned(),
+                referenced: "db".to_owned(),
+                resource: "test".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_resource_the_facts_lack_is_an_error() {
+        let template = Template::parse("{services.db.resources.dev.url}").unwrap();
+        let leases = BTreeMap::new();
+        assert_eq!(
+            template.render(&Facts {
+                slug: "s",
+                is_main: true,
+                leases: &leases,
+                resources: &BTreeMap::new(),
+            }),
+            Err(DerivedError::MissingResource {
+                service: "db".to_owned(),
+                resource: "dev".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_placeholder_for_a_resource_names_its_url_or_its_name_and_nothing_else() {
+        assert!(Template::parse("{services.db.resources.dev.url}").is_ok());
+        assert!(Template::parse("{services.db.resources.dev.name}").is_ok());
+        for placeholder in [
+            "services.db.resources.dev",
+            "services.db.resources.dev.host",
+            "services.db.resources..url",
+        ] {
+            assert_eq!(
+                Template::parse(&format!("{{{placeholder}}}")),
+                Err(UnknownPlaceholder(placeholder.to_owned())),
+                "{placeholder}"
+            );
+        }
+    }
+
     #[test]
     fn a_lease_the_facts_lack_is_an_error() {
         let leases = BTreeMap::new();
@@ -490,7 +690,8 @@ mod tests {
             template.render(&Facts {
                 slug: "s",
                 is_main: true,
-                leases: &leases
+                leases: &leases,
+                resources: &BTreeMap::new(),
             }),
             Err(DerivedError::MissingLease {
                 service: "api".to_owned(),
