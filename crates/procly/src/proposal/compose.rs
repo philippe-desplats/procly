@@ -20,6 +20,17 @@ const COMPOSE_FILES: [&str; 4] = [
     "docker-compose.yml",
 ];
 
+/// How a technology gives each Worktree resources of its own, through a Driver that ships with Procly.
+#[derive(Debug)]
+struct Logical {
+    /// The Driver, a file name.
+    driver: &'static str,
+    /// The key of the resource proposed, how templates name it.
+    resource: &'static str,
+    /// Whether the Driver names its resources, in which case the proposal names the one of the Main worktree.
+    named: bool,
+}
+
 /// What Procly knows about a technology: the images it runs from, the Driver that gives each Worktree its own Logical
 /// resource in it when a bundled one exists, and the Port name of its well-known ports, the first one being probed.
 #[derive(Debug)]
@@ -27,44 +38,57 @@ struct Technology {
     /// Image names, as `postgres` in `ghcr.io/acme/postgres:17`. A name matches whole, so that `postgres-exporter`
     /// is not taken for a Postgres.
     images: &'static [&'static str],
-    driver: Option<&'static str>,
+    logical: Option<Logical>,
     ports: &'static [(u16, &'static str)],
 }
 
 const TECHNOLOGIES: &[Technology] = &[
     Technology {
         images: &["postgres", "postgresql", "postgis", "pgvector", "timescaledb"],
-        driver: Some("postgres"),
+        logical: Some(Logical {
+            driver: "postgres",
+            resource: "dev",
+            named: true,
+        }),
         ports: &[(5432, "db")],
     },
     Technology {
-        images: &["redis", "redis-stack", "redis-stack-server", "valkey", "keydb"],
-        driver: None,
+        images: &["redis", "redis-stack", "redis-stack-server"],
+        logical: Some(Logical {
+            driver: "redis",
+            resource: "main",
+            named: false,
+        }),
+        ports: &[(6379, "redis")],
+    },
+    Technology {
+        images: &["valkey", "keydb"],
+        logical: None,
         ports: &[(6379, "redis")],
     },
     Technology {
         images: &["mailpit", "mailhog"],
-        driver: None,
+        logical: None,
         ports: &[(1025, "smtp"), (8025, "http")],
     },
     Technology {
         images: &["mysql", "mariadb"],
-        driver: None,
+        logical: None,
         ports: &[(3306, "db")],
     },
     Technology {
         images: &["mongo"],
-        driver: None,
+        logical: None,
         ports: &[(27017, "db")],
     },
     Technology {
         images: &["minio"],
-        driver: None,
+        logical: None,
         ports: &[(9000, "api"), (9001, "console")],
     },
     Technology {
         images: &["rabbitmq"],
-        driver: None,
+        logical: None,
         ports: &[(5672, "amqp"), (15672, "http")],
     },
 ];
@@ -349,19 +373,18 @@ fn compose_service(name: &str, own: &str, service: &Value, variables: &mut BTree
         entry.health = Some(HealthEntry { port: probed.clone() });
     }
     // A Logical resource is reached through the Lease and the credentials of its Driver, so a container with no port,
-    // or with credentials the bundled Driver does not know, stays Shared.
-    if let Some(driver) = technology
-        .and_then(|technology| technology.driver)
-        .filter(|_| !named.is_empty() && has_bundled_credentials(service))
+    // or a Postgres with credentials the bundled Driver does not know, stays Shared.
+    if let Some(logical) = technology
+        .and_then(|technology| technology.logical.as_ref())
+        .filter(|logical| !named.is_empty() && (logical.driver != "postgres" || has_bundled_credentials(service)))
     {
-        entry.driver = Some(driver.to_owned());
-        let database = environment(service, "POSTGRES_DB").unwrap_or_default();
-        entry.resources.insert(
-            "dev".to_owned(),
-            ResourceEntry {
-                name: resource_name(&database),
-            },
-        );
+        entry.driver = Some(logical.driver.to_owned());
+        let name = logical
+            .named
+            .then(|| resource_name(&environment(service, "POSTGRES_DB").unwrap_or_default()));
+        entry
+            .resources
+            .insert(logical.resource.to_owned(), ResourceEntry { name });
     }
     entry
 }
@@ -434,10 +457,16 @@ mod tests {
 
     #[test]
     fn an_image_reference_is_matched_by_its_name_only() {
-        let driver = |image| technology(image).and_then(|technology| technology.driver);
+        let driver = |image| {
+            technology(image)
+                .and_then(|technology| technology.logical.as_ref())
+                .map(|logical| logical.driver)
+        };
         assert_eq!(driver("postgres:17"), Some("postgres"));
         assert_eq!(driver("ghcr.io/acme/postgis:16@sha256:abc"), Some("postgres"));
         assert_eq!(driver("bitnami/postgresql"), Some("postgres"));
+        assert_eq!(driver("redis:7"), Some("redis"));
+        assert_eq!(driver("valkey/valkey"), None);
         assert!(technology("redis/redis-stack:latest").is_some());
         assert!(technology("redisinsight").is_none());
         assert!(technology("prometheuscommunity/postgres-exporter").is_none());
@@ -446,7 +475,11 @@ mod tests {
     #[test]
     fn every_driver_the_technologies_name_ships_with_procly() {
         let worktree = tempfile::tempdir().unwrap();
-        for driver in TECHNOLOGIES.iter().filter_map(|technology| technology.driver) {
+        for driver in TECHNOLOGIES
+            .iter()
+            .filter_map(|technology| technology.logical.as_ref())
+            .map(|logical| logical.driver)
+        {
             assert!(Driver::load(driver, worktree.path(), None).is_ok(), "{driver}");
         }
     }

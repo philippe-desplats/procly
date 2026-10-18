@@ -71,7 +71,9 @@ struct HealthEntry {
 /// One Logical resource of a Compose service.
 #[derive(Debug, Serialize)]
 struct ResourceEntry {
-    name: String,
+    /// The name in the Main worktree, unset for a Driver that numbers its resources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 impl ServiceEntry {

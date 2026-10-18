@@ -444,9 +444,12 @@ name = \"shop\"
 
 [services.redis]
 compose = \"redis\"
+driver = \"redis\"
 
 [services.redis.ports]
 redis = 6379
+
+[services.redis.resources.main]
 "
     );
     for service in ["postgres", "redis", "mailpit"] {
