@@ -81,6 +81,8 @@ Each Port name of a Service gets a Lease in each Worktree, a port that stays the
 - The Main worktree gets the declared port, unless another Lease or a Foreign process holds it.
 - Any other Worktree, and the Main worktree when its declared port is taken, gets the first port of `settings.port_range` that no Lease holds, that no Service declares, and that nothing listens on, checked with a real `bind`.
 
+One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way. Every other Lease stays the same across restarts.
+
 The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
 
 | Variable | Value |
