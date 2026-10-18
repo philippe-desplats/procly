@@ -147,8 +147,14 @@ impl Indexes {
 /// Numbers the resources of `request` in `table`: the Main worktree first, so that it has the lowest numbers
 /// whichever Worktree asks first, then the Worktree. A resource that has an index keeps it.
 fn allocate_in(table: &mut Table, request: &IndexRequest<'_>) -> Result<BTreeMap<String, u32>, IndexError> {
+    // A Shared request names the Main worktree, which is then numbered once.
+    let worktrees: &[&Path] = if request.main == request.worktree {
+        &[request.main]
+    } else {
+        &[request.main, request.worktree]
+    };
     let mut wanted = BTreeMap::new();
-    for worktree in [request.main, request.worktree] {
+    for &worktree in worktrees {
         wanted = BTreeMap::new();
         for resource in request.resources {
             let key = IndexKey {

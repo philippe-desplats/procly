@@ -241,7 +241,7 @@ A command Seed that fails, or reaches its timeout, drops the resource that same 
 How a Compose service that sets a `driver` is separated between Worktrees is its Isolation mode, set by the first of these that has one:
 
 1. `isolation` of the Service.
-2. `isolation` in `[settings]`, which sets it for every Service with a `driver` of the Repository, or of all your Repositories from the user settings.
+2. `isolation` in `[settings]`, which sets it for every Service with a `driver` of the Repository, Postgres ones included, or of all your Repositories from the user settings.
 3. Logical.
 
 | Mode | What every Worktree reads |
@@ -309,7 +309,7 @@ env = { CACHE_PORT = "{services.cache.ports.redis}" }
 REDIS_URL = "{services.cache.resources.main.url}"
 ```
 
-Indexes are handed out on first use and stored in `indexes.json` of the state directory, so a Worktree keeps its index across restarts of the Service and of the Daemon, in `procly env`, the Env file and `procly up` alike. The Main worktree has the lowest ones, 0 for its first resource, whichever Worktree asks first, so an app that never picks a database reads the one it always did. Each resource of a Service has an index of its own. An index is never given back, also when its Worktree is removed.
+Indexes are handed out on first use and stored in `indexes.json` of the state directory, so a Worktree keeps its index across restarts of the Service and of the Daemon, in `procly env`, the Env file and `procly up` alike. Each resource of a Service has an index of its own, numbered in the alphabetical order of the resource keys. The Main worktree has the lowest ones, whichever Worktree asks first, so an app that never picks a database reads the one it always did. An index is never given back, also when its Worktree is removed.
 
 When every index is taken, `procly env` and `procly up` exit with 125 and tell the way out, and the Worktrees that have an index keep it:
 
@@ -317,7 +317,7 @@ When every index is taken, `procly env` and `procly up` exit with 125 and tell t
 procly: all 16 indexes of service cache are taken, none is left for resource main: raise `capacity` in the Driver redis by copying it to .procly/drivers/redis.toml, together with the databases the server holds, or set `isolation = "shared"` on the service so that every Worktree uses the same index
 ```
 
-The 2 ways out are to copy the bundled Driver to `.procly/drivers/redis.toml` and raise its `capacity`, and to start the Redis server with as many `--databases`, or to set the Service Shared so that every Worktree reads the index of the Main worktree.
+There are 2 ways out. Either copy the bundled Driver to `.procly/drivers/redis.toml`, raise its `capacity` and start the Redis server with as many `--databases`, or set the Service Shared so that every Worktree reads the index of the Main worktree.
 
 ## Ports and Leases
 

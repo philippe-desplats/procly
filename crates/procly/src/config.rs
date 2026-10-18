@@ -170,7 +170,7 @@ pub(crate) struct Settings {
     /// The Isolation mode of every Compose service that sets a Driver and no `isolation` of its own, Logical when
     /// unset.
     #[serde(default)]
-    pub(crate) isolation: Option<Isolation>,
+    pub(crate) isolation: Option<IsolationMode>,
 }
 
 impl Default for Settings {
@@ -211,7 +211,7 @@ pub(crate) struct ServiceConfig {
     pub(crate) grace_period: Option<Duration>,
     /// Overrides `settings.isolation` for this Compose service.
     #[serde(default)]
-    pub(crate) isolation: Option<Isolation>,
+    pub(crate) isolation: Option<IsolationMode>,
     /// The Driver that creates the Logical resources of a Compose service in its container.
     #[serde(default)]
     pub(crate) driver: Option<String>,
@@ -297,28 +297,28 @@ impl PortConfig {
 /// How a Compose service is separated between Worktrees. The Isolated mode, one container per Worktree, is for a later
 /// version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Isolation {
+pub(crate) enum IsolationMode {
     /// One container, and every Worktree reads the resources of the Main worktree.
     Shared,
     /// One container, and each Worktree has resources of its own in it.
     Logical,
 }
 
-impl<'de> Deserialize<'de> for Isolation {
+impl<'de> Deserialize<'de> for IsolationMode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct IsolationVisitor;
 
         impl Visitor<'_> for IsolationVisitor {
-            type Value = Isolation;
+            type Value = IsolationMode;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("\"shared\" or \"logical\"")
             }
 
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<Isolation, E> {
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<IsolationMode, E> {
                 match value {
-                    "shared" => Ok(Isolation::Shared),
-                    "logical" => Ok(Isolation::Logical),
+                    "shared" => Ok(IsolationMode::Shared),
+                    "logical" => Ok(IsolationMode::Logical),
                     // Named apart so that nobody waits for it to start working.
                     "isolated" => Err(E::custom(
                         "the Isolated mode is not in v0.1, use \"shared\" or \"logical\"",
@@ -581,7 +581,7 @@ impl ServiceConfig {
     /// Fails on a Driver without resources or resources without a Driver, and on a key or a name that is not safe to
     /// put in a command run inside the container.
     fn validate_resources(&self, name: &str) -> Result<(), ConfigError> {
-        if self.isolation == Some(Isolation::Logical) && self.driver.is_none() {
+        if self.isolation == Some(IsolationMode::Logical) && self.driver.is_none() {
             return Err(ConfigError::LogicalWithoutDriver {
                 service: name.to_owned(),
             });
@@ -842,14 +842,14 @@ impl Config {
 
     /// How the Compose service `service` is separated between Worktrees: the mode it sets, else the one of the
     /// Repository, else Logical. A Service without a Driver has no resources to separate, so it is Shared.
-    pub(crate) fn isolation(&self, service: &ServiceConfig) -> Isolation {
+    pub(crate) fn isolation(&self, service: &ServiceConfig) -> IsolationMode {
         if service.driver.is_none() {
-            return Isolation::Shared;
+            return IsolationMode::Shared;
         }
         service
             .isolation
             .or(self.settings.isolation)
-            .unwrap_or(Isolation::Logical)
+            .unwrap_or(IsolationMode::Logical)
     }
 
     /// Fails on the first Service whose keys disagree, so that no `up` starts anything from a configuration that
@@ -1307,8 +1307,8 @@ mod tests {
             "[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\nresources = { dev = { name = 'app' } }\n\
              [services.mail]\ncompose = 'mailpit'\n",
         );
-        assert_eq!(config.isolation(&config.services["db"]), Isolation::Logical);
-        assert_eq!(config.isolation(&config.services["mail"]), Isolation::Shared);
+        assert_eq!(config.isolation(&config.services["db"]), IsolationMode::Logical);
+        assert_eq!(config.isolation(&config.services["mail"]), IsolationMode::Shared);
     }
 
     #[test]
@@ -1321,10 +1321,10 @@ mod tests {
              [services.mail]\ncompose = 'mailpit'\n",
         );
         let isolation = |name: &str| config.isolation(&config.services[name]);
-        assert_eq!(isolation("cache"), Isolation::Shared);
-        assert_eq!(isolation("db"), Isolation::Logical);
+        assert_eq!(isolation("cache"), IsolationMode::Shared);
+        assert_eq!(isolation("db"), IsolationMode::Logical);
         // A Service without a Driver has nothing to isolate, whatever the Repository asks for.
-        assert_eq!(isolation("mail"), Isolation::Shared);
+        assert_eq!(isolation("mail"), IsolationMode::Shared);
         assert_eq!(Settings::default().isolation, None);
     }
 

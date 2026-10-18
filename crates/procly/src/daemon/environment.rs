@@ -17,7 +17,7 @@ use super::health::{HealthCheck, HttpCheck};
 use super::index::{IndexError, IndexRequest};
 use super::lease::{Claimed, LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
-use crate::config::{self, Config, ConfigError, Isolation, PortConfig, ServiceConfig, ServiceKind};
+use crate::config::{self, Config, ConfigError, IsolationMode, PortConfig, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts, Resource};
 use crate::driver;
 use crate::driver::{Driver, DriverError};
@@ -252,7 +252,8 @@ fn facts<'a>(
 }
 
 /// The Logical resources of the Worktree for every Compose service some template reads one of. Only names and URLs are
-/// worked out here, creating the resources is for `up` of the Compose service.
+/// worked out here, creating the resources is for `up` of the Compose service. A Driver that numbers its resources has
+/// its indexes handed out and stored here, since the URL holds one.
 fn referenced_resources(
     registry: &Registry,
     topology: &Topology,
@@ -301,16 +302,24 @@ pub(super) fn logical_resources(
         .health_port_name(name)?
         .and_then(|port_name| leases.get(port_name).copied());
     // Whose resources the Worktree reads: its own, or the ones of the Main worktree when the Service is Shared.
-    let main = config.isolation(declared) == Isolation::Shared;
+    let shared = config.isolation(declared) == IsolationMode::Shared;
     let numbered = match driver.index_capacity() {
         Some(capacity) => {
-            let main_worktree = topology.main()?.worktree.path;
+            // Before any index is handed out, so that a configuration bound to fail never takes one.
+            if let Some(key) = declared
+                .resources
+                .iter()
+                .find(|(_, resource)| resource.name.is_some())
+                .map(|(key, _)| key)
+            {
+                return Err(not_used(&driver, name, key).into());
+            }
+            let main = topology.main()?.worktree.path;
             let resources: Vec<String> = declared.resources.keys().cloned().collect();
-            let scope = if main { &main_worktree } else { &worktree.path };
             let indexes = registry.indexes.allocate(&IndexRequest {
                 repository: &topology.git_common_dir,
-                main: &main_worktree,
-                worktree: scope,
+                main: &main,
+                worktree: if shared { &main } else { &worktree.path },
                 service: name,
                 driver: &driver.name,
                 capacity,
@@ -323,10 +332,12 @@ pub(super) fn logical_resources(
     let mut resources = BTreeMap::new();
     for (key, resource) in &declared.resources {
         let resource_name = match (&numbered, &resource.name) {
-            (Some(indexes), None) => indexes[key].to_string(),
-            (Some(_), Some(_)) => return Err(not_used(&driver, name, key).into()),
+            (Some(indexes), _) => indexes
+                .get(key)
+                .expect("an index is handed out for every resource asked for")
+                .to_string(),
             (None, Some(declared_name)) => {
-                driver.resource_name(declared_name, &worktree.slug, worktree.main || main)?
+                driver.resource_name(declared_name, &worktree.slug, worktree.main || shared)?
             }
             (None, None) => return Err(required(&driver, name, key).into()),
         };
@@ -342,6 +353,7 @@ pub(super) fn logical_resources(
     Ok(Some((driver, resources)))
 }
 
+/// The error of a resource of a Driver that names its resources and was given no name.
 fn required(driver: &Driver, service: &str, resource: &str) -> DriverError {
     DriverError::NameRequired {
         driver: driver.name.clone(),
@@ -350,6 +362,7 @@ fn required(driver: &Driver, service: &str, resource: &str) -> DriverError {
     }
 }
 
+/// The error of a resource given a name by a Driver that numbers its resources.
 fn not_used(driver: &Driver, service: &str, resource: &str) -> DriverError {
     DriverError::NameNotUsed {
         driver: driver.name.clone(),
