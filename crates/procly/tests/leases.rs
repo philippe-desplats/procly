@@ -62,3 +62,18 @@ fn a_second_worktree_gets_a_port_from_the_range_and_not_the_declared_one() {
     assert!((start..=end).contains(&in_other), "{in_other} is outside {start}-{end}");
     assert_eq!(common::http_get(in_other, "/"), "ok\n");
 }
+
+#[test]
+fn a_port_held_by_a_foreign_process_is_skipped() {
+    let procly = Procly::new();
+    let (start, _) = procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = common::git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", start)).expect("hold the first port of the Range");
+
+    let port = port_of(&procly.procly_in(&other, &["up", "web"]));
+
+    assert_ne!(port, start);
+    drop(foreign);
+}
