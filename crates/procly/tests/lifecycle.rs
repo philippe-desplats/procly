@@ -2,6 +2,7 @@ mod common;
 
 use std::net::TcpStream;
 use std::path::Path;
+use std::time::Duration;
 
 use common::{Procly, assert_success, free_port, git_repository, stderr, stdout, test_server};
 
@@ -170,19 +171,19 @@ fn a_crashed_service_restarts_with_increasing_delays_then_ends_failed() {
         .expect("procly up starts");
 
     // The delays are about the clock of the Daemon, which stands still: nothing restarts by itself.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(start_count(&starts), 1);
-    procly.advance_clock(std::time::Duration::from_secs(1));
+    procly.advance_clock(Duration::from_secs(1));
     common::eventually("the first restart", || start_count(&starts) == 2);
 
     // The restarted process exits at once, so the next delay doubles.
     common::eventually("the daemon to plan the second restart", || {
         procly.daemon_log().contains("restarting in 2s (restart 2 of 2)")
     });
-    procly.advance_clock(std::time::Duration::from_secs(1));
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    procly.advance_clock(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(start_count(&starts), 2, "restarted after 1s of a 2s delay");
-    procly.advance_clock(std::time::Duration::from_secs(1));
+    procly.advance_clock(Duration::from_secs(1));
     common::eventually("the second restart", || start_count(&starts) == 3);
 
     common::eventually("the daemon to give up", || {
@@ -196,8 +197,8 @@ fn a_crashed_service_restarts_with_increasing_delays_then_ends_failed() {
         "{}",
         stderr(&output)
     );
-    procly.advance_clock(std::time::Duration::from_secs(3600));
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    procly.advance_clock(Duration::from_secs(3600));
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(start_count(&starts), 3, "restarted after giving up");
 
     // The failed Service is gone, the next `up` is a start of its own and gets no restart either.
@@ -228,8 +229,8 @@ fn down_during_a_backoff_cancels_the_restart() {
 
     assert_success(&output);
     assert_eq!(stdout(&output), "web stopped\n");
-    procly.advance_clock(std::time::Duration::from_secs(3600));
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    procly.advance_clock(Duration::from_secs(3600));
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(start_count(&starts), 1);
 }
 
@@ -248,8 +249,8 @@ fn a_service_that_never_became_healthy_is_not_restarted() {
     let output = procly.procly_in(&main, &["up", "web"]);
 
     assert_eq!(output.status.code(), Some(3), "stderr: {}", stderr(&output));
-    procly.advance_clock(std::time::Duration::from_secs(3600));
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    procly.advance_clock(Duration::from_secs(3600));
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(start_count(&starts), 1);
 }
 
@@ -264,7 +265,7 @@ fn server_on(name: &str, port: u16, extra: &str) -> String {
 /// Gives the Daemon time to take its first look at the Services that just became healthy, which it does as soon
 /// as they are, so that the clock moves after it.
 fn let_the_daemon_look(duration_ms: u64) {
-    std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+    std::thread::sleep(Duration::from_millis(duration_ms));
 }
 
 #[test]
@@ -283,10 +284,10 @@ fn an_idle_service_stops_after_its_timeout_says_why_and_is_not_restarted() {
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let_the_daemon_look(300);
 
-    procly.advance_clock(std::time::Duration::from_mins(9));
+    procly.advance_clock(Duration::from_mins(9));
     let_the_daemon_look(300);
     assert!(listens(port), "stopped before the 10 minutes of idleness");
-    procly.advance_clock(std::time::Duration::from_secs(60));
+    procly.advance_clock(Duration::from_secs(60));
 
     common::eventually("the idle service to stop", || !listens(port));
     common::eventually("the daemon to say why", || {
@@ -297,7 +298,7 @@ fn an_idle_service_stops_after_its_timeout_says_why_and_is_not_restarted() {
     let output = procly.procly_in(&main, &["down", "web"]);
     assert_eq!(stdout(&output), "web not running\n");
     // An idle stop is no crash.
-    procly.advance_clock(std::time::Duration::from_secs(3600));
+    procly.advance_clock(Duration::from_secs(3600));
     let_the_daemon_look(300);
     assert_eq!(start_count(&starts), 1);
     let output = procly.procly_in(&main, &["up", "web"]);
@@ -332,7 +333,7 @@ fn a_service_that_prints_or_uses_cpu_is_not_idle_while_a_silent_one_stops() {
     // The busy loop must have used a measurable share of CPU, which `ps` counts in whole seconds on Linux.
     let_the_daemon_look(2500);
 
-    procly.advance_clock(std::time::Duration::from_mins(10));
+    procly.advance_clock(Duration::from_mins(10));
 
     common::eventually("the silent service to stop", || !listens(quiet));
     let_the_daemon_look(500);
@@ -361,7 +362,7 @@ fn idle_stop_is_set_in_the_settings_and_can_be_disabled_per_service() {
     }
     let_the_daemon_look(300);
 
-    procly.advance_clock(std::time::Duration::from_mins(5));
+    procly.advance_clock(Duration::from_mins(5));
 
     common::eventually("the service on the settings timeout to stop", || !listens(dropped));
     let_the_daemon_look(500);

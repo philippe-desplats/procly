@@ -405,13 +405,13 @@ mod tests {
         ));
     }
 
-    fn config(text: &str) -> Config {
+    fn parsed(text: &str) -> Config {
         Value::Table(table(text)).try_into().unwrap()
     }
 
     #[test]
     fn the_needs_of_a_service_start_before_it_and_once_each() {
-        let config = config(
+        let config = parsed(
             "[services.web]\nrun = 'x'\nneeds = ['api', 'cache']\n\
              [services.api]\nrun = 'x'\nneeds = ['db', 'cache']\n\
              [services.cache]\nrun = 'x'\n\
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn a_need_that_is_not_declared_is_an_error_naming_both_services() {
-        let config = config("[services.web]\nrun = 'x'\nneeds = ['db']\n");
+        let config = parsed("[services.web]\nrun = 'x'\nneeds = ['db']\n");
         assert!(matches!(
             config.start_order("web"),
             Err(ConfigError::UnknownNeed { service, need }) if service == "web" && need == "db"
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn needs_that_loop_back_are_an_error_listing_the_cycle() {
-        let config = config(
+        let config = parsed(
             "[services.web]\nrun = 'x'\nneeds = ['api']\n\
              [services.api]\nrun = 'x'\nneeds = ['db']\n\
              [services.db]\nrun = 'x'\nneeds = ['api']\n",
@@ -441,7 +441,7 @@ mod tests {
             config.start_order("web"),
             Err(ConfigError::NeedsCycle { cycle }) if cycle == ["api", "db", "api"]
         ));
-        let itself = self::config("[services.web]\nrun = 'x'\nneeds = ['web']\n");
+        let itself = parsed("[services.web]\nrun = 'x'\nneeds = ['web']\n");
         assert!(matches!(
             itself.start_order("web"),
             Err(ConfigError::NeedsCycle { cycle }) if cycle == ["web", "web"]
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn a_service_restarts_five_times_from_one_second_unless_configured_otherwise() {
-        let config = config("[services.web]\nrun = 'x'\n");
+        let config = parsed("[services.web]\nrun = 'x'\n");
         assert_eq!(
             config.restart_policy(&config.services["web"]),
             RestartPolicy {
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn the_restart_of_a_service_overrides_the_settings_key_by_key() {
-        let config = config(
+        let config = parsed(
             "[settings]\nrestart_attempts = 3\nrestart_delay = '2s'\n\
              [services.web]\nrun = 'x'\nrestart = { attempts = 0 }\n\
              [services.api]\nrun = 'x'\nrestart = { delay = '500ms' }\n\
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn a_service_stops_after_30_minutes_idle_unless_configured_otherwise() {
-        let config = config("[services.web]\nrun = 'x'\n");
+        let config = parsed("[services.web]\nrun = 'x'\n");
         assert_eq!(
             config.idle_timeout(&config.services["web"]),
             Some(Duration::from_mins(30))
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn the_idle_stop_of_a_service_overrides_the_settings_key_by_key() {
-        let config = config(
+        let config = parsed(
             "[settings]\nidle_timeout = '1h'\n\
              [services.web]\nrun = 'x'\nidle = { timeout = '5m' }\n\
              [services.api]\nrun = 'x'\nidle = { stop = false }\n\
@@ -514,9 +514,9 @@ mod tests {
         assert_eq!(idle("api"), None);
         assert_eq!(idle("db"), Some(Duration::from_hours(1)));
 
-        let off = self::config("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\nidle = { stop = true }\n");
+        let off = parsed("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\nidle = { stop = true }\n");
         assert_eq!(off.idle_timeout(&off.services["web"]), Some(Duration::from_mins(30)));
-        let off = self::config("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\n");
+        let off = parsed("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\n");
         assert_eq!(off.idle_timeout(&off.services["web"]), None);
     }
 

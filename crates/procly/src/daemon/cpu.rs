@@ -13,18 +13,23 @@ pub(super) fn group_cpu(pgid: Pid) -> io::Result<Duration> {
     if !output.status.success() {
         return Err(io::Error::other(format!("ps exited with {}", output.status)));
     }
-    Ok(sum_of_group(&String::from_utf8_lossy(&output.stdout), pgid))
+    sum_of_group(&String::from_utf8_lossy(&output.stdout), pgid)
+        .ok_or_else(|| io::Error::other("cannot read the CPU time of a member of the group in the ps listing"))
 }
 
-/// Adds up the CPU time of the lines of a `ps -o pgid=,time=` listing that belong to `pgid`.
-fn sum_of_group(listing: &str, pgid: Pid) -> Duration {
-    listing
-        .lines()
-        .filter_map(|line| {
-            let (group, time) = line.trim().split_once(char::is_whitespace)?;
-            (group.parse::<i32>().ok()? == pgid.as_raw()).then(|| parse_time(time.trim()))?
-        })
-        .sum()
+/// Adds up the CPU time of the lines of a `ps -o pgid=,time=` listing that belong to `pgid`. `None` when one of
+/// those lines has a time that cannot be read, as a sum that skips it would read low and look idle.
+fn sum_of_group(listing: &str, pgid: Pid) -> Option<Duration> {
+    let mut total = Duration::ZERO;
+    for line in listing.lines() {
+        let Some((group, time)) = line.trim().split_once(char::is_whitespace) else {
+            continue;
+        };
+        if group.parse::<i32>().ok() == Some(pgid.as_raw()) {
+            total += parse_time(time.trim())?;
+        }
+    }
+    Some(total)
 }
 
 /// Reads a `ps` cumulative CPU time: `[[DD-]HH:]MM:SS` on Linux, with minutes that may pass 59 and hundredths of
@@ -78,16 +83,17 @@ mod tests {
 
     #[test]
     fn adds_up_the_lines_of_the_group_only() {
-        let listing =
-            "    1 239:36.13\n  500   0:01.50\n  500   0:00.25\n 5000   9:00.00\n\ngarbage\n  500 not-a-time\n";
-        assert_eq!(sum_of_group(listing, Pid::from_raw(500)), Duration::from_millis(1750));
-        assert_eq!(sum_of_group(listing, Pid::from_raw(42)), Duration::ZERO);
+        let listing = "    1 239:36.13\n  500   0:01.50\n  500   0:00.25\n 5000   9:00.00\n\ngarbage\n";
+        assert_eq!(
+            sum_of_group(listing, Pid::from_raw(500)),
+            Some(Duration::from_millis(1750))
+        );
+        assert_eq!(sum_of_group(listing, Pid::from_raw(42)), Some(Duration::ZERO));
     }
 
     #[test]
-    fn measures_a_live_group() {
-        // The test process leads no group of its own under the harness, so read the group it belongs to.
-        let cpu = group_cpu(nix::unistd::getpgrp()).expect("ps runs");
-        assert!(cpu > Duration::ZERO);
+    fn gives_no_sum_when_a_member_of_the_group_has_an_unreadable_time() {
+        let listing = "  500 0:01.50\n  500 not-a-time\n";
+        assert_eq!(sum_of_group(listing, Pid::from_raw(500)), None);
     }
 }
