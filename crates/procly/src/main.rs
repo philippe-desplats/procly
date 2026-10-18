@@ -221,6 +221,10 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                     "was stopped by procly down before it became healthy".to_owned(),
                     EXIT_SERVICE_ENDED,
                 ),
+                ServiceEnd::Failed { restarts } => (
+                    format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
+                    EXIT_SERVICE_ENDED,
+                ),
                 ServiceEnd::HealthTimeout { timeout_ms } => (
                     format!(
                         "did not become healthy within {}, its process tree was stopped",

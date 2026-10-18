@@ -1,5 +1,6 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
+mod clock;
 mod health;
 mod job;
 mod process_group;
@@ -19,6 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
+use self::clock::Clock;
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::service::{Service, ServiceSpec, Services, Start};
@@ -28,10 +30,19 @@ use crate::state_dir::StateDir;
 use crate::topology;
 
 /// Every Job and Service the Daemon owns.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Registry {
     jobs: Jobs,
     services: Services,
+}
+
+impl Registry {
+    fn new(clock: Clock) -> Self {
+        Self {
+            jobs: Jobs::default(),
+            services: Services::new(clock),
+        }
+    }
 }
 
 /// Runs the Daemon until it receives `SIGTERM` or `SIGINT`.
@@ -80,7 +91,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", state.pid().display()))?;
     eprintln!("procly daemon {} listening on {}", std::process::id(), socket.display());
 
-    let registry = Arc::new(Registry::default());
+    let registry = Arc::new(Registry::new(Clock::from_env()));
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot handle SIGINT")?;
     loop {
@@ -240,6 +251,8 @@ fn start_service(services: &Services, name: &str, cwd: &Path, env: Vec<(String, 
             },
             health_timeout: config.health_timeout(declared),
             name: name.to_owned(),
+            worktree: worktree.clone(),
+            restart: config.restart_policy(declared),
         })
     })
 }

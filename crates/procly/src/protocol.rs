@@ -117,6 +117,10 @@ pub(crate) enum ServiceEnd {
     },
     /// `down` stopped the Service.
     Stopped,
+    /// The Service crashed again after being restarted `restarts` times, which is as often as it may be.
+    Failed {
+        restarts: u32,
+    },
 }
 
 /// Whether a start request started new work or ended in Reuse.

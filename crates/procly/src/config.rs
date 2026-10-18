@@ -64,12 +64,20 @@ pub(crate) struct Settings {
     /// How long `up` waits for a Service to become healthy before stopping it.
     #[serde(default = "default_health_timeout", deserialize_with = "duration")]
     pub(crate) health_timeout: Duration,
+    /// How many times a crashed Service is restarted before it is given up on.
+    #[serde(default = "default_restart_attempts")]
+    pub(crate) restart_attempts: u32,
+    /// The delay before the first restart of a crashed Service, doubled before each next one.
+    #[serde(default = "default_restart_delay", deserialize_with = "duration")]
+    pub(crate) restart_delay: Duration,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             health_timeout: default_health_timeout(),
+            restart_attempts: default_restart_attempts(),
+            restart_delay: default_restart_delay(),
         }
     }
 }
@@ -88,6 +96,35 @@ pub(crate) struct ServiceConfig {
     /// The Services started first, and healthy, before this one.
     #[serde(default)]
     pub(crate) needs: Vec<String>,
+    #[serde(default)]
+    pub(crate) restart: RestartConfig,
+}
+
+/// Overrides `settings.restart_attempts` and `settings.restart_delay` for one Service.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RestartConfig {
+    pub(crate) attempts: Option<u32>,
+    #[serde(default, deserialize_with = "optional_duration")]
+    pub(crate) delay: Option<Duration>,
+}
+
+/// How a Service that crashed after it was healthy is restarted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RestartPolicy {
+    /// How many restarts in a row are tried before the Service is given up on, 0 never restarts it.
+    pub(crate) attempts: u32,
+    /// The delay before the first restart.
+    pub(crate) delay: Duration,
+}
+
+impl RestartPolicy {
+    /// The delay before the `restart`th restart in a row, counting from 1: the delay doubles each time.
+    pub(crate) fn delay_before(&self, restart: u32) -> Duration {
+        // Capped well below overflow, a delay doubled 31 times is years long already.
+        let doublings = restart.saturating_sub(1).min(31);
+        self.delay.saturating_mul(1 << doublings)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -139,6 +176,14 @@ impl HealthConfig {
 }
 
 impl Config {
+    /// How `service` is restarted when it crashes.
+    pub(crate) fn restart_policy(&self, service: &ServiceConfig) -> RestartPolicy {
+        RestartPolicy {
+            attempts: service.restart.attempts.unwrap_or(self.settings.restart_attempts),
+            delay: service.restart.delay.unwrap_or(self.settings.restart_delay),
+        }
+    }
+
     /// The Services to bring up for `service`, each one after everything it needs and `service` last. A Service
     /// needed through several paths appears once.
     pub(crate) fn start_order(&self, service: &str) -> Result<Vec<String>, ConfigError> {
@@ -183,6 +228,14 @@ impl Config {
 /// Long enough for a dev server compiling a large app on its first start.
 fn default_health_timeout() -> Duration {
     Duration::from_mins(1)
+}
+
+fn default_restart_attempts() -> u32 {
+    5
+}
+
+fn default_restart_delay() -> Duration {
+    Duration::from_secs(1)
 }
 
 /// A duration written as `procly run --timeout` accepts it, such as `90s` or `5m`.
@@ -355,6 +408,50 @@ mod tests {
             itself.start_order("web"),
             Err(ConfigError::NeedsCycle { cycle }) if cycle == ["web", "web"]
         ));
+    }
+
+    #[test]
+    fn a_service_restarts_five_times_from_one_second_unless_configured_otherwise() {
+        let config = config("[services.web]\nrun = 'x'\n");
+        assert_eq!(
+            config.restart_policy(&config.services["web"]),
+            RestartPolicy {
+                attempts: 5,
+                delay: Duration::from_secs(1)
+            }
+        );
+    }
+
+    #[test]
+    fn the_restart_of_a_service_overrides_the_settings_key_by_key() {
+        let config = config(
+            "[settings]\nrestart_attempts = 3\nrestart_delay = '2s'\n\
+             [services.web]\nrun = 'x'\nrestart = { attempts = 0 }\n\
+             [services.api]\nrun = 'x'\nrestart = { delay = '500ms' }\n\
+             [services.db]\nrun = 'x'\n",
+        );
+        let policy = |name: &str| config.restart_policy(&config.services[name]);
+        assert_eq!(
+            (policy("web").attempts, policy("web").delay),
+            (0, Duration::from_secs(2))
+        );
+        assert_eq!(
+            (policy("api").attempts, policy("api").delay),
+            (3, Duration::from_millis(500))
+        );
+        assert_eq!((policy("db").attempts, policy("db").delay), (3, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn the_delay_before_a_restart_doubles_each_time() {
+        let policy = RestartPolicy {
+            attempts: 5,
+            delay: Duration::from_secs(1),
+        };
+        let delays: Vec<_> = (1..=5).map(|restart| policy.delay_before(restart)).collect();
+        assert_eq!(delays, [1, 2, 4, 8, 16].map(Duration::from_secs),);
+        // Never overflows, however many restarts are allowed.
+        assert!(policy.delay_before(u32::MAX) >= Duration::from_secs(16));
     }
 
     #[test]
