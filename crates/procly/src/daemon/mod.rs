@@ -6,6 +6,7 @@ mod compose;
 mod cpu;
 mod eject;
 mod environment;
+mod foreign;
 mod health;
 mod hook;
 mod idle;
@@ -38,7 +39,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
 use self::clock::Clock;
-use self::compose::{ComposeSpec, Composes, PlannedResource, Published, ResourcePlan};
+use self::compose::{ComposeError, ComposeSpec, Composes, PlannedResource, Published, ResourcePlan};
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
@@ -297,8 +298,10 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
         },
         Request::Status { cwd, all } => {
             let registry = Arc::clone(registry);
-            match tokio::task::spawn_blocking(move || status::report(&registry.jobs, &registry.services, &cwd, all))
-                .await
+            match tokio::task::spawn_blocking(move || {
+                status::report(&registry.jobs, &registry.services, &registry.composes, &cwd, all)
+            })
+            .await
             {
                 Ok(Ok(report)) => Response::Status(report),
                 Ok(Err(error)) => Response::Error {
@@ -539,6 +542,11 @@ async fn up_compose(
             port: brought.port,
             health: brought.health,
         }),
+        Err(ComposeError::Conflict { service, conflicts }) => Err(Box::new(Response::Conflict {
+            service,
+            conflicts,
+            needed_by: None,
+        })),
         Err(error) => Err(Box::new(Response::Error {
             message: format!("{error:#}"),
         })),
@@ -768,7 +776,16 @@ async fn up(
                 (StartOutcome::Reused, Some(name), port, health)
             }
             Ok(Running::Compose { outcome, port, health }) => (outcome, None, port, health),
-            Err(response) => return *response,
+            Err(response) => {
+                return match *response {
+                    Response::Conflict { service, conflicts, .. } => Response::Conflict {
+                        service,
+                        conflicts,
+                        needed_by: name.as_ref().filter(|target| *target != current).cloned(),
+                    },
+                    other => other,
+                };
+            }
         };
         if let Err((end, output)) = health {
             return Response::Unhealthy {

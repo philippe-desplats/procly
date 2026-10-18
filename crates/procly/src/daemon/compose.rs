@@ -19,6 +19,7 @@ use tokio::process::Command;
 use tokio::task::JoinSet;
 
 use super::clock::Clock;
+use super::foreign::{self, Container as ListedContainer};
 use super::health::HealthCheck;
 use super::job::{Fingerprint, JobSpec, Jobs};
 use super::lease::Leases;
@@ -26,7 +27,7 @@ use crate::config::Seed;
 use crate::derived::Resource;
 use crate::driver::Driver;
 use crate::duration;
-use crate::protocol::{JobEnd, Released, ServiceEnd, StartOutcome};
+use crate::protocol::{Conflict, Held, JobEnd, Released, ServiceEnd, StartOutcome};
 use crate::topology::Topology;
 
 /// Where to install `docker compose` v2, named in the error of a machine that lacks it.
@@ -108,6 +109,18 @@ pub(crate) enum ComposeError {
         name: String,
         reason: String,
         outcome: String,
+    },
+    #[error("service {service} needs what runs outside Procly, which Procly never stops")]
+    Conflict { service: String, conflicts: Vec<Conflict> },
+    #[error(
+        "the container {container} of service {service} was started outside Procly with the labels of its compose \
+         service, but did not answer the health check of Procly within {timeout}, so it was not adopted and was left \
+         running"
+    )]
+    AdoptedUnhealthy {
+        service: String,
+        container: String,
+        timeout: String,
     },
     #[error(transparent)]
     Prepare(#[from] anyhow::Error),
@@ -270,7 +283,35 @@ impl Composes {
             .map_err(|error| anyhow::anyhow!("the service could not be started: {error}"))??;
         let port = spec.health.port;
         let began = Instant::now();
-        let (docker, waited_out) = start(&spec).await?;
+        let (docker, found) = start(&spec).await?;
+        let waited_out = match found {
+            Begun::Started(waited_out) => waited_out,
+            Begun::Adopted(adopted) => {
+                // Not adopted until it answers, so that a container Procly does not own is never stopped.
+                if wait_healthy(&spec.health, spec.health_timeout).await.is_err() {
+                    return Err(ComposeError::AdoptedUnhealthy {
+                        service: spec.name.clone(),
+                        container: adopted.name,
+                        timeout: duration::format(spec.health_timeout),
+                    });
+                }
+                docker.create_resources(planned(plan).await?.as_ref()).await?;
+                eprintln!(
+                    "adopted the container {} of service {}, started outside Procly with the labels of its compose \
+                     service",
+                    adopted.name, spec.name
+                );
+                let mut state = container.state();
+                state.alive = Some(Alive { docker, port, grace });
+                state.worktrees.insert(worktree);
+                state.generation += 1;
+                return Ok(Brought {
+                    outcome: StartOutcome::Reused,
+                    port,
+                    health: Ok(()),
+                });
+            }
+        };
         let health = match waited_out {
             Some(end) => Err(end),
             // The health timeout covers `docker compose up --wait` and the probes together.
@@ -364,6 +405,18 @@ impl Composes {
                 let state = container.state();
                 let alive = state.alive.as_ref()?;
                 Some((alive.docker.project_dir.clone(), alive.docker.service.clone()))
+            })
+            .collect()
+    }
+
+    /// The compose project and service of every container Procly started or adopted and that runs.
+    pub(crate) fn owned(&self) -> BTreeSet<(String, String)> {
+        self.table()
+            .values()
+            .filter_map(|container| {
+                let state = container.state();
+                let alive = state.alive.as_ref()?;
+                Some((alive.docker.project.clone(), alive.docker.compose.clone()))
             })
             .collect()
     }
@@ -510,9 +563,19 @@ async fn touch(leases: Arc<Leases>, alive: &Alive) {
     }
 }
 
-/// Starts the container of the spec and returns the commands that drive it afterwards, with the end of the wait
-/// when the container was still not running, or not healthy by its own health check, after the health timeout.
-async fn start(spec: &ComposeSpec) -> Result<(Docker, Option<ServiceEnd>), ComposeError> {
+/// How [`start`] found the container of a Compose service.
+#[derive(Debug)]
+enum Begun {
+    /// Procly started it, with the end of the wait when it was still not running, or not healthy by its own health
+    /// check, after the health timeout.
+    Started(Option<ServiceEnd>),
+    /// It already ran, started outside Procly, with the labels of the compose service and on its Leases.
+    Adopted(ListedContainer),
+}
+
+/// Starts the container of the spec, or finds it running outside Procly for Adoption, and returns the commands that
+/// drive it afterwards. Anything else holding its Leases or its container name is a conflict, and nothing is started.
+async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
     let mut docker = Docker {
         service: spec.name.clone(),
         compose: spec.compose.clone(),
@@ -543,6 +606,21 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Option<ServiceEnd>), Compo
             });
         }
     }
+    let leased: Vec<u16> = spec.published.iter().map(|published| published.port).collect();
+    let name = service
+        .container_name
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}-1", docker.project, spec.compose));
+    match docker.occupants(&leased, name).await {
+        Occupants::Service(found) => return Ok((docker, Begun::Adopted(found))),
+        Occupants::Conflicts(conflicts) if !conflicts.is_empty() => {
+            return Err(ComposeError::Conflict {
+                service: spec.name.clone(),
+                conflicts,
+            });
+        }
+        Occupants::Conflicts(_) => {}
+    }
     // `--wait` returns once the container runs, or is healthy when the compose file defines a health check.
     let up = ["up", "--detach", "--wait", &spec.compose];
     let waited_out = match tokio::time::timeout(spec.health_timeout, docker.project_command(&up)).await {
@@ -554,7 +632,16 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Option<ServiceEnd>), Compo
         }
         Err(_) => Some(health_timeout(spec.health_timeout)),
     };
-    Ok((docker, waited_out))
+    Ok((docker, Begun::Started(waited_out)))
+}
+
+/// What holds what the container of a Compose service needs.
+#[derive(Debug)]
+enum Occupants {
+    /// The container of the service itself runs, started outside Procly, and publishes every Lease.
+    Service(ListedContainer),
+    /// What holds a Lease or the container name, empty when nothing does.
+    Conflicts(Vec<Conflict>),
 }
 
 /// Runs the command Seed of a resource on the host, at the root of the Worktree, as a Job. It reads the resource in
@@ -675,6 +762,69 @@ impl Docker {
             }
             Err(_) => false,
         }
+    }
+
+    /// What holds the ports `leased` or the container name `name`, the container of the service included.
+    ///
+    /// The container of the service is the running one whose compose project and service labels are the expected ones
+    /// exactly, `docker compose run` ones aside. On its Leases it is adopted, elsewhere it is a conflict: adopting it
+    /// would move the Leases, and starting the service would recreate it.
+    async fn occupants(&self, leased: &[u16], name: String) -> Occupants {
+        let (project, compose, env, leased) = (
+            self.project.clone(),
+            self.compose.clone(),
+            self.env.clone(),
+            leased.to_owned(),
+        );
+        let found = tokio::task::spawn_blocking(move || {
+            let labels = [
+                format!("label=com.docker.compose.project={project}"),
+                format!("label=com.docker.compose.service={compose}"),
+            ];
+            let of_service = foreign::containers(&["--filter", &labels[0], "--filter", &labels[1]], Some(&env))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|container| container.running && container.is_service(&project, &compose));
+            if let Some(found) = of_service {
+                if leased.iter().all(|port| found.ports.contains(port)) {
+                    return Occupants::Service(found);
+                }
+                return Occupants::Conflicts(vec![Conflict {
+                    held: Held::Service {
+                        ports: found.ports.clone(),
+                        leased,
+                    },
+                    occupant: found.occupant(),
+                    stop: Some(format!("docker compose --project-name {project} stop {compose}")),
+                }]);
+            }
+            let mut conflicts = Vec::new();
+            let by_name = format!("name=^{name}$");
+            let named = foreign::containers(&["--all", "--filter", &by_name], Some(&env)).unwrap_or_default();
+            if let Some(holder) = named
+                .into_iter()
+                .find(|container| container.name == name && !container.is_service(&project, &compose))
+            {
+                conflicts.push(Conflict {
+                    held: Held::ContainerName { name: name.clone() },
+                    occupant: holder.occupant(),
+                    stop: Some(format!("docker rm --force {name}")),
+                });
+            }
+            for port in leased {
+                if let Some((occupant, stop)) = foreign::occupant(port, Some(&env)) {
+                    conflicts.push(Conflict {
+                        held: Held::Port { port },
+                        occupant,
+                        stop,
+                    });
+                }
+            }
+            Occupants::Conflicts(conflicts)
+        })
+        .await;
+        // A lookup that could not run finds nothing, and `docker compose up` reports what it runs into.
+        found.unwrap_or_else(|_| Occupants::Conflicts(Vec::new()))
     }
 
     /// The recent logs of the container.
@@ -891,6 +1041,8 @@ struct Stack {
 struct StackService {
     #[serde(default)]
     ports: Vec<StackPort>,
+    /// The name the compose file gives the container, which is `<project>-<service>-1` when it gives none.
+    container_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -12,8 +12,9 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use super::Registry;
+use super::foreign;
 use super::health::{HealthCheck, HttpCheck};
-use super::lease::{LeaseError, LeaseRequest, PinnedBranch};
+use super::lease::{Claimed, LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts, Resource};
@@ -356,10 +357,10 @@ fn grant(
     let compose = config
         .services
         .get(service)
-        .is_some_and(|declared| declared.compose.is_some());
+        .and_then(|declared| declared.compose.as_deref());
     // The container of a Compose service is shared by every Worktree, so it holds the Leases of the Main worktree
     // and never those of a Pinned branch.
-    let (topology, pinned) = if compose {
+    let (topology, pinned) = if compose.is_some() {
         shared = topology.main()?;
         (&shared, None)
     } else {
@@ -369,6 +370,9 @@ fn grant(
         });
         (topology, pinned)
     };
+    let main = &topology.worktree.path;
+    let held_by_container =
+        |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, main, compose));
     Ok(registry.leases.grant(&LeaseRequest {
         topology,
         service,
@@ -379,6 +383,7 @@ fn grant(
         expiry: config.settings.lease_expiry,
         running: &registry.running(),
         keep,
+        claimed: compose.map(|_| Claimed(&held_by_container)),
     })?)
 }
 
