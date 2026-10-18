@@ -6,7 +6,7 @@ Procly reads its configuration from 3 TOML files, merged in this order, each lev
 2. `procly.toml` at the root of the Worktree, versioned with the Repository. It declares the Services the team shares.
 3. `procly.local.toml` at the root of the Worktree, excluded from git. It holds personal overrides for this Worktree.
 
-Tables merge key by key and any other value replaces the one below, so a local file can override one port without repeating the rest of the Service. A missing file counts as empty, and an unknown key is an error, so a typo never goes unnoticed. The Daemon reads the files again on every `procly up`, no restart is needed after an edit.
+Tables merge key by key and any other value replaces the one below, so a local file can override one port without repeating the rest of the Service. A missing file counts as empty, and an unknown key is an error, so a typo never goes unnoticed. The Daemon reads the files again on every `procly up` and `procly worktree init`, no restart is needed after an edit.
 
 ## Example
 
@@ -25,6 +25,10 @@ timeout = "90s"
 
 [services.worker]
 run = "pnpm --filter worker start"
+
+[worktree]
+copy = [".env", "certs"]
+setup = ["pnpm install"]
 ```
 
 ## `[settings]`
@@ -71,3 +75,12 @@ Health is a TCP connection to the Lease of the Service, on `127.0.0.1` or `::1`,
 | `path` | none | The path of the HTTP check. Setting `path` or `status` turns the HTTP check on, with `/` as the default path. |
 | `status` | `200` | The status the HTTP check must answer. |
 | `timeout` | `settings.health_timeout` | The health timeout of this Service. |
+
+## `[worktree]`
+
+What `procly worktree init` does in a fresh Worktree, see [Preparing a Worktree](worktree-init.md). Lists replace the ones of the level below instead of adding to them.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `copy` | none | Untracked files and directories to copy from the Main worktree when the Worktree lacks them, such as env files and local certificates. Paths are relative to the root of the Worktree, an absolute path or one climbing out with `..` is an error. |
+| `setup` | none | Commands run once, in order, by `/bin/sh -c` at the root of the Worktree, with the environment of the `procly worktree init` that ran them. |

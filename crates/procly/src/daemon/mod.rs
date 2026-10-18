@@ -9,12 +9,14 @@ mod requester;
 mod service;
 mod status;
 mod store;
+mod worktree_init;
 
+use std::collections::HashMap;
 use std::fs::{self, File, Permissions, TryLockError};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -38,6 +40,8 @@ struct Registry {
     jobs: Jobs,
     services: Services,
     leases: Leases,
+    /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
+    initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Runs the Daemon until it receives `SIGTERM` or `SIGINT`.
@@ -90,6 +94,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         jobs: Jobs::default(),
         services: Services::default(),
         leases: Leases::new(state.leases()),
+        initializing: Mutex::default(),
     });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot handle SIGINT")?;
@@ -227,6 +232,12 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
                 },
             }
         }
+        Request::WorktreeInit { path, env } => match worktree_init::run(Arc::clone(registry), path, env).await {
+            Ok(response) => response,
+            Err(error) => Response::Error {
+                message: format!("{error:#}"),
+            },
+        },
     }
 }
 
