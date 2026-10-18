@@ -23,3 +23,18 @@ fn a_usage_error_exits_2() {
 
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn the_help_of_up_lists_its_exit_codes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .args(["up", "--help"])
+        .output()
+        .expect("the procly binary runs");
+
+    assert!(output.status.success(), "exit status: {}", output.status);
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("3 when it stopped before it became healthy") && help.contains("124 when it did not"),
+        "{help}"
+    );
+}

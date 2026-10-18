@@ -56,6 +56,12 @@ enum Command {
     },
     /// Start a declared Service of the current Worktree, or find it running, wait until it is healthy and print
     /// its name, `started` or `reused`, its URL and its port on one line.
+    #[command(
+        after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
+                            (it exited, was killed by a signal or was stopped by `procly down`), 124 when it did not \
+                            become healthy within its health timeout and its process tree was stopped, 125 when \
+                            Procly itself fails. See docs/exit-codes.md."
+    )]
     Up { service: String },
     /// Stop a Service of the current Worktree, or all of its Services without an argument, with their whole
     /// process trees. The Daemon logs who asked.
