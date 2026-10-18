@@ -100,6 +100,11 @@ fn leases_stay_the_same_across_restarts_of_the_service_and_of_the_daemon() {
     // The second Worktree asks first, a Daemon that forgot would hand it the port of the first one.
     assert_eq!(port_of(&procly.procly_in(&second, &["up", "web"])), in_second);
     assert_eq!(port_of(&procly.procly_in(&first, &["up", "web"])), in_first);
+    let document = std::fs::metadata(procly.state_dir().join("leases.json")).expect("the Leases are stored");
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&document.permissions()) & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -138,20 +143,24 @@ fn concurrent_ups_from_several_worktrees_never_get_the_same_port() {
 }
 
 #[test]
-fn an_unreadable_lease_document_fails_up_with_125_naming_it() {
+fn an_unreadable_or_newer_lease_document_fails_up_with_125_naming_it() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
     write(&main, "procly.toml", &web_declaring(free_port()));
-    std::fs::write(procly.state_dir().join("leases.json"), "{\"version\": 1, \"leases\": [").unwrap();
+    let document = procly.state_dir().join("leases.json");
 
-    let output = procly.procly_in(&main, &["up", "web"]);
+    for (content, why) in [
+        ("{\"version\": 1, \"leases\": [", "cannot parse"),
+        ("{\"version\": 2, \"leases\": []}", "written by a newer procly"),
+    ] {
+        std::fs::write(&document, content).unwrap();
 
-    assert_eq!(output.status.code(), Some(125));
-    assert!(
-        common::stderr(&output).contains("leases.json"),
-        "{}",
-        common::stderr(&output)
-    );
+        let output = procly.procly_in(&main, &["up", "web"]);
+
+        assert_eq!(output.status.code(), Some(125));
+        let stderr = common::stderr(&output);
+        assert!(stderr.contains("leases.json") && stderr.contains(why), "{stderr}");
+    }
 }
 
 #[test]
@@ -226,7 +235,13 @@ fn a_foreign_process_answering_on_the_lease_is_no_health_when_the_service_listen
     assert_success(&procly.procly_in(&main, &["down", "web"]));
     let foreign = std::net::TcpListener::bind(("127.0.0.1", port)).expect("hold the Lease");
     let actual = free_port();
-    write(&main, "procly.toml", &web_listening_elsewhere(port, actual));
+    // The server opens its port only after a while, as a dev server compiling first, while the Foreign one answers.
+    let config = format!(
+        "[services.web]\nrun = 'sleep 1; exec {} --port {actual}'\nports = {{ http = {port} }}\n\
+         health = {{ timeout = '5s' }}\n",
+        test_server().display()
+    );
+    write(&main, "procly.toml", &config);
 
     let output = procly.procly_in(&main, &["up", "web"]);
 

@@ -260,6 +260,9 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
     registry.services.start(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
+        // Checked before any Lease is granted, so that a request bound to fail stores none.
+        let health_port_name = declared.health_port_name(name)?;
+        ports::check(name, &declared.run, declared.ports.keys())?;
         // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
         let leases = registry.leases.grant(&LeaseRequest {
             topology: &topology,
@@ -268,20 +271,23 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
             range: config.settings.port_range,
             declared: &config.declared_ports(),
         })?;
-        let health_port_name = declared.health_port_name(name)?;
-        let health_port = health_port_name.map(|port_name| leases[port_name]);
+        let health_port = health_port_name.map(|port_name| {
+            *leases
+                .get(port_name)
+                .expect("a Lease is granted for every Port name, the health one included")
+        });
         // After the environment of the caller, so that a `PORT` of its own never wins over the Lease.
         let mut env = env;
-        env.extend(ports::environment(name, &leases, health_port_name)?);
+        env.extend(ports::environment(&leases, health_port));
         Ok(ServiceSpec {
-            command: ports::render(name, &declared.run, &leases)?,
+            command: ports::render(&declared.run, &leases),
             cwd: worktree.clone(),
             env,
             health: HealthCheck {
                 port: health_port,
                 http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
             },
-            leases: leases.values().copied().collect(),
+            lease_ports: leases.values().copied().collect(),
             health_timeout: config.health_timeout(declared),
             name: name.to_owned(),
         })

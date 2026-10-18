@@ -47,7 +47,7 @@ pub(crate) struct ServiceSpec {
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
     /// The port of every Lease of the Service, which may listen on all of them.
-    pub(crate) leases: Vec<u16>,
+    pub(crate) lease_ports: Vec<u16>,
 }
 
 /// A Service runs at most once per Worktree: it is keyed by the root of its Worktree and its name.
@@ -265,7 +265,7 @@ fn spawn(spec: ServiceSpec) -> Result<Arc<Service>, ServiceError> {
     tokio::spawn(check_health(
         Arc::clone(&service),
         spec.health,
-        spec.leases,
+        spec.lease_ports,
         spec.health_timeout,
     ));
     Ok(service)
@@ -305,9 +305,9 @@ async fn stop_tree(child: &mut dyn ChildWrapper) {
     }
 }
 
-/// Marks the Service healthy once its health check passes, and stops it once `timeout` has passed without, or once
-/// it shows a Port mismatch.
-async fn check_health(service: Arc<Service>, check: HealthCheck, leases: Vec<u16>, timeout: Duration) {
+/// Marks the Service healthy once its health check passes and its process group listens on the Lease the check
+/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch.
+async fn check_health(service: Arc<Service>, check: HealthCheck, lease_ports: Vec<u16>, timeout: Duration) {
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -316,28 +316,34 @@ async fn check_health(service: Arc<Service>, check: HealthCheck, leases: Vec<u16
         }
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
-            // What answered may be a Foreign process holding the Lease while the Service listens elsewhere.
-            if let Some(mismatch) = port_mismatch(&service, &check, &leases).await {
-                service.request_stop(mismatch);
-                return;
-            }
-            // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
-            service.state.send_if_modified(|state| {
-                let healthy = *state == ServiceState::Starting && !service.is_stopping();
-                if healthy {
-                    *state = ServiceState::Healthy;
+            // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
+            match ownership(&service, check.port, &lease_ports).await {
+                Ownership::Listening => {
+                    // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
+                    service.state.send_if_modified(|state| {
+                        let healthy = *state == ServiceState::Starting && !service.is_stopping();
+                        if healthy {
+                            *state = ServiceState::Healthy;
+                        }
+                        healthy
+                    });
+                    return;
                 }
-                healthy
-            });
-            return;
+                Ownership::Elsewhere(mismatch) => {
+                    service.request_stop(mismatch);
+                    return;
+                }
+                Ownership::Pending => {}
+            }
         }
         if tokio::time::Instant::now() >= deadline {
-            // Only now, a Service may open another port, such as a debugger, long before the one of its Lease.
-            let end = port_mismatch(&service, &check, &leases)
-                .await
-                .unwrap_or(ServiceEnd::HealthTimeout {
+            // Only now when nothing answers, a Service may open another port, such as a debugger, long before its Lease.
+            let end = match ownership(&service, check.port, &lease_ports).await {
+                Ownership::Elsewhere(mismatch) => mismatch,
+                Ownership::Listening | Ownership::Pending => ServiceEnd::HealthTimeout {
                     timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                });
+                },
+            };
             service.request_stop(end);
             return;
         }
@@ -348,26 +354,42 @@ async fn check_health(service: Arc<Service>, check: HealthCheck, leases: Vec<u16
     }
 }
 
-/// The Port mismatch of the Service, when its process group listens on the port of none of its Leases and not on
-/// the one its health check probes. `None` as long as its listeners cannot tell otherwise.
-async fn port_mismatch(service: &Service, check: &HealthCheck, lease_ports: &[u16]) -> Option<ServiceEnd> {
-    let leased = check.port?;
+/// Whether the process group of a Service listens on the Lease its health check probes.
+#[derive(Debug, PartialEq, Eq)]
+enum Ownership {
+    /// It listens on that Lease, or there is no Lease to probe, or its listeners cannot be read.
+    Listening,
+    /// It listens on another port than any of its Leases, and not on that one.
+    Elsewhere(ServiceEnd),
+    /// It listens on no port yet, or only on another of its Leases.
+    Pending,
+}
+
+async fn ownership(service: &Service, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {
+    let Some(leased) = leased else {
+        return Ownership::Listening;
+    };
     let pgid = service.pid;
     let listening = tokio::task::spawn_blocking(move || listening_ports(pgid))
         .await
-        .ok()??;
-    mismatched_port(leased, lease_ports, &listening).map(|actual| ServiceEnd::PortMismatch { leased, actual })
+        .ok()
+        .flatten();
+    // Without `lsof`, the answer on the Lease is all there is to go by.
+    listening.map_or(Ownership::Listening, |listening| {
+        ownership_of(leased, lease_ports, &listening)
+    })
 }
 
-/// The port the Service listens on instead of its Lease `leased`, the lowest one when it listens on several.
-///
-/// A Service listening on no port at all tells nothing, it may run a container publishing the port from another
-/// process, so it is no Port mismatch.
-fn mismatched_port(leased: u16, lease_ports: &[u16], listening: &[u16]) -> Option<u16> {
+/// Judges the ports a process group listens on against its Lease `leased`, a Port mismatch reporting the lowest
+/// port it listens on that is none of its Leases.
+fn ownership_of(leased: u16, lease_ports: &[u16], listening: &[u16]) -> Ownership {
     if listening.contains(&leased) {
-        return None;
+        return Ownership::Listening;
     }
-    listening.iter().copied().find(|port| !lease_ports.contains(port))
+    match listening.iter().copied().find(|port| !lease_ports.contains(port)) {
+        Some(actual) => Ownership::Elsewhere(ServiceEnd::PortMismatch { leased, actual }),
+        None => Ownership::Pending,
+    }
 }
 
 fn end_of(status: ExitStatus) -> ServiceEnd {
@@ -398,19 +420,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listening_on_the_lease_is_no_port_mismatch_whatever_else_is_open() {
-        assert_eq!(mismatched_port(24000, &[24000], &[9229, 24000]), None);
+    fn listening_on_the_lease_is_owning_it_whatever_else_is_open() {
+        assert_eq!(ownership_of(24000, &[24000], &[9229, 24000]), Ownership::Listening);
     }
 
     #[test]
     fn listening_elsewhere_than_any_lease_is_a_port_mismatch_on_the_lowest_such_port() {
-        assert_eq!(mismatched_port(24000, &[24000, 24001], &[5173, 9229]), Some(5173));
-        assert_eq!(mismatched_port(24000, &[24000, 24001], &[24001, 5173]), Some(5173));
+        let mismatch = |actual| Ownership::Elsewhere(ServiceEnd::PortMismatch { leased: 24000, actual });
+        assert_eq!(ownership_of(24000, &[24000, 24001], &[5173, 9229]), mismatch(5173));
+        assert_eq!(ownership_of(24000, &[24000, 24001], &[24001, 5173]), mismatch(5173));
     }
 
     #[test]
-    fn listening_on_nothing_or_only_on_another_lease_is_no_port_mismatch() {
-        assert_eq!(mismatched_port(24000, &[24000], &[]), None);
-        assert_eq!(mismatched_port(24000, &[24000, 24001], &[24001]), None);
+    fn listening_on_nothing_or_only_on_another_lease_is_pending() {
+        assert_eq!(ownership_of(24000, &[24000], &[]), Ownership::Pending);
+        assert_eq!(ownership_of(24000, &[24000, 24001], &[24001]), Ownership::Pending);
     }
 }

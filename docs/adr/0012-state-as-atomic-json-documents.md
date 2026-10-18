@@ -1,6 +1,6 @@
 # Persistent state as versioned JSON documents replaced atomically
 
-The Daemon persists its state as JSON documents in the state directory, one per concern, starting with `leases.json` for the Leases. Each document carries a `version` field and is replaced atomically: written to a temporary file next to it, flushed to disk, renamed over it, then the directory is flushed. The Daemon is the only writer, it holds the lock of the state directory (ADR 0001), so a document needs no locking of its own, and allocation is serialized in memory before anything is written. A document is read on the first request that needs it, so an unreadable one fails that request with exit code 125 and its path, instead of keeping the Daemon from starting.
+The Daemon persists its state as JSON documents in the state directory, one per concern, starting with `leases.json` for the Leases. Each document carries a `version` field and is replaced atomically: written to a temporary file next to it, flushed to disk, renamed over it, then the directory is flushed. The Daemon is the only writer, it holds the lock of the state directory (ADR 0001), so a document needs no locking of its own, and Leases are granted one request at a time in memory before anything is written. A document is read on the first request that needs it, so an unreadable one fails that request with exit code 125 and its path, instead of keeping the Daemon from starting.
 
 ## Considered Options
 

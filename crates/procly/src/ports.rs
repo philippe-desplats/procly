@@ -64,63 +64,75 @@ pub(crate) enum PortsError {
     InvalidPortName { service: String, name: String },
 }
 
-/// The variables carrying the Leases of a Service: `PORT` for the Port name its health check probes, which is the
-/// only one or the one `health.port` names, and `PORT_<NAME>` for each Port name, such as `PORT_HTTP`.
-pub(crate) fn environment(
+/// Checks that each Port name of the Service fits in a variable of its own, and that each placeholder of its
+/// command names one of them, before any Lease is granted for it.
+pub(crate) fn check<'a>(
     service: &str,
-    leases: &BTreeMap<String, u16>,
-    health_port_name: Option<&str>,
-) -> Result<Vec<(String, String)>, PortsError> {
-    let mut variables = Vec::with_capacity(leases.len() + 1);
-    for (name, port) in leases {
-        // Lowercase only, so that 2 Port names never map to the same variable.
-        if name.is_empty()
+    command: &str,
+    port_names: impl IntoIterator<Item = &'a String>,
+) -> Result<(), PortsError> {
+    let port_names: Vec<&String> = port_names.into_iter().collect();
+    // Lowercase only, so that 2 Port names never map to the same variable.
+    if let Some(name) = port_names.iter().find(|name| {
+        name.is_empty()
             || !name
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        {
-            return Err(PortsError::InvalidPortName {
-                service: service.to_owned(),
-                name: name.clone(),
-            });
-        }
-        variables.push((format!("PORT_{}", name.to_ascii_uppercase()), port.to_string()));
+    }) {
+        return Err(PortsError::InvalidPortName {
+            service: service.to_owned(),
+            name: (*name).clone(),
+        });
     }
-    if let Some(port) = health_port_name.and_then(|name| leases.get(name)) {
-        variables.push(("PORT".to_owned(), port.to_string()));
-    }
-    Ok(variables)
-}
-
-/// Replaces each `{ports.<name>}` of `command` with the leased port of that Port name.
-///
-/// Every other brace is left alone, a shell command is full of them (`${VAR}`, `awk '{ print }'`, `find -exec {}`).
-pub(crate) fn render(service: &str, command: &str, leases: &BTreeMap<String, u16>) -> Result<String, PortsError> {
-    let mut rendered = String::with_capacity(command.len());
-    let mut rest = command;
-    while let Some(start) = rest.find(PLACEHOLDER_PREFIX) {
-        let after = &rest[start + PLACEHOLDER_PREFIX.len()..];
-        let name_len = after.find(|c: char| !is_port_name_char(c)).unwrap_or(after.len());
-        if name_len == 0 || !after[name_len..].starts_with('}') {
-            // Not a placeholder, such as `{ports.}` or `{ports.a b}`: copy the opening brace and look further.
-            rendered.push_str(&rest[..=start]);
-            rest = &rest[start + 1..];
-            continue;
-        }
-        let name = &after[..name_len];
-        let port = leases.get(name).ok_or_else(|| PortsError::UnknownPlaceholder {
+    match placeholders(command).find(|(_, name)| !port_names.iter().any(|port_name| port_name == name)) {
+        Some((_, name)) => Err(PortsError::UnknownPlaceholder {
             service: service.to_owned(),
             name: name.to_owned(),
-        })?;
-        rendered.push_str(&rest[..start]);
-        rendered.push_str(&port.to_string());
-        rest = &after[name_len + 1..];
+        }),
+        None => Ok(()),
     }
-    rendered.push_str(rest);
-    Ok(rendered)
 }
 
-/// The characters of a Port name, which must also fit in the name of an environment variable.
+/// The variables carrying the Leases of a Service: `PORT` for `health_port`, the Lease its health check probes, and
+/// `PORT_<NAME>` for each Port name, such as `PORT_HTTP`.
+pub(crate) fn environment(leases: &BTreeMap<String, u16>, health_port: Option<u16>) -> Vec<(String, String)> {
+    leases
+        .iter()
+        .map(|(name, port)| (format!("PORT_{}", name.to_ascii_uppercase()), port.to_string()))
+        .chain(health_port.map(|port| ("PORT".to_owned(), port.to_string())))
+        .collect()
+}
+
+/// Replaces each `{ports.<name>}` of `command` with the leased port of that Port name, once [`check`] has passed.
+///
+/// Every other brace is left alone, a shell command is full of them (`${VAR}`, `awk '{ print }'`, `find -exec {}`).
+pub(crate) fn render(command: &str, leases: &BTreeMap<String, u16>) -> String {
+    let mut rendered = String::with_capacity(command.len());
+    let mut copied = 0;
+    for (span, name) in placeholders(command) {
+        if let Some(port) = leases.get(name) {
+            rendered.push_str(&command[copied..span.start]);
+            rendered.push_str(&port.to_string());
+            copied = span.end;
+        }
+    }
+    rendered.push_str(&command[copied..]);
+    rendered
+}
+
+/// Each `{ports.<name>}` of `command`, with its span and its Port name, skipping what only looks like one, such as
+/// `{ports.}` or `{ports.a b}`.
+fn placeholders(command: &str) -> impl Iterator<Item = (std::ops::Range<usize>, &str)> {
+    command.match_indices(PLACEHOLDER_PREFIX).filter_map(|(start, _)| {
+        let name_start = start + PLACEHOLDER_PREFIX.len();
+        let after = &command[name_start..];
+        let name_len = after.find(|c: char| !is_port_name_char(c)).unwrap_or(after.len());
+        (name_len > 0 && after[name_len..].starts_with('}'))
+            .then(|| (start..name_start + name_len + 1, &after[..name_len]))
+    })
+}
+
+/// The characters a placeholder may name, the Port name itself is checked by [`check`].
 fn is_port_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
@@ -158,42 +170,32 @@ mod tests {
     #[test]
     fn port_carries_the_health_port_and_each_port_name_its_own_variable() {
         assert_eq!(
-            environment("web", &leases(), Some("http")).unwrap(),
+            environment(&leases(), Some(24000)),
             [
                 ("PORT_HTTP".to_owned(), "24000".to_owned()),
                 ("PORT_TEST".to_owned(), "24001".to_owned()),
                 ("PORT".to_owned(), "24000".to_owned()),
             ]
         );
-        assert_eq!(
-            environment("worker", &BTreeMap::new(), None).unwrap(),
-            Vec::<(String, String)>::new()
-        );
+        assert_eq!(environment(&BTreeMap::new(), None), Vec::<(String, String)>::new());
     }
 
     #[test]
     fn a_port_name_must_fit_in_one_variable_of_its_own() {
         for name in ["Http", "api-http", ""] {
-            let leases = BTreeMap::from([(name.to_owned(), 24000)]);
+            let names = [name.to_owned()];
             assert!(
-                matches!(
-                    environment("web", &leases, None),
-                    Err(PortsError::InvalidPortName { .. })
-                ),
+                matches!(check("web", "serve", &names), Err(PortsError::InvalidPortName { .. })),
                 "{name:?} was accepted"
             );
         }
+        assert!(check("web", "serve", &["api_http2".to_owned()]).is_ok());
     }
 
     #[test]
     fn each_placeholder_becomes_the_leased_port_of_its_port_name() {
         assert_eq!(
-            render(
-                "web",
-                "vite --port {ports.http} --strictPort && serve {ports.test}",
-                &leases()
-            )
-            .unwrap(),
+            render("vite --port {ports.http} --strictPort && serve {ports.test}", &leases()),
             "vite --port 24000 --strictPort && serve 24001"
         );
     }
@@ -201,13 +203,14 @@ mod tests {
     #[test]
     fn other_braces_of_a_shell_command_are_left_alone() {
         let command = "echo ${PORT} {} {ports.} {ports.a b} {ports.http | awk '{ print $1 }'";
-        assert_eq!(render("web", command, &leases()).unwrap(), command);
+        assert_eq!(render(command, &leases()), command);
+        assert!(check("web", command, leases().keys()).is_ok());
     }
 
     #[test]
     fn a_placeholder_for_an_undeclared_port_name_is_an_error() {
         assert!(matches!(
-            render("web", "serve --port {ports.htpp}", &leases()),
+            check("web", "serve --port {ports.htpp}", leases().keys()),
             Err(PortsError::UnknownPlaceholder { name, .. }) if name == "htpp"
         ));
     }

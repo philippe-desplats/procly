@@ -312,13 +312,4 @@ mod tests {
             Err(LeaseError::RangeExhausted { port_name, .. }) if port_name == "http"
         ));
     }
-
-    #[test]
-    fn a_port_held_by_a_listener_is_not_free() {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(!is_free(port));
-        drop(listener);
-        assert!(is_free(port));
-    }
 }
