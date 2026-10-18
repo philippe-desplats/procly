@@ -89,6 +89,13 @@ pub(crate) fn resolve(dir: &Path) -> Result<Option<Topology>, TopologyError> {
     }))
 }
 
+/// The git directory private to the Worktree rooted at `worktree`: `.git/worktrees/<name>` for a linked Worktree,
+/// removed by git with the Worktree, and the `.git` directory itself for the Main worktree.
+pub(crate) fn git_dir(worktree: &Path) -> Result<PathBuf, TopologyError> {
+    let output = git(worktree, &["rev-parse", "--path-format=absolute", "--git-dir"])?;
+    canonicalize(Path::new(OsStr::from_bytes(&output)))
+}
+
 /// Every Worktree of a Repository, in the order of `git worktree list`.
 ///
 /// The first entry of a bare Repository is the bare directory itself, which is no Worktree and is skipped, so no

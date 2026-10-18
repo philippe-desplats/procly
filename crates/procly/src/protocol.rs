@@ -47,6 +47,13 @@ pub(crate) enum Request {
         cwd: PathBuf,
         all: bool,
     },
+    /// Prepares the Worktree holding `path`: copies the listed files from the Main worktree, then runs the setup
+    /// commands it has not run yet, and answers once they have ended.
+    WorktreeInit {
+        path: PathBuf,
+        /// The environment of the requesting command, handed to the setup commands as for `Run`.
+        env: Vec<(String, String)>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +89,16 @@ pub(crate) enum Response {
     /// The Services `down` stopped, by name.
     Down {
         stopped: Vec<String>,
+    },
+    /// The Worktree is prepared.
+    WorktreeInit(InitReport),
+    /// A setup command failed, and the ones after it were not run.
+    SetupFailed {
+        report: InitReport,
+        command: String,
+        end: JobEnd,
+        /// The recent output of the command, to tell why.
+        output: String,
     },
     Error {
         message: String,
@@ -157,6 +174,17 @@ pub(crate) struct JobStatus {
 pub(crate) enum JobState {
     Running,
     Ended { end: JobEnd },
+}
+
+/// What `worktree init` changed in a Worktree.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct InitReport {
+    /// The listed paths that were copied, as listed.
+    pub(crate) copied: Vec<String>,
+    /// The listed paths the Main worktree does not hold.
+    pub(crate) missing: Vec<String>,
+    /// The setup commands that ran and succeeded.
+    pub(crate) ran: Vec<String>,
 }
 
 /// How a Job ended.
