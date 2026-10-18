@@ -318,3 +318,39 @@ impl Procly {
         wait_until_gone(pid);
     }
 }
+
+/// Like [`git`], and returns what the command printed on stdout.
+pub fn git_output(dir: &Path, args: &[&str]) -> String {
+    let mut command = Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert_success(&output);
+    stdout(&output)
+}
+
+/// Whether `docker compose` v2 and a running Docker engine are available, printing why a Docker test is skipped
+/// otherwise. A Docker test starts with `if !require_docker() { return; }`.
+pub fn require_docker() -> bool {
+    let works = |args: &[&str]| {
+        Command::new("docker")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|output| output.status.success())
+    };
+    let available = works(&["compose", "version"]) && works(&["info"]);
+    if !available {
+        eprintln!("skipped: docker compose v2 and a running Docker engine are required");
+    }
+    available
+}

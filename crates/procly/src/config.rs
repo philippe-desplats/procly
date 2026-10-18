@@ -1,11 +1,13 @@
 //! The configuration of a Repository: user settings, the versioned `procly.toml` and the git-excluded
 //! `procly.local.toml` of the Worktree, merged in that order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use serde::de::{self, MapAccess, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer};
 use toml::{Table, Value};
 
@@ -40,10 +42,27 @@ pub(crate) enum ConfigError {
     UnknownNeed { service: String, need: String },
     #[error("services need each other in a loop: {}", .cycle.join(" -> "))]
     NeedsCycle { cycle: Vec<String> },
+    #[error(
+        "pinned.{branch}.ports sets a port for {service}.{port_name}, which is not a Port name of a declared service"
+    )]
+    UnknownPinnedPort {
+        branch: String,
+        service: String,
+        port_name: String,
+    },
     #[error("worktree.copy lists {path:?}, which is not a path inside the Worktree")]
     WorktreeCopyPath { path: String },
     #[error("the user settings {path} holds only [settings], move [{key}] to a procly.toml")]
     UserSettingsScope { path: PathBuf, key: String },
+    #[error("service {service} must set exactly one of `run` (a Process service) and `compose` (a Compose service)")]
+    ServiceKind { service: String },
+    #[error("service {service} is {kind}, `{key}` is for {other} only")]
+    KeyOfOtherKind {
+        service: String,
+        key: &'static str,
+        kind: &'static str,
+        other: &'static str,
+    },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
     Invalid {
         files: Vec<PathBuf>,
@@ -61,6 +80,18 @@ pub(crate) struct Config {
     pub(crate) services: BTreeMap<String, ServiceConfig>,
     #[serde(default)]
     pub(crate) worktree: WorktreeConfig,
+    /// The Pinned branches, by branch name.
+    #[serde(default)]
+    pub(crate) pinned: BTreeMap<String, PinnedConfig>,
+}
+
+/// A Pinned branch: its Leases are bound to the branch name rather than to the Worktree, and never expire.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PinnedConfig {
+    /// The explicit port of some Port names, by Service then Port name, preferred over any other port.
+    #[serde(default)]
+    pub(crate) ports: BTreeMap<String, BTreeMap<String, u16>>,
 }
 
 /// What `procly worktree init` does in a fresh Worktree.
@@ -98,6 +129,12 @@ pub(crate) struct Settings {
     /// Where the Leases of Worktrees other than the Main worktree are drawn from.
     #[serde(default = "default_port_range", deserialize_with = "range")]
     pub(crate) port_range: Range,
+    /// How long a Lease no Service used is kept before its port returns to the Range, Pinned branches aside.
+    #[serde(default = "default_lease_expiry", deserialize_with = "duration")]
+    pub(crate) lease_expiry: Duration,
+    /// How long a Compose service keeps running after the last Worktree that needed it stopped needing it.
+    #[serde(default = "default_grace_period", deserialize_with = "duration")]
+    pub(crate) grace_period: Duration,
 }
 
 impl Default for Settings {
@@ -109,21 +146,34 @@ impl Default for Settings {
             idle_stop: default_idle_stop(),
             idle_timeout: default_idle_timeout(),
             port_range: default_port_range(),
+            lease_expiry: default_lease_expiry(),
+            grace_period: default_grace_period(),
         }
     }
 }
 
-/// A Process service.
+/// A Process service, or a Compose service.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServiceConfig {
-    /// The command, run by `/bin/sh -c` at the root of the Worktree.
-    pub(crate) run: String,
-    /// The port of each Port name.
+    /// The command of a Process service, run by `/bin/sh -c` at the root of the Worktree.
     #[serde(default)]
-    pub(crate) ports: BTreeMap<String, u16>,
+    pub(crate) run: Option<String>,
+    /// The service of the compose file a Compose service maps to.
+    #[serde(default)]
+    pub(crate) compose: Option<String>,
+    /// The declared port and the Pool of each Port name.
+    #[serde(default)]
+    pub(crate) ports: BTreeMap<String, PortConfig>,
+    /// Overrides `settings.grace_period` for this Compose service.
+    #[serde(default, deserialize_with = "optional_duration")]
+    pub(crate) grace_period: Option<Duration>,
     #[serde(default)]
     pub(crate) health: HealthConfig,
+    /// The Derived variables of the Service: each value is a template over Leases and Worktree facts, rendered into
+    /// the environment of the Service and mirrored in the Env file.
+    #[serde(default)]
+    pub(crate) env: BTreeMap<String, String>,
     /// The Services started first, and healthy, before this one.
     #[serde(default)]
     pub(crate) needs: Vec<String>,
@@ -131,6 +181,67 @@ pub(crate) struct ServiceConfig {
     pub(crate) restart: RestartConfig,
     #[serde(default)]
     pub(crate) idle: IdleConfig,
+}
+
+/// One Port name of a Service: its declared port alone, as in `http = 3000`, or with a Pool, as in
+/// `http = { port = 3000, pool = [3100, 3101] }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PortConfig {
+    /// The port of the Main worktree.
+    pub(crate) port: u16,
+    /// The ports tried, in order, before the Range in any other Worktree.
+    pub(crate) pool: Vec<u16>,
+}
+
+impl<'de> Deserialize<'de> for PortConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The table form, deserialized as declared so that a misspelt key is named in the error.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PortTable {
+            port: u16,
+            #[serde(default)]
+            pool: Vec<u16>,
+        }
+
+        /// Takes the bare number and the table form, which a derive of an untagged enum would accept with an
+        /// error naming neither.
+        struct PortVisitor;
+
+        impl<'de> Visitor<'de> for PortVisitor {
+            type Value = PortConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a port number, or a table with port and pool")
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<PortConfig, E> {
+                u16::try_from(value)
+                    .map(PortConfig::declared)
+                    .map_err(|_| E::invalid_value(Unexpected::Signed(value), &self))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<PortConfig, E> {
+                u16::try_from(value)
+                    .map(PortConfig::declared)
+                    .map_err(|_| E::invalid_value(Unexpected::Unsigned(value), &self))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<PortConfig, A::Error> {
+                let PortTable { port, pool } = PortTable::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(PortConfig { port, pool })
+            }
+        }
+
+        deserializer.deserialize_any(PortVisitor)
+    }
+}
+
+impl PortConfig {
+    /// A declared port without a Pool, the meaning of the bare form `http = 3000`.
+    pub(crate) fn declared(port: u16) -> Self {
+        Self { port, pool: Vec::new() }
+    }
 }
 
 /// Overrides `settings.idle_stop` and `settings.idle_timeout` for one Service.
@@ -202,7 +313,52 @@ impl WorktreeConfig {
     }
 }
 
+/// What a Service runs, once its keys are known to agree.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ServiceKind<'a> {
+    Process {
+        run: &'a str,
+    },
+    /// A service of the compose file of the Repository.
+    Compose {
+        service: &'a str,
+    },
+}
+
 impl ServiceConfig {
+    /// Whether the Service `name` is a Process service or a Compose service, failing when its keys disagree: both or
+    /// neither of `run` and `compose`, or a key that belongs to the other kind.
+    pub(crate) fn kind(&self, name: &str) -> Result<ServiceKind<'_>, ConfigError> {
+        let wrong_key = |key, kind, other| ConfigError::KeyOfOtherKind {
+            service: name.to_owned(),
+            key,
+            kind,
+            other,
+        };
+        match (&self.run, &self.compose) {
+            (Some(run), None) => {
+                if self.grace_period.is_some() {
+                    return Err(wrong_key("grace_period", "a Process service", "a Compose service"));
+                }
+                Ok(ServiceKind::Process { run })
+            }
+            (None, Some(service)) => {
+                let restart = &self.restart;
+                if restart.attempts.is_some() || restart.delay.is_some() {
+                    return Err(wrong_key("restart", "a Compose service", "a Process service"));
+                }
+                let idle = &self.idle;
+                if idle.stop.is_some() || idle.timeout.is_some() {
+                    return Err(wrong_key("idle", "a Compose service", "a Process service"));
+                }
+                Ok(ServiceKind::Compose { service })
+            }
+            _ => Err(ConfigError::ServiceKind {
+                service: name.to_owned(),
+            }),
+        }
+    }
+
     /// The Port name the health check of the Service `name` probes, `None` when it declares no Port name.
     pub(crate) fn health_port_name(&self, name: &str) -> Result<Option<&str>, ConfigError> {
         match &self.health.port_name {
@@ -286,13 +442,54 @@ impl Config {
         Ok(())
     }
 
-    /// Every port declared in the configuration, which the Range skips so that it never hands out the port a
-    /// Main worktree expects.
-    pub(crate) fn declared_ports(&self) -> std::collections::BTreeSet<u16> {
-        self.services
+    /// Every port the configuration declares, Pools and explicit ports of Pinned branches included, which the
+    /// Range skips so that it never hands out a port a Worktree expects.
+    pub(crate) fn declared_ports(&self) -> BTreeSet<u16> {
+        let services = self
+            .services
             .values()
-            .flat_map(|service| service.ports.values().copied())
-            .collect()
+            .flat_map(|service| service.ports.values())
+            .flat_map(|port| std::iter::once(port.port).chain(port.pool.iter().copied()));
+        let pinned = self
+            .pinned
+            .values()
+            .flat_map(|pinned| pinned.ports.values())
+            .flat_map(|ports| ports.values().copied());
+        services.chain(pinned).collect()
+    }
+
+    /// Fails on an explicit port of a Pinned branch set for a Service or a Port name that is not declared, so
+    /// that a typo never leaves a branch without the port it expects.
+    fn validate_pinned(&self) -> Result<(), ConfigError> {
+        for (branch, pinned) in &self.pinned {
+            for (service, ports) in &pinned.ports {
+                let declared = self.services.get(service);
+                if let Some(port_name) = ports
+                    .keys()
+                    .find(|port_name| declared.is_none_or(|declared| !declared.ports.contains_key(*port_name)))
+                {
+                    return Err(ConfigError::UnknownPinnedPort {
+                        branch: branch.clone(),
+                        service: service.clone(),
+                        port_name: port_name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// How long the Compose service `service` keeps running once no Worktree needs it.
+    pub(crate) fn grace_period(&self, service: &ServiceConfig) -> Duration {
+        service.grace_period.unwrap_or(self.settings.grace_period)
+    }
+
+    /// Fails on the first Service whose keys disagree, so that no `up` starts anything from a configuration that
+    /// cannot be run.
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.services
+            .iter()
+            .try_for_each(|(name, service)| service.kind(name).map(|_| ()))
     }
 
     /// How long `up` waits for `service` to become healthy.
@@ -325,6 +522,16 @@ fn default_restart_delay() -> Duration {
 
 fn default_port_range() -> Range {
     Range::DEFAULT
+}
+
+/// Long enough for an agent coming back from a short break to find the container warm.
+fn default_grace_period() -> Duration {
+    Duration::from_mins(10)
+}
+
+/// Long enough to cover a branch left aside during a holiday.
+fn default_lease_expiry() -> Duration {
+    Duration::from_hours(30 * 24)
 }
 
 /// A Range written as `<start>-<end>`, such as `24000-24999`.
@@ -384,6 +591,8 @@ pub(crate) fn load(user_settings: Option<&Path>, worktree: &Path) -> Result<Conf
         .try_into()
         .map_err(|source| ConfigError::Invalid { files, source })?;
     config.worktree.validate()?;
+    config.validate()?;
+    config.validate_pinned()?;
     Ok(config)
 }
 
@@ -580,6 +789,69 @@ mod tests {
         assert_eq!(off.idle_timeout(&off.services["web"]), None);
     }
 
+    #[test]
+    fn a_service_is_a_process_by_its_run_and_a_compose_service_by_its_compose() {
+        let config = parsed("[services.web]\nrun = 'serve'\n[services.db]\ncompose = 'postgres'\n");
+        assert_eq!(
+            config.services["web"].kind("web").unwrap(),
+            ServiceKind::Process { run: "serve" }
+        );
+        assert_eq!(
+            config.services["db"].kind("db").unwrap(),
+            ServiceKind::Compose { service: "postgres" }
+        );
+    }
+
+    #[test]
+    fn a_service_sets_exactly_one_of_run_and_compose() {
+        for text in ["ports = { http = 3000 }\n", "run = 'x'\ncompose = 'db'\n"] {
+            assert!(
+                matches!(
+                    service(text).kind("db"),
+                    Err(ConfigError::ServiceKind { service }) if service == "db"
+                ),
+                "{text:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_service_refuses_the_keys_of_a_process_and_the_other_way_round() {
+        let key = |text: &str, name: &str| match service(text).kind(name) {
+            Err(ConfigError::KeyOfOtherKind { key, .. }) => key,
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        assert_eq!(key("compose = 'db'\nrestart = { attempts = 1 }\n", "db"), "restart");
+        assert_eq!(key("compose = 'db'\nidle = { stop = false }\n", "db"), "idle");
+        assert_eq!(key("run = 'x'\ngrace_period = '1m'\n", "web"), "grace_period");
+    }
+
+    #[test]
+    fn a_compose_service_waits_ten_minutes_before_it_stops_unless_configured_otherwise() {
+        let config = parsed(
+            "[settings]\ngrace_period = '20m'\n\
+             [services.db]\ncompose = 'postgres'\n\
+             [services.cache]\ncompose = 'redis'\ngrace_period = '30s'\n",
+        );
+        assert_eq!(config.grace_period(&config.services["db"]), Duration::from_mins(20));
+        assert_eq!(config.grace_period(&config.services["cache"]), Duration::from_secs(30));
+        assert_eq!(Settings::default().grace_period, Duration::from_mins(10));
+    }
+
+    #[test]
+    fn loading_refuses_a_service_that_is_neither_a_process_nor_a_compose_service() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(VERSIONED_FILE),
+            "[services.db]\nports = { db = 5432 }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            load(None, dir.path()),
+            Err(ConfigError::ServiceKind { service }) if service == "db"
+        ));
+    }
+
     fn worktree(text: &str) -> WorktreeConfig {
         Value::Table(table(text)).try_into::<Config>().unwrap().worktree
     }
@@ -606,6 +878,61 @@ mod tests {
         assert_eq!(section.copy, [".env"]);
         assert_eq!(section.setup, ["pnpm install", "pnpm db:migrate"]);
         assert_eq!(worktree("").copy, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_port_name_declares_its_port_alone_or_with_a_pool() {
+        let web = service("run = 'x'\nports = { http = 3000, test = { port = 3001, pool = [3101, 3102] } }\n");
+        assert_eq!(web.ports["http"], PortConfig::declared(3000));
+        assert_eq!(
+            web.ports["test"],
+            PortConfig {
+                port: 3001,
+                pool: vec![3101, 3102]
+            }
+        );
+        let invalid = |text: &str| {
+            Value::Table(table(text))
+                .try_into::<ServiceConfig>()
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(invalid("run = 'x'\nports = { http = { port = 3000, pol = [3100] } }\n").contains("pol"));
+        assert!(invalid("run = 'x'\nports = { http = 70000 }\n").contains("70000"));
+    }
+
+    #[test]
+    fn pools_and_explicit_ports_of_pinned_branches_are_declared_ports() {
+        let config = parsed(
+            "[services.web]\nrun = 'x'\nports = { http = { port = 3000, pool = [3100] } }\n\
+             [pinned.develop]\n\
+             [pinned.staging.ports]\nweb = { http = 3200 }\n",
+        );
+        assert_eq!(config.declared_ports(), BTreeSet::from([3000, 3100, 3200]));
+        assert!(config.pinned["develop"].ports.is_empty());
+        assert!(config.validate_pinned().is_ok());
+    }
+
+    #[test]
+    fn an_explicit_port_of_a_pinned_branch_must_name_a_declared_port_name() {
+        for pinned in ["api = { http = 3200 }", "web = { test = 3200 }"] {
+            let config = parsed(&format!(
+                "[services.web]\nrun = 'x'\nports = {{ http = 3000 }}\n[pinned.develop.ports]\n{pinned}\n"
+            ));
+            assert!(
+                matches!(config.validate_pinned(), Err(ConfigError::UnknownPinnedPort { branch, .. }) if branch == "develop"),
+                "{pinned} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lease_expires_after_30_days_unless_configured_otherwise() {
+        assert_eq!(Settings::default().lease_expiry, Duration::from_hours(30 * 24));
+        assert_eq!(
+            parsed("[settings]\nlease_expiry = '7d'\n").settings.lease_expiry,
+            Duration::from_hours(7 * 24)
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Services: declared Process services, run with pipes in a process group of their own and health-checked.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
@@ -177,6 +177,15 @@ impl Services {
             service.request_stop(ServiceEnd::Stopped);
         }
         stopping
+    }
+
+    /// The Worktree root and the name of every running Service.
+    pub(crate) fn running(&self) -> BTreeSet<ServiceKey> {
+        self.table()
+            .iter()
+            .filter(|(_, service)| service.is_running())
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     /// Stops the tree of every running Service and waits until they are gone, for a Daemon about to exit.

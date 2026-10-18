@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 7;
+pub(crate) const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -35,6 +35,14 @@ pub(crate) enum Request {
         cwd: PathBuf,
         /// The environment of the requesting command, as for `Run`.
         env: Vec<(String, String)>,
+        /// Writes the exclusion of the generated files to the `.gitignore` of the Worktree and not to the shared git
+        /// exclude file, unless a block of Procly already sits in the `.gitignore`.
+        gitignore: bool,
+    },
+    /// The variables Procly injects into the Service `service` of the Worktree holding `cwd`, without starting it.
+    Env {
+        service: String,
+        cwd: PathBuf,
     },
     /// Stops a Service of the Worktree holding `cwd`, or every Service of it without `service`, and answers once
     /// their trees are gone.
@@ -90,9 +98,14 @@ pub(crate) enum Response {
         /// The Service that needs this one, when `up` was asked for that one instead.
         needed_by: Option<String>,
     },
-    /// The Services `down` stopped, by name.
+    /// The variables Procly injects into the Service, by name.
+    Env {
+        variables: Vec<(String, String)>,
+    },
+    /// The Services `down` stopped, by name, and the Compose services it let go of.
     Down {
         stopped: Vec<String>,
+        released: Vec<Released>,
     },
     /// The Worktree is prepared.
     WorktreeInit(InitReport),
@@ -116,6 +129,16 @@ pub(crate) struct UpService {
     pub(crate) outcome: StartOutcome,
     pub(crate) port: Option<u16>,
     pub(crate) url: Option<String>,
+}
+
+/// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Released {
+    pub(crate) service: String,
+    /// How many other Worktrees still need the container.
+    pub(crate) others: usize,
+    /// How long the container keeps running once no Worktree needs it.
+    pub(crate) grace_ms: u64,
 }
 
 /// Why a Service ended.
@@ -322,7 +345,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":7,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":9,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

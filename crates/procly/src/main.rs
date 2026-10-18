@@ -1,7 +1,9 @@
 mod client;
 mod config;
 mod daemon;
+mod derived;
 mod duration;
+mod envfile;
 mod output;
 mod ports;
 mod protocol;
@@ -18,7 +20,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
-use crate::protocol::{InitReport, JobEnd, Request, Response, ServiceEnd, StartOutcome};
+use crate::protocol::{InitReport, JobEnd, Released, Request, Response, ServiceEnd, StartOutcome};
 use crate::state_dir::StateDir;
 
 /// The exit code of `wait` for a Job killed on timeout, and of `up` for a Service never healthy, the one
@@ -70,9 +72,24 @@ enum Command {
                             within its health timeout and its process tree was stopped, 125 when Procly itself \
                             fails. See docs/exit-codes.md."
     )]
-    Up { service: String },
+    Up {
+        /// Exclude the files Procly generates through the `.gitignore` of the Worktree, as a Managed block, instead
+        /// of the git exclude file shared by the Repository.
+        #[arg(long)]
+        gitignore: bool,
+        service: String,
+    },
+    /// Print the variables Procly injects into a Service of the current Worktree as shell exports: its Leases, its
+    /// Derived variables, `PROCLY=1` and `PROCLY_SERVICE`. Without starting it, nor the environment of the caller.
+    #[command(
+        after_help = "Run a one-off command with the environment of a Service: `eval \"$(procly env web)\"`. \
+                      Exit codes: 0 on success, 125 when Procly itself fails, such as for a Service that is not \
+                      declared or a Derived variable that cannot be rendered. See docs/exit-codes.md."
+    )]
+    Env { service: String },
     /// Stop a Service of the current Worktree, or all of its Services without an argument, with their whole
-    /// process trees. The Daemon logs who asked.
+    /// process trees. The Daemon logs who asked. A Compose service is let go of instead: its container keeps
+    /// running while another Worktree needs it, then stops after its Grace period.
     Down { service: Option<String> },
     /// Wait for a Job to end, print its output and exit with its exit code (124 on timeout).
     Wait { job: String },
@@ -164,7 +181,8 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Up { service } => up(&state, service),
+        Command::Up { gitignore, service } => up(&state, service, gitignore),
+        Command::Env { service } => env(&state, service),
         Command::Down { service } => down(&state, service),
         Command::Wait { job } => match client::send(&state, &Request::Wait { job: job.clone() })? {
             Response::Ended { output, end } => {
@@ -223,12 +241,13 @@ fn tail(output: &str, lines: usize) -> &str {
 }
 
 /// Runs `up`, printing where to reach the healthy Service, or why it is not.
-fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
+fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Up {
         service,
         cwd,
         env: caller_env(),
+        gitignore,
     };
     match client::send(state, &request)? {
         Response::Up {
@@ -315,6 +334,18 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
     }
 }
 
+/// Runs `env`, printing one `export` line per variable.
+fn env(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    match client::send(state, &Request::Env { service, cwd })? {
+        Response::Env { variables } => {
+            print(&envfile::exports(&variables))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
 /// Where to reach a Service that is up: its name, `started` or `reused`, its URL and its port.
 fn reached(service: &str, outcome: StartOutcome, url: Option<String>, port: Option<u16>) -> String {
     match (url, port) {
@@ -331,13 +362,16 @@ fn down(state: &StateDir, service: Option<String>) -> anyhow::Result<ExitCode> {
         cwd,
     };
     match client::send(state, &request)? {
-        Response::Down { stopped } => {
+        Response::Down { stopped, released } => {
             match service {
-                Some(service) if stopped.is_empty() => println!("{service} not running"),
-                None if stopped.is_empty() => println!("no services running"),
+                Some(service) if stopped.is_empty() && released.is_empty() => println!("{service} not running"),
+                None if stopped.is_empty() && released.is_empty() => println!("no services running"),
                 _ => {
                     for service in stopped {
                         println!("{service} stopped");
+                    }
+                    for released in &released {
+                        println!("{}", let_go(released));
                     }
                 }
             }
@@ -373,6 +407,24 @@ fn unit(state: &StateDir, command: &UnitCommand) -> anyhow::Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// What `down` tells about a Compose service the Worktree let go of: whether its container keeps running for others,
+/// or when it stops.
+fn let_go(released: &Released) -> String {
+    let Released {
+        service,
+        others,
+        grace_ms,
+    } = released;
+    match others {
+        0 => format!(
+            "{service} released, it stops after {} unless a Worktree needs it again",
+            duration::format(Duration::from_millis(*grace_ms))
+        ),
+        1 => format!("{service} released, 1 other Worktree still needs it"),
+        _ => format!("{service} released, {others} other Worktrees still need it"),
+    }
 }
 
 /// Runs `worktree init`, printing one line per file copied and per setup command run.
@@ -476,6 +528,21 @@ mod tests {
     fn the_tail_keeps_the_last_lines_with_their_newlines() {
         assert_eq!(tail("one\ntwo\nthree\n", 2), "two\nthree\n");
         assert_eq!(tail("one\ntwo\nthree", 2), "two\nthree");
+    }
+
+    #[test]
+    fn a_released_container_tells_who_still_needs_it_or_when_it_stops() {
+        let released = |others| Released {
+            service: "db".to_owned(),
+            others,
+            grace_ms: 300_000,
+        };
+        assert_eq!(
+            let_go(&released(0)),
+            "db released, it stops after 5m unless a Worktree needs it again"
+        );
+        assert_eq!(let_go(&released(1)), "db released, 1 other Worktree still needs it");
+        assert_eq!(let_go(&released(2)), "db released, 2 other Worktrees still need it");
     }
 
     #[test]

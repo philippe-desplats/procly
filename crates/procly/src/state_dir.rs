@@ -90,6 +90,11 @@ impl StateDir {
     pub(crate) fn services(&self) -> PathBuf {
         self.path.join("services.json")
     }
+
+    /// The document holding the fingerprint of every Managed block Procly wrote.
+    pub(crate) fn managed_blocks(&self) -> PathBuf {
+        self.path.join("managed-blocks.json")
+    }
 }
 
 fn non_empty_env(name: &str) -> Option<PathBuf> {
