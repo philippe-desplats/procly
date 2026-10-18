@@ -44,16 +44,20 @@ pub(super) fn signal_group(pgid: Pid, signal: Signal) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Identity {
     pub(super) pgid: Pid,
-    /// When the process started, as `ps` prints it, to the second.
+    /// When the process started, in a form that only compares with another reading on the same host.
     pub(super) started: String,
 }
 
-/// The identity of the live process `pid`, read with `ps`, which macOS and Linux both ship. `None` when no such
-/// process exists or `ps` cannot tell.
+/// The identity of the live process `pid`, `None` when no such process exists or its start cannot be read.
 ///
-/// The locale and the time zone are fixed, so that a Daemon started from a shell and one started by the session
-/// manager read the same start time.
+/// Linux keeps the start in `/proc` as clock ticks after boot, which stay the same when the wall clock is set. Its
+/// `ps` would compute a date from them that moves with the clock, and a Service would then no longer be recognized.
+/// macOS keeps the date itself, which `ps` prints, with the locale and the time zone fixed so that a Daemon started
+/// from a shell and one started by the session manager read the same.
 pub(super) fn identity(pid: Pid) -> Option<Identity> {
+    if cfg!(target_os = "linux") {
+        return parse_proc_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?);
+    }
     let output = Command::new("ps")
         .args(["-o", "pgid=,lstart=", "-p", &pid.to_string()])
         .env("LC_ALL", "C")
@@ -62,6 +66,20 @@ pub(super) fn identity(pid: Pid) -> Option<Identity> {
         .ok()
         .filter(|output| output.status.success())?;
     parse_identity(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Reads the process group and the start of `/proc/<pid>/stat`, the 5th and 22nd fields, counted after the name of
+/// the command, which may hold spaces and parentheses itself.
+fn parse_proc_stat(stat: &str) -> Option<Identity> {
+    let (_, fields) = stat.rsplit_once(')')?;
+    // The state is the 3rd field, so the 5th is 2 after it and the 22nd 19 after it.
+    let fields: Vec<&str> = fields.split_whitespace().collect();
+    let pgid = fields.get(2)?.parse().ok()?;
+    let started: u64 = fields.get(19)?.parse().ok()?;
+    Some(Identity {
+        pgid: Pid::from_raw(pgid),
+        started: format!("{started} ticks after boot"),
+    })
 }
 
 /// Reads the line `ps -o pgid=,lstart=` prints, such as `4242 Sun Oct 18 20:52:01 2026`.
@@ -112,6 +130,21 @@ mod tests {
                 started: "Sun Oct 18 20:52:01 2026".to_owned()
             })
         );
+    }
+
+    #[test]
+    fn reads_the_group_and_the_start_time_linux_keeps_in_proc() {
+        // The name of the command may hold spaces and parentheses, the fields after its last one are the numbers.
+        let stat = "4242 (my (odd) cmd) S 1 4242 4242 0 -1 4194560 120 0 0 0 1 2 0 0 20 0 1 0 987654 1234 56 \
+                    18446744073709551615\n";
+        assert_eq!(
+            parse_proc_stat(stat),
+            Some(Identity {
+                pgid: Pid::from_raw(4242),
+                started: "987654 ticks after boot".to_owned()
+            })
+        );
+        assert_eq!(parse_proc_stat("4242 (cmd) S 1"), None);
     }
 
     #[test]

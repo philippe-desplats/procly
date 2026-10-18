@@ -30,6 +30,10 @@ _Avoid_: server, supervisor, backend
 The launchd agent on macOS, or the systemd user unit on Linux, that starts the Daemon with the user's session and restarts it when it crashes.
 _Avoid_: service unit, autostart, daemon service
 
+**Reconciliation**:
+What a starting Daemon does with the Services a previous Daemon recorded: it re-attaches the ones still running and listening on their Lease, stops what is left of the others and reports what became of each. Re-attaching takes back the supervision of a running process group, unlike Reuse, which is the answer to a start request.
+_Avoid_: recovery, resync
+
 ### Services
 
 **Service**:

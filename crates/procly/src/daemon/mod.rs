@@ -49,9 +49,9 @@ struct Registry {
     leases: Leases,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
-    /// Set once the Services recorded by the previous Daemon are reconciled, with the error that kept it from
-    /// reading their document.
-    reconciled: tokio::sync::OnceCell<Result<(), String>>,
+    /// Set once the Services recorded by the previous Daemon are reconciled. Left unset when their document cannot
+    /// be read, so that the request after it is fixed or removed reconciles again.
+    reconciled: tokio::sync::OnceCell<()>,
 }
 
 impl Registry {
@@ -60,13 +60,13 @@ impl Registry {
     /// for it, so that it never starts a Service still running from before the restart.
     async fn reconciled(&self) -> Result<(), String> {
         self.reconciled
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 reconcile::run(&self.services)
                     .await
                     .map_err(|error| format!("{:#}", anyhow::Error::from(error)))
             })
             .await
-            .clone()
+            .map(|&()| ())
     }
 }
 

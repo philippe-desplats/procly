@@ -64,16 +64,15 @@ async fn judge(record: &ServiceRecord) -> Verdict {
         .flatten();
     match leader {
         Some(leader) if is_recorded(record, &leader) => {
-            let listening = match record.port {
-                Some(port) => listens_on_lease(pgid, port, &record.lease_ports).await,
-                // Nothing to probe, a Service without a port is healthy as long as it runs.
-                None => true,
+            // Nothing to probe, a Service without a port is healthy as long as it runs.
+            let silent = match record.port {
+                Some(port) => (!listens_on_lease(pgid, port, &record.lease_ports).await).then_some(port),
+                None => None,
             };
-            if listening {
+            let Some(port) = silent else {
                 eprintln!("{label} still runs after a restart of the Daemon, it is re-attached");
                 return Verdict::Reattach;
-            }
-            let port = record.port.expect("a Service without a port always listens");
+            };
             process_group::stop_group(pgid).await;
             eprintln!(
                 "{label} still ran after a restart of the Daemon but no longer listened on its Lease, port {port}, its \

@@ -231,7 +231,7 @@ fn a_daemon_stopped_cleanly_leaves_no_service_for_the_next_one_to_reconcile() {
 }
 
 #[test]
-fn an_unreadable_service_document_fails_up_with_125_naming_it() {
+fn an_unreadable_service_document_fails_up_with_125_naming_it_until_it_is_removed() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
     let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
@@ -252,4 +252,9 @@ fn an_unreadable_service_document_fails_up_with_125_naming_it() {
         !starts.exists(),
         "a Service started although the previous ones could not be reconciled"
     );
+
+    // Removing the document is enough, the Daemon reconciles again on the next request.
+    std::fs::remove_file(&document).expect("remove the document");
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_eq!(lines(&starts), ["start"]);
 }
