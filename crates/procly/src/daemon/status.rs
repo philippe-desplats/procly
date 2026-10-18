@@ -22,7 +22,11 @@ pub(super) fn report(
 ) -> anyhow::Result<StatusReport> {
     let cwd = topology::canonicalize(cwd)?;
     let here = topology::resolve(&cwd)?;
-    let owned_groups = services.process_groups().into_iter().chain(jobs.process_groups()).collect();
+    let owned_groups = services
+        .process_groups()
+        .into_iter()
+        .chain(jobs.process_groups())
+        .collect();
     let statuses = jobs.statuses();
     let services = services.statuses();
     // Every Worktree the Daemon ran something in.
@@ -67,7 +71,10 @@ pub(super) fn report(
         .flat_map(|repository| repository.worktrees.iter().map(|status| status.worktree.path.clone()))
         .collect();
     let mut found = foreign::in_worktrees(&reported, &owned_groups, &composes.owned()).into_iter();
-    for status in repositories.iter_mut().flat_map(|repository| repository.worktrees.iter_mut()) {
+    for status in repositories
+        .iter_mut()
+        .flat_map(|repository| repository.worktrees.iter_mut())
+    {
         status.foreign = found.next().unwrap_or_default();
     }
     let jobs_outside_repositories = if all {

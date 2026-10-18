@@ -251,10 +251,7 @@ mod tests {
 
     #[test]
     fn the_host_ports_a_container_publishes_are_read_once_each() {
-        assert_eq!(
-            published_ports("0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp"),
-            [5432]
-        );
+        assert_eq!(published_ports("0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp"), [5432]);
         assert_eq!(published_ports("0.0.0.0:8000-8002->80-82/tcp"), [8000, 8001, 8002]);
         assert_eq!(published_ports("80/tcp"), Vec::<u16>::new());
         assert_eq!(published_ports(""), Vec::<u16>::new());
@@ -285,7 +282,10 @@ mod tests {
     fn a_path_belongs_to_the_deepest_worktree_holding_it() {
         let worktrees = [PathBuf::from("/src/app"), PathBuf::from("/src/app/.worktrees/feature")];
         assert_eq!(deepest(&worktrees, Path::new("/src/app/web")), Some(0));
-        assert_eq!(deepest(&worktrees, Path::new("/src/app/.worktrees/feature/web")), Some(1));
+        assert_eq!(
+            deepest(&worktrees, Path::new("/src/app/.worktrees/feature/web")),
+            Some(1)
+        );
         assert_eq!(deepest(&worktrees, Path::new("/src/other")), None);
     }
 }

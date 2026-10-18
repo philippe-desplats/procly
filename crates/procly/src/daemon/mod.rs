@@ -296,8 +296,10 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
         },
         Request::Status { cwd, all } => {
             let registry = Arc::clone(registry);
-            match tokio::task::spawn_blocking(move || status::report(&registry.jobs, &registry.services, &registry.composes, &cwd, all))
-                .await
+            match tokio::task::spawn_blocking(move || {
+                status::report(&registry.jobs, &registry.services, &registry.composes, &cwd, all)
+            })
+            .await
             {
                 Ok(Ok(report)) => Response::Status(report),
                 Ok(Err(error)) => Response::Error {

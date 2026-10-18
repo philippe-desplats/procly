@@ -127,7 +127,8 @@ mod tests {
 
     #[test]
     fn reads_each_listening_process_with_its_group_command_and_ports() {
-        let output = "p4242\ng4240\ncnode server\nf3\nn127.0.0.1:5173\nf4\nn[::1]:5173\np17\ng17\ncpostgres\nf5\nn*:5432\n";
+        let output =
+            "p4242\ng4240\ncnode server\nf3\nn127.0.0.1:5173\nf4\nn[::1]:5173\np17\ng17\ncpostgres\nf5\nn*:5432\n";
         assert_eq!(
             parse_listeners(output),
             [

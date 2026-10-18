@@ -436,7 +436,12 @@ struct Foreign {
 impl Foreign {
     /// Runs a container named `name` that does nothing, publishing `port` when given.
     fn run(name: &str, port: Option<u16>) -> Self {
-        let mut args = vec!["run".to_owned(), "--detach".to_owned(), "--name".to_owned(), name.to_owned()];
+        let mut args = vec![
+            "run".to_owned(),
+            "--detach".to_owned(),
+            "--name".to_owned(),
+            name.to_owned(),
+        ];
         if let Some(port) = port {
             args.extend(["--publish".to_owned(), format!("{port}:80")]);
         }
@@ -519,7 +524,10 @@ fn docker_a_container_holding_the_lease_without_matching_labels_is_a_conflict_pr
         "{error}"
     );
     assert!(foreign.is_running(), "Procly stopped a container it does not own");
-    assert!(fixture.project.container().is_empty(), "Procly created the container anyway");
+    assert!(
+        fixture.project.container().is_empty(),
+        "Procly created the container anyway"
+    );
 
     run_stop_command(&error);
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
@@ -583,4 +591,28 @@ fn docker_the_service_running_outside_procly_on_another_port_than_its_lease_is_a
     let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
     assert_success(&output);
     assert!(stdout(&output).starts_with("db started "), "{}", stdout(&output));
+}
+
+#[test]
+fn docker_a_container_started_outside_procly_is_a_foreign_process_in_status_until_it_is_adopted() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    compose_up_outside_procly(&fixture, port);
+    let project = &fixture.project.name;
+
+    let status = stdout(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    assert!(
+        status.contains(&format!(
+            "    foreign container {project}-db-1 (compose project {project}, service db) port {port}, started \
+             outside Procly\n"
+        )),
+        "{status}"
+    );
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let status = stdout(&fixture.procly.procly_in(&fixture.main, &["status"]));
+    assert!(!status.contains("foreign container"), "{status}");
 }

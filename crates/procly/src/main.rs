@@ -389,19 +389,22 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
             service,
             conflicts,
             needed_by,
-        } => {
-            let service = match needed_by {
-                Some(needed_by) => format!("{service}, needed by {needed_by},"),
-                None => service,
-            };
-            eprintln!("procly: service {service} needs what runs outside Procly, which Procly never stops:");
-            for conflict in &conflicts {
-                eprintln!("  {}", conflict_line(conflict));
-            }
-            Ok(ExitCode::from(EXIT_CONFLICT))
-        }
+        } => Ok(conflicted(service, &conflicts, needed_by)),
         other => unexpected(other),
     }
+}
+
+/// Prints the conflicts that keep a Service from starting, one per line.
+fn conflicted(service: String, conflicts: &[Conflict], needed_by: Option<String>) -> ExitCode {
+    let service = match needed_by {
+        Some(needed_by) => format!("{service}, needed by {needed_by},"),
+        None => service,
+    };
+    eprintln!("procly: service {service} needs what runs outside Procly, which Procly never stops:");
+    for conflict in conflicts {
+        eprintln!("  {}", conflict_line(conflict));
+    }
+    ExitCode::from(EXIT_CONFLICT)
 }
 
 /// What holds what a Service needs, and how to stop it.

@@ -283,8 +283,8 @@ impl Composes {
             .map_err(|error| anyhow::anyhow!("the service could not be started: {error}"))??;
         let port = spec.health.port;
         let began = Instant::now();
-        let (docker, begun) = start(&spec).await?;
-        let waited_out = match begun {
+        let (docker, found) = start(&spec).await?;
+        let waited_out = match found {
             Begun::Started(waited_out) => waited_out,
             Begun::Adopted(adopted) => {
                 // Not adopted until it answers, so that a container Procly does not own is never stopped.

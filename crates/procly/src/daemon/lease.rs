@@ -298,8 +298,7 @@ fn grant_in(
         let preferred = explicit.or_else(|| request.topology.worktree.main.then_some(declared.port));
         let port = if let Some(preferred) = preferred.filter(|&port| {
             !(request.keep && current.is_some()) && current != Some(port) && (available(port) || claimed(port))
-        })
-        {
+        }) {
             preferred
         } else if let Some(current) = current {
             current

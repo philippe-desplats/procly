@@ -278,7 +278,8 @@ fn grant(
         (topology, pinned)
     };
     let main = &topology.worktree.path;
-    let held_by_container = |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, main, compose));
+    let held_by_container =
+        |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, main, compose));
     Ok(registry.leases.grant(&LeaseRequest {
         topology,
         service,

@@ -200,11 +200,7 @@ pub(crate) enum Occupant {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ForeignProcess {
     /// A process listening on TCP ports, whose working directory is in the Worktree.
-    Process {
-        pid: i32,
-        command: String,
-        ports: Vec<u16>,
-    },
+    Process { pid: i32, command: String, ports: Vec<u16> },
     /// A running container of a compose project whose directory is in the Worktree.
     Container {
         name: String,
@@ -360,7 +356,9 @@ pub(crate) struct WorktreeStatus {
     pub(crate) worktree: Worktree,
     pub(crate) services: Vec<ServiceStatus>,
     pub(crate) jobs: Vec<JobStatus>,
-    /// What runs in the Worktree without Procly having started it.
+    /// What runs in the Worktree without Procly having started it. Left out when empty, so that the status of a
+    /// Worktree without any reads as it did before Foreign processes were reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) foreign: Vec<ForeignProcess>,
 }
 
