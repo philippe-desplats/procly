@@ -50,6 +50,17 @@ fn repository(procly: &Procly, driver: &str) -> (PathBuf, PathBuf, u16) {
     (main, other, port)
 }
 
+/// The port `procly up` printed at the end of its line.
+fn port_of(output: &std::process::Output) -> u16 {
+    assert_success(output);
+    let line = stdout(output);
+    line.trim_end()
+        .rsplit(' ')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("no port at the end of {line:?}"))
+}
+
 /// A Driver that only has a URL, for the tests that read it.
 fn write_driver(dir: &Path, name: &str, url: &str) {
     write_driver_file(
@@ -293,7 +304,8 @@ fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver
     let first = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
 
     assert_success(&first);
-    let port = fixture.port;
+    // The declared port, unless another process took it between the choice of the test and the start.
+    let port = port_of(&first);
     assert_eq!(
         stdout(&first),
         format!("db started http://localhost:{port} port {port}\n")
@@ -357,7 +369,7 @@ fn docker_each_seed_variant_gives_a_new_resource_its_content_and_an_existing_one
     assert_eq!(fixture.project.exec("ls /data/res/app_plain"), "");
     assert_eq!(content("app_copied"), "from-template\n");
     assert_eq!(content("app_filled"), "from-seed\n");
-    let port = fixture.port;
+    let port = port_of(&output);
     assert_eq!(
         fs::read_to_string(&ran).expect("the seed ran"),
         format!("filled app_filled dir://localhost:{port}/app_filled\n")
