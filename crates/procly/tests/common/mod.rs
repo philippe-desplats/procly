@@ -249,3 +249,18 @@ pub fn http_response(port: u16, path: &str) -> String {
     });
     response.expect("the response was read")
 }
+
+impl Procly {
+    /// Gives the Daemon a narrow Range of its own in the user settings, so that tests running in parallel, each with
+    /// its own Daemon, rarely draw the same ports. Returns its bounds.
+    pub fn narrow_range(&self) -> (u16, u16) {
+        let start = free_port().min(65_000);
+        let end = start + 19;
+        std::fs::write(
+            self.config_dir().join("config.toml"),
+            format!("[settings]\nport_range = \"{start}-{end}\"\n"),
+        )
+        .expect("write the user settings");
+        (start, end)
+    }
+}

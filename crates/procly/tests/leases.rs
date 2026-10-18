@@ -44,3 +44,21 @@ fn the_main_worktree_gets_the_declared_port_through_the_command_placeholder() {
     );
     assert_eq!(common::http_get(port, "/"), "ok\n");
 }
+
+#[test]
+fn a_second_worktree_gets_a_port_from_the_range_and_not_the_declared_one() {
+    let procly = Procly::new();
+    let (start, end) = procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = common::git_worktree_add(&main, "app-other");
+    let declared = free_port();
+    write(&main, "procly.toml", &web_declaring(declared));
+    write(&other, "procly.toml", &web_declaring(declared));
+
+    let in_main = port_of(&procly.procly_in(&main, &["up", "web"]));
+    let in_other = port_of(&procly.procly_in(&other, &["up", "web"]));
+
+    assert_eq!(in_main, declared);
+    assert!((start..=end).contains(&in_other), "{in_other} is outside {start}-{end}");
+    assert_eq!(common::http_get(in_other, "/"), "ok\n");
+}

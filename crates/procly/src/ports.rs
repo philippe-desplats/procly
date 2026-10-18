@@ -1,9 +1,55 @@
-//! Port names and their Leases as a Service sees them: the placeholders of its command.
+//! Port names, the Range Leases are drawn from, and Leases as a Service sees them: the placeholders of its command.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
 
 /// What opens a placeholder for a Port name of the Service itself, such as `{ports.http}`.
 const PLACEHOLDER_PREFIX: &str = "{ports.";
+
+/// The span of port numbers Leases are drawn from outside the Main worktree, bounds included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Range {
+    pub(crate) start: u16,
+    pub(crate) end: u16,
+}
+
+impl Range {
+    /// Below the ephemeral ports of Linux (from 32768) and macOS (from 49152), which the system hands out to
+    /// outgoing connections, and above the ports dev servers and databases use by default.
+    pub(crate) const DEFAULT: Self = Self { start: 24000, end: 24999 };
+
+    /// Every port of the Range, in increasing order.
+    pub(crate) fn ports(self) -> std::ops::RangeInclusive<u16> {
+        self.start..=self.end
+    }
+}
+
+impl FromStr for Range {
+    type Err = String;
+
+    /// Parses `<start>-<end>`, such as `24000-24999`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || format!("invalid port range {text:?}, expected <start>-<end> such as \"24000-24999\"");
+        let (start, end) = text.split_once('-').ok_or_else(invalid)?;
+        let (start, end): (u16, u16) = (
+            start.trim().parse().map_err(|_| invalid())?,
+            end.trim().parse().map_err(|_| invalid())?,
+        );
+        if start == 0 || start > end {
+            return Err(format!(
+                "invalid port range {text:?}, its start must be at least 1 and at most its end"
+            ));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+impl fmt::Display for Range {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.start, self.end)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PortsError {
@@ -52,6 +98,22 @@ mod tests {
 
     fn leases() -> BTreeMap<String, u16> {
         BTreeMap::from([("http".to_owned(), 24000), ("test".to_owned(), 24001)])
+    }
+
+    #[test]
+    fn a_range_reads_its_bounds_inclusive() {
+        let range: Range = "24000-24999".parse().unwrap();
+        assert_eq!(range, Range { start: 24000, end: 24999 });
+        assert_eq!(range.ports().count(), 1000);
+        assert_eq!(range.to_string(), "24000-24999");
+        assert_eq!("8080-8080".parse::<Range>().unwrap().ports().count(), 1);
+    }
+
+    #[test]
+    fn a_range_must_be_two_ordered_ports() {
+        for text in ["24000", "24000-", "a-b", "24999-24000", "0-10", "24000-70000"] {
+            assert!(text.parse::<Range>().is_err(), "{text} parsed");
+        }
     }
 
     #[test]

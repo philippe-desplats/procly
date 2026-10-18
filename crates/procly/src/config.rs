@@ -9,6 +9,8 @@ use std::time::Duration;
 use serde::{Deserialize, Deserializer};
 use toml::{Table, Value};
 
+use crate::ports::Range;
+
 /// The versioned configuration at the root of a Worktree.
 pub(crate) const VERSIONED_FILE: &str = "procly.toml";
 /// The git-excluded configuration at the root of a Worktree, for personal overrides.
@@ -60,12 +62,16 @@ pub(crate) struct Settings {
     /// How long `up` waits for a Service to become healthy before stopping it.
     #[serde(default = "default_health_timeout", deserialize_with = "duration")]
     pub(crate) health_timeout: Duration,
+    /// Where the Leases of Worktrees other than the Main worktree are drawn from.
+    #[serde(default = "default_port_range", deserialize_with = "range")]
+    pub(crate) port_range: Range,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             health_timeout: default_health_timeout(),
+            port_range: default_port_range(),
         }
     }
 }
@@ -99,21 +105,19 @@ pub(crate) struct HealthConfig {
 }
 
 impl ServiceConfig {
-    /// The port the health check of the Service `name` probes, `None` when it declares no Port name.
-    pub(crate) fn health_port(&self, name: &str) -> Result<Option<u16>, ConfigError> {
+    /// The Port name the health check of the Service `name` probes, `None` when it declares no Port name.
+    pub(crate) fn health_port_name(&self, name: &str) -> Result<Option<&str>, ConfigError> {
         match &self.health.port_name {
-            Some(port_name) => match self.ports.get(port_name) {
-                Some(&port) => Ok(Some(port)),
-                None => Err(ConfigError::UnknownHealthPort {
-                    service: name.to_owned(),
-                    name: port_name.clone(),
-                }),
-            },
+            Some(port_name) if self.ports.contains_key(port_name) => Ok(Some(port_name)),
+            Some(port_name) => Err(ConfigError::UnknownHealthPort {
+                service: name.to_owned(),
+                name: port_name.clone(),
+            }),
             None if self.ports.len() > 1 => Err(ConfigError::AmbiguousHealthPort {
                 service: name.to_owned(),
                 names: self.ports.keys().cloned().collect(),
             }),
-            None => Ok(self.ports.values().next().copied()),
+            None => Ok(self.ports.keys().next().map(String::as_str)),
         }
     }
 }
@@ -132,6 +136,15 @@ impl HealthConfig {
 }
 
 impl Config {
+    /// Every port declared in the configuration, which the Range skips so that it never hands out the port a
+    /// Main worktree expects.
+    pub(crate) fn declared_ports(&self) -> std::collections::BTreeSet<u16> {
+        self.services
+            .values()
+            .flat_map(|service| service.ports.values().copied())
+            .collect()
+    }
+
     /// How long `up` waits for `service` to become healthy.
     pub(crate) fn health_timeout(&self, service: &ServiceConfig) -> Duration {
         service.health.timeout.unwrap_or(self.settings.health_timeout)
@@ -141,6 +154,17 @@ impl Config {
 /// Long enough for a dev server compiling a large app on its first start.
 fn default_health_timeout() -> Duration {
     Duration::from_mins(1)
+}
+
+fn default_port_range() -> Range {
+    Range::DEFAULT
+}
+
+/// A Range written as `<start>-<end>`, such as `24000-24999`.
+fn range<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Range, D::Error> {
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(serde::de::Error::custom)
 }
 
 /// A duration written as `procly run --timeout` accepts it, such as `90s` or `5m`.
@@ -245,29 +269,29 @@ mod tests {
     fn the_health_check_probes_the_only_port_or_none() {
         assert_eq!(
             service("run = 'x'\nports = { http = 3000 }\n")
-                .health_port("web")
+                .health_port_name("web")
                 .unwrap(),
-            Some(3000)
+            Some("http")
         );
-        assert_eq!(service("run = 'x'\n").health_port("worker").unwrap(), None);
+        assert_eq!(service("run = 'x'\n").health_port_name("worker").unwrap(), None);
     }
 
     #[test]
     fn the_health_check_probes_the_named_port_among_several() {
         let web = service("run = 'x'\nports = { http = 3000, test = 3001 }\nhealth = { port = 'test' }\n");
-        assert_eq!(web.health_port("web").unwrap(), Some(3001));
+        assert_eq!(web.health_port_name("web").unwrap(), Some("test"));
     }
 
     #[test]
     fn the_health_port_must_be_named_among_several_and_declared() {
         let ambiguous = service("run = 'x'\nports = { http = 3000, test = 3001 }\n");
         assert!(matches!(
-            ambiguous.health_port("web"),
+            ambiguous.health_port_name("web"),
             Err(ConfigError::AmbiguousHealthPort { names, .. }) if names == ["http", "test"]
         ));
         let unknown = service("run = 'x'\nports = { http = 3000 }\nhealth = { port = 'api' }\n");
         assert!(matches!(
-            unknown.health_port("web"),
+            unknown.health_port_name("web"),
             Err(ConfigError::UnknownHealthPort { name, .. }) if name == "api"
         ));
     }

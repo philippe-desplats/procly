@@ -2,6 +2,7 @@
 
 mod health;
 mod job;
+mod lease;
 mod process_group;
 mod requester;
 mod service;
@@ -21,6 +22,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
+use self::lease::{LeaseRequest, Leases};
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
 use crate::ports;
@@ -33,6 +35,7 @@ use crate::topology;
 struct Registry {
     jobs: Jobs,
     services: Services,
+    leases: Leases,
 }
 
 /// Runs the Daemon until it receives `SIGTERM` or `SIGINT`.
@@ -184,7 +187,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
             let (registry, start_name, cwd, env) = (Arc::clone(registry), name.clone(), cwd.clone(), env.clone());
             // Resolving the Topology runs git, and reading the configuration and forking are blocking.
             let started =
-                tokio::task::spawn_blocking(move || start_service(&registry.services, &start_name, &cwd, env)).await;
+                tokio::task::spawn_blocking(move || start_service(&registry, &start_name, &cwd, env)).await;
             match started {
                 Ok(Ok(Start::Ready { service, outcome })) => break up(name, &service, outcome).await,
                 // Its tree still holds the port, a new one could not bind it.
@@ -246,17 +249,29 @@ fn start_job(
     Ok(jobs.start(&spec)?)
 }
 
-fn start_service(services: &Services, name: &str, cwd: &Path, env: Vec<(String, String)>) -> anyhow::Result<Start> {
-    let worktree = worktree_of(cwd)?;
-    services.start(&worktree, name, || {
+fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, String)>) -> anyhow::Result<Start> {
+    let topology = topology_of(cwd)?;
+    let worktree = topology.worktree.path.clone();
+    registry.services.start(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
+        // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
+        let leases = registry.leases.grant(&LeaseRequest {
+            topology: &topology,
+            service: name,
+            ports: &declared.ports,
+            range: config.settings.port_range,
+            declared: &config.declared_ports(),
+        })?;
+        let health_port = declared
+            .health_port_name(name)?
+            .map(|port_name| leases[port_name]);
         Ok(ServiceSpec {
-            command: ports::render(name, &declared.run, &declared.ports)?,
+            command: ports::render(name, &declared.run, &leases)?,
             cwd: worktree.clone(),
             env,
             health: HealthCheck {
-                port: declared.health_port(name)?,
+                port: health_port,
                 http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
             },
             health_timeout: config.health_timeout(declared),
@@ -301,9 +316,14 @@ async fn down(
 
 /// The root of the Worktree holding `cwd`, where its Services are declared.
 fn worktree_of(cwd: &Path) -> anyhow::Result<PathBuf> {
+    Ok(topology_of(cwd)?.worktree.path)
+}
+
+/// The Repository and the Worktree holding `cwd`, which must be in a git Repository.
+fn topology_of(cwd: &Path) -> anyhow::Result<topology::Topology> {
     let cwd = topology::canonicalize(cwd)?;
     match topology::resolve(&cwd)? {
-        Some(topology) => Ok(topology.worktree.path),
+        Some(topology) => Ok(topology),
         None => anyhow::bail!(
             "{} is not in a git repository, and Services are declared per Repository",
             cwd.display()
