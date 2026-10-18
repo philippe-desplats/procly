@@ -1,15 +1,18 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
+mod agent;
 mod clock;
 mod compose;
 mod cpu;
 mod environment;
 mod health;
+mod hook;
 mod idle;
 mod job;
 mod lease;
 mod listeners;
 mod managed;
+mod off;
 mod process_group;
 mod reconcile;
 mod record;
@@ -38,6 +41,7 @@ use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
 use self::managed::ManagedBlocks;
+use self::off::Offs;
 use self::record::ServiceRecords;
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
@@ -54,6 +58,9 @@ struct Registry {
     composes: Composes,
     leases: Arc<Leases>,
     managed: ManagedBlocks,
+    offs: Offs,
+    /// Held while the Rules block and the Guard are written or switched, so that an install and `off` never cross.
+    agent: Mutex<()>,
     /// Held while the generated files of a Worktree are written, so that 2 starts never write them at once.
     mirroring: Mutex<()>,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
@@ -143,6 +150,8 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         composes: Composes::new(clock.clone(), Arc::clone(&leases)),
         leases,
         managed: ManagedBlocks::new(state.managed_blocks()),
+        offs: Offs::new(state.off()),
+        agent: Mutex::default(),
         mirroring: Mutex::default(),
         initializing: Mutex::default(),
         reconciled: tokio::sync::OnceCell::new(),
@@ -304,6 +313,9 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
                 message: format!("{error:#}"),
             },
         },
+        request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
+            agent::answer(registry, request).await
+        }
     }
 }
 
