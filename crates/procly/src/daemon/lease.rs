@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -40,7 +40,9 @@ pub(crate) enum LeaseError {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Scope {
+    /// The root of the Worktree, for a branch that is not pinned, so that 2 Worktrees never share a Lease.
     Worktree(PathBuf),
+    /// The name of the Pinned branch, so that whichever Worktree checks it out gets its Leases.
     Branch(String),
 }
 
@@ -59,6 +61,7 @@ struct LeaseKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Granted {
     port: u16,
+    /// Compared with `settings.lease_expiry` to drop a Lease no Service used for that long.
     last_used: Duration,
 }
 
@@ -130,7 +133,7 @@ impl Leases {
 
     /// The leased port of each Port name of the Service, granting the Leases it lacks and storing them before it
     /// returns. Leases of the Repository that expired are dropped first, so that their ports return to the Range.
-    /// Blocking: it reads and writes the document, and binds the candidate ports to check that nothing else holds
+    /// Each grant dates the Leases it hands out, so the document is rewritten on every start of a Service. Blocking: it reads and writes the document, and binds the candidate ports to check that nothing else holds
     /// them.
     pub(crate) fn grant(&self, request: &LeaseRequest<'_>) -> Result<BTreeMap<String, u16>, LeaseError> {
         let now = self.clock.since_epoch();
@@ -151,6 +154,31 @@ impl Leases {
             *table = granted_table;
         }
         Ok(granted)
+    }
+
+    /// Dates the Leases of the Service `service` of `worktree` as used now, for a Service that just ended. Leases of
+    /// a Pinned branch are left alone, they never expire. Blocking: it writes the document.
+    pub(crate) fn touch(&self, worktree: &Path, service: &str) -> Result<(), StoreError> {
+        let now = self.clock.since_epoch();
+        let mut table = self
+            .table
+            .lock()
+            .expect("the lease table mutex is never poisoned, no code panics while holding it");
+        // Read on the grant that started the Service, so only a failed read leaves nothing to date.
+        let Some(table) = &mut *table else {
+            return Ok(());
+        };
+        let mut touched = table.clone();
+        for (key, granted) in &mut touched {
+            if matches!(&key.scope, Scope::Worktree(path) if path == worktree) && key.service == service {
+                granted.last_used = now;
+            }
+        }
+        if touched != *table {
+            self.write(&touched)?;
+            *table = touched;
+        }
+        Ok(())
     }
 
     /// Reads the document, a Lease of a document of version 1 counting as used at `now`.
@@ -313,6 +341,7 @@ mod tests {
         end: 24009,
     };
 
+    /// The unit of `settings.lease_expiry` in the defaults.
     const DAY: Duration = Duration::from_hours(24);
 
     /// A request of `web` in `topology`, for the declared ports `ports`, expiring after 30 days.

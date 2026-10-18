@@ -251,17 +251,24 @@ fn start_job(
     Ok(jobs.start(&spec)?)
 }
 
-fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, String)>) -> anyhow::Result<Start> {
+fn start_service(
+    registry: &Arc<Registry>,
+    name: &str,
+    cwd: &Path,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<Start> {
     let topology = topology_of(cwd)?;
     let worktree = topology.worktree.path.clone();
-    registry.services.start(&worktree, name, || {
+    let start = registry.services.start::<anyhow::Error>(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
         // Checked before any Lease is granted, so that a request bound to fail stores none.
         let health_port_name = declared.health_port_name(name)?;
         ports::check(name, &declared.run, declared.ports.keys())?;
-        // Only a Repository declaring Pinned branches needs to know the branch.
-        let branch = if config.pinned.is_empty() {
+        // Only a Repository declaring Pinned branches needs to know the branch. The Main worktree keeps Leases of
+        // its own whatever its branch, its declared ports are already fixed, and a Lease of the branch would keep
+        // them from it once it checks out another one.
+        let branch = if config.pinned.is_empty() || topology.worktree.main {
             None
         } else {
             topology::branch(&worktree)?
@@ -307,7 +314,23 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
             restart: config.restart_policy(declared),
             idle: config.idle_timeout(declared),
         })
-    })
+    })?;
+    if let Start::Ready {
+        service,
+        outcome: StartOutcome::Started,
+    } = &start
+    {
+        // Dated again once it ends, so that a Service which ran longer than the expiry keeps its Leases.
+        let (registry, service, name) = (Arc::clone(registry), Arc::clone(service), name.to_owned());
+        tokio::spawn(async move {
+            service.ended().await;
+            let touched = tokio::task::spawn_blocking(move || registry.leases.touch(&worktree, &name)).await;
+            if let Ok(Err(error)) = touched {
+                eprintln!("cannot date the Leases of a service that ended: {error:#}");
+            }
+        });
+    }
+    Ok(start)
 }
 
 /// Stops the Services, logging who asked, and returns their names once their trees are gone.

@@ -174,12 +174,14 @@ impl<'de> Deserialize<'de> for PortConfig {
         /// The table form, deserialized as declared so that a misspelt key is named in the error.
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Table {
+        struct PortTable {
             port: u16,
             #[serde(default)]
             pool: Vec<u16>,
         }
 
+        /// Takes the bare number and the table form, which a derive of an untagged enum would accept with an
+        /// error naming neither.
         struct PortVisitor;
 
         impl<'de> Visitor<'de> for PortVisitor {
@@ -202,7 +204,7 @@ impl<'de> Deserialize<'de> for PortConfig {
             }
 
             fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<PortConfig, A::Error> {
-                let Table { port, pool } = Table::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                let PortTable { port, pool } = PortTable::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(PortConfig { port, pool })
             }
         }
@@ -212,7 +214,7 @@ impl<'de> Deserialize<'de> for PortConfig {
 }
 
 impl PortConfig {
-    /// A declared port without a Pool.
+    /// A declared port without a Pool, the meaning of the bare form `http = 3000`.
     pub(crate) fn declared(port: u16) -> Self {
         Self { port, pool: Vec::new() }
     }

@@ -90,7 +90,7 @@ Each Port name of a Service gets a Lease in each Worktree, a port that stays the
 
 A Lease that no Service used for `settings.lease_expiry` is dropped, and its port returns to the Range. The Lease of a running Service counts as used.
 
-One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way. Every other Lease stays the same across restarts.
+One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way, and a Pinned branch does the same toward its explicit port. Every other Lease stays the same across restarts.
 
 The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
 
@@ -131,9 +131,10 @@ A Service that printed nothing and used under 1% of a CPU (averaged since it las
 | --- | --- | --- |
 | `stop` | `settings.idle_stop` | `false` keeps this Service running however long it stays idle. |
 | `timeout` | `settings.idle_timeout` | How long this Service must be idle to be stopped. |
+
 ## `[pinned.<branch>]`
 
-A Pinned branch, such as a long-lived `develop`. The Leases of a Worktree on that branch are bound to the branch name rather than to the Worktree, so a Worktree of the branch removed and recreated, even at another path, gets the same ports. They never expire. Quote a branch name holding a `/`, such as `[pinned."release/1.0"]`.
+A Pinned branch, such as a long-lived `develop`. The Leases of a Worktree on that branch are bound to the branch name rather than to the Worktree, so a Worktree of the branch removed and recreated, even at another path, gets the same ports. They never expire. The Main worktree is the exception: it keeps Leases of its own whatever its branch, since its declared ports are already fixed. A detached `HEAD` is on no branch, so its Worktree gets Leases of its own too. Quote a branch name holding a `/`, such as `[pinned."release/1.0"]`.
 
 | Key | Required | Meaning |
 | --- | --- | --- |

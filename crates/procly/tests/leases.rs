@@ -417,3 +417,47 @@ fn a_lease_document_of_version_1_is_read_and_its_ports_kept() {
 
     assert_eq!(port_of(&procly.procly_in(&other, &["up", "web"])), leased);
 }
+
+#[test]
+fn a_lease_counts_as_used_until_its_service_ends() {
+    let procly = Procly::with_clock();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    // Never stopped for being idle, the clock jumps by days while it runs.
+    let config = format!("{}idle = {{ stop = false }}\n", web_declaring(free_port()));
+    let worktree = |name: &str| {
+        let worktree = common::git_worktree_add(&main, name);
+        write(&worktree, "procly.toml", &config);
+        worktree
+    };
+    let long_running = worktree("app-long");
+    let leased = port_of(&procly.procly_in(&long_running, &["up", "web"]));
+
+    procly.advance_clock(Duration::from_hours(29 * 24));
+    assert_success(&procly.procly_in(&long_running, &["down", "web"]));
+    // 31 days since the Lease was granted, 2 days since its Service ended.
+    procly.advance_clock(Duration::from_hours(2 * 24));
+    let other = worktree("app-other");
+
+    assert_ne!(port_of(&procly.procly_in(&other, &["up", "web"])), leased);
+}
+
+#[test]
+fn the_main_worktree_on_a_pinned_branch_keeps_its_declared_port_on_any_branch() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let declared = free_port();
+    write(
+        &main,
+        "procly.toml",
+        &format!("{}[pinned.develop]\n", web_declaring(declared)),
+    );
+    git(&main, &["checkout", "--quiet", "-b", "develop"]);
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    git(&main, &["checkout", "--quiet", "-b", "feature"]);
+
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+}
