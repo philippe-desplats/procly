@@ -1,0 +1,102 @@
+//! `procly init`: a `procly.toml` proposed from the package scripts and the compose file of a Worktree.
+//!
+//! The proposal is a starting point to review, not a guess to trust: it declares only what the Worktree states, and
+//! leaves out what it would have to invent, such as the port of a dev server that names none.
+
+mod scripts;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProposalError {
+    #[error("cannot read {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("invalid JSON in {path}")]
+    Json {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{dir} has no dev script in a package.json and no compose file, so there is nothing to propose")]
+    Nothing { dir: PathBuf },
+}
+
+/// One `[services.<name>]` table of the proposal, written in the order the keys are declared.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct ServiceEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) covers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) ports: BTreeMap<String, u16>,
+}
+
+/// The Services proposed so far, by name.
+#[derive(Debug, Default, Serialize)]
+struct Proposal {
+    services: BTreeMap<String, ServiceEntry>,
+}
+
+impl Proposal {
+    /// Adds a Service under a name based on `base` that no other Service of the proposal has, and returns it.
+    fn add(&mut self, base: &str, entry: ServiceEntry) -> String {
+        let taken: BTreeSet<&String> = self.services.keys().collect();
+        let name = unique(&taken, base);
+        self.services.insert(name.clone(), entry);
+        name
+    }
+}
+
+/// `base`, or `base-2`, `base-3` and so on when the name is taken.
+fn unique(taken: &BTreeSet<&String>, base: &str) -> String {
+    if !taken.contains(&base.to_owned()) {
+        return base.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|candidate| !taken.contains(candidate))
+        .expect("an unbounded range always yields a free name")
+}
+
+/// A Service name made of what a package or compose name holds that a placeholder can carry: lowercase letters,
+/// digits, hyphens and underscores.
+fn service_name(raw: &str, fallback: &str) -> String {
+    let name: String = raw
+        .rsplit('/')
+        .next()
+        .unwrap_or(raw)
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' })
+        .collect();
+    let name = name.trim_matches('-');
+    if name.is_empty() {
+        fallback.to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
+/// The `procly.toml` proposed for the Worktree rooted at `worktree`.
+pub(crate) fn propose(worktree: &Path) -> Result<String, ProposalError> {
+    let mut proposal = Proposal::default();
+    scripts::propose(worktree, &mut proposal)?;
+    if proposal.services.is_empty() {
+        return Err(ProposalError::Nothing {
+            dir: worktree.to_owned(),
+        });
+    }
+    let body = toml::to_string(&proposal).expect("a proposal holds only strings, numbers and tables, which serialize");
+    Ok(format!(
+        "# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.\n\n{body}"
+    ))
+}

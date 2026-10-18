@@ -15,6 +15,7 @@ mod listeners;
 mod managed;
 mod off;
 mod process_group;
+mod propose;
 mod reconcile;
 mod record;
 mod requester;
@@ -315,6 +316,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
             },
         },
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
+        Request::Init { cwd } => propose::run(cwd).await,
         request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
             agent::answer(registry, request).await
         }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 11;
+pub(crate) const PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -84,6 +84,10 @@ pub(crate) enum Request {
     Eject {
         cwd: PathBuf,
     },
+    /// Proposes a `procly.toml` for the Worktree holding `cwd`, and writes it unless the Worktree has one.
+    Init {
+        cwd: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -156,6 +160,8 @@ pub(crate) enum Response {
     },
     /// The Repository is ejected.
     Eject(EjectReport),
+    /// The `procly.toml` proposed for the Worktree.
+    Init(ProposalReport),
     Error {
         message: String,
     },
@@ -188,6 +194,17 @@ impl BlockOutcome {
 pub(crate) struct BlockReport {
     pub(crate) file: PathBuf,
     pub(crate) outcome: BlockOutcome,
+}
+
+/// What `init` proposed.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ProposalReport {
+    /// The `procly.toml` of the Worktree, written there when `written`.
+    pub(crate) file: PathBuf,
+    /// The proposal, the content of `file` when `written`.
+    pub(crate) toml: String,
+    /// Whether the Worktree had no `procly.toml`. One that exists is never overwritten.
+    pub(crate) written: bool,
 }
 
 /// What `agent install` wrote.
@@ -490,7 +507,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":11,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":12,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

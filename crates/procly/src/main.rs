@@ -8,6 +8,7 @@ mod envfile;
 mod guard;
 mod output;
 mod ports;
+mod proposal;
 mod protocol;
 mod state_dir;
 mod status;
@@ -157,6 +158,9 @@ enum Command {
                       the Daemon cannot answer. See docs/agents.md."
     )]
     Guard,
+    /// Propose a `procly.toml` for this Worktree from its package scripts and its compose file, print it on stdout and
+    /// write it to the root of the Worktree. A `procly.toml` that exists is never overwritten.
+    Init,
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
@@ -319,6 +323,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Off => switch(&state, true),
         Command::On => switch(&state, false),
         Command::Eject { agent } => eject(&state, agent),
+        Command::Init => init(&state),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Daemon => {
             daemon::run(&state)?;
@@ -572,6 +577,26 @@ fn switch(state: &StateDir, off: bool) -> anyhow::Result<ExitCode> {
             println!("{}", if report.off { "off" } else { "on" });
             for block in &report.rules {
                 print_block("rules", block);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
+/// Runs `init`, printing the proposal on stdout and on stderr whether it was written.
+fn init(state: &StateDir) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    match client::send(state, &Request::Init { cwd })? {
+        Response::Init(report) => {
+            print(&report.toml)?;
+            if report.written {
+                eprintln!("procly: wrote {}", report.file.display());
+            } else {
+                eprintln!(
+                    "procly: {} exists already, left as it is, the proposal above is not written",
+                    report.file.display()
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
