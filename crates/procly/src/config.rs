@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
@@ -34,6 +34,8 @@ pub(crate) enum ConfigError {
     AmbiguousHealthPort { service: String, names: Vec<String> },
     #[error("health.port of service {service} is {name}, which is not one of its Port names")]
     UnknownHealthPort { service: String, name: String },
+    #[error("worktree.copy lists {path:?}, which is not a path inside the Worktree")]
+    WorktreeCopyPath { path: String },
     #[error("the user settings {path} holds only [settings], move [{key}] to a procly.toml")]
     UserSettingsScope { path: PathBuf, key: String },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
@@ -51,6 +53,21 @@ pub(crate) struct Config {
     pub(crate) settings: Settings,
     #[serde(default)]
     pub(crate) services: BTreeMap<String, ServiceConfig>,
+    #[serde(default)]
+    pub(crate) worktree: WorktreeConfig,
+}
+
+/// What `procly worktree init` does in a fresh Worktree.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorktreeConfig {
+    /// Untracked files and directories to copy from the Main worktree when the Worktree lacks them, such as env
+    /// files and local certificates. Paths are relative to the root of the Worktree.
+    #[serde(default)]
+    pub(crate) copy: Vec<String>,
+    /// Commands run once, in order, by `/bin/sh -c` at the root of the Worktree.
+    #[serde(default)]
+    pub(crate) setup: Vec<String>,
 }
 
 /// The defaults of every Service, usually set in the user settings.
@@ -96,6 +113,23 @@ pub(crate) struct HealthConfig {
     /// Overrides `settings.health_timeout` for this Service.
     #[serde(default, deserialize_with = "optional_duration")]
     pub(crate) timeout: Option<Duration>,
+}
+
+impl WorktreeConfig {
+    /// Fails on a `copy` entry that is empty, absolute or climbs out of the Worktree, so that no entry can read or
+    /// write elsewhere than the Main worktree and the Worktree.
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        for path in &self.copy {
+            let components = Path::new(path).components();
+            let inside = components
+                .clone()
+                .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
+            if !inside || !components.into_iter().any(|part| matches!(part, Component::Normal(_))) {
+                return Err(ConfigError::WorktreeCopyPath { path: path.clone() });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ServiceConfig {
@@ -189,9 +223,11 @@ pub(crate) fn load(user_settings: Option<&Path>, worktree: &Path) -> Result<Conf
             files.push(path);
         }
     }
-    Value::Table(merged)
+    let config: Config = Value::Table(merged)
         .try_into()
-        .map_err(|source| ConfigError::Invalid { files, source })
+        .map_err(|source| ConfigError::Invalid { files, source })?;
+    config.worktree.validate()?;
+    Ok(config)
 }
 
 fn read(path: &Path) -> Result<Option<Table>, ConfigError> {
@@ -270,6 +306,34 @@ mod tests {
             unknown.health_port("web"),
             Err(ConfigError::UnknownHealthPort { name, .. }) if name == "api"
         ));
+    }
+
+    fn worktree(text: &str) -> WorktreeConfig {
+        Value::Table(table(text)).try_into::<Config>().unwrap().worktree
+    }
+
+    #[test]
+    fn a_copied_path_stays_inside_the_worktree() {
+        let inside = worktree("[worktree]\ncopy = ['.env', 'certs/local.pem', './dir']\n");
+        assert!(inside.validate().is_ok());
+        for path in ["/etc/passwd", "../secret", "certs/../../secret", "", "."] {
+            let outside = WorktreeConfig {
+                copy: vec![path.to_owned()],
+                setup: Vec::new(),
+            };
+            assert!(
+                matches!(outside.validate(), Err(ConfigError::WorktreeCopyPath { path: bad }) if bad == path),
+                "{path:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_worktree_section_lists_files_to_copy_and_commands_to_run() {
+        let section = worktree("[worktree]\ncopy = ['.env']\nsetup = ['pnpm install', 'pnpm db:migrate']\n");
+        assert_eq!(section.copy, [".env"]);
+        assert_eq!(section.setup, ["pnpm install", "pnpm db:migrate"]);
+        assert_eq!(worktree("").copy, Vec::<String>::new());
     }
 
     #[test]
