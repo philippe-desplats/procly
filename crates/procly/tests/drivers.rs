@@ -219,29 +219,42 @@ fn alpine_compose(project: &str) -> String {
 /// A Repository on the directory Driver, with `resources` as TOML under `[services.db.resources]`, and a second
 /// Worktree. The Driver and the configuration are committed, so both Worktrees hold them.
 fn directory_fixture(resources: &str) -> Fixture {
+    let fixture = logical_fixture(alpine_compose, "dir", resources);
+    write_driver_file(&fixture.main.join(".procly/drivers"), "dir", DIRECTORY_DRIVER);
+    commit_and_add_worktree(fixture)
+}
+
+/// A Repository whose service `db` is the compose service `db` of `compose(project)`, on the Driver `driver`.
+/// Nothing is committed yet and the second Worktree is not added, see [`commit_and_add_worktree`].
+fn logical_fixture(compose: fn(&str) -> String, driver: &str, resources: &str) -> Fixture {
     let procly = Procly::new();
     let (name, port) = (project_name(), free_port());
     let main = git_repository(procly.scratch(), "app");
     let config = format!(
-        "[services.db]\ncompose = 'db'\ndriver = 'dir'\nports = {{ db = {port} }}\n\
+        "[services.db]\ncompose = 'db'\ndriver = '{driver}'\nports = {{ db = {port} }}\n\
          env = {{ DB_PORT = '{{services.db.ports.db}}' }}\n{resources}"
     );
-    fs::write(main.join("compose.yaml"), alpine_compose(&name)).expect("write the compose file");
+    fs::write(main.join("compose.yaml"), compose(&name)).expect("write the compose file");
     fs::write(main.join("procly.toml"), config).expect("write the config");
-    write_driver_file(&main.join(".procly/drivers"), "dir", DIRECTORY_DRIVER);
-    git(&main, &["add", "."]);
-    git(&main, &["commit", "--quiet", "--message", "compose"]);
-    let other = git_worktree_add(&main, "app-other");
     Fixture {
         procly,
         project: Project {
             name,
             dir: main.clone(),
         },
+        other: main.clone(),
         main,
-        other,
         port,
     }
+}
+
+/// Commits what the Repository holds and adds the second Worktree, so that both hold the same files.
+fn commit_and_add_worktree(mut fixture: Fixture) -> Fixture {
+    let main = fixture.main.clone();
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "--quiet", "--message", "compose"]);
+    fixture.other = git_worktree_add(&main, "app-other");
+    fixture
 }
 
 fn write_driver_file(dir: &Path, name: &str, text: &str) {
@@ -424,4 +437,92 @@ fn docker_a_template_seed_needs_a_driver_with_a_copy_command_and_an_existing_tem
     let refused = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
     assert_eq!(refused.status.code(), Some(125));
     assert!(stderr(&refused).contains("has no `copy` command"), "{}", stderr(&refused));
+}
+
+/// A compose file whose service `db` is the Postgres image, healthy once the final server accepts TCP connections.
+fn postgres_compose(project: &str) -> String {
+    format!(
+        "name: {project}\nservices:\n  db:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_PASSWORD: postgres\n    \
+         ports:\n      - \"${{DB_PORT:-1}}:5432\"\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -h 127.0.0.1 -U postgres\"]\n      \
+         interval: 1s\n      timeout: 3s\n      retries: 60\n"
+    )
+}
+
+/// A Repository on the bundled Postgres Driver, and a second Worktree.
+fn postgres_fixture(resources: &str) -> Fixture {
+    commit_and_add_worktree(logical_fixture(postgres_compose, "postgres", resources))
+}
+
+/// What a query prints on database `database` of the container, unaligned and without headers.
+fn query(project: &Project, database: &str, sql: &str) -> String {
+    project
+        .exec(&format!("psql --username postgres --dbname {database} --tuples-only --no-align --command \"{sql}\" 2>&1"))
+        .trim()
+        .to_owned()
+}
+
+/// The databases of the container Procly created for the Repository, sorted.
+fn databases(project: &Project) -> Vec<String> {
+    query(project, "postgres", "SELECT datname FROM pg_database WHERE datname LIKE 'app%' ORDER BY 1")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn docker_postgres_2_worktrees_get_distinct_databases_for_dev_and_test_in_one_container() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = postgres_fixture(DEV_AND_TEST);
+
+    let first = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    assert_success(&first);
+    let container = fixture.project.container();
+    let second = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_success(&second);
+
+    assert_eq!(
+        databases(&fixture.project),
+        ["app", "app_app_other", "app_test", "app_test_app_other"]
+    );
+    assert_eq!(fixture.project.container(), container);
+    // The URL the Worktree reads is the one of its own database, on the port the container publishes.
+    let url = exported(&fixture.procly.procly_in(&fixture.other, &["env", "db"]), "PORT");
+    assert_eq!(url, fixture.port.to_string());
+}
+
+#[test]
+fn docker_postgres_each_seed_variant_produces_the_expected_content() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = postgres_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    // The template is a database that exists already, with a table and a row.
+    let project = &fixture.project;
+    project.exec("createdb --username postgres app_base");
+    query(project, "app_base", "CREATE TABLE people (name text); INSERT INTO people VALUES ('ada')");
+    let seed = format!(
+        "docker compose -p {} exec -T db psql --username postgres --dbname $PROCLY_RESOURCE_NAME --command \
+         'CREATE TABLE seeded (n int); INSERT INTO seeded VALUES (42)'",
+        project.name
+    );
+    fs::write(
+        fixture.main.join("procly.local.toml"),
+        format!(
+            "[services.db.resources.copied]\nname = 'app_copied'\nseed = {{ template = 'app_base' }}\n\
+             [services.db.resources.filled]\nname = 'app_filled'\nseed = {{ run = \"{seed}\" }}\n"
+        ),
+    )
+    .expect("write the local config");
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+
+    // Empty: no table. Template: the table and the row of the template. Command: what the command created.
+    let tables = "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'";
+    assert_eq!(query(project, "app_plain", tables), "0");
+    assert_eq!(query(project, "app_copied", "SELECT name FROM people"), "ada");
+    assert_eq!(query(project, "app_filled", "SELECT n FROM seeded"), "42");
+    assert_eq!(query(project, "app_filled", tables), "1");
 }
