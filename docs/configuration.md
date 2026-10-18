@@ -172,6 +172,20 @@ Containers are counted by Worktree. The first `procly up` starts the container (
 
 `procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon stops the containers it started when it exits, since it would lose count of the Worktrees that need them.
 
+### Containers started outside Procly
+
+A container started without Procly, by a plain `docker compose up` for instance, is a Foreign process until `procly up` finds it. Procly never stops or removes a running container it does not own, and only tells which command does. A stopped container of the service is the service's own, whoever created it: `procly up` starts it again through `docker compose up`, which recreates it on the Leases when its configuration differs, its volumes kept.
+
+- Adoption: a running container whose compose labels name the project of the compose file of the Main worktree and the service the Service maps to, exactly, and which publishes every Lease of the Service, is adopted. `procly up` answers `reused` once the health check of Procly passes, and from then on Procly counts it and stops it after its Grace period like a container it started. A container of `docker compose run` is never adopted. When the declared port of the Main worktree is held by that container, it is the Lease, so a container started with the defaults of the compose file is adopted on the port it already uses. An adoptable container that does not pass the health check within its timeout is left running, and `procly up` fails with 125.
+- Conflicts: `procly up` exits with 5 and starts nothing when a Lease of the Service is held by another container or process, when a container that compose did not create for the service holds its container name (the `container_name` of the compose file, or `<project>-<service>-1`), or when the container of the service runs with matching labels on other ports than its Leases. Each conflict is one line on stderr, with the command that frees what the Service needs, such as `docker stop <container>`, `kill <pid>`, `docker rm --force <container>` for a container name, or `docker compose --project-name <project> stop <service>`. Run it yourself and run `procly up` again.
+
+```text
+procly: service db needs what runs outside Procly, which Procly never stops:
+  port 5432 of its Lease is held by container legacy-postgres started outside Procly, stop it with `docker stop legacy-postgres`
+```
+
+A port held by a process `lsof` cannot see, such as one of another user, is reported with the `lsof` command that finds it. Procly never tells to kill the Docker engine, it names the container that publishes the port instead.
+
 ## Logical resources and Drivers
 
 A Compose service that sets `driver` stays one container for every Worktree (Logical mode, ADR 0005), and each Worktree also gets its own Logical resources inside it, such as a Postgres database. The Driver creates them, `procly up` makes sure they exist, and the connection URL of each one reaches the Services as a Derived variable.

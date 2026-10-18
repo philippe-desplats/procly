@@ -46,3 +46,12 @@ The session manager restarts the Daemon only when it fails, so a Daemon already 
 Installing the unit again on macOS unloads it first, which stops the Daemon it started and its Services. On Linux the running Daemon keeps going, and the new unit applies from its next start.
 
 `procly unit remove` stops the Daemon the unit started, which stops its Services, and the next command starts a Daemon on demand again.
+
+## Foreign processes
+
+`procly status` lists under each Worktree what runs in it without Procly having started it, so that an agent that bypassed Procly shows up:
+
+- a process listening on TCP whose working directory is in the Worktree, outside the process groups of the Services and Jobs of Procly, as `foreign process <pid> <command> port <port>`
+- a running container of a compose project whose directory is in the Worktree, unless Procly started or adopted it, as `foreign container <name> (compose project <project>, service <service>) port <port>`
+
+`procly status --json` carries them in the `foreign` list of each Worktree that has some, with a `kind` of `process` or `container`, and leaves the list out of a Worktree that has none. Processes are found with `lsof`, which on macOS sees only the processes of your user, and containers with `docker ps`. Without `lsof` or a running Docker engine, the list is empty. Procly never stops a Foreign process, see [Containers started outside Procly](configuration.md#containers-started-outside-procly) for the ones in the way of a Compose service.

@@ -24,8 +24,8 @@ use anyhow::Context as _;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, EjectReport, InitReport, JobEnd, Released, Request, Response, ServiceEnd, StartOutcome,
-    Written,
+    BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, Occupant, Released, Request, Response,
+    ServiceEnd, StartOutcome, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -38,6 +38,8 @@ const OUTPUT_TAIL_LINES: usize = 20;
 const EXIT_SERVICE_ENDED: u8 = 3;
 /// The exit code of `up` for a Service whose process listened on another port than its Lease.
 const EXIT_PORT_MISMATCH: u8 = 4;
+/// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly.
+const EXIT_CONFLICT: u8 = 5;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
@@ -47,7 +49,7 @@ const EXIT_PROCLY_FAILURE: u8 = 125;
     version,
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
-                  healthy, 4 when `up` finds a Port mismatch, 124 when `wait` finds the Job timed out or `up` \
+                  healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 124 when `wait` finds the Job timed out or `up` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
                   docs/exit-codes.md."
@@ -75,7 +77,9 @@ enum Command {
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
                             (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
                             until Procly gave up restarting it), 4 when it listened on another port than its Lease \
-                            (Port mismatch) and its process tree was stopped, 124 when it did not become healthy \
+                            (Port mismatch) and its process tree was stopped, 5 when what it needs is held outside \
+                            Procly (a conflict, with the command that stops it, which Procly never runs), 124 when it \
+                            did not become healthy \
                             within its health timeout and its process tree was stopped, 125 when Procly itself \
                             fails. See docs/exit-codes.md."
     )]
@@ -393,50 +397,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool) -> anyhow::Res
                 Some(needed_by) => format!("{service}, needed by {needed_by},"),
                 None => service,
             };
-            let (why, code) = match end {
-                ServiceEnd::Exited { code } => (
-                    format!("exited with code {code} before it became healthy"),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Signaled { signal } => (
-                    format!("was killed by signal {signal} before it became healthy"),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Stopped => (
-                    "was stopped by procly down before it became healthy".to_owned(),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Idle { timeout_ms } => (
-                    format!(
-                        "was stopped after {} idle",
-                        duration::format(Duration::from_millis(timeout_ms))
-                    ),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Failed { restarts } => (
-                    format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::PortMismatch { leased, actual } => (
-                    format!(
-                        "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
-                         tree was stopped"
-                    ),
-                    EXIT_PORT_MISMATCH,
-                ),
-                // Ends a Daemon finds when it restarts, which `up` never waits on, since it starts the Service again.
-                ServiceEnd::Lost | ServiceEnd::Orphaned { .. } | ServiceEnd::NotListening { .. } => (
-                    "ended when the Daemon restarted, before it became healthy".to_owned(),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::HealthTimeout { timeout_ms } => (
-                    format!(
-                        "did not become healthy within {}, its process tree was stopped",
-                        duration::format(Duration::from_millis(timeout_ms))
-                    ),
-                    EXIT_TIMEOUT,
-                ),
-            };
+            let (why, code) = unhealthy(end);
             if output.is_empty() {
                 eprintln!("procly: service {service} {why}, it printed nothing");
             } else {
@@ -445,7 +406,110 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool) -> anyhow::Res
             }
             Ok(ExitCode::from(code))
         }
+        Response::Conflict {
+            service,
+            conflicts,
+            needed_by,
+        } => Ok(conflicted(service, &conflicts, needed_by)),
         other => unexpected(other),
+    }
+}
+
+/// Why a Service is not healthy, after its name, and the exit code of `up` for it.
+fn unhealthy(end: ServiceEnd) -> (String, u8) {
+    match end {
+        ServiceEnd::Exited { code } => (
+            format!("exited with code {code} before it became healthy"),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Signaled { signal } => (
+            format!("was killed by signal {signal} before it became healthy"),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Stopped => (
+            "was stopped by procly down before it became healthy".to_owned(),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Idle { timeout_ms } => (
+            format!(
+                "was stopped after {} idle",
+                duration::format(Duration::from_millis(timeout_ms))
+            ),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Failed { restarts } => (
+            format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::PortMismatch { leased, actual } => (
+            format!(
+                "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
+                 tree was stopped"
+            ),
+            EXIT_PORT_MISMATCH,
+        ),
+        // Ends a Daemon finds when it restarts, which `up` never waits on, since it starts the Service again.
+        ServiceEnd::Lost | ServiceEnd::Orphaned { .. } | ServiceEnd::NotListening { .. } => (
+            "ended when the Daemon restarted, before it became healthy".to_owned(),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::HealthTimeout { timeout_ms } => (
+            format!(
+                "did not become healthy within {}, its process tree was stopped",
+                duration::format(Duration::from_millis(timeout_ms))
+            ),
+            EXIT_TIMEOUT,
+        ),
+    }
+}
+
+/// Prints the conflicts that keep a Service from starting, one per line.
+fn conflicted(service: String, conflicts: &[Conflict], needed_by: Option<String>) -> ExitCode {
+    let service = match needed_by {
+        Some(needed_by) => format!("{service}, needed by {needed_by},"),
+        None => service,
+    };
+    eprintln!("procly: service {service} needs what runs outside Procly, which Procly never stops:");
+    for conflict in conflicts {
+        eprintln!("  {}", conflict_line(conflict));
+    }
+    ExitCode::from(EXIT_CONFLICT)
+}
+
+/// What holds what a Service needs, and how to stop it.
+fn conflict_line(conflict: &Conflict) -> String {
+    let occupant = match &conflict.occupant {
+        Occupant::Container { name, .. } => format!("container {name}"),
+        Occupant::Process { pid, command } => format!("process {pid} {command}"),
+        Occupant::Unknown { .. } => "something Procly cannot name".to_owned(),
+    };
+    let what = match &conflict.held {
+        Held::Port { port } => format!("port {port} of its Lease is held by {occupant} started outside Procly"),
+        Held::ContainerName { name } => {
+            format!("container name {name} is held by a container compose did not create for this service")
+        }
+        Held::Service { ports, leased } => {
+            let service = match &conflict.occupant {
+                Occupant::Container {
+                    service: Some(service), ..
+                } => format!("compose service {service}"),
+                _ => "its compose service".to_owned(),
+            };
+            format!(
+                "{service} already runs outside Procly in {occupant}, publishing {} instead of its {}",
+                status::ports_text(ports),
+                match leased.as_slice() {
+                    [port] => format!("Lease, port {port}"),
+                    leased => format!("Leases, {}", status::ports_text(leased)),
+                }
+            )
+        }
+    };
+    match (&conflict.stop, &conflict.held, &conflict.occupant) {
+        (Some(stop), Held::ContainerName { .. }, _) => format!("{what}, stop and remove it with `{stop}`"),
+        (Some(stop), ..) => format!("{what}, stop it with `{stop}`"),
+        (None, _, Occupant::Unknown { find }) => format!("{what}, find it with `{find}`"),
+        (None, ..) => what,
     }
 }
 

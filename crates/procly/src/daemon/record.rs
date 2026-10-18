@@ -109,6 +109,11 @@ impl ServiceRecords {
         }
     }
 
+    /// The process group of every recorded run, the Services re-attached after a restart of the Daemon included.
+    pub(crate) fn process_groups(&self) -> Vec<i32> {
+        self.table().values().map(|record| record.pgid).collect()
+    }
+
     /// A Service that could not be recorded keeps running, the next Daemon would only fail to re-attach it.
     fn write(&self, table: &BTreeMap<Key, ServiceRecord>) {
         let document = ServiceDocument {

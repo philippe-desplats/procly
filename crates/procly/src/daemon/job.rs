@@ -145,6 +145,15 @@ impl Jobs {
             .collect()
     }
 
+    /// The process group of every running Job.
+    pub(crate) fn process_groups(&self) -> Vec<i32> {
+        self.table()
+            .values()
+            .filter(|job| job.end.borrow().is_none())
+            .map(|job| job.pid.as_raw())
+            .collect()
+    }
+
     /// Kills the tree of every running Job, for a Daemon about to exit.
     pub(crate) fn kill_all(&self) {
         for job in self.table().values() {
