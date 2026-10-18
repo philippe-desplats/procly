@@ -268,4 +268,11 @@ impl Procly {
         .expect("write the user settings");
         (start, end)
     }
+
+    /// Stops the Daemon and waits until it has exited, the next command starts a new one.
+    pub fn stop_daemon(&self) {
+        let pid = self.daemon_pid().expect("a Daemon runs");
+        kill(pid, Signal::SIGTERM).expect("signal the Daemon");
+        wait_until_gone(pid);
+    }
 }

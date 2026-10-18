@@ -77,3 +77,27 @@ fn a_port_held_by_a_foreign_process_is_skipped() {
     assert_ne!(port, start);
     drop(foreign);
 }
+
+#[test]
+fn leases_stay_the_same_across_restarts_of_the_service_and_of_the_daemon() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let (first, second) = (
+        common::git_worktree_add(&main, "app-first"),
+        common::git_worktree_add(&main, "app-second"),
+    );
+    for worktree in [&first, &second] {
+        write(worktree, "procly.toml", &web_declaring(free_port()));
+    }
+    let in_first = port_of(&procly.procly_in(&first, &["up", "web"]));
+    let in_second = port_of(&procly.procly_in(&second, &["up", "web"]));
+
+    assert_success(&procly.procly_in(&second, &["down", "web"]));
+    assert_eq!(port_of(&procly.procly_in(&second, &["up", "web"])), in_second);
+
+    procly.stop_daemon();
+    // The second Worktree asks first, a Daemon that forgot would hand it the port of the first one.
+    assert_eq!(port_of(&procly.procly_in(&second, &["up", "web"])), in_second);
+    assert_eq!(port_of(&procly.procly_in(&first, &["up", "web"])), in_first);
+}

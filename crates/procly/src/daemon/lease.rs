@@ -6,13 +6,20 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpSocket;
 
+use super::store::{self, StoreError};
 use crate::ports::Range;
 use crate::topology::Topology;
 
+/// The version of the format of the Lease document, bumped when a field changes meaning or disappears.
+const DOCUMENT_VERSION: u32 = 1;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LeaseError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
     #[error("no port of the Range {range} is free for Port name {port_name} of service {service}, widen settings.port_range")]
     RangeExhausted {
         service: String,
@@ -22,7 +29,7 @@ pub(crate) enum LeaseError {
 }
 
 /// What a Lease binds: one Port name of one Service in one Worktree of one Repository.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct LeaseKey {
     /// The common git directory identifying the Repository.
     repository: PathBuf,
@@ -33,10 +40,28 @@ struct LeaseKey {
 
 type Table = BTreeMap<LeaseKey, u16>;
 
-/// Every Lease the Daemon granted, across all Repositories, so that no 2 of them share a port.
-#[derive(Debug, Default)]
+/// One Lease as the document stores it.
+#[derive(Debug, Serialize, Deserialize)]
+struct Lease {
+    #[serde(flatten)]
+    key: LeaseKey,
+    port: u16,
+}
+
+/// The document holding every Lease.
+#[derive(Debug, Serialize, Deserialize)]
+struct LeaseDocument {
+    leases: Vec<Lease>,
+}
+
+/// Every Lease the Daemon granted, across all Repositories, so that no 2 of them share a port. They persist in a
+/// document of the state directory, so they survive restarts of the Daemon.
+#[derive(Debug)]
 pub(crate) struct Leases {
-    table: Mutex<Table>,
+    path: PathBuf,
+    /// Read from the document on the first request, so that an unreadable document fails that request, naming the
+    /// file, instead of keeping the Daemon from starting. `None` until then.
+    table: Mutex<Option<Table>>,
 }
 
 /// What a Service asks Leases for.
@@ -52,14 +77,49 @@ pub(crate) struct LeaseRequest<'a> {
 }
 
 impl Leases {
-    /// The leased port of each Port name of the Service, granting the Leases it lacks. Blocking: it binds the
-    /// candidate ports to check that nothing else holds them.
+    /// The Leases stored in the document at `path`.
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            table: Mutex::new(None),
+        }
+    }
+
+    /// The leased port of each Port name of the Service, granting the Leases it lacks and storing them before it
+    /// returns. Blocking: it reads and writes the document, and binds the candidate ports to check that nothing
+    /// else holds them.
     pub(crate) fn grant(&self, request: &LeaseRequest<'_>) -> Result<BTreeMap<String, u16>, LeaseError> {
         let mut table = self
             .table
             .lock()
             .expect("the lease table mutex is never poisoned, no code panics while holding it");
-        grant_in(&mut table, request, is_free)
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read()?),
+        };
+        // Granted on a copy, so that a Lease the document failed to store is not handed out.
+        let mut granted_table = table.clone();
+        let granted = grant_in(&mut granted_table, request, is_free)?;
+        if granted_table != *table {
+            self.write(&granted_table)?;
+            *table = granted_table;
+        }
+        Ok(granted)
+    }
+
+    fn read(&self) -> Result<Table, StoreError> {
+        let document = store::load::<LeaseDocument>(&self.path, DOCUMENT_VERSION)?;
+        Ok(document
+            .map(|document| document.leases.into_iter().map(|lease| (lease.key, lease.port)).collect())
+            .unwrap_or_default())
+    }
+
+    fn write(&self, table: &Table) -> Result<(), StoreError> {
+        let leases = table
+            .iter()
+            .map(|(key, &port)| Lease { key: key.clone(), port })
+            .collect();
+        store::save(&self.path, DOCUMENT_VERSION, &LeaseDocument { leases })
     }
 }
 

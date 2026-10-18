@@ -7,6 +7,7 @@ mod process_group;
 mod requester;
 mod service;
 mod status;
+mod store;
 
 use std::fs::{self, File, Permissions, TryLockError};
 use std::io;
@@ -30,8 +31,8 @@ use crate::protocol::{self, Request, Response, StartOutcome};
 use crate::state_dir::StateDir;
 use crate::topology;
 
-/// Every Job and Service the Daemon owns.
-#[derive(Debug, Default)]
+/// Every Job, Service and Lease the Daemon owns.
+#[derive(Debug)]
 struct Registry {
     jobs: Jobs,
     services: Services,
@@ -84,7 +85,11 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", state.pid().display()))?;
     eprintln!("procly daemon {} listening on {}", std::process::id(), socket.display());
 
-    let registry = Arc::new(Registry::default());
+    let registry = Arc::new(Registry {
+        jobs: Jobs::default(),
+        services: Services::default(),
+        leases: Leases::new(state.leases()),
+    });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot handle SIGINT")?;
     loop {
