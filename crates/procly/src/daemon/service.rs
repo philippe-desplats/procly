@@ -49,8 +49,9 @@ pub(crate) enum ServiceError {
     #[error("service {service} started without a process id")]
     NoPid { service: String },
     #[error(
-        "cannot start group {group}, the services it covers run on their own: {}, stop them with `procly down` first",
-        .services.join(", ")
+        "cannot start group {group}, the services it covers run on their own: {}, stop them first with {}",
+        .services.join(", "),
+        .services.iter().map(|service| format!("`procly down {service}`")).collect::<Vec<_>>().join(" and ")
     )]
     CoveredRunning { group: String, services: Vec<String> },
 }

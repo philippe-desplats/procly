@@ -51,7 +51,7 @@ fn a_group_runs_as_one_unit_with_the_leases_and_derived_variables_of_every_servi
     assert_eq!(stdout(&output), "dev started\n");
     assert!(
         listens(web) && listens(api),
-        "both covered servers listen once up returns"
+        "both covered Services listen once up returns"
     );
     assert_eq!(
         std::fs::read_to_string(&seen).unwrap(),
@@ -60,7 +60,7 @@ fn a_group_runs_as_one_unit_with_the_leases_and_derived_variables_of_every_servi
 
     // One unit: stopping the Group stops both servers.
     assert_success(&procly.procly_in(&main, &["down", "dev"]));
-    eventually("both servers are gone", || !listens(web) && !listens(api));
+    eventually("both Services are gone", || !listens(web) && !listens(api));
     assert_eq!(start_count(&starts), 1);
 }
 
@@ -83,7 +83,7 @@ fn a_start_request_for_a_covered_service_while_the_group_runs_answers_reused_via
     assert_eq!(start_count(&starts), 1);
     // Nothing of its own was started: stopping the Group is all it takes to free the port.
     assert_success(&procly.procly_in(&main, &["down", "dev"]));
-    eventually("the covered server is gone", || !listens(web));
+    eventually("the covered Service is gone", || !listens(web));
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn a_group_running_when_the_daemon_was_killed_is_reattached_and_still_covers_its
     assert_eq!(stdout(&group), "dev reused\n");
     assert_eq!(start_count(&starts), 1);
     assert_success(&procly.procly_in(&main, &["down", "dev"]));
-    eventually("both servers are gone", || !listens(web) && !listens(api));
+    eventually("both Services are gone", || !listens(web) && !listens(api));
 }
 
 /// The port `procly up` printed at the end of its line.

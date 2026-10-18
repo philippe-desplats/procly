@@ -69,6 +69,8 @@ pub(crate) enum ConfigError {
     UnknownCovered { group: String, service: String },
     #[error("group {group} covers {service}, which is not a Process service that runs on its own")]
     CoveredNotProcess { group: String, service: String },
+    #[error("group {group} needs {service}, which it covers, and a Group already starts the Services it covers")]
+    GroupNeedsCovered { group: String, service: String },
     #[error("{service} is covered by 2 groups ({}), a service runs under one group at most", .groups.join(" and "))]
     CoveredTwice { service: String, groups: Vec<String> },
     #[error("no service is declared, there is nothing to start")]
@@ -364,7 +366,7 @@ impl ServiceConfig {
                 };
                 // Its Leases and Derived variables are the ones of the Services it covers.
                 let group = "a Group";
-                let other = "a Process service or a Compose service";
+                let other = "the Services a Group covers";
                 if !self.ports.is_empty() {
                     return Err(wrong_key("ports", group, other));
                 }
@@ -573,6 +575,16 @@ impl Config {
     fn validate_groups(&self) -> Result<(), ConfigError> {
         let mut covered_by: BTreeMap<&str, &str> = BTreeMap::new();
         for (group, declared) in &self.services {
+            if let Some(service) = declared
+                .needs
+                .iter()
+                .find(|need| declared.covers.iter().flatten().any(|covered| covered == *need))
+            {
+                return Err(ConfigError::GroupNeedsCovered {
+                    group: group.clone(),
+                    service: service.clone(),
+                });
+            }
             for service in declared.covers.iter().flatten() {
                 match self.services.get(service) {
                     None => {
@@ -1198,6 +1210,16 @@ mod tests {
              [services.dev]\nrun = 'x'\ncovers = ['api', 'web']\n",
         );
         assert_eq!(inside.start_order("web").unwrap(), ["api", "web"]);
+    }
+
+    #[test]
+    fn a_group_does_not_need_a_service_it_covers() {
+        let config =
+            parsed("[services.web]\nrun = 'x'\n[services.dev]\nrun = 'x'\ncovers = ['web']\nneeds = ['web']\n");
+        assert!(matches!(
+            config.validate_groups(),
+            Err(ConfigError::GroupNeedsCovered { group, service }) if group == "dev" && service == "web"
+        ));
     }
 
     #[test]
