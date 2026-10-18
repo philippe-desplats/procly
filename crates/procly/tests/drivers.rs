@@ -5,8 +5,13 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use common::{Procly, assert_success, free_port, git_repository, git_worktree_add, stderr, stdout, test_server};
+use common::{
+    Procly, assert_success, free_port, git, git_repository, git_worktree_add, require_docker, stderr, stdout,
+    test_server,
+};
 
 /// A Repository with a Postgres Compose service holding 2 resources, and an `api` reading both URLs.
 fn config(port: u16, driver: &str) -> String {
@@ -141,4 +146,147 @@ fn a_driver_that_does_not_exist_or_a_name_too_long_for_it_fails_before_anything_
     let too_long = procly.procly_in(&other, &["env", "api"]);
     assert_eq!(too_long.status.code(), Some(125));
     assert!(stderr(&too_long).contains("its limit is 63"), "{}", stderr(&too_long));
+}
+
+/// Removes the containers, network and volumes of a test project when the test ends, passed or failed.
+struct Project {
+    name: String,
+    dir: PathBuf,
+}
+
+impl Project {
+    fn try_docker(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        Command::new("docker")
+            .args(["compose", "-p", &self.name])
+            .args(args)
+            .current_dir(&self.dir)
+            .env("DB_PORT", "1")
+            .output()
+    }
+
+    /// Runs a script inside the container of service `db` and returns what it printed.
+    fn exec(&self, script: &str) -> String {
+        let output = self
+            .try_docker(&["exec", "-T", "db", "sh", "-c", script])
+            .expect("docker runs");
+        stdout(&output)
+    }
+
+    fn container(&self) -> String {
+        let output = self.try_docker(&["ps", "-a", "-q", "db"]).expect("docker runs");
+        stdout(&output).trim().to_owned()
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        // A test that needs no Docker never started anything, and may run where Docker is absent.
+        let _ = self.try_docker(&["down", "--volumes", "--remove-orphans"]);
+    }
+}
+
+/// A Repository with a compose file, a `procly.toml` and a second Worktree, in a project of its own.
+struct Fixture {
+    // First, so that the containers are removed while the working directories still exist.
+    project: Project,
+    procly: Procly,
+    main: PathBuf,
+    other: PathBuf,
+    port: u16,
+}
+
+fn project_name() -> String {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    format!("pcd-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The Driver of an imaginary technology whose resources are directories of the data volume: a new technology is
+/// only a file.
+const DIRECTORY_DRIVER: &str = "url = 'dir://localhost:{port}/{resource}'\n\
+    check = 'test -d /data/res/{resource}'\n\
+    create = 'mkdir -p /data/res/{resource}'\n\
+    copy = 'cp -r /data/res/{template} /data/res/{resource}'\n\
+    drop = 'rm -r -f /data/res/{resource}'\n";
+
+/// A compose file whose service `db` runs a TCP listener in `alpine`, with a data volume.
+fn alpine_compose(project: &str) -> String {
+    format!(
+        "name: {project}\nservices:\n  db:\n    image: alpine\n    init: true\n    command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]\n    \
+         ports:\n      - \"${{DB_PORT:-1}}:80\"\n    volumes:\n      - data:/data\nvolumes:\n  data:\n"
+    )
+}
+
+/// A Repository on the directory Driver, with `resources` as TOML under `[services.db.resources]`, and a second
+/// Worktree. The Driver and the configuration are committed, so both Worktrees hold them.
+fn directory_fixture(resources: &str) -> Fixture {
+    let procly = Procly::new();
+    let (name, port) = (project_name(), free_port());
+    let main = git_repository(procly.scratch(), "app");
+    let config = format!(
+        "[services.db]\ncompose = 'db'\ndriver = 'dir'\nports = {{ db = {port} }}\n\
+         env = {{ DB_PORT = '{{services.db.ports.db}}' }}\n{resources}"
+    );
+    fs::write(main.join("compose.yaml"), alpine_compose(&name)).expect("write the compose file");
+    fs::write(main.join("procly.toml"), config).expect("write the config");
+    write_driver_file(&main.join(".procly/drivers"), "dir", DIRECTORY_DRIVER);
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "--quiet", "--message", "compose"]);
+    let other = git_worktree_add(&main, "app-other");
+    Fixture {
+        procly,
+        project: Project {
+            name,
+            dir: main.clone(),
+        },
+        main,
+        other,
+        port,
+    }
+}
+
+fn write_driver_file(dir: &Path, name: &str, text: &str) {
+    fs::create_dir_all(dir).expect("create the Drivers directory");
+    fs::write(dir.join(format!("{name}.toml")), text).expect("write the Driver");
+}
+
+/// The resources of the data volume, sorted.
+fn resources(project: &Project) -> Vec<String> {
+    let mut found: Vec<String> = project
+        .exec("ls /data/res 2>/dev/null")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    found.sort();
+    found
+}
+
+const DEV_AND_TEST: &str =
+    "[services.db.resources.dev]\nname = 'app'\n[services.db.resources.test]\nname = 'app_test'\n";
+
+#[test]
+fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver_file_of_the_repository() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = directory_fixture(DEV_AND_TEST);
+
+    let first = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_success(&first);
+    let port = fixture.port;
+    assert_eq!(stdout(&first), format!("db started http://localhost:{port} port {port}\n"));
+    // Several Logical resources per Service, under the names of the configuration in the Main worktree.
+    assert_eq!(resources(&fixture.project), ["app", "app_test"]);
+    let container = fixture.project.container();
+
+    let second = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+
+    assert_success(&second);
+    assert_eq!(stdout(&second), format!("db reused http://localhost:{port} port {port}\n"));
+    assert_eq!(
+        resources(&fixture.project),
+        ["app", "app_app_other", "app_test", "app_test_app_other"]
+    );
+    // The one container, not one recreated for the second Worktree.
+    assert_eq!(fixture.project.container(), container);
 }
