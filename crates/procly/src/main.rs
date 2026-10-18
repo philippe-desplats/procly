@@ -3,6 +3,7 @@ mod config;
 mod daemon;
 mod duration;
 mod output;
+mod ports;
 mod protocol;
 mod state_dir;
 mod status;

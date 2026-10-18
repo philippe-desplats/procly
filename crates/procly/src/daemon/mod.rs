@@ -23,6 +23,7 @@ use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
+use crate::ports;
 use crate::protocol::{self, Request, Response, StartOutcome};
 use crate::state_dir::StateDir;
 use crate::topology;
@@ -251,7 +252,7 @@ fn start_service(services: &Services, name: &str, cwd: &Path, env: Vec<(String, 
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
         Ok(ServiceSpec {
-            command: declared.run.clone(),
+            command: ports::render(name, &declared.run, &declared.ports)?,
             cwd: worktree.clone(),
             env,
             health: HealthCheck {
