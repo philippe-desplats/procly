@@ -111,6 +111,9 @@ pub(crate) struct LeaseRequest<'a> {
     pub(crate) expiry: Duration,
     /// The Worktree root and the name of every running Service, whose Leases are in use and never expire.
     pub(crate) running: &'a BTreeSet<(PathBuf, String)>,
+    /// Keeps a Lease already granted as it is, even where a freed preferred port would take it back. For a request
+    /// that does not start the Service, as the Service may run on that Lease right now.
+    pub(crate) keep: bool,
 }
 
 /// The Pinned branch a Worktree is on.
@@ -244,8 +247,9 @@ fn expire(table: &mut Table, request: &LeaseRequest<'_>, now: Duration) {
 ///
 /// A Lease already granted is kept as it is, so the port stays the same across restarts. The preferred port, the
 /// explicit port of a Pinned branch or else the declared port in the Main worktree, is taken whenever no other
-/// Lease and nothing else holds it, even when the Lease held another one before, so that editing it takes effect.
-/// Without a Lease nor a free preferred port, the Pool is tried in order, then the Range.
+/// Lease and nothing else holds it, even when the Lease held another one before, so that editing it takes effect,
+/// unless the request asks to keep its Lease. Without a Lease nor a free preferred port, the Pool is tried in order,
+/// then the Range.
 fn grant_in(
     table: &mut Table,
     request: &LeaseRequest<'_>,
@@ -276,7 +280,9 @@ fn grant_in(
             .and_then(|pinned| pinned.ports)
             .and_then(|ports| ports.get(port_name).copied());
         let preferred = explicit.or_else(|| request.topology.worktree.main.then_some(declared.port));
-        let port = if let Some(preferred) = preferred.filter(|&port| current != Some(port) && available(port)) {
+        let port = if let Some(preferred) =
+            preferred.filter(|&port| !(request.keep && current.is_some()) && current != Some(port) && available(port))
+        {
             preferred
         } else if let Some(current) = current {
             current
@@ -360,6 +366,7 @@ mod tests {
             pinned: None,
             expiry: 30 * DAY,
             running,
+            keep: false,
         }
     }
 
@@ -430,6 +437,36 @@ mod tests {
         );
         assert_eq!(grant(&mut table, &main, &[("http", 3000)], |_| true), [3000]);
         assert_eq!(grant(&mut table, &main, &[("http", 4000)], |_| true), [4000]);
+    }
+
+    #[test]
+    fn a_lease_asked_to_be_kept_stays_even_when_the_declared_port_is_free_again() {
+        let mut table = Table::new();
+        let main = topology("/src/app", true);
+        assert_eq!(
+            grant(&mut table, &main, &[("http", 3000)], |port| port != 3000),
+            [24000]
+        );
+        let ports = port_configs(&[("http", 3000)]);
+        let (declared, running) = (BTreeSet::from([3000]), BTreeSet::new());
+        let request = LeaseRequest {
+            keep: true,
+            ..request(&main, &ports, &declared, &running)
+        };
+        // A Service that runs on its Lease must not see it move under a request that only reads it.
+        assert_eq!(
+            grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap()["http"],
+            24000
+        );
+        // A Lease that does not exist yet is granted the usual way.
+        let missing = LeaseRequest {
+            service: "api",
+            ..request
+        };
+        assert_eq!(
+            grant_in(&mut table, &missing, Duration::ZERO, |_| true).unwrap()["http"],
+            3000
+        );
     }
 
     #[test]
@@ -510,6 +547,36 @@ mod tests {
         );
         assert_eq!(grant("/src/app-develop-again"), first);
         assert!(table.keys().all(|key| key.scope == Scope::Branch("develop".to_owned())));
+    }
+
+    #[test]
+    fn a_lease_asked_to_be_kept_stays_even_when_the_explicit_port_of_its_pinned_branch_is_free_again() {
+        let mut table = Table::new();
+        let ports = port_configs(&[("http", 3000)]);
+        let declared = BTreeSet::from([3000, 3200]);
+        let running = BTreeSet::new();
+        let explicit = BTreeMap::from([("http".to_owned(), 3200)]);
+        let topology = topology("/src/app-develop", false);
+        let request = LeaseRequest {
+            pinned: Some(PinnedBranch {
+                name: "develop",
+                ports: Some(&explicit),
+            }),
+            ..request(&topology, &ports, &declared, &running)
+        };
+        assert_eq!(
+            grant_in(&mut table, &request, Duration::ZERO, |port| port != 3200).unwrap()["http"],
+            24000
+        );
+        let kept = LeaseRequest { keep: true, ..request };
+        assert_eq!(
+            grant_in(&mut table, &kept, Duration::ZERO, |_| true).unwrap()["http"],
+            24000
+        );
+        assert_eq!(
+            grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap()["http"],
+            3200
+        );
     }
 
     #[test]

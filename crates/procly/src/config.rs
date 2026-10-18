@@ -150,6 +150,10 @@ pub(crate) struct ServiceConfig {
     pub(crate) ports: BTreeMap<String, PortConfig>,
     #[serde(default)]
     pub(crate) health: HealthConfig,
+    /// The Derived variables of the Service: each value is a template over Leases and Worktree facts, rendered into
+    /// the environment of the Service and mirrored in the Env file.
+    #[serde(default)]
+    pub(crate) env: BTreeMap<String, String>,
     /// The Services started first, and healthy, before this one.
     #[serde(default)]
     pub(crate) needs: Vec<String>,
