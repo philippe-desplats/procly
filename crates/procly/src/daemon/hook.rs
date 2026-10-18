@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use super::managed::{self, ManagedBlocks, ManagedError, Outcome};
+use super::managed::{self, ManagedBlocks, ManagedError, Outcome, Removal};
 
 /// The command of the hook, which reads the tool call on its standard input.
 pub(crate) const COMMAND: &str = "procly guard";
@@ -110,6 +110,77 @@ pub(super) fn install(managed: &ManagedBlocks, file: &Path) -> Result<Outcome, H
     Ok(outcome)
 }
 
+/// Takes the Guard out of the settings file `file` when Procly wrote it and nobody edited it. The hooks the user has
+/// stay, and the keys that end up empty go, so that a file Procly created is deleted with it.
+pub(super) fn remove(managed: &ManagedBlocks, file: &Path) -> Result<Removal, HookError> {
+    let text = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Removal::Absent),
+        Err(source) => {
+            return Err(HookError::Read {
+                path: file.to_owned(),
+                source,
+            });
+        }
+    };
+    let Ok(mut settings) = serde_json::from_str::<Value>(&text) else {
+        // A file that is no JSON cannot be told apart from an edited Guard once it names the command.
+        return Ok(if text.contains(COMMAND) {
+            Removal::Edited
+        } else {
+            Removal::Absent
+        });
+    };
+    let Some(groups) = settings
+        .get_mut("hooks")
+        .and_then(|hooks| hooks.get_mut("PreToolUse"))
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(Removal::Absent);
+    };
+    let Some(at) = groups.iter().position(is_guard) else {
+        return Ok(Removal::Absent);
+    };
+    if groups[at] != group() && !managed.is_recorded(file, BLOCK, &compact(&groups[at]))? {
+        return Ok(Removal::Edited);
+    }
+    groups.remove(at);
+    prune_empty_hooks(&mut settings);
+    let deleted = settings.as_object().is_some_and(Map::is_empty);
+    if deleted {
+        fs::remove_file(file).map_err(|source| ManagedError::Write {
+            path: file.to_owned(),
+            source,
+        })?;
+    } else {
+        let mut text = serde_json::to_string_pretty(&settings).expect("a JSON value always serializes");
+        text.push('\n');
+        managed::write_text(file, &text)?;
+    }
+    managed.forget_block(file, BLOCK)?;
+    Ok(Removal::Removed { deleted })
+}
+
+/// Removes `hooks.PreToolUse` and `hooks` from the settings when the Guard was all they held.
+fn prune_empty_hooks(settings: &mut Value) {
+    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if hooks
+        .get("PreToolUse")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        hooks.shift_remove("PreToolUse");
+    }
+    if hooks.is_empty() {
+        settings
+            .as_object_mut()
+            .expect("the settings are an object, they held `hooks`")
+            .shift_remove("hooks");
+    }
+}
+
 fn compact(group: &Value) -> String {
     serde_json::to_string(group).expect("a JSON value always serializes")
 }
@@ -200,6 +271,64 @@ mod tests {
         let error = install(&blocks, &file).unwrap_err();
 
         assert!(matches!(error, HookError::Parse { .. }), "{error}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn removing_the_guard_deletes_the_settings_file_it_created_and_forgets_it() {
+        let (_dir, blocks, file) = fixture();
+        install(&blocks, &file).unwrap();
+
+        assert_eq!(remove(&blocks, &file).unwrap(), Removal::Removed { deleted: true });
+
+        assert!(!file.exists());
+        assert_eq!(blocks.files_holding(BLOCK).unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(remove(&blocks, &file).unwrap(), Removal::Absent);
+    }
+
+    #[test]
+    fn removing_the_guard_keeps_every_other_hook_and_setting_in_their_order() {
+        let (_dir, blocks, file) = fixture();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let own = r#"{"model":"opus","hooks":{"PostToolUse":[{"hooks":[{"type":"command","command":"fmt"}]}],"PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"lint"}]}]},"env":{"A":"1"}}"#;
+        fs::write(&file, own).unwrap();
+        install(&blocks, &file).unwrap();
+
+        assert_eq!(remove(&blocks, &file).unwrap(), Removal::Removed { deleted: false });
+
+        let written = settings(&file);
+        assert_eq!(written, serde_json::from_str::<Value>(own).unwrap());
+        let keys: Vec<_> = written.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["model", "hooks", "env"]);
+    }
+
+    #[test]
+    fn removing_the_guard_drops_the_hooks_it_alone_filled() {
+        let (_dir, blocks, file) = fixture();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, r#"{"model":"opus"}"#).unwrap();
+        install(&blocks, &file).unwrap();
+
+        assert_eq!(remove(&blocks, &file).unwrap(), Removal::Removed { deleted: false });
+
+        assert_eq!(settings(&file), json!({ "model": "opus" }));
+    }
+
+    #[test]
+    fn an_edited_guard_or_a_file_that_is_not_json_is_left_alone() {
+        let (_dir, blocks, file) = fixture();
+        install(&blocks, &file).unwrap();
+        let mut edited = settings(&file);
+        edited["hooks"]["PreToolUse"][0]["matcher"] = json!("Bash|Task");
+        let text = serde_json::to_string_pretty(&edited).unwrap();
+        fs::write(&file, &text).unwrap();
+        assert_eq!(remove(&blocks, &file).unwrap(), Removal::Edited);
+        assert_eq!(fs::read_to_string(&file).unwrap(), text);
+
+        fs::write(&file, "{ procly guard").unwrap();
+        assert_eq!(remove(&blocks, &file).unwrap(), Removal::Edited);
+        fs::write(&file, "{ not json").unwrap();
+        assert_eq!(remove(&blocks, &file).unwrap(), Removal::Absent);
         assert_eq!(fs::read_to_string(&file).unwrap(), "{ not json");
     }
 }

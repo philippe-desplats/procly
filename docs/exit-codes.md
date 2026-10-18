@@ -15,6 +15,8 @@ Every `procly` command exits with one of these codes. They are stable: an agent 
 
 `agent install`, `off` and `on` exit with 0, also when a Managed block was already in place or was left as it is because you edited it, and with 125 when Procly itself fails: a settings file that is not JSON, an instruction file outside the Worktree, a state document that is unreadable, or a directory that is not in a git Repository. `guard` always exits with 0. It denies a command through the JSON it prints and lets the others through, see [Steering agents to Procly](agents.md).
 
+`eject` exits with 0, also when it left Managed blocks because you edited them, and with 125 when Procly itself fails: a container that cannot be stopped, a state document that is unreadable, a directory that is not in a git Repository, or, with `--agent`, an agent CLI that is missing or exits with another code than 0, in which case what eject removed stays removed. See [Removing Procly from a Repository](eject.md).
+
 `wait` otherwise exits with the Job's own exit code, and with 128 + N for a Job killed by signal N, as a shell does. Those codes can collide with the ones above, so read them as the Job's when `wait` reports no Procly error on stderr.
 
 The code for a conflict with a Foreign process is reserved for the ticket that introduces it.

@@ -13,16 +13,18 @@ mod status;
 mod topology;
 mod unit;
 
+use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, InitReport, JobEnd, Released, Request, Response, ServiceEnd, StartOutcome,
+    BlockOutcome, BlockReport, EjectReport, InitReport, JobEnd, Released, Request, Response, ServiceEnd, StartOutcome,
+    Written,
 };
 use crate::state_dir::StateDir;
 
@@ -129,6 +131,22 @@ enum Command {
     Off,
     /// Bring back the Guards and Rules blocks of this Repository after `procly off`.
     On,
+    /// Remove everything Procly wrote into this Repository: stop its Services, then take out the Rules blocks, the
+    /// Guard, the exclusion lines and the Env files that nobody edited, and print what was removed and what was left.
+    /// Docker volumes and Logical resources are kept. A Managed block you edited is left as it is, and a prompt
+    /// describing what to undo in it is printed.
+    #[command(
+        after_help = "Exit codes: 0 when the Repository is ejected, also when blocks were left because you edited them, \
+                      125 when Procly itself fails, such as for a container that cannot be stopped or the agent \
+                      CLI of `--agent` failing, in which case what eject removed stays removed. See docs/eject.md and \
+                      docs/exit-codes.md."
+    )]
+    Eject {
+        /// Hand the prompt to your own coding agent in its non-interactive mode, from the current directory, instead
+        /// of printing it. Without this flag no agent is ever run.
+        #[arg(long, value_enum)]
+        agent: Option<AgentCli>,
+    },
     /// The Claude Code hook that blocks the dev-server and compose commands Procly runs instead, and answers with
     /// the Procly command to run. It reads the tool call on its standard input and always exits 0.
     #[command(
@@ -140,6 +158,40 @@ enum Command {
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
+}
+
+/// A coding agent CLI that `eject --agent` can hand a prompt to, with the arguments that make it answer the prompt
+/// once and exit.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AgentCli {
+    /// `claude -p <prompt>`
+    Claude,
+    /// `codex exec <prompt>`
+    Codex,
+    /// `gemini -p <prompt>`
+    Gemini,
+    /// `opencode run <prompt>`
+    Opencode,
+}
+
+impl AgentCli {
+    fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Opencode => "opencode",
+        }
+    }
+
+    /// The arguments before the prompt.
+    fn non_interactive(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude | Self::Gemini => &["-p"],
+            Self::Codex => &["exec"],
+            Self::Opencode => &["run"],
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -264,6 +316,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         } => agent_install(&state, file),
         Command::Off => switch(&state, true),
         Command::On => switch(&state, false),
+        Command::Eject { agent } => eject(&state, agent),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Daemon => {
             daemon::run(&state)?;
@@ -506,6 +559,92 @@ fn switch(state: &StateDir, off: bool) -> anyhow::Result<ExitCode> {
         }
         other => unexpected(other),
     }
+}
+
+/// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands
+/// to the coding agent instead.
+fn eject(state: &StateDir, agent: Option<AgentCli>) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let Response::Eject(report) = (match client::send(state, &Request::Eject { cwd })? {
+        response @ Response::Eject(_) => response,
+        other => return unexpected(other),
+    }) else {
+        unreachable!("the answer was matched as an eject report just above")
+    };
+    print(&eject_summary(&report))?;
+    let Some(prompt) = &report.prompt else {
+        if let Some(agent) = agent {
+            eprintln!(
+                "procly: nothing was left, so there is no prompt to hand to {}",
+                agent.program()
+            );
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    match agent {
+        None => {
+            eprintln!(
+                "procly: {} edited, left as it is, the prompt below describes what to undo, `procly eject --agent \
+                 <cli>` hands it to your coding agent",
+                blocks(report.left.len())
+            );
+            print(&format!("\n{prompt}"))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(agent) => {
+            eprintln!("procly: handing the prompt to {}", agent.program());
+            let status = std::process::Command::new(agent.program())
+                .args(agent.non_interactive())
+                .arg(prompt)
+                .status()
+                .with_context(|| format!("cannot run {}, is it installed and on the PATH?", agent.program()))?;
+            if status.success() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                anyhow::bail!(
+                    "{} exited with {status}, what it was to undo is left as it is",
+                    agent.program()
+                )
+            }
+        }
+    }
+}
+
+/// `1 item was` or `3 items were`, for the items eject left.
+fn blocks(count: usize) -> String {
+    match count {
+        1 => "1 item was".to_owned(),
+        _ => format!("{count} items were"),
+    }
+}
+
+/// One line per Service stopped, per file removed and per file left, then what eject never touches.
+fn eject_summary(report: &EjectReport) -> String {
+    let mut text = String::new();
+    for stopped in &report.stopped {
+        let _ = match &stopped.worktree {
+            Some(worktree) => writeln!(text, "stopped {} of {}", stopped.service, worktree.display()),
+            None => writeln!(text, "stopped {} (container, its volumes are kept)", stopped.service),
+        };
+    }
+    for removed in &report.removed {
+        let deleted = if removed.deleted && removed.kind != Written::EnvFile {
+            ", the file held nothing else and was deleted"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            text,
+            "removed {} {}{deleted}",
+            removed.kind.as_str(),
+            removed.file.display()
+        );
+    }
+    for left in &report.left {
+        let _ = writeln!(text, "left {} {}, edited", left.kind.as_str(), left.file.display());
+    }
+    text.push_str("left Docker volumes and Logical resources\n");
+    text
 }
 
 /// Runs the Guard for a Claude Code `PreToolUse` hook: reads the tool call on stdin and, for a command it knows while

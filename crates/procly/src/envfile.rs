@@ -15,6 +15,11 @@ pub(crate) fn env_file(variables: &[(String, String)]) -> String {
     text
 }
 
+/// Whether `text` is an Env file as Procly wrote it, which a file that lost its header is not.
+pub(crate) fn is_generated(text: &str) -> bool {
+    text.lines().next() == Some(HEADER)
+}
+
 /// A value as dotenv parsers read it back unchanged: bare when it holds nothing they treat specially, otherwise in
 /// double quotes with `\`, `"`, `$` and the line break escaped. The `$` is escaped because the parsers that expand
 /// variables, such as the ones of Next.js and `dotenv-cli`, would expand it even between double quotes.
@@ -96,5 +101,13 @@ mod tests {
             "export PORT='24000'\nexport GREETING='it'\\''s $HOME `x`'\n"
         );
         assert_eq!(exports(&[]), "");
+    }
+
+    #[test]
+    fn an_env_file_is_told_by_its_header() {
+        assert!(is_generated(&env_file(&variables(&[("A", "1")]))));
+        assert!(is_generated(&env_file(&[])));
+        assert!(!is_generated("A=1\n"));
+        assert!(!is_generated(""));
     }
 }

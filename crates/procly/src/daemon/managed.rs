@@ -47,6 +47,17 @@ pub(crate) enum Outcome {
     Edited,
 }
 
+/// What a request to remove a block did to the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Removal {
+    /// The block was taken out. `deleted` tells that the file held nothing else, so it was deleted too.
+    Removed { deleted: bool },
+    /// The file does not hold the block.
+    Absent,
+    /// The block holds something Procly did not write, so it was left as it is.
+    Edited,
+}
+
 /// The fingerprint of the content of every block Procly wrote, by file and block name, kept in a document of the
 /// state directory so that it survives restarts of the Daemon.
 #[derive(Debug)]
@@ -84,7 +95,7 @@ impl ManagedBlocks {
     /// when they are missing. The rest of the file is kept byte for byte. A block the user edited is left alone.
     pub(crate) fn write(&self, file: &Path, block: &str, content: &[impl AsRef<str>]) -> Result<Outcome, ManagedError> {
         self.with_table(|table| {
-            let content: String = content.iter().flat_map(|line| [line.as_ref(), "\n"]).collect();
+            let content = joined(content);
             let text = read_text(file)?;
             let key = (file.to_owned(), block.to_owned());
             let (change, new_text) = plan(
@@ -102,6 +113,46 @@ impl ManagedBlocks {
             }
             Ok(change)
         })
+    }
+
+    /// Takes the block `block` out of `file` when Procly wrote it and nobody edited it, and forgets its fingerprint.
+    /// The rest of the file is kept byte for byte, and a file left empty is deleted, since only Procly can have
+    /// created it. `known` lists the contents that count as Procly's even without a fingerprint, such as the one a
+    /// Procly whose state was lost would write. A block the user edited, or one that never closes, is left alone.
+    pub(crate) fn remove(&self, file: &Path, block: &str, known: &[String]) -> Result<Removal, ManagedError> {
+        self.with_table(|table| {
+            let key = (file.to_owned(), block.to_owned());
+            let text = read_text(file)?;
+            let removal = match plan_removal(
+                Syntax::of(file),
+                &text,
+                block,
+                known,
+                table.get(&key).map(String::as_str),
+            ) {
+                Planned::Edited => return Ok(Removal::Edited),
+                Planned::Absent => Removal::Absent,
+                Planned::Remove(rest) if rest.is_empty() => {
+                    fs::remove_file(file).map_err(|source| ManagedError::Write {
+                        path: file.to_owned(),
+                        source,
+                    })?;
+                    Removal::Removed { deleted: true }
+                }
+                Planned::Remove(rest) => {
+                    write_text(file, &rest)?;
+                    Removal::Removed { deleted: false }
+                }
+            };
+            self.forget(table, &key)?;
+            Ok(removal)
+        })
+    }
+
+    /// Forgets the fingerprint of the block `block` of `file`, for a file that cannot carry markers and whose caller
+    /// took the block out by its own means.
+    pub(crate) fn forget_block(&self, file: &Path, block: &str) -> Result<(), ManagedError> {
+        self.with_table(|table| self.forget(table, &(file.to_owned(), block.to_owned())))
     }
 
     /// Whether `file` holds the block `block`, whatever its content.
@@ -156,6 +207,17 @@ impl ManagedBlocks {
         if table.get(&key) != Some(&fingerprint) {
             let mut updated = table.clone();
             updated.insert(key, fingerprint);
+            self.write_table(&updated)?;
+            *table = updated;
+        }
+        Ok(())
+    }
+
+    /// Drops the fingerprint for `key`, in the document first so that a failed write leaves the table as it was.
+    fn forget(&self, table: &mut Table, key: &(PathBuf, String)) -> Result<(), ManagedError> {
+        if table.contains_key(key) {
+            let mut updated = table.clone();
+            updated.remove(key);
             self.write_table(&updated)?;
             *table = updated;
         }
@@ -239,6 +301,42 @@ fn plan(syntax: Syntax, text: &str, block: &str, content: &str, recorded: Option
         }
         Located::Broken | Located::Found { .. } => (Outcome::Edited, None),
     }
+}
+
+/// What to do with `text` to take the block `block` out of it.
+#[derive(Debug, PartialEq, Eq)]
+enum Planned {
+    Absent,
+    Edited,
+    /// The text without the block.
+    Remove(String),
+}
+
+/// `recorded` is the fingerprint stored for the block when Procly last wrote it, and `known` the contents that are
+/// Procly's whatever the record says.
+fn plan_removal(syntax: Syntax, text: &str, block: &str, known: &[String], recorded: Option<&str>) -> Planned {
+    match locate(syntax, text, block) {
+        Located::Absent => Planned::Absent,
+        Located::Found { range, content }
+            if recorded == Some(fingerprint(&content).as_str()) || known.contains(&content) =>
+        {
+            let mut rest = text.to_owned();
+            rest.replace_range(range, "");
+            Planned::Remove(rest)
+        }
+        Located::Broken | Located::Found { .. } => Planned::Edited,
+    }
+}
+
+/// The lines of a block as its content: each one ends with a line break.
+pub(super) fn joined(lines: &[impl AsRef<str>]) -> String {
+    lines.iter().flat_map(|line| [line.as_ref(), "\n"]).collect()
+}
+
+/// The lines that open and close the block `block` in `file`, which depend on the comments the file can hold.
+pub(super) fn markers(file: &Path, block: &str) -> (String, String) {
+    let syntax = Syntax::of(file);
+    (open_marker(syntax, block), close_marker(syntax, block))
 }
 
 /// Where the block `block` sits in a text.
@@ -497,5 +595,73 @@ mod tests {
         assert!(restarted.is_recorded(&file, "guard", "{}").unwrap());
         assert_eq!(restarted.files_holding("guard").unwrap(), vec![file]);
         assert_eq!(restarted.files_holding("rules").unwrap(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn an_intact_block_is_taken_out_and_the_text_around_it_is_kept() {
+        let text = format!("above\n{}below", block("/a\n"));
+        let recorded = fingerprint("/a\n");
+        assert_eq!(
+            plan_removal(Syntax::Hash, &text, "exclusions", &[], Some(&recorded)),
+            Planned::Remove("above\nbelow".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_block_with_a_known_content_is_taken_out_without_a_fingerprint() {
+        let text = block("/a\n");
+        let known = ["/b\n".to_owned(), "/a\n".to_owned()];
+        assert_eq!(
+            plan_removal(Syntax::Hash, &text, "exclusions", &known, None),
+            Planned::Remove(String::new())
+        );
+    }
+
+    #[test]
+    fn an_edited_block_or_one_that_never_closes_is_not_taken_out() {
+        let text = format!("above\n{}below", block("/a\n/mine\n"));
+        let recorded = fingerprint("/a\n");
+        assert_eq!(
+            plan_removal(Syntax::Hash, &text, "exclusions", &["/a\n".to_owned()], Some(&recorded)),
+            Planned::Edited
+        );
+        let open = format!("{}\n/a\n", open_marker(Syntax::Hash, "exclusions"));
+        assert_eq!(
+            plan_removal(Syntax::Hash, &open, "exclusions", &["/a\n".to_owned()], None),
+            Planned::Edited
+        );
+        assert_eq!(
+            plan_removal(Syntax::Hash, "other\n", "exclusions", &[], None),
+            Planned::Absent
+        );
+    }
+
+    #[test]
+    fn removing_a_block_forgets_it_and_deletes_a_file_left_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("managed-blocks.json");
+        let blocks = ManagedBlocks::new(path.clone());
+        let file = dir.path().join("AGENTS.md");
+        fs::write(&file, "mine\n").unwrap();
+        blocks.write(&file, "rules", &["x"]).unwrap();
+        let created = dir.path().join("info/exclude");
+        blocks.write(&created, "exclusions", &["/a"]).unwrap();
+
+        assert_eq!(
+            blocks.remove(&file, "rules", &[]).unwrap(),
+            Removal::Removed { deleted: false }
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "mine\n");
+        assert_eq!(
+            blocks.remove(&created, "exclusions", &[]).unwrap(),
+            Removal::Removed { deleted: true }
+        );
+        assert!(!created.exists());
+
+        // A new Daemon reads the record back: nothing is left in it.
+        let restarted = ManagedBlocks::new(path);
+        assert_eq!(restarted.files_holding("rules").unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(restarted.files_holding("exclusions").unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(restarted.remove(&file, "rules", &[]).unwrap(), Removal::Absent);
     }
 }
