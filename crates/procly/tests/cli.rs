@@ -16,8 +16,11 @@ fn version_flag_prints_the_package_version() {
 
 #[test]
 fn a_usage_error_exits_2() {
-    // A command that fails to parse never reaches the Daemon, so this never starts one under the real home.
+    // A command that fails to parse never reaches the Daemon, and the state directory is a temporary one anyway, so
+    // a command that did parse would start a Daemon there and never under the real home.
+    let state = tempfile::tempdir().expect("create a state dir");
     let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .env("PROCLY_STATE_DIR", state.path())
         .arg("wait")
         .output()
         .expect("the procly binary runs");
