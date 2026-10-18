@@ -1,7 +1,9 @@
 mod client;
 mod config;
 mod daemon;
+mod derived;
 mod duration;
+mod envfile;
 mod output;
 mod ports;
 mod protocol;
@@ -69,7 +71,21 @@ enum Command {
                             within its health timeout and its process tree was stopped, 125 when Procly itself \
                             fails. See docs/exit-codes.md."
     )]
-    Up { service: String },
+    Up {
+        /// Exclude the files Procly generates through the `.gitignore` of the Worktree, as a Managed block, instead
+        /// of the git exclude file shared by the Repository.
+        #[arg(long)]
+        gitignore: bool,
+        service: String,
+    },
+    /// Print the variables Procly injects into a Service of the current Worktree as shell exports: its Leases, its
+    /// Derived variables, `PROCLY=1` and `PROCLY_SERVICE`. Without starting it, nor the environment of the caller.
+    #[command(
+        after_help = "Run a one-off command with the environment of a Service: `eval \"$(procly env web)\"`. \
+                      Exit codes: 0 on success, 125 when Procly itself fails, such as for a Service that is not \
+                      declared or a Derived variable that cannot be rendered. See docs/exit-codes.md."
+    )]
+    Env { service: String },
     /// Stop a Service of the current Worktree, or all of its Services without an argument, with their whole
     /// process trees. The Daemon logs who asked.
     Down { service: Option<String> },
@@ -144,7 +160,8 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Up { service } => up(&state, service),
+        Command::Up { gitignore, service } => up(&state, service, gitignore),
+        Command::Env { service } => env(&state, service),
         Command::Down { service } => down(&state, service),
         Command::Wait { job } => match client::send(&state, &Request::Wait { job: job.clone() })? {
             Response::Ended { output, end } => {
@@ -202,12 +219,13 @@ fn tail(output: &str, lines: usize) -> &str {
 }
 
 /// Runs `up`, printing where to reach the healthy Service, or why it is not.
-fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
+fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Up {
         service,
         cwd,
         env: caller_env(),
+        gitignore,
     };
     match client::send(state, &request)? {
         Response::Up {
@@ -284,6 +302,18 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                 eprint!("{}", tail(&output, OUTPUT_TAIL_LINES));
             }
             Ok(ExitCode::from(code))
+        }
+        other => unexpected(other),
+    }
+}
+
+/// Runs `env`, printing one `export` line per variable.
+fn env(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    match client::send(state, &Request::Env { service, cwd })? {
+        Response::Env { variables } => {
+            print(&envfile::exports(&variables))?;
+            Ok(ExitCode::SUCCESS)
         }
         other => unexpected(other),
     }

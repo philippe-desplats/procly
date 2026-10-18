@@ -2,11 +2,13 @@
 
 mod clock;
 mod cpu;
+mod environment;
 mod health;
 mod idle;
 mod job;
 mod lease;
 mod listeners;
+mod managed;
 mod process_group;
 mod requester;
 mod service;
@@ -30,7 +32,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use self::clock::Clock;
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
-use self::lease::{LeaseRequest, Leases};
+use self::lease::Leases;
+use self::managed::ManagedBlocks;
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
 use crate::ports;
@@ -44,6 +47,9 @@ struct Registry {
     jobs: Jobs,
     services: Services,
     leases: Leases,
+    managed: ManagedBlocks,
+    /// Held while the generated files of a Worktree are written, so that 2 starts never write them at once.
+    mirroring: Mutex<()>,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -98,6 +104,8 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         jobs: Jobs::default(),
         services: Services::new(Clock::from_env()),
         leases: Leases::new(state.leases()),
+        managed: ManagedBlocks::new(state.managed_blocks()),
+        mirroring: Mutex::default(),
         initializing: Mutex::default(),
     });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
@@ -198,7 +206,21 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
             service: name,
             cwd,
             env,
-        } => up(registry, name, cwd, env).await,
+            gitignore,
+        } => up(registry, name, cwd, env, gitignore).await,
+        Request::Env { service, cwd } => {
+            let registry = Arc::clone(registry);
+            // Resolving the Topology runs git, and reading the configuration and the Leases are blocking.
+            match tokio::task::spawn_blocking(move || service_environment(&registry, &service, &cwd)).await {
+                Ok(Ok(variables)) => Response::Env { variables },
+                Ok(Err(error)) => Response::Error {
+                    message: format!("{error:#}"),
+                },
+                Err(error) => Response::Error {
+                    message: format!("the environment could not be read: {error}"),
+                },
+            }
+        }
         Request::Down { service, cwd } => match down(Arc::clone(registry), service, cwd, peer).await {
             Ok(stopped) => Response::Down { stopped },
             Err(error) => Response::Error {
@@ -250,40 +272,39 @@ fn start_job(
     Ok(jobs.start(&spec)?)
 }
 
-fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, String)>) -> anyhow::Result<Start> {
+fn start_service(
+    registry: &Registry,
+    name: &str,
+    cwd: &Path,
+    env: Vec<(String, String)>,
+    gitignore: bool,
+) -> anyhow::Result<Start> {
     let topology = topology_of(cwd)?;
     let worktree = topology.worktree.path.clone();
+    {
+        // Also on a Reuse, so that `--gitignore` is honored whenever it is asked. A Service that is not declared fails
+        // here, before any file is written or Lease granted.
+        let config = read_config(&worktree)?;
+        environment::check(name, declared(&config, &worktree, name)?)?;
+        environment::mirror(registry, &topology, &config, gitignore)?;
+    }
     registry.services.start(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
-        // Checked before any Lease is granted, so that a request bound to fail stores none.
-        let health_port_name = declared.health_port_name(name)?;
-        ports::check(name, &declared.run, declared.ports.keys())?;
         // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
-        let leases = registry.leases.grant(&LeaseRequest {
-            topology: &topology,
-            service: name,
-            ports: &declared.ports,
-            range: config.settings.port_range,
-            declared: &config.declared_ports(),
-        })?;
-        let health_port = health_port_name.map(|port_name| {
-            *leases
-                .get(port_name)
-                .expect("a Lease is granted for every Port name, the health one included")
-        });
+        let injected = environment::injected(registry, &topology, &config, name, declared, true)?;
         // After the environment of the caller, so that a `PORT` of its own never wins over the Lease.
         let mut env = env;
-        env.extend(ports::environment(&leases, health_port));
+        env.extend(injected.variables);
         Ok(ServiceSpec {
-            command: ports::render(&declared.run, &leases),
+            command: ports::render(&declared.run, &injected.leases),
             cwd: worktree.clone(),
             env,
             health: HealthCheck {
-                port: health_port,
+                port: injected.health_port,
                 http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
             },
-            lease_ports: leases.values().copied().collect(),
+            lease_ports: injected.leases.values().copied().collect(),
             health_timeout: config.health_timeout(declared),
             name: name.to_owned(),
             worktree: worktree.clone(),
@@ -291,6 +312,16 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
             idle: config.idle_timeout(declared),
         })
     })
+}
+
+/// The variables Procly injects into the Service `name` of the Worktree holding `cwd`.
+fn service_environment(registry: &Registry, name: &str, cwd: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    let topology = topology_of(cwd)?;
+    let config = read_config(&topology.worktree.path)?;
+    let declared = declared(&config, &topology.worktree.path, name)?;
+    let mut variables = environment::injected(registry, &topology, &config, name, declared, false)?.variables;
+    variables.sort();
+    Ok(variables)
 }
 
 /// Stops the Services, logging who asked, and returns their names once their trees are gone.
@@ -359,7 +390,13 @@ fn declared<'a>(config: &'a config::Config, worktree: &Path, name: &str) -> anyh
 
 /// Brings up the Services `name` needs, each one healthy before the next starts, then `name`, and answers with
 /// where to reach it. Stops at the first Service that does not become healthy.
-async fn up(registry: &Arc<Registry>, name: String, cwd: PathBuf, env: Vec<(String, String)>) -> Response {
+async fn up(
+    registry: &Arc<Registry>,
+    name: String,
+    cwd: PathBuf,
+    env: Vec<(String, String)>,
+    gitignore: bool,
+) -> Response {
     let planned = {
         let (cwd, name) = (cwd.clone(), name.clone());
         // Resolving the Topology runs git, and reading the configuration is blocking.
@@ -385,7 +422,7 @@ async fn up(registry: &Arc<Registry>, name: String, cwd: PathBuf, env: Vec<(Stri
     };
     let mut needs = Vec::new();
     for current in needed.iter().chain(std::iter::once(target)) {
-        let (service, outcome) = match start(registry, current, &cwd, &env).await {
+        let (service, outcome) = match start(registry, current, &cwd, &env, gitignore).await {
             Ok(started) => started,
             Err(response) => return *response,
         };
@@ -433,11 +470,12 @@ async fn start(
     name: &str,
     cwd: &Path,
     env: &[(String, String)],
+    gitignore: bool,
 ) -> Result<(Arc<Service>, StartOutcome), Box<Response>> {
     loop {
         let (registry, name, cwd, env) = (Arc::clone(registry), name.to_owned(), cwd.to_owned(), env.to_owned());
         // Resolving the Topology runs git, and reading the configuration and forking are blocking.
-        let started = tokio::task::spawn_blocking(move || start_service(&registry, &name, &cwd, env)).await;
+        let started = tokio::task::spawn_blocking(move || start_service(&registry, &name, &cwd, env, gitignore)).await;
         match started {
             Ok(Ok(Start::Ready { service, outcome })) => return Ok((service, outcome)),
             Ok(Ok(Start::Stopping(service))) => service.ended().await,
