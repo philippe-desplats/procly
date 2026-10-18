@@ -82,6 +82,7 @@ fn service_line(text: &mut String, service: &ServiceStatus) {
     let _ = writeln!(text, "    service {} {state}{reattached}", service.service);
 }
 
+/// A Foreign process of the Worktree, with the ports it holds.
 fn foreign_line(text: &mut String, foreign: &ForeignProcess) {
     let (what, ports) = match foreign {
         ForeignProcess::Process { pid, command, ports } => (format!("process {pid} {command}"), ports),
@@ -95,15 +96,24 @@ fn foreign_line(text: &mut String, foreign: &ForeignProcess) {
             ports,
         ),
     };
-    let ports = match ports.as_slice() {
-        [] => String::new(),
-        [port] => format!(" port {port}"),
-        ports => {
-            let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
-            format!(" ports {}", ports.join(", "))
-        }
+    let ports = if ports.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", ports_text(ports))
     };
     let _ = writeln!(text, "    foreign {what}{ports}, started outside Procly");
+}
+
+/// `port 5432`, `ports 5432, 5433` or `no port`.
+pub(crate) fn ports_text(ports: &[u16]) -> String {
+    match ports {
+        [] => "no port".to_owned(),
+        [port] => format!("port {port}"),
+        ports => {
+            let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+            format!("ports {}", ports.join(", "))
+        }
+    }
 }
 
 /// How a Service ended, after `ended: `.

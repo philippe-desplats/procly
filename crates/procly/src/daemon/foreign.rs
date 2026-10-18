@@ -22,7 +22,22 @@ const PS_FORMAT: &str = "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}\t
                          {{.State}}\t{{.Ports}}";
 /// The processes of the Docker engine that forward published ports, which Procly never tells anyone to kill: the
 /// container publishing the port is what to stop.
-const ENGINE_COMMANDS: [&str; 5] = ["com.docker", "vpnkit", "docker-proxy", "dockerd", "containerd"];
+/// Docker Desktop, the engine on Linux, `OrbStack`, Colima and Lima, and Podman, by the start of their command names.
+/// `ssh` is among them because Lima forwards ports through it.
+const ENGINE_COMMANDS: [&str; 12] = [
+    "com.docker",
+    "vpnkit",
+    "docker-proxy",
+    "dockerd",
+    "containerd",
+    "OrbStack",
+    "limactl",
+    "colima",
+    "ssh",
+    "gvproxy",
+    "podman",
+    "qemu",
+];
 
 /// A container as `docker ps` lists it, with its compose labels when compose created it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +59,7 @@ impl Container {
         !self.oneoff && self.project.as_deref() == Some(project) && self.service.as_deref() == Some(service)
     }
 
+    /// The container as the occupant of what a Service needs.
     pub(super) fn occupant(&self) -> Occupant {
         Occupant::Container {
             name: self.name.clone(),
@@ -67,7 +83,7 @@ pub(super) fn containers(args: &[&str], env: Option<&[(String, String)]>) -> Opt
     if let Some(env) = env {
         command.env_clear().envs(env.iter().map(|(name, value)| (name, value)));
     }
-    let output = command.output().ok()?;
+    let output = listeners::bounded_output(&mut command).ok()??;
     if !output.status.success() {
         return None;
     }
@@ -105,7 +121,12 @@ pub(super) fn occupant(port: u16, env: Option<&[(String, String)]>) -> Option<(O
             },
             Some(format!("kill {}", process.pid)),
         ),
-        None => (Occupant::Unknown, None),
+        None => (
+            Occupant::Unknown {
+                find: format!("lsof -nP -iTCP:{port} -sTCP:LISTEN"),
+            },
+            None,
+        ),
     })
 }
 
@@ -188,6 +209,7 @@ fn answers(port: u16) -> bool {
     .any(|address| TcpStream::connect_timeout(address, CONNECT_TIMEOUT).is_ok())
 }
 
+/// Whether the command name is one of the Docker engine, which forwards the ports containers publish.
 fn is_engine(command: &str) -> bool {
     ENGINE_COMMANDS.iter().any(|engine| command.starts_with(engine))
 }

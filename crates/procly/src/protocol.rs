@@ -157,7 +157,9 @@ pub(crate) enum Response {
 /// Something started outside Procly that holds what a Service needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Conflict {
+    /// What the Service needs and the occupant holds.
     pub(crate) held: Held,
+    /// What holds it.
     pub(crate) occupant: Occupant,
     /// The command that frees what the Service needs, which Procly never runs itself. `None` when the occupant
     /// cannot be named.
@@ -187,12 +189,11 @@ pub(crate) enum Occupant {
         project: Option<String>,
         service: Option<String>,
     },
-    Process {
-        pid: i32,
-        command: String,
-    },
-    /// Something answers on the port that neither Docker nor `lsof` can name, such as a process of another user.
-    Unknown,
+    /// A process outside any container, `command` being its name as `lsof` prints it.
+    Process { pid: i32, command: String },
+    /// Something answers on the port that neither Docker nor `lsof` can name, such as a process of another user,
+    /// with the command that finds it with more rights.
+    Unknown { find: String },
 }
 
 /// A dev process or container running in a Worktree that Procly did not start.

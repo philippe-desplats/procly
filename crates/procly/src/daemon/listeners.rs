@@ -2,13 +2,20 @@
 //! listening on TCP, to name what holds a port or runs in a Worktree.
 
 use std::collections::BTreeMap;
+use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use nix::unistd::Pid;
 
 /// Where `lsof` lives on macOS and on Linux, tried after the `PATH` of the Daemon, which may lack `/usr/sbin`.
 const LSOF: [&str; 3] = ["lsof", "/usr/sbin/lsof", "/usr/bin/lsof"];
+/// How long a lookup with `lsof` or `docker ps` may run, so that a stuck Docker engine or file system never holds up
+/// `up` or `status`.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often a running lookup is checked for its end.
+const LOOKUP_POLL: Duration = Duration::from_millis(10);
 
 /// The TCP ports the members of the process group `pgid` listen on, sorted, read with `lsof`. `None` when `lsof`
 /// cannot run, the caller then cannot tell.
@@ -59,15 +66,49 @@ pub(super) fn working_directories(pids: &[i32]) -> BTreeMap<i32, PathBuf> {
 
 /// Runs `lsof` with `args`. `None` when it cannot run or fails, `lsof` exiting with 1 when no file matches.
 fn lsof(args: &[&str]) -> Option<Output> {
-    let output = LSOF.iter().find_map(|lsof| {
-        Command::new(lsof)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-    })?;
-    (output.status.success() || output.status.code() == Some(1)).then_some(output)
+    for lsof in LSOF {
+        let mut command = Command::new(lsof);
+        command.args(args).stdin(Stdio::null()).stderr(Stdio::null());
+        match bounded_output(&mut command) {
+            // Not at this place, try the next one.
+            Err(_) => {}
+            Ok(output) => {
+                return output.filter(|output| output.status.success() || output.status.code() == Some(1));
+            }
+        }
+    }
+    None
+}
+
+/// Runs `command` and returns what it printed on stdout, `Ok(None)` when it ran past [`LOOKUP_TIMEOUT`] and was
+/// killed, and the error when it could not start. Its stderr is the caller's to redirect. Blocking.
+pub(super) fn bounded_output(command: &mut Command) -> io::Result<Option<Output>> {
+    let mut child = command.stdout(Stdio::piped()).spawn()?;
+    let mut stdout = child.stdout.take().expect("stdout is piped above");
+    // Read on the side, so that a command printing more than the pipe holds never blocks before it exits.
+    let reader = std::thread::spawn(move || {
+        let mut printed = Vec::new();
+        let _ = stdout.read_to_end(&mut printed);
+        printed
+    });
+    let deadline = Instant::now() + LOOKUP_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(LOOKUP_POLL),
+            _ => {
+                // Started here, so it is ours to kill.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(None);
+            }
+        }
+    };
+    Ok(reader.join().ok().map(|stdout| Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    }))
 }
 
 /// The processes of `lsof -F pgcn` output, one `p` field opening each, sorted by pid.

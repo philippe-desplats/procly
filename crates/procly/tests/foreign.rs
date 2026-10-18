@@ -8,13 +8,13 @@ use std::process::{Child, Command, Stdio};
 
 use common::{Procly, assert_success, eventually, free_port, git_repository, git_worktree_add, stdout, test_server};
 
-/// A dev server started outside Procly, as an agent bypassing it would, killed when the test ends.
-struct DevServer {
+/// A dev process started outside Procly, as an agent bypassing it would, killed when the test ends.
+struct StartedOutside {
     child: Child,
     port: u16,
 }
 
-impl DevServer {
+impl StartedOutside {
     fn start(dir: &Path) -> Self {
         let port = free_port();
         let child = Command::new(test_server())
@@ -34,7 +34,7 @@ impl DevServer {
     }
 }
 
-impl Drop for DevServer {
+impl Drop for StartedOutside {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -46,7 +46,7 @@ fn a_dev_server_started_outside_procly_in_the_worktree_is_a_foreign_process_in_s
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
     let other = git_worktree_add(&main, "app-feature");
-    let server = DevServer::start(&other);
+    let server = StartedOutside::start(&other);
 
     let output = procly.procly_in(&other, &["status"]);
 
@@ -76,7 +76,7 @@ fn a_dev_server_started_outside_procly_in_the_worktree_is_a_foreign_process_in_s
 fn the_json_status_carries_the_foreign_processes_of_the_worktree() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
-    let server = DevServer::start(&main);
+    let server = StartedOutside::start(&main);
 
     let output = procly.procly_in(&main, &["status", "--json"]);
 

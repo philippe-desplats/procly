@@ -412,7 +412,7 @@ fn conflict_line(conflict: &Conflict) -> String {
     let occupant = match &conflict.occupant {
         Occupant::Container { name, .. } => format!("container {name}"),
         Occupant::Process { pid, command } => format!("process {pid} {command}"),
-        Occupant::Unknown => "something Procly cannot name".to_owned(),
+        Occupant::Unknown { .. } => "something Procly cannot name".to_owned(),
     };
     let what = match &conflict.held {
         Held::Port { port } => format!("port {port} of its Lease is held by {occupant} started outside Procly"),
@@ -428,31 +428,19 @@ fn conflict_line(conflict: &Conflict) -> String {
             };
             format!(
                 "{service} already runs outside Procly in {occupant}, publishing {} instead of its {}",
-                ports_text("port", ports),
+                status::ports_text(ports),
                 match leased.as_slice() {
                     [port] => format!("Lease, port {port}"),
-                    leased => format!("Leases, {}", ports_text("port", leased)),
+                    leased => format!("Leases, {}", status::ports_text(leased)),
                 }
             )
         }
     };
-    match (&conflict.stop, &conflict.held) {
-        (Some(stop), Held::ContainerName { .. }) => format!("{what}, stop and remove it with `{stop}`"),
-        (Some(stop), _) => format!("{what}, stop it with `{stop}`"),
-        (None, Held::Port { port }) => format!("{what}, find it with `lsof -nP -iTCP:{port} -sTCP:LISTEN`"),
-        (None, _) => what,
-    }
-}
-
-/// `port 5432`, `ports 5432, 5433` or `no port`.
-fn ports_text(noun: &str, ports: &[u16]) -> String {
-    match ports {
-        [] => format!("no {noun}"),
-        [port] => format!("{noun} {port}"),
-        ports => {
-            let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
-            format!("{noun}s {}", ports.join(", "))
-        }
+    match (&conflict.stop, &conflict.held, &conflict.occupant) {
+        (Some(stop), Held::ContainerName { .. }, _) => format!("{what}, stop and remove it with `{stop}`"),
+        (Some(stop), ..) => format!("{what}, stop it with `{stop}`"),
+        (None, _, Occupant::Unknown { find }) => format!("{what}, find it with `{find}`"),
+        (None, ..) => what,
     }
 }
 
