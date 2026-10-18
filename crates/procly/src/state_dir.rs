@@ -81,6 +81,11 @@ impl StateDir {
     pub(crate) fn leases(&self) -> PathBuf {
         self.path.join("leases.json")
     }
+
+    /// The document recording every running Service, which the next Daemon reconciles after a crash.
+    pub(crate) fn services(&self) -> PathBuf {
+        self.path.join("services.json")
+    }
 }
 
 fn non_empty_env(name: &str) -> Option<PathBuf> {

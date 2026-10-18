@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 6;
+pub(crate) const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -148,6 +148,20 @@ pub(crate) enum ServiceEnd {
         leased: u16,
         actual: u16,
     },
+    /// A previous Daemon started the Service, and its process ended without the Daemon of now being able to wait
+    /// for it, so its exit code is unknown.
+    Lost,
+    /// The leader of the process group had ended when the Daemon restarted, and the rest of the group, which held
+    /// the leased `port` when it is set, was stopped.
+    Orphaned {
+        pgid: i32,
+        port: Option<u16>,
+    },
+    /// The process group still ran when the Daemon restarted, but no longer listened on its Lease `port`, so it was
+    /// stopped instead of being re-attached.
+    NotListening {
+        port: u16,
+    },
 }
 
 /// Whether a start request started new work or ended in Reuse.
@@ -184,7 +198,30 @@ pub(crate) struct RepositoryStatus {
 pub(crate) struct WorktreeStatus {
     #[serde(flatten)]
     pub(crate) worktree: Worktree,
+    pub(crate) services: Vec<ServiceStatus>,
     pub(crate) jobs: Vec<JobStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ServiceStatus {
+    pub(crate) service: String,
+    pub(crate) port: Option<u16>,
+    /// Whether a previous Daemon started the Service, and this one found it running when it started.
+    pub(crate) reattached: bool,
+    #[serde(flatten)]
+    pub(crate) state: ServiceState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum ServiceState {
+    Starting,
+    Healthy,
+    /// The process crashed and its restart is waiting out the delay.
+    Restarting,
+    Ended {
+        end: ServiceEnd,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,7 +322,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":6,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":7,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

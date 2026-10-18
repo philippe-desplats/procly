@@ -269,6 +269,24 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                     ),
                     EXIT_PORT_MISMATCH,
                 ),
+                ServiceEnd::Lost => (
+                    "ended before it became healthy, its exit code is unknown, a previous Daemon started it".to_owned(),
+                    EXIT_SERVICE_ENDED,
+                ),
+                ServiceEnd::Orphaned { pgid, .. } => (
+                    format!(
+                        "had lost its leader when the Daemon restarted, the rest of its process group {pgid} was \
+                         stopped"
+                    ),
+                    EXIT_SERVICE_ENDED,
+                ),
+                ServiceEnd::NotListening { port } => (
+                    format!(
+                        "no longer listened on its Lease, port {port}, when the Daemon restarted, its process \
+                         group was stopped"
+                    ),
+                    EXIT_SERVICE_ENDED,
+                ),
                 ServiceEnd::HealthTimeout { timeout_ms } => (
                     format!(
                         "did not become healthy within {}, its process tree was stopped",

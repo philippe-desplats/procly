@@ -308,3 +308,13 @@ impl Procly {
         wait_until_gone(pid);
     }
 }
+
+impl Procly {
+    /// Kills the Daemon with `SIGKILL`, as a crash would, and waits until it has exited. It cleans nothing up, so its
+    /// socket, its pid file and the processes it supervised are left behind for the next Daemon to find.
+    pub fn kill_daemon(&self) {
+        let pid = self.daemon_pid().expect("a Daemon runs");
+        kill(pid, Signal::SIGKILL).expect("kill the Daemon");
+        wait_until_gone(pid);
+    }
+}
