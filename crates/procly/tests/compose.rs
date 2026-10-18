@@ -349,6 +349,20 @@ fn every_worktree_sees_the_leases_of_the_main_worktree_for_a_compose_service() {
 }
 
 #[test]
+fn a_pinned_branch_does_not_move_the_leases_of_a_compose_service() {
+    let pinned = free_port();
+    // `app-feature` is the branch git creates for the second Worktree.
+    let fixture = fixture(&format!("[pinned.app-feature.ports]\ndb = {{ db = {pinned} }}\n"));
+    let port = fixture.port;
+
+    let output = fixture.procly.procly_in(&fixture.other, &["env", "db"]);
+
+    assert_success(&output);
+    let exports = stdout(&output);
+    assert!(exports.contains(&format!("PORT_DB='{port}'")), "{exports}");
+}
+
+#[test]
 fn up_without_docker_says_what_to_install() {
     let output = up_with_path("{bin}", |_| {});
 

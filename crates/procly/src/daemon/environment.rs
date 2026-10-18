@@ -12,13 +12,13 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use super::Registry;
-use super::lease::{LeaseError, LeaseRequest};
+use super::lease::{LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
-use crate::config::{self, Config, ConfigError, ServiceConfig, ServiceKind};
+use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts};
 use crate::envfile;
 use crate::ports::{self, PortsError};
-use crate::topology::{Topology, TopologyError};
+use crate::topology::{self, Topology, TopologyError};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum EnvironmentError {
@@ -89,9 +89,10 @@ pub(super) fn injected(
 ) -> Result<Injected, EnvironmentError> {
     let health_port_name = check(name, declared)?;
     let derived = Derived::from_config(&config.services)?;
+    let branch = pinned_branch(topology, config)?;
 
-    let mut table = grant_referenced(registry, topology, config, &derived)?;
-    let leases = grant(registry, topology, config, name, &declared.ports, !starting)?;
+    let mut table = grant_referenced(registry, topology, config, branch, &derived)?;
+    let leases = grant(registry, topology, config, branch, name, &declared.ports, !starting)?;
     table.insert(name.to_owned(), leases.clone());
     let health_port = health_port_name.map(|port_name| {
         *leases
@@ -127,7 +128,7 @@ pub(super) fn mirror(
         .lock()
         .expect("the mirroring mutex is never poisoned, no code panics while holding it");
     let derived = Derived::from_config(&config.services)?;
-    let table = grant_referenced(registry, topology, config, &derived)?;
+    let table = grant_referenced(registry, topology, config, pinned_branch(topology, config)?, &derived)?;
     let variables = derived.render_all(&facts(topology, &table))?;
     // Excluded first, so that the Env file is never visible to git, not even for a moment.
     exclude(registry, topology, gitignore)?;
@@ -142,11 +143,27 @@ fn facts<'a>(topology: &'a Topology, leases: &'a BTreeMap<String, BTreeMap<Strin
     }
 }
 
+/// The Pinned branch the Worktree is on, as the configuration names it, `None` when its branch is not pinned.
+///
+/// Only a Repository declaring Pinned branches needs to know the branch. The Main worktree keeps Leases of its own
+/// whatever its branch, its declared ports are already fixed, and a Lease of the branch would keep them from it once
+/// it checks out another one.
+fn pinned_branch<'a>(topology: &Topology, config: &'a Config) -> Result<Option<&'a str>, EnvironmentError> {
+    if config.pinned.is_empty() || topology.worktree.main {
+        return Ok(None);
+    }
+    let branch = topology::branch(&topology.worktree.path)?;
+    Ok(branch
+        .and_then(|branch| config.pinned.get_key_value(&branch))
+        .map(|(name, _)| name.as_str()))
+}
+
 /// The Leases of every Service a template reads one of, which are bound whether that Service runs or not.
 fn grant_referenced(
     registry: &Registry,
     topology: &Topology,
     config: &Config,
+    branch: Option<&str>,
     derived: &Derived,
 ) -> Result<BTreeMap<String, BTreeMap<String, u16>>, EnvironmentError> {
     let mut table = BTreeMap::new();
@@ -157,7 +174,7 @@ fn grant_referenced(
             .expect("Derived::from_config checked that every referenced Service is declared");
         table.insert(
             service.to_owned(),
-            grant(registry, topology, config, service, &declared.ports, true)?,
+            grant(registry, topology, config, branch, service, &declared.ports, true)?,
         );
     }
     Ok(table)
@@ -169,20 +186,27 @@ fn grant(
     registry: &Registry,
     topology: &Topology,
     config: &Config,
+    branch: Option<&str>,
     service: &str,
-    ports: &BTreeMap<String, u16>,
+    ports: &BTreeMap<String, PortConfig>,
     keep: bool,
 ) -> Result<BTreeMap<String, u16>, EnvironmentError> {
     let shared;
-    let topology = if config
+    let compose = config
         .services
         .get(service)
-        .is_some_and(|declared| declared.compose.is_some())
-    {
+        .is_some_and(|declared| declared.compose.is_some());
+    // The container of a Compose service is shared by every Worktree, so it holds the Leases of the Main worktree
+    // and never those of a Pinned branch.
+    let (topology, pinned) = if compose {
         shared = topology.main()?;
-        &shared
+        (&shared, None)
     } else {
-        topology
+        let pinned = branch.map(|name| PinnedBranch {
+            name,
+            ports: config.pinned.get(name).and_then(|pinned| pinned.ports.get(service)),
+        });
+        (topology, pinned)
     };
     Ok(registry.leases.grant(&LeaseRequest {
         topology,
@@ -190,6 +214,9 @@ fn grant(
         ports,
         range: config.settings.port_range,
         declared: &config.declared_ports(),
+        pinned,
+        expiry: config.settings.lease_expiry,
+        running: &registry.running(),
         keep,
     })?)
 }

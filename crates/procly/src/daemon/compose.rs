@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 
 use super::clock::Clock;
 use super::health::HealthCheck;
+use super::lease::Leases;
 use crate::protocol::{Released, ServiceEnd, StartOutcome};
 
 /// Where to install `docker compose` v2, named in the error of a machine that lacks it.
@@ -109,6 +110,8 @@ pub(crate) type ComposeKey = (PathBuf, String);
 #[derive(Debug)]
 pub(crate) struct Composes {
     clock: Clock,
+    /// Dated again when a container stops, so that its Leases do not expire the moment it does.
+    leases: Arc<Leases>,
     table: Mutex<HashMap<ComposeKey, Arc<Container>>>,
 }
 
@@ -148,9 +151,10 @@ struct Docker {
 }
 
 impl Composes {
-    pub(crate) fn new(clock: Clock) -> Self {
+    pub(crate) fn new(clock: Clock, leases: Arc<Leases>) -> Self {
         Self {
             clock,
+            leases,
             table: Mutex::default(),
         }
     }
@@ -244,6 +248,7 @@ impl Composes {
                 state.generation += 1;
                 tokio::spawn(stop_after(
                     self.clock.clone(),
+                    Arc::clone(&self.leases),
                     Arc::clone(&container),
                     grace,
                     state.generation,
@@ -259,11 +264,25 @@ impl Composes {
         released
     }
 
+    /// The Main worktree root and the name of every container Procly started and that runs, which hold the Leases of
+    /// the Main worktree.
+    pub(crate) fn running(&self) -> BTreeSet<(PathBuf, String)> {
+        self.table()
+            .values()
+            .filter_map(|container| {
+                let state = container.state();
+                let alive = state.alive.as_ref()?;
+                Some((alive.docker.project_dir.clone(), alive.docker.service.clone()))
+            })
+            .collect()
+    }
+
     /// Stops every container Procly started, without waiting for any Grace period, for a Daemon about to exit.
     pub(crate) async fn stop_all(&self) {
         let containers: Vec<_> = self.table().values().cloned().collect();
         let mut stopping = JoinSet::new();
         for container in containers {
+            let leases = Arc::clone(&self.leases);
             stopping.spawn(async move {
                 let _commands = container.commands.lock().await;
                 let alive = {
@@ -273,8 +292,9 @@ impl Composes {
                     state.alive.take()
                 };
                 let Some(alive) = alive else { return };
-                if let Err(error) = alive.docker.stop().await {
-                    eprintln!("cannot stop the container of service {}: {error}", alive.docker.service);
+                match alive.docker.stop().await {
+                    Ok(()) => touch(leases, &alive).await,
+                    Err(error) => eprintln!("cannot stop the container of service {}: {error}", alive.docker.service),
                 }
             });
         }
@@ -301,7 +321,7 @@ impl Container {
 }
 
 /// Stops the container after `grace`, unless a Worktree needed it again in the meantime.
-async fn stop_after(clock: Clock, container: Arc<Container>, grace: Duration, generation: u64) {
+async fn stop_after(clock: Clock, leases: Arc<Leases>, container: Arc<Container>, grace: Duration, generation: u64) {
     clock.sleep(grace).await;
     let _commands = container.commands.lock().await;
     let alive = {
@@ -315,6 +335,7 @@ async fn stop_after(clock: Clock, container: Arc<Container>, grace: Duration, ge
     match alive.docker.stop().await {
         Ok(()) => {
             container.state().alive = None;
+            touch(leases, &alive).await;
             eprintln!(
                 "stopped the container of service {}, no Worktree needs it",
                 alive.docker.service
@@ -322,6 +343,15 @@ async fn stop_after(clock: Clock, container: Arc<Container>, grace: Duration, ge
         }
         // Still counted as running, so that the next `up` finds it and the next release schedules another stop.
         Err(error) => eprintln!("cannot stop the container of service {}: {error}", alive.docker.service),
+    }
+}
+
+/// Dates the Leases of a container that just stopped as used now, so that they do not expire at once.
+async fn touch(leases: Arc<Leases>, alive: &Alive) {
+    let (worktree, service) = (alive.docker.project_dir.clone(), alive.docker.service.clone());
+    let touched = tokio::task::spawn_blocking(move || leases.touch(&worktree, &service)).await;
+    if let Ok(Err(error)) = touched {
+        eprintln!("cannot date the Leases of a container that stopped: {error:#}");
     }
 }
 

@@ -1,4 +1,4 @@
-//! The clock behind every delay that depends on the passing of time: restart backoff and idle stop.
+//! The clock behind every delay that depends on the passing of time: restart backoff, idle stop and Lease expiry.
 //!
 //! Tests cannot wait minutes, so the Daemon reads `PROCLY_TEST_CLOCK` once at startup. When it names a file, time
 //! stands still until the test writes the reading of the clock in it, as a number of milliseconds, and every wait
@@ -9,7 +9,7 @@
 //! time, and stay on real time.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::time::Instant;
 
@@ -59,6 +59,18 @@ impl Clock {
         }
     }
 
+    /// The time passed since the Unix epoch, which still compares with a reading taken before the Daemon restarted.
+    /// On the test clock, the reading of its file.
+    pub(crate) fn since_epoch(&self) -> Duration {
+        match &self.source {
+            // A system clock set before 1970 reads as the epoch itself.
+            Source::Real(_) => SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default(),
+            Source::File(path) => read(path),
+        }
+    }
+
     /// Waits until `duration` has passed on this clock.
     pub(crate) async fn sleep(&self, duration: Duration) {
         match &self.source {
@@ -93,6 +105,7 @@ mod tests {
         assert_eq!(clock.now(), Duration::ZERO);
         std::fs::write(&path, "1500\n").unwrap();
         assert_eq!(clock.now(), Duration::from_millis(1500));
+        assert_eq!(clock.since_epoch(), Duration::from_millis(1500));
         std::fs::write(&path, "soon").unwrap();
         assert_eq!(clock.now(), Duration::ZERO);
     }

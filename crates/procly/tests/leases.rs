@@ -2,7 +2,9 @@ mod common;
 
 use std::path::Path;
 
-use common::{Procly, assert_success, free_port, git_repository, stdout, test_server};
+use std::time::Duration;
+
+use common::{Procly, assert_success, free_port, git, git_repository, stdout, test_server};
 
 /// Writes `content` to `name` at the root of the Worktree `dir`.
 fn write(dir: &Path, name: &str, content: &str) {
@@ -151,7 +153,7 @@ fn an_unreadable_or_newer_lease_document_fails_up_with_125_naming_it() {
 
     for (content, why) in [
         ("{\"version\": 1, \"leases\": [", "cannot parse"),
-        ("{\"version\": 2, \"leases\": []}", "written by a newer procly"),
+        ("{\"version\": 3, \"leases\": []}", "written by a newer procly"),
     ] {
         std::fs::write(&document, content).unwrap();
 
@@ -252,4 +254,210 @@ fn a_foreign_process_answering_on_the_lease_is_no_health_when_the_service_listen
         common::stderr(&output)
     );
     drop(foreign);
+}
+
+/// A `procly.toml` declaring `web` like [`web_declaring`], with `pool` as the Pool of `http`, and `extra` after it.
+fn web_with_pool(port: u16, pool: &[u16], extra: &str) -> String {
+    let pool: Vec<String> = pool.iter().map(u16::to_string).collect();
+    format!(
+        "[services.web]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {{ port = {port}, pool = [{}] }} }}\n{extra}",
+        test_server().display(),
+        pool.join(", ")
+    )
+}
+
+/// Adds a Worktree next to the Main worktree on `branch`, created when `create`, and returns it canonicalized.
+fn worktree_on(main: &Path, name: &str, branch: &str, create: bool) -> std::path::PathBuf {
+    let path = main.parent().expect("the Main worktree has a parent").join(name);
+    let path_arg = path.to_string_lossy().into_owned();
+    if create {
+        git(main, &["worktree", "add", "--quiet", "-b", branch, &path_arg]);
+    } else {
+        git(main, &["worktree", "add", "--quiet", &path_arg, branch]);
+    }
+    path.canonicalize().expect("canonicalize the worktree")
+}
+
+#[test]
+fn a_secondary_worktree_gets_the_first_free_port_of_the_pool_before_the_range() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = common::git_worktree_add(&main, "app-other");
+    let (declared, taken, free) = (free_port(), free_port(), free_port());
+    let config = web_with_pool(declared, &[taken, free], "");
+    write(&main, "procly.toml", &config);
+    write(&other, "procly.toml", &config);
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", taken)).expect("hold the first port of the Pool");
+
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+    assert_eq!(port_of(&procly.procly_in(&other, &["up", "web"])), free);
+    assert_eq!(common::http_get(free, "/"), "ok\n");
+    drop(foreign);
+}
+
+#[test]
+fn once_the_pool_is_exhausted_a_worktree_gets_a_port_from_the_range() {
+    let procly = Procly::new();
+    let (start, end) = procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let (first, second) = (
+        common::git_worktree_add(&main, "app-first"),
+        common::git_worktree_add(&main, "app-second"),
+    );
+    let pooled = free_port();
+    let config = web_with_pool(free_port(), &[pooled], "");
+    write(&first, "procly.toml", &config);
+    write(&second, "procly.toml", &config);
+
+    assert_eq!(port_of(&procly.procly_in(&first, &["up", "web"])), pooled);
+    let in_second = port_of(&procly.procly_in(&second, &["up", "web"]));
+
+    assert!(
+        (start..=end).contains(&in_second),
+        "{in_second} is outside {start}-{end}"
+    );
+}
+
+#[test]
+fn a_worktree_of_a_pinned_branch_removed_and_recreated_elsewhere_gets_the_same_leases() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let config = format!("{}[pinned.develop]\n", web_declaring(free_port()));
+    let develop = worktree_on(&main, "app-develop", "develop", true);
+    write(&develop, "procly.toml", &config);
+    let leased = port_of(&procly.procly_in(&develop, &["up", "web"]));
+    assert_success(&procly.procly_in(&develop, &["down", "web"]));
+    git(&main, &["worktree", "remove", "--force", &develop.to_string_lossy()]);
+
+    // Another Worktree asks in between, it would get the port of a Lease that went with the removed Worktree.
+    let other = common::git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &config);
+    assert_ne!(port_of(&procly.procly_in(&other, &["up", "web"])), leased);
+    let recreated = worktree_on(&main, "app-develop-again", "develop", false);
+    write(&recreated, "procly.toml", &config);
+
+    assert_eq!(port_of(&procly.procly_in(&recreated, &["up", "web"])), leased);
+}
+
+#[test]
+fn the_explicit_ports_of_a_pinned_branch_are_honoured() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let explicit = free_port();
+    let config = format!(
+        "{}[pinned.staging.ports]\nweb = {{ http = {explicit} }}\n",
+        web_declaring(free_port())
+    );
+    let staging = worktree_on(&main, "app-staging", "staging", true);
+    let other = common::git_worktree_add(&main, "app-other");
+    write(&staging, "procly.toml", &config);
+    write(&other, "procly.toml", &config);
+
+    assert_ne!(port_of(&procly.procly_in(&other, &["up", "web"])), explicit);
+    assert_eq!(port_of(&procly.procly_in(&staging, &["up", "web"])), explicit);
+    assert_eq!(common::http_get(explicit, "/"), "ok\n");
+}
+
+#[test]
+fn an_inactive_lease_expires_after_30_days_and_a_pinned_branch_lease_never_does() {
+    let procly = Procly::with_clock();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let config = format!("{}[pinned.develop]\n", web_declaring(free_port()));
+    let worktree = |name: &str| {
+        let worktree = common::git_worktree_add(&main, name);
+        write(&worktree, "procly.toml", &config);
+        worktree
+    };
+    let up_down = |worktree: &Path| {
+        let port = port_of(&procly.procly_in(worktree, &["up", "web"]));
+        assert_success(&procly.procly_in(worktree, &["down", "web"]));
+        port
+    };
+    let abandoned = worktree("app-abandoned");
+    let develop = worktree_on(&main, "app-develop", "develop", true);
+    write(&develop, "procly.toml", &config);
+    let in_abandoned = up_down(&abandoned);
+    let in_develop = up_down(&develop);
+
+    procly.advance_clock(Duration::from_hours(29 * 24));
+    let recent = worktree("app-recent");
+    let in_recent = up_down(&recent);
+    assert!(
+        ![in_abandoned, in_develop].contains(&in_recent),
+        "{in_recent} was still leased"
+    );
+
+    // 30 days since the abandoned Worktree used its Lease, 1 day since the recent one did.
+    procly.advance_clock(Duration::from_hours(24));
+    assert_eq!(up_down(&worktree("app-new")), in_abandoned);
+    let later = up_down(&worktree("app-later"));
+    assert!(![in_develop, in_recent].contains(&later), "{later} was still leased");
+    assert_eq!(up_down(&develop), in_develop);
+}
+
+#[test]
+fn a_lease_document_of_version_1_is_read_and_its_ports_kept() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = common::git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    let leased = free_port();
+    let document = format!(
+        "{{\"version\": 1, \"leases\": [{{\"repository\": {:?}, \"worktree\": {:?}, \"service\": \"web\", \
+         \"port_name\": \"http\", \"port\": {leased}}}]}}\n",
+        main.join(".git").canonicalize().unwrap(),
+        other
+    );
+    std::fs::write(procly.state_dir().join("leases.json"), document).unwrap();
+
+    assert_eq!(port_of(&procly.procly_in(&other, &["up", "web"])), leased);
+}
+
+#[test]
+fn a_lease_counts_as_used_until_its_service_ends() {
+    let procly = Procly::with_clock();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    // Never stopped for being idle, the clock jumps by days while it runs.
+    let config = format!("{}idle = {{ stop = false }}\n", web_declaring(free_port()));
+    let worktree = |name: &str| {
+        let worktree = common::git_worktree_add(&main, name);
+        write(&worktree, "procly.toml", &config);
+        worktree
+    };
+    let long_running = worktree("app-long");
+    let leased = port_of(&procly.procly_in(&long_running, &["up", "web"]));
+
+    procly.advance_clock(Duration::from_hours(29 * 24));
+    assert_success(&procly.procly_in(&long_running, &["down", "web"]));
+    // 31 days since the Lease was granted, 2 days since its Service ended.
+    procly.advance_clock(Duration::from_hours(2 * 24));
+    let other = worktree("app-other");
+
+    assert_ne!(port_of(&procly.procly_in(&other, &["up", "web"])), leased);
+}
+
+#[test]
+fn the_main_worktree_on_a_pinned_branch_keeps_its_declared_port_on_any_branch() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let declared = free_port();
+    write(
+        &main,
+        "procly.toml",
+        &format!("{}[pinned.develop]\n", web_declaring(declared)),
+    );
+    git(&main, &["checkout", "--quiet", "-b", "develop"]);
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    git(&main, &["checkout", "--quiet", "-b", "feature"]);
+
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
 }

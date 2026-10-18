@@ -17,7 +17,7 @@ mod status;
 mod store;
 mod worktree_init;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, Permissions, TryLockError};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -49,12 +49,22 @@ struct Registry {
     jobs: Jobs,
     services: Services,
     composes: Composes,
-    leases: Leases,
+    leases: Arc<Leases>,
     managed: ManagedBlocks,
     /// Held while the generated files of a Worktree are written, so that 2 starts never write them at once.
     mirroring: Mutex<()>,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl Registry {
+    /// The Worktree root and the name of every running Service, a container included under the Main worktree whose
+    /// Leases it holds. Their Leases are in use and never expire.
+    fn running(&self) -> BTreeSet<(PathBuf, String)> {
+        let mut running = self.services.running();
+        running.extend(self.composes.running());
+        running
+    }
 }
 
 /// Runs the Daemon until it receives `SIGTERM` or `SIGINT`.
@@ -103,11 +113,13 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", state.pid().display()))?;
     eprintln!("procly daemon {} listening on {}", std::process::id(), socket.display());
 
+    let clock = Clock::from_env();
+    let leases = Arc::new(Leases::new(state.leases(), clock.clone()));
     let registry = Arc::new(Registry {
         jobs: Jobs::default(),
-        services: Services::new(Clock::from_env()),
-        composes: Composes::new(Clock::from_env()),
-        leases: Leases::new(state.leases()),
+        services: Services::new(clock.clone()),
+        composes: Composes::new(clock.clone(), Arc::clone(&leases)),
+        leases,
         managed: ManagedBlocks::new(state.managed_blocks()),
         mirroring: Mutex::default(),
         initializing: Mutex::default(),
@@ -288,7 +300,7 @@ enum Started {
 }
 
 fn start_service(
-    registry: &Registry,
+    registry: &Arc<Registry>,
     name: &str,
     cwd: &Path,
     env: Vec<(String, String)>,
@@ -310,7 +322,7 @@ fn start_service(
             });
         }
     }
-    let started = registry.services.start(&worktree, name, || {
+    let start = registry.services.start::<anyhow::Error>(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
         let config::ServiceKind::Process { run } = declared.kind(name)? else {
@@ -337,7 +349,22 @@ fn start_service(
             idle: config.idle_timeout(declared),
         })
     })?;
-    Ok(Started::Process(started))
+    if let Start::Ready {
+        service,
+        outcome: StartOutcome::Started,
+    } = &start
+    {
+        // Dated again once it ends, so that a Service which ran longer than the expiry keeps its Leases.
+        let (registry, service, name) = (Arc::clone(registry), Arc::clone(service), name.to_owned());
+        tokio::spawn(async move {
+            service.ended().await;
+            let touched = tokio::task::spawn_blocking(move || registry.leases.touch(&worktree, &name)).await;
+            if let Ok(Err(error)) = touched {
+                eprintln!("cannot date the Leases of a service that ended: {error:#}");
+            }
+        });
+    }
+    Ok(Started::Process(start))
 }
 
 /// Starts the container of the Compose service `name`, or finds it running for another Worktree, and waits until it
