@@ -86,6 +86,11 @@ impl StateDir {
         self.path.join("leases.json")
     }
 
+    /// The document holding the index of every Logical resource a Driver numbers.
+    pub(crate) fn indexes(&self) -> PathBuf {
+        self.path.join("indexes.json")
+    }
+
     /// The document recording every running Service, which the next Daemon reconciles after a crash.
     pub(crate) fn services(&self) -> PathBuf {
         self.path.join("services.json")
