@@ -101,3 +101,51 @@ fn leases_stay_the_same_across_restarts_of_the_service_and_of_the_daemon() {
     assert_eq!(port_of(&procly.procly_in(&second, &["up", "web"])), in_second);
     assert_eq!(port_of(&procly.procly_in(&first, &["up", "web"])), in_first);
 }
+
+#[test]
+fn concurrent_ups_from_several_worktrees_never_get_the_same_port() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let worktrees: Vec<_> = (0..4)
+        .map(|i| common::git_worktree_add(&main, &format!("app-{i}")))
+        .collect();
+    for worktree in &worktrees {
+        write(worktree, "procly.toml", &web_declaring(free_port()));
+    }
+
+    let ups: Vec<_> = worktrees
+        .iter()
+        .map(|worktree| {
+            procly
+                .command()
+                .current_dir(worktree)
+                .args(["up", "web"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("procly up starts")
+        })
+        .collect();
+    let mut ports: Vec<u16> = ups
+        .into_iter()
+        .map(|up| port_of(&up.wait_with_output().expect("procly up ends")))
+        .collect();
+
+    ports.sort_unstable();
+    ports.dedup();
+    assert_eq!(ports.len(), 4, "{ports:?}");
+}
+
+#[test]
+fn an_unreadable_lease_document_fails_up_with_125_naming_it() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    write(&main, "procly.toml", &web_declaring(free_port()));
+    std::fs::write(procly.state_dir().join("leases.json"), "{\"version\": 1, \"leases\": [").unwrap();
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(output.status.code(), Some(125));
+    assert!(common::stderr(&output).contains("leases.json"), "{}", common::stderr(&output));
+}
