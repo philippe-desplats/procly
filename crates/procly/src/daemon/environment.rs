@@ -12,6 +12,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use super::Registry;
+use super::health::{HealthCheck, HttpCheck};
 use super::lease::{LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
@@ -72,7 +73,7 @@ pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Optio
     let health_port_name = declared.health_port_name(name)?;
     // A Compose service has no command, so no placeholder either.
     let command = match declared.kind(name)? {
-        ServiceKind::Process { run } => run,
+        ServiceKind::Process { run } | ServiceKind::Group { run, .. } => run,
         ServiceKind::Compose { .. } => "",
     };
     ports::check(name, command, declared.ports.keys())?;
@@ -115,6 +116,91 @@ pub(super) fn injected(
         leases,
         health_port,
     })
+}
+
+/// What a Group receives on top of the environment of its caller.
+#[derive(Debug)]
+pub(super) struct InjectedGroup {
+    /// In the order they are set: the Leases of each covered Service, their Derived variables, then `PROCLY` and
+    /// `PROCLY_SERVICE`.
+    pub(super) variables: Vec<(String, String)>,
+    /// The port of every Lease of the covered Services.
+    pub(super) lease_ports: Vec<u16>,
+    /// The health check of each covered Service, which the Group passes once all of them do.
+    pub(super) checks: Vec<HealthCheck>,
+}
+
+/// The variables Procly injects into the Group `name`, granting the Leases of the Services it covers.
+///
+/// Each covered Service has `PORT` and `PORT_<NAME>` of its own, which would collide in one environment, so the
+/// Group gets `PORT_<SERVICE>_<NAME>` instead, such as `PORT_WEB_HTTP`. Their Derived variables are injected as they
+/// are, they are named apart already. `starting` is as for [`injected`].
+pub(super) fn injected_group(
+    registry: &Registry,
+    topology: &Topology,
+    config: &Config,
+    name: &str,
+    covers: &[String],
+    starting: bool,
+) -> Result<InjectedGroup, EnvironmentError> {
+    let derived = Derived::from_config(&config.services)?;
+    let branch = pinned_branch(topology, config)?;
+    let mut table = grant_referenced(registry, topology, config, branch, &derived)?;
+    let mut variables = Vec::new();
+    let mut lease_ports = Vec::new();
+    let mut checks = Vec::new();
+    for service in covers {
+        let declared = config
+            .services
+            .get(service)
+            .expect("the configuration was validated, so a covered Service is declared");
+        let health_port_name = check(service, declared)?;
+        let leases = grant(registry, topology, config, branch, service, &declared.ports, !starting)?;
+        for (port_name, port) in &leases {
+            variables.push((
+                format!("PORT_{}_{}", identifier(service), port_name.to_ascii_uppercase()),
+                port.to_string(),
+            ));
+            lease_ports.push(*port);
+        }
+        checks.push(HealthCheck {
+            port: health_port_name.and_then(|port_name| leases.get(port_name).copied()),
+            http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
+            covered: Vec::new(),
+        });
+        table.insert(service.clone(), leases);
+    }
+    let resources = referenced_resources(topology, config, &derived, &table)?;
+    let facts = facts(topology, &table, &resources);
+    for service in covers {
+        for variable in derived.render(service, &facts)? {
+            // Two covered Services may share a variable, they were checked to give it one template.
+            if !variables.contains(&variable) {
+                variables.push(variable);
+            }
+        }
+    }
+    variables.push(("PROCLY".to_owned(), "1".to_owned()));
+    variables.push(("PROCLY_SERVICE".to_owned(), name.to_owned()));
+    Ok(InjectedGroup {
+        variables,
+        lease_ports,
+        checks,
+    })
+}
+
+/// The name of a Service as part of a variable name: upper case, every other character an underscore.
+fn identifier(service: &str) -> String {
+    service
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Writes the Env file of the Worktree and makes git ignore it, and `procly.local.toml`, with a Managed block.
