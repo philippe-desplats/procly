@@ -10,6 +10,7 @@ mod protocol;
 mod state_dir;
 mod status;
 mod topology;
+mod unit;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -108,6 +109,12 @@ enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
+    /// Manage the Session unit, which starts the Daemon with your session: a launchd agent on macOS, a systemd user
+    /// unit on Linux. Without it, the first command of a session starts the Daemon on demand.
+    Unit {
+        #[command(subcommand)]
+        command: UnitCommand,
+    },
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
@@ -126,6 +133,19 @@ enum WorktreeCommand {
         /// The Worktree to prepare, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum UnitCommand {
+    /// Write the Session unit and have the session manager start the Daemon now and with every session, restarting
+    /// it if it crashes. Run it again after moving the procly executable or the state directory.
+    Install,
+    /// Print where the Session unit is, whether it is installed, whether it starts the Daemon with the session and
+    /// whether that Daemon runs now.
+    Inspect,
+    /// Stop the Daemon the Session unit started, with its Services, and remove the unit. The next command starts a
+    /// Daemon on demand again.
+    Remove,
 }
 
 fn main() -> ExitCode {
@@ -195,6 +215,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Worktree {
             command: WorktreeCommand::Init { path },
         } => worktree_init(&state, path),
+        Command::Unit { command } => unit(&state, &command),
         Command::Daemon => {
             daemon::run(&state)?;
             Ok(ExitCode::SUCCESS)
@@ -288,6 +309,11 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
                     ),
                     EXIT_PORT_MISMATCH,
                 ),
+                // Ends a Daemon finds when it restarts, which `up` never waits on, since it starts the Service again.
+                ServiceEnd::Lost | ServiceEnd::Orphaned { .. } | ServiceEnd::NotListening { .. } => (
+                    "ended when the Daemon restarted, before it became healthy".to_owned(),
+                    EXIT_SERVICE_ENDED,
+                ),
                 ServiceEnd::HealthTimeout { timeout_ms } => (
                     format!(
                         "did not become healthy within {}, its process tree was stopped",
@@ -353,6 +379,34 @@ fn down(state: &StateDir, service: Option<String>) -> anyhow::Result<ExitCode> {
         }
         other => unexpected(other),
     }
+}
+
+/// Runs `unit install`, `unit inspect` or `unit remove`, without asking the Daemon, which the unit starts.
+fn unit(state: &StateDir, command: &UnitCommand) -> anyhow::Result<ExitCode> {
+    let unit = unit::Unit::resolve(state)?;
+    let path = unit.path.display();
+    match command {
+        UnitCommand::Install => {
+            unit.install()?;
+            println!("installed {path}");
+        }
+        UnitCommand::Inspect => {
+            let inspection = unit.inspect()?;
+            let yes_no = |yes| if yes { "yes" } else { "no" };
+            println!("unit {path}");
+            println!("installed {}", yes_no(inspection.installed));
+            println!("starts with the session {}", yes_no(inspection.enabled));
+            println!("daemon running {}", yes_no(inspection.running));
+        }
+        UnitCommand::Remove => {
+            if unit.remove()? {
+                println!("removed {path}");
+            } else {
+                println!("not installed {path}");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// What `down` tells about a Compose service the Worktree let go of: whether its container keeps running for others,

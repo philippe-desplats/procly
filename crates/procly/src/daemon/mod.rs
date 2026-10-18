@@ -11,6 +11,8 @@ mod lease;
 mod listeners;
 mod managed;
 mod process_group;
+mod reconcile;
+mod record;
 mod requester;
 mod service;
 mod status;
@@ -36,6 +38,7 @@ use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
 use self::managed::ManagedBlocks;
+use self::record::ServiceRecords;
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
 use crate::ports;
@@ -55,6 +58,25 @@ struct Registry {
     mirroring: Mutex<()>,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    /// Set once the Services recorded by the previous Daemon are reconciled. Left unset when their document cannot
+    /// be read, so that the request after it is fixed or removed reconciles again.
+    reconciled: tokio::sync::OnceCell<()>,
+}
+
+impl Registry {
+    /// Waits until the Services recorded by the previous Daemon are reconciled, which the first request touching
+    /// Services runs if the Daemon has not finished it yet. A request that starts, stops or reports Services waits
+    /// for it, so that it never starts a Service still running from before the restart.
+    async fn reconciled(&self) -> Result<(), String> {
+        self.reconciled
+            .get_or_try_init(|| async {
+                reconcile::run(&self.services)
+                    .await
+                    .map_err(|error| format!("{:#}", anyhow::Error::from(error)))
+            })
+            .await
+            .map(|&()| ())
+    }
 }
 
 impl Registry {
@@ -117,12 +139,23 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     let leases = Arc::new(Leases::new(state.leases(), clock.clone()));
     let registry = Arc::new(Registry {
         jobs: Jobs::default(),
-        services: Services::new(clock.clone()),
+        services: Services::new(clock.clone(), ServiceRecords::new(state.services())),
         composes: Composes::new(clock.clone(), Arc::clone(&leases)),
         leases,
         managed: ManagedBlocks::new(state.managed_blocks()),
         mirroring: Mutex::default(),
         initializing: Mutex::default(),
+        reconciled: tokio::sync::OnceCell::new(),
+    });
+    // After the socket is bound, so that the command that started this Daemon is not left waiting to connect while
+    // orphans are stopped, and its request waits for the reconciliation instead.
+    tokio::spawn({
+        let registry = Arc::clone(&registry);
+        async move {
+            if let Err(message) = registry.reconciled().await {
+                eprintln!("cannot reconcile the services of the previous daemon: {message}");
+            }
+        }
     });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot handle SIGINT")?;
@@ -183,6 +216,13 @@ async fn handle(stream: UnixStream, registry: Arc<Registry>) {
 /// Answers one request. `peer` is the pid of the requesting command, when the kernel tells it.
 async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>) -> Response {
     let jobs = &registry.jobs;
+    if matches!(
+        request,
+        Request::Up { .. } | Request::Down { .. } | Request::Status { .. }
+    ) && let Err(message) = registry.reconciled().await
+    {
+        return Response::Error { message };
+    }
     match request {
         Request::Run {
             command,
@@ -246,7 +286,9 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
         },
         Request::Status { cwd, all } => {
             let registry = Arc::clone(registry);
-            match tokio::task::spawn_blocking(move || status::report(&registry.jobs, &cwd, all)).await {
+            match tokio::task::spawn_blocking(move || status::report(&registry.jobs, &registry.services, &cwd, all))
+                .await
+            {
                 Ok(Ok(report)) => Response::Status(report),
                 Ok(Err(error)) => Response::Error {
                     message: format!("{error:#}"),
@@ -345,6 +387,7 @@ fn start_service(
             health_timeout: config.health_timeout(declared),
             name: name.to_owned(),
             worktree: worktree.clone(),
+            topology: topology.clone(),
             restart: config.restart_policy(declared),
             idle: config.idle_timeout(declared),
         })

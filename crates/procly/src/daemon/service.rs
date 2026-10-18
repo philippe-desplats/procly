@@ -19,15 +19,19 @@ use super::cpu::group_cpu;
 use super::health::HealthCheck;
 use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
-use super::process_group::{DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group};
+use super::process_group::{self, DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group};
+use super::record::{ServiceRecord, ServiceRecords};
 use crate::config::RestartPolicy;
 use crate::output::{self, OutputBuffer};
-use crate::protocol::{ServiceEnd, StartOutcome};
+use crate::protocol::{self, ServiceEnd, ServiceStatus, StartOutcome};
+use crate::topology::Topology;
 
 /// How long the health check waits between 2 probes.
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
 /// How often the Daemon looks at a Service to tell whether it is idle.
 const IDLE_INTERVAL: Duration = Duration::from_secs(10);
+/// How often the Daemon looks whether the process of a re-attached Service, which is not its child, still runs.
+const LIVENESS_INTERVAL: Duration = Duration::from_millis(100);
 /// How long a restarted Service must stay healthy for the next crash to count as a first one again, instead of
 /// one more in a row.
 const STABLE_RUN: Duration = Duration::from_mins(1);
@@ -57,6 +61,8 @@ pub(crate) struct ServiceSpec {
     pub(crate) health_timeout: Duration,
     /// The root of the Worktree the Service runs in, named in the Daemon log.
     pub(crate) worktree: PathBuf,
+    /// The Repository and the Worktree the Service runs in, recorded for the status and for the next Daemon.
+    pub(crate) topology: Topology,
     pub(crate) restart: RestartPolicy,
     /// How long the Service may be idle before it is stopped, `None` to leave it running however long it is.
     pub(crate) idle: Option<Duration>,
@@ -71,6 +77,7 @@ type ServiceKey = (PathBuf, String);
 #[derive(Debug)]
 pub(crate) struct Services {
     clock: Clock,
+    records: Arc<ServiceRecords>,
     table: Mutex<HashMap<ServiceKey, Arc<Service>>>,
     /// Held from the lookup to the insert, so that 2 concurrent requests never both start the Service.
     starting: Mutex<()>,
@@ -79,6 +86,9 @@ pub(crate) struct Services {
 #[derive(Debug)]
 pub(crate) struct Service {
     port: Option<u16>,
+    topology: Topology,
+    /// Whether a previous Daemon started the Service, and this one found it running when it started.
+    reattached: bool,
     /// The output of every run of the Service, restarts included.
     output: Arc<Mutex<OutputBuffer>>,
     state: watch::Sender<ServiceState>,
@@ -108,9 +118,10 @@ enum ServiceState {
 }
 
 impl Services {
-    pub(crate) fn new(clock: Clock) -> Self {
+    pub(crate) fn new(clock: Clock, records: ServiceRecords) -> Self {
         Self {
             clock,
+            records: Arc::new(records),
             table: Mutex::default(),
             starting: Mutex::default(),
         }
@@ -142,7 +153,7 @@ impl Services {
                 }
             });
         }
-        let service = spawn(spec()?, self.clock.clone())?;
+        let service = spawn(spec()?, self.clock.clone(), Arc::clone(&self.records))?;
         self.table().insert(key, Arc::clone(&service));
         Ok(Start::Ready {
             service,
@@ -191,6 +202,78 @@ impl Services {
         for service in running {
             service.ended().await;
         }
+    }
+
+    /// The records of the running Services, which a new Daemon reconciles before it starts any.
+    pub(crate) fn records(&self) -> Arc<ServiceRecords> {
+        Arc::clone(&self.records)
+    }
+
+    /// Takes over the Service of `record`, which a previous Daemon started and which still runs and listens on its
+    /// Lease: it is healthy, and supervised through its process group, as it is no child of this Daemon. Its output
+    /// went to the previous Daemon and is lost. Must run inside the Tokio runtime.
+    pub(crate) fn reattach(&self, record: ServiceRecord) {
+        let service = Arc::new(Service {
+            port: record.port,
+            topology: record.topology(),
+            reattached: true,
+            output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
+            state: watch::Sender::new(ServiceState::Healthy),
+            stop: watch::Sender::new(None),
+        });
+        self.table().insert(
+            (record.worktree.path.clone(), record.service.clone()),
+            Arc::clone(&service),
+        );
+        tokio::spawn(supervise_reattached(
+            service,
+            record,
+            self.clock.clone(),
+            Arc::clone(&self.records),
+        ));
+    }
+
+    /// Reports the Service of `record`, which a previous Daemon started, as ended with `end`, so that the status
+    /// tells what became of it.
+    pub(crate) fn forget(&self, record: &ServiceRecord, end: ServiceEnd) {
+        let service = Arc::new(Service {
+            port: record.port,
+            topology: record.topology(),
+            reattached: false,
+            output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
+            state: watch::Sender::new(ServiceState::Ended(end)),
+            stop: watch::Sender::new(None),
+        });
+        self.table()
+            .insert((record.worktree.path.clone(), record.service.clone()), service);
+    }
+
+    /// Every Service with its Topology, sorted by Worktree and name.
+    pub(crate) fn statuses(&self) -> Vec<(Topology, ServiceStatus)> {
+        let mut statuses: Vec<_> = self
+            .table()
+            .iter()
+            .map(|((worktree, name), service)| {
+                let state = match *service.state.borrow() {
+                    ServiceState::Starting => protocol::ServiceState::Starting,
+                    ServiceState::Healthy => protocol::ServiceState::Healthy,
+                    ServiceState::Restarting => protocol::ServiceState::Restarting,
+                    ServiceState::Ended(end) => protocol::ServiceState::Ended { end },
+                };
+                let status = ServiceStatus {
+                    service: name.clone(),
+                    port: service.port,
+                    reattached: service.reattached,
+                    state,
+                };
+                ((worktree.clone(), name.clone()), service.topology.clone(), status)
+            })
+            .collect();
+        statuses.sort_by(|(a, ..), (b, ..)| a.cmp(b));
+        statuses
+            .into_iter()
+            .map(|(_, topology, status)| (topology, status))
+            .collect()
     }
 
     fn table(&self) -> std::sync::MutexGuard<'_, HashMap<ServiceKey, Arc<Service>>> {
@@ -263,17 +346,54 @@ struct Process {
     pumps: Vec<JoinHandle<()>>,
 }
 
-fn spawn(spec: ServiceSpec, clock: Clock) -> Result<Arc<Service>, ServiceError> {
+fn spawn(spec: ServiceSpec, clock: Clock, records: Arc<ServiceRecords>) -> Result<Arc<Service>, ServiceError> {
     let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
     let process = launch(&spec, &output)?;
+    // Recorded before anyone hears of the Service, so that a crash of the Daemon from now on leaves a trace of it.
+    record_run(&records, record_of(&spec), process.pgid);
     let service = Arc::new(Service {
         port: spec.health.port,
+        topology: spec.topology.clone(),
+        reattached: false,
         output,
         state: watch::Sender::new(ServiceState::Starting),
         stop: watch::Sender::new(None),
     });
-    tokio::spawn(supervise(Arc::clone(&service), spec, clock, process));
+    tokio::spawn(supervise(Arc::clone(&service), spec, clock, records, process));
     Ok(service)
+}
+
+/// The record of a Service, waiting for the process group of its current run.
+fn record_of(spec: &ServiceSpec) -> ServiceRecord {
+    ServiceRecord {
+        repository: spec.topology.git_common_dir.clone(),
+        worktree: spec.topology.worktree.clone(),
+        service: spec.name.clone(),
+        pgid: 0,
+        started: None,
+        port: spec.health.port,
+        lease_ports: spec.lease_ports.clone(),
+        idle_ms: spec
+            .idle
+            .map(|idle| u64::try_from(idle.as_millis()).unwrap_or(u64::MAX)),
+    }
+}
+
+/// Records the run of the process group `pgid` in `record`. Blocking: it reads when the leader started with `ps`
+/// and writes the document.
+fn record_run(records: &ServiceRecords, mut record: ServiceRecord, pgid: Pid) {
+    record.pgid = pgid.as_raw();
+    record.started = process_group::identity(pgid).map(|identity| identity.started);
+    records.put(record);
+}
+
+/// Ends the Service with `end`, once it is no longer recorded, so that a Daemon starting right after never finds a
+/// Service that ended.
+async fn finish(service: &Service, records: &Arc<ServiceRecords>, topology: &Topology, name: &str, end: ServiceEnd) {
+    let (records, worktree, name) = (Arc::clone(records), topology.worktree.path.clone(), name.to_owned());
+    // Writing the document syncs it to disk, which must not park a runtime worker.
+    let _ = tokio::task::spawn_blocking(move || records.remove(worktree, name)).await;
+    service.state.send_replace(ServiceState::Ended(end));
 }
 
 /// Starts the process of the Service, writing its output into `output`.
@@ -321,7 +441,13 @@ fn launch(spec: &ServiceSpec, output: &Arc<Mutex<OutputBuffer>>) -> Result<Proce
 /// A process that crashes after the Service was healthy once is restarted, after a delay that doubles with each
 /// crash in a row. One that dies before the Service was ever healthy is not: whoever asked for it is told at once
 /// that it cannot start.
-async fn supervise(service: Arc<Service>, spec: ServiceSpec, clock: Clock, first: Process) {
+async fn supervise(
+    service: Arc<Service>,
+    spec: ServiceSpec,
+    clock: Clock,
+    records: Arc<ServiceRecords>,
+    first: Process,
+) {
     let mut stop = service.stop.subscribe();
     let mut process = first;
     let mut ever_healthy = false;
@@ -364,7 +490,7 @@ async fn supervise(service: Arc<Service>, spec: ServiceSpec, clock: Clock, first
 
         let crashed = exited_by_itself && !service.is_stopping();
         if !(crashed && ever_healthy && spec.restart.attempts > 0) {
-            service.state.send_replace(ServiceState::Ended(ended));
+            finish(&service, &records, &spec.topology, &spec.name, ended).await;
             return;
         }
         if healthy && clock.now().saturating_sub(started) >= STABLE_RUN {
@@ -383,7 +509,7 @@ async fn supervise(service: Arc<Service>, spec: ServiceSpec, clock: Clock, first
                 let end = ServiceEnd::Failed {
                     restarts: spec.restart.attempts,
                 };
-                service.state.send_replace(ServiceState::Ended(end));
+                finish(&service, &records, &spec.topology, &spec.name, end).await;
                 return;
             }
             let delay = spec.restart.delay_before(restarts);
@@ -404,11 +530,15 @@ async fn supervise(service: Arc<Service>, spec: ServiceSpec, clock: Clock, first
                 let end = stop
                     .borrow()
                     .expect("the stop was requested, which is what ended the wait");
-                service.state.send_replace(ServiceState::Ended(end));
+                finish(&service, &records, &spec.topology, &spec.name, end).await;
                 return;
             }
             match launch(&spec, &service.output) {
-                Ok(process) => break process,
+                Ok(process) => {
+                    let (records, record, pgid) = (Arc::clone(&records), record_of(&spec), process.pgid);
+                    let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid)).await;
+                    break process;
+                }
                 Err(error) => {
                     let cause = std::error::Error::source(&error)
                         .map(ToString::to_string)
@@ -432,7 +562,10 @@ fn describe(end: ServiceEnd) -> String {
         | ServiceEnd::Stopped
         | ServiceEnd::Idle { .. }
         | ServiceEnd::PortMismatch { .. }
-        | ServiceEnd::Failed { .. } => {
+        | ServiceEnd::Failed { .. }
+        | ServiceEnd::Lost
+        | ServiceEnd::Orphaned { .. }
+        | ServiceEnd::NotListening { .. } => {
             unreachable!("only a process that exited by itself is described")
         }
     }
@@ -449,6 +582,58 @@ async fn stop_tree(child: &mut dyn ChildWrapper) {
         }
         let _ = child.wait().await;
     }
+}
+
+/// Watches the process group of a re-attached Service until it ends or is stopped. The Daemon cannot wait for a
+/// process it did not start, so it looks at the leader instead, and it cannot restart the Service either, as the
+/// environment it was started with is gone: the next `up` starts it again.
+async fn supervise_reattached(
+    service: Arc<Service>,
+    record: ServiceRecord,
+    clock: Clock,
+    records: Arc<ServiceRecords>,
+) {
+    let pgid = Pid::from_raw(record.pgid);
+    let label = format!("service {} of {}", record.service, record.worktree.path.display());
+    let idle = record.idle_ms.map(|idle_ms| {
+        let (service, label, clock) = (Arc::clone(&service), label.clone(), clock.clone());
+        tokio::spawn(
+            async move { stop_when_idle(&service, &label, pgid, Duration::from_millis(idle_ms), &clock).await },
+        )
+    });
+    let mut stop = service.stop.subscribe();
+    let stopped = loop {
+        tokio::select! {
+            _ = stop.wait_for(Option::is_some) => break true,
+            () = tokio::time::sleep(LIVENESS_INTERVAL) => if !process_group::is_alive(pgid) {
+                break false;
+            },
+        }
+    };
+    if let Some(idle) = idle {
+        idle.abort();
+    }
+    let end = if stopped {
+        process_group::stop_group(pgid).await;
+        stop.borrow()
+            .expect("the group is stopped only once a stop was requested")
+    } else {
+        // Members of the group still running once the leader has ended would keep holding the port.
+        let _ = tokio::task::spawn_blocking(move || kill_group(pgid)).await;
+        eprintln!("{label} ended, its exit code is unknown, a previous Daemon started it");
+        ServiceEnd::Lost
+    };
+    finish(&service, &records, &record.topology(), &record.service, end).await;
+}
+
+/// Whether the process group `pgid` accepts connections on its Lease `port` and is what listens there, rather than
+/// a Foreign process, so that a Service found running after a restart of the Daemon can be re-attached.
+pub(super) async fn listens_on_lease(pgid: Pid, port: u16, lease_ports: &[u16]) -> bool {
+    let check = HealthCheck {
+        port: Some(port),
+        http: None,
+    };
+    check.passes().await && ownership(pgid, Some(port), lease_ports).await == Ownership::Listening
 }
 
 /// What the task watching a run of the process needs to know about it.

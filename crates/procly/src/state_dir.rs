@@ -61,6 +61,10 @@ impl StateDir {
             })
     }
 
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     pub(crate) fn socket(&self) -> PathBuf {
         self.path.join("procly.sock")
     }
@@ -80,6 +84,11 @@ impl StateDir {
     /// The document holding every Lease.
     pub(crate) fn leases(&self) -> PathBuf {
         self.path.join("leases.json")
+    }
+
+    /// The document recording every running Service, which the next Daemon reconciles after a crash.
+    pub(crate) fn services(&self) -> PathBuf {
+        self.path.join("services.json")
     }
 
     /// The document holding the fingerprint of every Managed block Procly wrote.

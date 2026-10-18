@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::duration;
-use crate::protocol::{JobEnd, JobState, JobStatus, StatusReport};
+use crate::protocol::{JobEnd, JobState, JobStatus, ServiceEnd, ServiceState, ServiceStatus, StatusReport};
 
 /// The version of the `--json` schema, bumped on any incompatible change, independently of the socket protocol.
 pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
@@ -29,7 +29,7 @@ pub(crate) fn json(report: &StatusReport) -> String {
     json
 }
 
-/// One line per Repository, Worktree and Job, indented by nesting.
+/// One line per Repository, Worktree, Service and Job, indented by nesting.
 pub(crate) fn text(report: &StatusReport) -> String {
     let mut text = String::new();
     for repository in &report.repositories {
@@ -38,6 +38,9 @@ pub(crate) fn text(report: &StatusReport) -> String {
             let worktree = &status.worktree;
             let main = if worktree.main { " (main)" } else { "" };
             let _ = writeln!(text, "  worktree {}{main} {}", worktree.slug, worktree.path.display());
+            for service in &status.services {
+                service_line(&mut text, service);
+            }
             if status.jobs.is_empty() {
                 text.push_str("    no jobs\n");
             }
@@ -56,6 +59,54 @@ pub(crate) fn text(report: &StatusReport) -> String {
         text.push_str("no jobs\n");
     }
     text
+}
+
+fn service_line(text: &mut String, service: &ServiceStatus) {
+    let port = service.port.map(|port| format!(" port {port}")).unwrap_or_default();
+    let state = match service.state {
+        ServiceState::Starting => format!("starting{port}"),
+        ServiceState::Healthy => format!("healthy{port}"),
+        ServiceState::Restarting => format!("restarting{port}"),
+        ServiceState::Ended { end } => format!("ended: {}", ended(end)),
+    };
+    let reattached = if service.reattached {
+        ", re-attached after a restart of the Daemon"
+    } else {
+        ""
+    };
+    let _ = writeln!(text, "    service {} {state}{reattached}", service.service);
+}
+
+/// How a Service ended, after `ended: `.
+fn ended(end: ServiceEnd) -> String {
+    match end {
+        ServiceEnd::Exited { code } => format!("exited with code {code}"),
+        ServiceEnd::Signaled { signal } => format!("killed by signal {signal}"),
+        ServiceEnd::HealthTimeout { timeout_ms } => format!(
+            "not healthy within {}, its process tree was stopped",
+            duration::format(Duration::from_millis(timeout_ms))
+        ),
+        ServiceEnd::Stopped => "stopped by procly down".to_owned(),
+        ServiceEnd::Idle { timeout_ms } => format!(
+            "stopped after {} idle",
+            duration::format(Duration::from_millis(timeout_ms))
+        ),
+        ServiceEnd::Failed { restarts } => format!("kept crashing, given up after {restarts} restarts"),
+        ServiceEnd::PortMismatch { leased, actual } => {
+            format!("listened on port {actual} instead of its Lease, port {leased} (Port mismatch)")
+        }
+        ServiceEnd::Lost => "exit code unknown, a previous Daemon started it".to_owned(),
+        ServiceEnd::Orphaned { pgid, port: Some(port) } => format!(
+            "its leader ended while no Daemon ran, the rest of process group {pgid} held port {port} of its Lease \
+             and was stopped"
+        ),
+        ServiceEnd::Orphaned { pgid, port: None } => {
+            format!("its leader ended while no Daemon ran, the rest of process group {pgid} was stopped")
+        }
+        ServiceEnd::NotListening { port } => format!(
+            "no longer listened on its Lease, port {port}, when the Daemon restarted, its process group was stopped"
+        ),
+    }
 }
 
 /// The directory of a Job is left out when it is the root of its Worktree, and shown relative to it otherwise.
@@ -112,6 +163,7 @@ mod tests {
                             slug: "app".to_owned(),
                             main: true,
                         },
+                        services: vec![],
                         jobs: vec![
                             job("3f9a1c2e", "sleep 30", "/src/app", JobState::Running),
                             job(
@@ -130,6 +182,7 @@ mod tests {
                             slug: "app_login".to_owned(),
                             main: false,
                         },
+                        services: vec![],
                         jobs: vec![],
                     },
                 ],

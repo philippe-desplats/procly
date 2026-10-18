@@ -31,8 +31,8 @@ fn two_worktrees_of_one_repository_are_reported_under_it_with_the_main_worktree_
         json!([{
             "git_common_dir": main.join(".git"),
             "worktrees": [
-                {"path": main, "slug": "app", "main": true, "jobs": []},
-                {"path": feature, "slug": "app_feature_2", "main": false, "jobs": []},
+                {"path": main, "slug": "app", "main": true, "services": [], "jobs": []},
+                {"path": feature, "slug": "app_feature_2", "main": false, "services": [], "jobs": []},
             ],
         }])
     );
