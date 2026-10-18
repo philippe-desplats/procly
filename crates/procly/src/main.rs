@@ -3,6 +3,7 @@ mod config;
 mod daemon;
 mod duration;
 mod output;
+mod ports;
 mod protocol;
 mod state_dir;
 mod status;
@@ -26,6 +27,8 @@ const EXIT_TIMEOUT: u8 = 124;
 const OUTPUT_TAIL_LINES: usize = 20;
 /// The exit code of `up` for a Service that ended before it became healthy.
 const EXIT_SERVICE_ENDED: u8 = 3;
+/// The exit code of `up` for a Service whose process listened on another port than its Lease.
+const EXIT_PORT_MISMATCH: u8 = 4;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
@@ -35,8 +38,8 @@ const EXIT_PROCLY_FAILURE: u8 = 125;
     version,
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
-                  healthy, 124 when `wait` finds the Job timed out or `up` waited past the health timeout, 125 when \
-                  Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
+                  healthy, 4 when `up` finds a Port mismatch, 124 when `wait` finds the Job timed out or `up` \
+                  waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
                   docs/exit-codes.md."
 )]
@@ -60,9 +63,10 @@ enum Command {
     /// its name, `started` or `reused`, its URL and its port on one line.
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
-                            (it exited, was killed by a signal or was stopped by `procly down`), 124 when it did not \
-                            become healthy within its health timeout and its process tree was stopped, 125 when \
-                            Procly itself fails. See docs/exit-codes.md."
+                            (it exited, was killed by a signal or was stopped by `procly down`), 4 when it listened \
+                            on another port than its Lease (Port mismatch) and its process tree was stopped, 124 \
+                            when it did not become healthy within its health timeout and its process tree was \
+                            stopped, 125 when Procly itself fails. See docs/exit-codes.md."
     )]
     Up { service: String },
     /// Stop a Service of the current Worktree, or all of its Services without an argument, with their whole
@@ -232,6 +236,13 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                 ServiceEnd::Stopped => (
                     "was stopped by procly down before it became healthy".to_owned(),
                     EXIT_SERVICE_ENDED,
+                ),
+                ServiceEnd::PortMismatch { leased, actual } => (
+                    format!(
+                        "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
+                         tree was stopped"
+                    ),
+                    EXIT_PORT_MISMATCH,
                 ),
                 ServiceEnd::HealthTimeout { timeout_ms } => (
                     format!(

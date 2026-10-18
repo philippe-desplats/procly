@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::health::HealthCheck;
+use super::listeners::listening_ports;
 use super::process_group::{DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group};
 use crate::output::{self, OutputBuffer};
 use crate::protocol::{ServiceEnd, StartOutcome};
@@ -45,6 +46,8 @@ pub(crate) struct ServiceSpec {
     pub(crate) env: Vec<(String, String)>,
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
+    /// The port of every Lease of the Service, which may listen on all of them.
+    pub(crate) lease_ports: Vec<u16>,
 }
 
 /// A Service runs at most once per Worktree: it is keyed by the root of its Worktree and its name.
@@ -259,7 +262,12 @@ fn spawn(spec: ServiceSpec) -> Result<Arc<Service>, ServiceError> {
         stop: watch::Sender::new(None),
     });
     tokio::spawn(supervise(Arc::clone(&service), child, pumps));
-    tokio::spawn(check_health(Arc::clone(&service), spec.health, spec.health_timeout));
+    tokio::spawn(check_health(
+        Arc::clone(&service),
+        spec.health,
+        spec.lease_ports,
+        spec.health_timeout,
+    ));
     Ok(service)
 }
 
@@ -297,8 +305,9 @@ async fn stop_tree(child: &mut dyn ChildWrapper) {
     }
 }
 
-/// Marks the Service healthy once its health check passes, and stops it once `timeout` has passed without.
-async fn check_health(service: Arc<Service>, check: HealthCheck, timeout: Duration) {
+/// Marks the Service healthy once its health check passes and its process group listens on the Lease the check
+/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch.
+async fn check_health(service: Arc<Service>, check: HealthCheck, lease_ports: Vec<u16>, timeout: Duration) {
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -307,26 +316,79 @@ async fn check_health(service: Arc<Service>, check: HealthCheck, timeout: Durati
         }
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
-            // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
-            service.state.send_if_modified(|state| {
-                let healthy = *state == ServiceState::Starting && !service.is_stopping();
-                if healthy {
-                    *state = ServiceState::Healthy;
+            // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
+            match ownership(&service, check.port, &lease_ports).await {
+                Ownership::Listening => {
+                    // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
+                    service.state.send_if_modified(|state| {
+                        let healthy = *state == ServiceState::Starting && !service.is_stopping();
+                        if healthy {
+                            *state = ServiceState::Healthy;
+                        }
+                        healthy
+                    });
+                    return;
                 }
-                healthy
-            });
-            return;
+                Ownership::Elsewhere(mismatch) => {
+                    service.request_stop(mismatch);
+                    return;
+                }
+                Ownership::Pending => {}
+            }
         }
         if tokio::time::Instant::now() >= deadline {
-            service.request_stop(ServiceEnd::HealthTimeout {
-                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-            });
+            // Only now when nothing answers, a Service may open another port, such as a debugger, long before its Lease.
+            let end = match ownership(&service, check.port, &lease_ports).await {
+                Ownership::Elsewhere(mismatch) => mismatch,
+                Ownership::Listening | Ownership::Pending => ServiceEnd::HealthTimeout {
+                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                },
+            };
+            service.request_stop(end);
             return;
         }
         tokio::select! {
             () = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + HEALTH_INTERVAL)) => {}
             _ = state.changed() => {}
         }
+    }
+}
+
+/// Whether the process group of a Service listens on the Lease its health check probes.
+#[derive(Debug, PartialEq, Eq)]
+enum Ownership {
+    /// It listens on that Lease, or there is no Lease to probe, or its listeners cannot be read.
+    Listening,
+    /// It listens on another port than any of its Leases, and not on that one.
+    Elsewhere(ServiceEnd),
+    /// It listens on no port yet, or only on another of its Leases.
+    Pending,
+}
+
+async fn ownership(service: &Service, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {
+    let Some(leased) = leased else {
+        return Ownership::Listening;
+    };
+    let pgid = service.pid;
+    let listening = tokio::task::spawn_blocking(move || listening_ports(pgid))
+        .await
+        .ok()
+        .flatten();
+    // Without `lsof`, the answer on the Lease is all there is to go by.
+    listening.map_or(Ownership::Listening, |listening| {
+        ownership_of(leased, lease_ports, &listening)
+    })
+}
+
+/// Judges the ports a process group listens on against its Lease `leased`, a Port mismatch reporting the lowest
+/// port it listens on that is none of its Leases.
+fn ownership_of(leased: u16, lease_ports: &[u16], listening: &[u16]) -> Ownership {
+    if listening.contains(&leased) {
+        return Ownership::Listening;
+    }
+    match listening.iter().copied().find(|port| !lease_ports.contains(port)) {
+        Some(actual) => Ownership::Elsewhere(ServiceEnd::PortMismatch { leased, actual }),
+        None => Ownership::Pending,
     }
 }
 
@@ -350,5 +412,28 @@ async fn pump(mut reader: impl AsyncRead + Unpin, output: Arc<Mutex<OutputBuffer
     // An error reading a pipe means the Service closed it, which is the end of its output.
     while let Ok(read @ 1..) = reader.read(&mut chunk).await {
         output::lock(&output).push(&chunk[..read]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listening_on_the_lease_is_owning_it_whatever_else_is_open() {
+        assert_eq!(ownership_of(24000, &[24000], &[9229, 24000]), Ownership::Listening);
+    }
+
+    #[test]
+    fn listening_elsewhere_than_any_lease_is_a_port_mismatch_on_the_lowest_such_port() {
+        let mismatch = |actual| Ownership::Elsewhere(ServiceEnd::PortMismatch { leased: 24000, actual });
+        assert_eq!(ownership_of(24000, &[24000, 24001], &[5173, 9229]), mismatch(5173));
+        assert_eq!(ownership_of(24000, &[24000, 24001], &[24001, 5173]), mismatch(5173));
+    }
+
+    #[test]
+    fn listening_on_nothing_or_only_on_another_lease_is_pending() {
+        assert_eq!(ownership_of(24000, &[24000], &[]), Ownership::Pending);
+        assert_eq!(ownership_of(24000, &[24000, 24001], &[24001]), Ownership::Pending);
     }
 }

@@ -2,10 +2,13 @@
 
 mod health;
 mod job;
+mod lease;
+mod listeners;
 mod process_group;
 mod requester;
 mod service;
 mod status;
+mod store;
 mod worktree_init;
 
 use std::collections::HashMap;
@@ -23,17 +26,20 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
+use self::lease::{LeaseRequest, Leases};
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
+use crate::ports;
 use crate::protocol::{self, Request, Response, StartOutcome};
 use crate::state_dir::StateDir;
 use crate::topology;
 
-/// Every Job and Service the Daemon owns.
-#[derive(Debug, Default)]
+/// Every Job, Service and Lease the Daemon owns.
+#[derive(Debug)]
 struct Registry {
     jobs: Jobs,
     services: Services,
+    leases: Leases,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -84,7 +90,12 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         .with_context(|| format!("cannot write {}", state.pid().display()))?;
     eprintln!("procly daemon {} listening on {}", std::process::id(), socket.display());
 
-    let registry = Arc::new(Registry::default());
+    let registry = Arc::new(Registry {
+        jobs: Jobs::default(),
+        services: Services::default(),
+        leases: Leases::new(state.leases()),
+        initializing: Mutex::default(),
+    });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot handle SIGINT")?;
     loop {
@@ -186,8 +197,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
         } => loop {
             let (registry, start_name, cwd, env) = (Arc::clone(registry), name.clone(), cwd.clone(), env.clone());
             // Resolving the Topology runs git, and reading the configuration and forking are blocking.
-            let started =
-                tokio::task::spawn_blocking(move || start_service(&registry.services, &start_name, &cwd, env)).await;
+            let started = tokio::task::spawn_blocking(move || start_service(&registry, &start_name, &cwd, env)).await;
             match started {
                 Ok(Ok(Start::Ready { service, outcome })) => break up(name, &service, outcome).await,
                 // Its tree still holds the port, a new one could not bind it.
@@ -255,19 +265,40 @@ fn start_job(
     Ok(jobs.start(&spec)?)
 }
 
-fn start_service(services: &Services, name: &str, cwd: &Path, env: Vec<(String, String)>) -> anyhow::Result<Start> {
-    let worktree = worktree_of(cwd)?;
-    services.start(&worktree, name, || {
+fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, String)>) -> anyhow::Result<Start> {
+    let topology = topology_of(cwd)?;
+    let worktree = topology.worktree.path.clone();
+    registry.services.start(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
+        // Checked before any Lease is granted, so that a request bound to fail stores none.
+        let health_port_name = declared.health_port_name(name)?;
+        ports::check(name, &declared.run, declared.ports.keys())?;
+        // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
+        let leases = registry.leases.grant(&LeaseRequest {
+            topology: &topology,
+            service: name,
+            ports: &declared.ports,
+            range: config.settings.port_range,
+            declared: &config.declared_ports(),
+        })?;
+        let health_port = health_port_name.map(|port_name| {
+            *leases
+                .get(port_name)
+                .expect("a Lease is granted for every Port name, the health one included")
+        });
+        // After the environment of the caller, so that a `PORT` of its own never wins over the Lease.
+        let mut env = env;
+        env.extend(ports::environment(&leases, health_port));
         Ok(ServiceSpec {
-            command: declared.run.clone(),
+            command: ports::render(&declared.run, &leases),
             cwd: worktree.clone(),
             env,
             health: HealthCheck {
-                port: declared.health_port(name)?,
+                port: health_port,
                 http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
             },
+            lease_ports: leases.values().copied().collect(),
             health_timeout: config.health_timeout(declared),
             name: name.to_owned(),
         })
@@ -310,9 +341,14 @@ async fn down(
 
 /// The root of the Worktree holding `cwd`, where its Services are declared.
 fn worktree_of(cwd: &Path) -> anyhow::Result<PathBuf> {
+    Ok(topology_of(cwd)?.worktree.path)
+}
+
+/// The Repository and the Worktree holding `cwd`, which must be in a git Repository.
+fn topology_of(cwd: &Path) -> anyhow::Result<topology::Topology> {
     let cwd = topology::canonicalize(cwd)?;
     match topology::resolve(&cwd)? {
-        Some(topology) => Ok(topology.worktree.path),
+        Some(topology) => Ok(topology),
         None => anyhow::bail!(
             "{} is not in a git repository, and Services are declared per Repository",
             cwd.display()
