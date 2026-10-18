@@ -34,6 +34,10 @@ pub(crate) enum ConfigError {
     AmbiguousHealthPort { service: String, names: Vec<String> },
     #[error("health.port of service {service} is {name}, which is not one of its Port names")]
     UnknownHealthPort { service: String, name: String },
+    #[error("service {service} needs {need}, which is not declared")]
+    UnknownNeed { service: String, need: String },
+    #[error("services need each other in a loop: {}", .cycle.join(" -> "))]
+    NeedsCycle { cycle: Vec<String> },
     #[error("the user settings {path} holds only [settings], move [{key}] to a procly.toml")]
     UserSettingsScope { path: PathBuf, key: String },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
@@ -81,6 +85,9 @@ pub(crate) struct ServiceConfig {
     pub(crate) ports: BTreeMap<String, u16>,
     #[serde(default)]
     pub(crate) health: HealthConfig,
+    /// The Services started first, and healthy, before this one.
+    #[serde(default)]
+    pub(crate) needs: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -132,6 +139,41 @@ impl HealthConfig {
 }
 
 impl Config {
+    /// The Services to bring up for `service`, each one after everything it needs and `service` last. A Service
+    /// needed through several paths appears once.
+    pub(crate) fn start_order(&self, service: &str) -> Result<Vec<String>, ConfigError> {
+        let mut order = Vec::new();
+        self.visit(service, &mut Vec::new(), &mut order)?;
+        Ok(order)
+    }
+
+    /// Depth-first walk of the needs of `name`, `path` being the Services being visited above it.
+    fn visit(&self, name: &str, path: &mut Vec<String>, order: &mut Vec<String>) -> Result<(), ConfigError> {
+        if let Some(start) = path.iter().position(|visiting| visiting == name) {
+            let mut cycle = path[start..].to_vec();
+            cycle.push(name.to_owned());
+            return Err(ConfigError::NeedsCycle { cycle });
+        }
+        if order.iter().any(|done| done == name) {
+            return Ok(());
+        }
+        let Some(declared) = self.services.get(name) else {
+            // The caller checks the requested Service, so only a need can be missing here.
+            let service = path.last().cloned().unwrap_or_default();
+            return Err(ConfigError::UnknownNeed {
+                service,
+                need: name.to_owned(),
+            });
+        };
+        path.push(name.to_owned());
+        for need in &declared.needs {
+            self.visit(need, path, order)?;
+        }
+        path.pop();
+        order.push(name.to_owned());
+        Ok(())
+    }
+
     /// How long `up` waits for `service` to become healthy.
     pub(crate) fn health_timeout(&self, service: &ServiceConfig) -> Duration {
         service.health.timeout.unwrap_or(self.settings.health_timeout)
@@ -269,6 +311,49 @@ mod tests {
         assert!(matches!(
             unknown.health_port("web"),
             Err(ConfigError::UnknownHealthPort { name, .. }) if name == "api"
+        ));
+    }
+
+    fn config(text: &str) -> Config {
+        Value::Table(table(text)).try_into().unwrap()
+    }
+
+    #[test]
+    fn the_needs_of_a_service_start_before_it_and_once_each() {
+        let config = config(
+            "[services.web]\nrun = 'x'\nneeds = ['api', 'cache']\n\
+             [services.api]\nrun = 'x'\nneeds = ['db', 'cache']\n\
+             [services.cache]\nrun = 'x'\n\
+             [services.db]\nrun = 'x'\n",
+        );
+        assert_eq!(config.start_order("web").unwrap(), ["db", "cache", "api", "web"]);
+        assert_eq!(config.start_order("cache").unwrap(), ["cache"]);
+    }
+
+    #[test]
+    fn a_need_that_is_not_declared_is_an_error_naming_both_services() {
+        let config = config("[services.web]\nrun = 'x'\nneeds = ['db']\n");
+        assert!(matches!(
+            config.start_order("web"),
+            Err(ConfigError::UnknownNeed { service, need }) if service == "web" && need == "db"
+        ));
+    }
+
+    #[test]
+    fn needs_that_loop_back_are_an_error_listing_the_cycle() {
+        let config = config(
+            "[services.web]\nrun = 'x'\nneeds = ['api']\n\
+             [services.api]\nrun = 'x'\nneeds = ['db']\n\
+             [services.db]\nrun = 'x'\nneeds = ['api']\n",
+        );
+        assert!(matches!(
+            config.start_order("web"),
+            Err(ConfigError::NeedsCycle { cycle }) if cycle == ["api", "db", "api"]
+        ));
+        let itself = self::config("[services.web]\nrun = 'x'\nneeds = ['web']\n");
+        assert!(matches!(
+            itself.start_order("web"),
+            Err(ConfigError::NeedsCycle { cycle }) if cycle == ["web", "web"]
         ));
     }
 

@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
-use crate::protocol::{JobEnd, Request, Response, ServiceEnd};
+use crate::protocol::{JobEnd, Request, Response, ServiceEnd, StartOutcome};
 use crate::state_dir::StateDir;
 
 /// The exit code of `wait` for a Job killed on timeout, and of `up` for a Service never healthy, the one
@@ -185,16 +185,29 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
             outcome,
             port,
             url,
+            needs,
         } => {
-            match (url, port) {
-                (Some(url), Some(port)) => println!("{service} {} {url} port {port}", outcome.as_str()),
-                _ => println!("{service} {}", outcome.as_str()),
+            // Stdout is the requested Service alone, what it needed is told on stderr.
+            for need in needs {
+                eprintln!(
+                    "{} (needed by {service})",
+                    reached(&need.service, need.outcome, need.url, need.port)
+                );
             }
+            println!("{}", reached(&service, outcome, url, port));
             Ok(ExitCode::SUCCESS)
         }
         Response::Unhealthy {
-            service, end, output, ..
+            service,
+            end,
+            output,
+            needed_by,
+            ..
         } => {
+            let service = match needed_by {
+                Some(needed_by) => format!("{service}, needed by {needed_by},"),
+                None => service,
+            };
             let (why, code) = match end {
                 ServiceEnd::Exited { code } => (
                     format!("exited with code {code} before it became healthy"),
@@ -225,6 +238,14 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(code))
         }
         other => unexpected(other),
+    }
+}
+
+/// Where to reach a Service that is up: its name, `started` or `reused`, its URL and its port.
+fn reached(service: &str, outcome: StartOutcome, url: Option<String>, port: Option<u16>) -> String {
+    match (url, port) {
+        (Some(url), Some(port)) => format!("{service} {} {url} port {port}", outcome.as_str()),
+        _ => format!("{service} {}", outcome.as_str()),
     }
 }
 

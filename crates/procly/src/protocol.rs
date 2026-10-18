@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 3;
+pub(crate) const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -70,6 +70,8 @@ pub(crate) enum Response {
         outcome: StartOutcome,
         port: Option<u16>,
         url: Option<String>,
+        /// The Services it needs, in the order `up` brought them up.
+        needs: Vec<UpService>,
     },
     /// The Service ended before it became healthy.
     Unhealthy {
@@ -78,6 +80,8 @@ pub(crate) enum Response {
         end: ServiceEnd,
         /// The recent output of the Service, to tell why.
         output: String,
+        /// The Service that needs this one, when `up` was asked for that one instead.
+        needed_by: Option<String>,
     },
     /// The Services `down` stopped, by name.
     Down {
@@ -86,6 +90,15 @@ pub(crate) enum Response {
     Error {
         message: String,
     },
+}
+
+/// A healthy Service `up` brought up or found running.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct UpService {
+    pub(crate) service: String,
+    pub(crate) outcome: StartOutcome,
+    pub(crate) port: Option<u16>,
+    pub(crate) url: Option<String>,
 }
 
 /// Why a Service ended.
@@ -230,7 +243,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":3,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":4,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 
