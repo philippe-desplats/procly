@@ -6,20 +6,39 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::io;
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
-
-use anyhow::Context as _;
+use std::path::{Path, PathBuf};
 
 use super::Registry;
-use super::lease::LeaseRequest;
-use super::managed::{ManagedBlocks, Outcome};
-use crate::config::{self, Config, ServiceConfig};
-use crate::derived::{Derived, Facts};
+use super::lease::{LeaseError, LeaseRequest};
+use super::managed::{ManagedBlocks, ManagedError, Outcome};
+use crate::config::{self, Config, ConfigError, ServiceConfig};
+use crate::derived::{Derived, DerivedError, Facts};
 use crate::envfile;
-use crate::ports;
+use crate::ports::{self, PortsError};
 use crate::topology::Topology;
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum EnvironmentError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Ports(#[from] PortsError),
+    #[error(transparent)]
+    Derived(#[from] DerivedError),
+    #[error(transparent)]
+    Lease(#[from] LeaseError),
+    #[error(transparent)]
+    Managed(#[from] ManagedError),
+    #[error("cannot write {path}")]
+    WriteEnvFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
 
 /// The file in the root of a Worktree mirroring the Derived variables, for tools Procly does not launch.
 const ENV_FILE: &str = ".env.procly";
@@ -43,25 +62,29 @@ pub(super) struct Injected {
 
 /// Checks the ports of the Service `name` against its health check and its command, and returns the Port name its
 /// health check probes. Run before any Lease is granted, so that a request bound to fail stores none.
-pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> anyhow::Result<Option<&'a str>> {
+pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Option<&'a str>, EnvironmentError> {
     let health_port_name = declared.health_port_name(name)?;
     ports::check(name, &declared.run, declared.ports.keys())?;
     Ok(health_port_name)
 }
 
 /// The variables Procly injects into the Service `name`, granting the Leases it and its templates need.
+///
+/// `starting` tells whether the Service is about to start, which lets the Main worktree take its declared port back.
+/// Otherwise a Lease already granted stays as it is, the Service may run on it.
 pub(super) fn injected(
     registry: &Registry,
     topology: &Topology,
     config: &Config,
     name: &str,
     declared: &ServiceConfig,
-) -> anyhow::Result<Injected> {
+    starting: bool,
+) -> Result<Injected, EnvironmentError> {
     let health_port_name = check(name, declared)?;
     let derived = Derived::from_config(&config.services)?;
 
     let mut table = grant_referenced(registry, topology, config, &derived)?;
-    let leases = grant(registry, topology, config, name, &declared.ports)?;
+    let leases = grant(registry, topology, config, name, &declared.ports, !starting)?;
     table.insert(name.to_owned(), leases.clone());
     let health_port = health_port_name.map(|port_name| {
         *leases
@@ -85,17 +108,23 @@ pub(super) fn injected(
 ///
 /// The Env file holds the Derived variables of every Service. A Service-specific variable such as `PORT` has no
 /// single value for the Worktree, and `PROCLY` would tell a tool that Procly did not launch that it is supervised.
-pub(super) fn mirror(registry: &Registry, topology: &Topology, config: &Config, gitignore: bool) -> anyhow::Result<()> {
-    let derived = Derived::from_config(&config.services)?;
-    let table = grant_referenced(registry, topology, config, &derived)?;
-    let variables = derived.render_all(&facts(topology, &table))?;
-    // One writer at a time, they share the temporary file of the Env file and the exclusion file of the Repository.
+pub(super) fn mirror(
+    registry: &Registry,
+    topology: &Topology,
+    config: &Config,
+    gitignore: bool,
+) -> Result<(), EnvironmentError> {
+    // One writer at a time, from the rendering to the writing, so that the last one to write also rendered last.
     let _mirroring = registry
         .mirroring
         .lock()
         .expect("the mirroring mutex is never poisoned, no code panics while holding it");
-    write_env_file(&topology.worktree.path, &envfile::dotenv(&variables))?;
-    exclude(registry, topology, gitignore)
+    let derived = Derived::from_config(&config.services)?;
+    let table = grant_referenced(registry, topology, config, &derived)?;
+    let variables = derived.render_all(&facts(topology, &table))?;
+    // Excluded first, so that the Env file is never visible to git, not even for a moment.
+    exclude(registry, topology, gitignore)?;
+    write_env_file(&topology.worktree.path, &envfile::env_file(&variables))
 }
 
 fn facts<'a>(topology: &'a Topology, leases: &'a BTreeMap<String, BTreeMap<String, u16>>) -> Facts<'a> {
@@ -112,7 +141,7 @@ fn grant_referenced(
     topology: &Topology,
     config: &Config,
     derived: &Derived,
-) -> anyhow::Result<BTreeMap<String, BTreeMap<String, u16>>> {
+) -> Result<BTreeMap<String, BTreeMap<String, u16>>, EnvironmentError> {
     let mut table = BTreeMap::new();
     for service in derived.referenced() {
         let declared = config
@@ -121,7 +150,7 @@ fn grant_referenced(
             .expect("Derived::from_config checked that every referenced Service is declared");
         table.insert(
             service.to_owned(),
-            grant(registry, topology, config, service, &declared.ports)?,
+            grant(registry, topology, config, service, &declared.ports, true)?,
         );
     }
     Ok(table)
@@ -133,19 +162,21 @@ fn grant(
     config: &Config,
     service: &str,
     ports: &BTreeMap<String, u16>,
-) -> anyhow::Result<BTreeMap<String, u16>> {
+    keep: bool,
+) -> Result<BTreeMap<String, u16>, EnvironmentError> {
     Ok(registry.leases.grant(&LeaseRequest {
         topology,
         service,
         ports,
         range: config.settings.port_range,
         declared: &config.declared_ports(),
+        keep,
     })?)
 }
 
 /// Replaces the Env file in one step, readable by the user only since a Derived variable may carry a credential,
 /// and leaves it alone when it already holds `text`.
-fn write_env_file(worktree: &Path, text: &str) -> anyhow::Result<()> {
+fn write_env_file(worktree: &Path, text: &str) -> Result<(), EnvironmentError> {
     let path = worktree.join(ENV_FILE);
     if fs::read_to_string(&path).is_ok_and(|current| current == text) {
         return Ok(());
@@ -159,13 +190,14 @@ fn write_env_file(worktree: &Path, text: &str) -> anyhow::Result<()> {
         .open(&partial)
         .and_then(|mut file| file.write_all(text.as_bytes()))
         .and_then(|()| fs::rename(&partial, &path))
-        .with_context(|| format!("cannot write {}", path.display()))
+        .map_err(|source| EnvironmentError::WriteEnvFile { path, source })
 }
 
 /// Excludes the generated files from git, in the shared exclude file of the Repository, or in the `.gitignore` of the
-/// Worktree on request. A `.gitignore` that already holds the block keeps it, so that the lines never end up in
-/// both files.
-fn exclude(registry: &Registry, topology: &Topology, gitignore: bool) -> anyhow::Result<()> {
+/// Worktree on request. A `.gitignore` that already holds the block keeps it, so that a later `up` without the flag
+/// does not add the block to the exclude file as well. The reverse is not undone, an earlier block stays in the
+/// exclude file.
+fn exclude(registry: &Registry, topology: &Topology, gitignore: bool) -> Result<(), EnvironmentError> {
     let gitignore_file = topology.worktree.path.join(GITIGNORE_FILE);
     let file = if gitignore || ManagedBlocks::holds(&gitignore_file, EXCLUSIONS)? {
         gitignore_file

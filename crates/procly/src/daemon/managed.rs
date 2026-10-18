@@ -67,7 +67,7 @@ struct Record {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct FingerprintDocument {
+struct ManagedDocument {
     blocks: Vec<Record>,
 }
 
@@ -116,7 +116,7 @@ impl ManagedBlocks {
     }
 
     fn read(&self) -> Result<Table, StoreError> {
-        let document = store::load::<FingerprintDocument>(&self.path, DOCUMENT_VERSION)?;
+        let document = store::load::<ManagedDocument>(&self.path, DOCUMENT_VERSION)?;
         Ok(document
             .map(|document| {
                 document
@@ -137,7 +137,7 @@ impl ManagedBlocks {
                 fingerprint: fingerprint.clone(),
             })
             .collect();
-        store::save(&self.path, DOCUMENT_VERSION, &FingerprintDocument { blocks })
+        store::save(&self.path, DOCUMENT_VERSION, &ManagedDocument { blocks })
     }
 }
 

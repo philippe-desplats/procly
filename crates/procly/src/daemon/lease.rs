@@ -76,6 +76,9 @@ pub(crate) struct LeaseRequest<'a> {
     pub(crate) range: Range,
     /// Every port the configuration declares, which the Range skips.
     pub(crate) declared: &'a BTreeSet<u16>,
+    /// Keeps a Lease already granted as it is, even in the Main worktree where a freed declared port would take it
+    /// back. For a request that does not start the Service, as the Service may run on that Lease right now.
+    pub(crate) keep: bool,
 }
 
 impl Leases {
@@ -152,6 +155,7 @@ fn grant_in(
         let current = table.get(&key).copied();
         let held_elsewhere = |port: u16| table.iter().any(|(other, &leased)| leased == port && *other != key);
         let port = if request.topology.worktree.main
+            && !(request.keep && current.is_some())
             && current != Some(declared)
             && !held_elsewhere(declared)
             && is_free(declared)
@@ -227,6 +231,7 @@ mod tests {
             ports: &ports,
             range: RANGE,
             declared: &declared,
+            keep: false,
         };
         grant_in(table, &request, is_free).unwrap().into_values().collect()
     }
@@ -283,6 +288,33 @@ mod tests {
     }
 
     #[test]
+    fn a_lease_asked_to_be_kept_stays_even_when_the_declared_port_is_free_again() {
+        let mut table = Table::new();
+        let main = topology("/src/app", true);
+        assert_eq!(
+            grant(&mut table, &main, &[("http", 3000)], |port| port != 3000),
+            [24000]
+        );
+        let ports = BTreeMap::from([("http".to_owned(), 3000)]);
+        let request = LeaseRequest {
+            topology: &main,
+            service: "web",
+            ports: &ports,
+            range: RANGE,
+            declared: &BTreeSet::from([3000]),
+            keep: true,
+        };
+        // A Service that runs on its Lease must not see it move under a request that only reads it.
+        assert_eq!(grant_in(&mut table, &request, |_| true).unwrap()["http"], 24000);
+        // A Lease that does not exist yet is granted the usual way.
+        let missing = LeaseRequest {
+            service: "api",
+            ..request
+        };
+        assert_eq!(grant_in(&mut table, &missing, |_| true).unwrap()["http"], 3000);
+    }
+
+    #[test]
     fn each_port_name_gets_its_own_lease_and_the_range_skips_declared_ports() {
         let mut table = Table::new();
         let ports = [("http", 24000), ("test", 24001)];
@@ -306,6 +338,7 @@ mod tests {
             ports: &ports,
             range: RANGE,
             declared: &BTreeSet::new(),
+            keep: false,
         };
         assert!(matches!(
             grant_in(&mut table, &request, |_| false),

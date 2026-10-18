@@ -187,8 +187,8 @@ fn is_identifier(name: &str) -> bool {
 /// The Derived variables of every Service of a configuration, parsed and checked against it.
 #[derive(Debug, Default)]
 pub(crate) struct Derived {
-    /// Service, then variable name, then the text of the template and the template itself.
-    services: BTreeMap<String, BTreeMap<String, (String, Template)>>,
+    /// Service, then variable name, then its template.
+    services: BTreeMap<String, BTreeMap<String, Template>>,
 }
 
 impl Derived {
@@ -196,7 +196,7 @@ impl Derived {
     /// placeholder that names nothing, on a Service or a Port name no Service declares, and on 2 Services giving
     /// one variable 2 templates.
     pub(crate) fn from_config(configured: &BTreeMap<String, ServiceConfig>) -> Result<Self, DerivedError> {
-        let mut services: BTreeMap<String, BTreeMap<String, (String, Template)>> = BTreeMap::new();
+        let mut services: BTreeMap<String, BTreeMap<String, Template>> = BTreeMap::new();
         // The Service that first declared each variable, to name it in a conflict.
         let mut declared_by: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
         for (service, config) in configured {
@@ -252,7 +252,7 @@ impl Derived {
                         declared_by.insert(name, (service, text));
                     }
                 }
-                variables.insert(name.clone(), (text.clone(), template));
+                variables.insert(name.clone(), template);
             }
             services.insert(service.clone(), variables);
         }
@@ -264,28 +264,28 @@ impl Derived {
         self.services
             .values()
             .flat_map(BTreeMap::values)
-            .flat_map(|(_, template)| template.references().map(|(service, _)| service))
+            .flat_map(|template| template.references().map(|(service, _)| service))
             .collect()
     }
 
     /// The variables of `service`, rendered and sorted by name.
     pub(crate) fn render(&self, service: &str, facts: &Facts<'_>) -> Result<Vec<(String, String)>, DerivedError> {
-        render_all(self.services.get(service).into_iter(), facts)
+        render_variables(self.services.get(service).into_iter(), facts)
     }
 
     /// The variables of every Service, rendered and sorted by name, for the Env file.
     pub(crate) fn render_all(&self, facts: &Facts<'_>) -> Result<Vec<(String, String)>, DerivedError> {
-        render_all(self.services.values(), facts)
+        render_variables(self.services.values(), facts)
     }
 }
 
-fn render_all<'a>(
-    services: impl Iterator<Item = &'a BTreeMap<String, (String, Template)>>,
+fn render_variables<'a>(
+    services: impl Iterator<Item = &'a BTreeMap<String, Template>>,
     facts: &Facts<'_>,
 ) -> Result<Vec<(String, String)>, DerivedError> {
     let mut rendered = BTreeMap::new();
     for variables in services {
-        for (name, (_, template)) in variables {
+        for (name, template) in variables {
             rendered.insert(name.clone(), template.render(facts)?);
         }
     }

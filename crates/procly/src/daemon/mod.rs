@@ -292,7 +292,7 @@ fn start_service(
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
         // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
-        let injected = environment::injected(registry, &topology, &config, name, declared)?;
+        let injected = environment::injected(registry, &topology, &config, name, declared, true)?;
         // After the environment of the caller, so that a `PORT` of its own never wins over the Lease.
         let mut env = env;
         env.extend(injected.variables);
@@ -319,7 +319,9 @@ fn service_environment(registry: &Registry, name: &str, cwd: &Path) -> anyhow::R
     let topology = topology_of(cwd)?;
     let config = read_config(&topology.worktree.path)?;
     let declared = declared(&config, &topology.worktree.path, name)?;
-    Ok(environment::injected(registry, &topology, &config, name, declared)?.variables)
+    let mut variables = environment::injected(registry, &topology, &config, name, declared, false)?.variables;
+    variables.sort();
+    Ok(variables)
 }
 
 /// Stops the Services, logging who asked, and returns their names once their trees are gone.

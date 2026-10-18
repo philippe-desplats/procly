@@ -135,7 +135,7 @@ $ eval "$(procly env web)" && pnpm --filter web test
 
 ## The Env file
 
-Each `procly up` writes `.env.procly` at the root of the Worktree, for tools Procly does not launch, such as an IDE or a test runner. It holds the Derived variables of every Service of the Worktree, one `NAME=value` line each, quoted only where a dotenv parser needs it, and is readable by the user only. It leaves out `PORT`, `PORT_*`, `PROCLY` and `PROCLY_SERVICE`: those differ per Service, and `PROCLY=1` would tell a tool that Procly did not launch that it is supervised. This is why 2 Services cannot give one variable 2 templates. The file is rewritten only when its content changes.
+Each `procly up` writes `.env.procly` at the root of the Worktree, for tools Procly does not launch, such as an IDE or a test runner. It holds the Derived variables of every Service of the Worktree, one `NAME=value` line each, quoted only where a dotenv parser needs it, and is readable by the user only. It leaves out `PORT`, `PORT_*`, `PROCLY` and `PROCLY_SERVICE`: those differ per Service, and `PROCLY=1` would tell a tool that Procly did not launch that it is supervised. This is why 2 Services cannot give one variable 2 templates. A value is quoted when a dotenv parser would misread it, with `\`, `"`, `$` and the line break escaped, so that the parsers that expand variables (Next.js, `dotenv-cli`) read back the value `procly env` prints. The file is rewritten only when its content changes, and it shows the configuration as of the last `procly up`: a Service that keeps running keeps the environment it started with.
 
 ## Git exclusion
 
