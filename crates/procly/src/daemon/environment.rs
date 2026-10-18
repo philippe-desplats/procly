@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 use super::Registry;
 use super::lease::{LeaseError, LeaseRequest};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
-use crate::config::{self, Config, ConfigError, ServiceConfig};
+use crate::config::{self, Config, ConfigError, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts};
 use crate::envfile;
 use crate::ports::{self, PortsError};
-use crate::topology::Topology;
+use crate::topology::{Topology, TopologyError};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum EnvironmentError {
@@ -32,6 +32,8 @@ pub(super) enum EnvironmentError {
     Lease(#[from] LeaseError),
     #[error(transparent)]
     Managed(#[from] ManagedError),
+    #[error(transparent)]
+    Topology(#[from] TopologyError),
     #[error("cannot write {path}")]
     WriteEnvFile {
         path: PathBuf,
@@ -64,7 +66,12 @@ pub(super) struct Injected {
 /// health check probes. Run before any Lease is granted, so that a request bound to fail stores none.
 pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Option<&'a str>, EnvironmentError> {
     let health_port_name = declared.health_port_name(name)?;
-    ports::check(name, &declared.run, declared.ports.keys())?;
+    // A Compose service has no command, so no placeholder either.
+    let command = match declared.kind(name)? {
+        ServiceKind::Process { run } => run,
+        ServiceKind::Compose { .. } => "",
+    };
+    ports::check(name, command, declared.ports.keys())?;
     Ok(health_port_name)
 }
 
@@ -94,6 +101,13 @@ pub(super) fn injected(
 
     let facts = facts(topology, &table);
     let mut variables = ports::environment(&leases, health_port);
+    // The variables a compose file interpolates, next to `PORT_<NAME>`.
+    variables.extend(
+        declared
+            .port_env
+            .iter()
+            .filter_map(|(port_name, variable)| leases.get(port_name).map(|port| (variable.clone(), port.to_string()))),
+    );
     variables.extend(derived.render(name, &facts)?);
     variables.push(("PROCLY".to_owned(), "1".to_owned()));
     variables.push(("PROCLY_SERVICE".to_owned(), name.to_owned()));
@@ -156,6 +170,8 @@ fn grant_referenced(
     Ok(table)
 }
 
+/// Grants the Leases of the Service `service`. The container of a Compose service is shared by every Worktree, so it
+/// holds the Leases of the Main worktree, whichever Worktree asks.
 fn grant(
     registry: &Registry,
     topology: &Topology,
@@ -164,6 +180,17 @@ fn grant(
     ports: &BTreeMap<String, u16>,
     keep: bool,
 ) -> Result<BTreeMap<String, u16>, EnvironmentError> {
+    let shared;
+    let topology = if config
+        .services
+        .get(service)
+        .is_some_and(|declared| declared.compose.is_some())
+    {
+        shared = topology.main()?;
+        &shared
+    } else {
+        topology
+    };
     Ok(registry.leases.grant(&LeaseRequest {
         topology,
         service,

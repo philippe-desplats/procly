@@ -25,6 +25,8 @@ pub(crate) enum TopologyError {
     UnexpectedOutput { dir: PathBuf, args: String, output: String },
     #[error("{dir} is not in a git repository")]
     NotARepository { dir: PathBuf },
+    #[error("{dir} has no Main worktree, and a Compose service in Shared mode runs from it")]
+    NoMainWorktree { dir: PathBuf },
     #[error("cannot resolve {path}")]
     Canonicalize {
         path: PathBuf,
@@ -47,6 +49,25 @@ pub(crate) struct Worktree {
     pub(crate) slug: String,
     /// Whether this is the Main worktree, the first entry of `git worktree list`.
     pub(crate) main: bool,
+}
+
+impl Topology {
+    /// The Topology of the Main worktree of the Repository, where a Shared container runs from and holds its Leases.
+    pub(crate) fn main(&self) -> Result<Self, TopologyError> {
+        if self.worktree.main {
+            return Ok(self.clone());
+        }
+        let worktree = worktrees(&self.git_common_dir)?
+            .into_iter()
+            .find(|worktree| worktree.main)
+            .ok_or_else(|| TopologyError::NoMainWorktree {
+                dir: self.git_common_dir.clone(),
+            })?;
+        Ok(Self {
+            git_common_dir: self.git_common_dir.clone(),
+            worktree,
+        })
+    }
 }
 
 /// The Topology of a directory, or `None` when it is not inside a git Repository.

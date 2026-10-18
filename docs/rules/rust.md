@@ -90,6 +90,11 @@ How Rust code is written in this repository. Process and PTY handling has its ow
   - Pure logic tested in place stays fast and close to the code. Everything touching a process, a socket or the filesystem goes through an integration test instead.
   - Example: `Range` parsing and Derived variable rendering get unit tests, `procly up` gets an integration test.
 
+- **ALWAYS** mark a test that needs Docker by a name starting with `docker_` and a first line `if !require_docker() { return; }`, from `tests/common/mod.rs`.
+  - A machine without `docker compose` v2 skips these slow tests and prints why, so the suite stays green there.
+  - Name every container, network and volume of the test after a per-test prefix, remove them when the test ends, and never touch anything else in the shared engine.
+  - Example: `docker_2_worktrees_share_one_container_on_one_port` in `crates/procly/tests/compose.rs`.
+
 - **ALWAYS** isolate a test that touches the filesystem or a socket in its own temporary directory, and never read or write the user's real state directory.
   - Tests run in parallel and on a developer's machine where a real Daemon may be running.
   - Example: the code under test takes its state directory as a parameter, and the test passes a `tempfile::TempDir`.

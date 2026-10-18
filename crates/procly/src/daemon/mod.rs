@@ -1,6 +1,7 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
 mod clock;
+mod compose;
 mod cpu;
 mod environment;
 mod health;
@@ -30,6 +31,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
 use self::clock::Clock;
+use self::compose::{ComposeSpec, Composes, Published};
 use self::health::{HealthCheck, HttpCheck};
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
@@ -37,7 +39,7 @@ use self::managed::ManagedBlocks;
 use self::service::{Service, ServiceSpec, Services, Start};
 use crate::config;
 use crate::ports;
-use crate::protocol::{self, Request, Response, StartOutcome, UpService};
+use crate::protocol::{self, Released, Request, Response, ServiceEnd, StartOutcome, UpService};
 use crate::state_dir::StateDir;
 use crate::topology;
 
@@ -46,6 +48,7 @@ use crate::topology;
 struct Registry {
     jobs: Jobs,
     services: Services,
+    composes: Composes,
     leases: Leases,
     managed: ManagedBlocks,
     /// Held while the generated files of a Worktree are written, so that 2 starts never write them at once.
@@ -103,6 +106,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     let registry = Arc::new(Registry {
         jobs: Jobs::default(),
         services: Services::new(Clock::from_env()),
+        composes: Composes::new(Clock::from_env()),
         leases: Leases::new(state.leases()),
         managed: ManagedBlocks::new(state.managed_blocks()),
         mirroring: Mutex::default(),
@@ -131,6 +135,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     let jobs = Arc::clone(&registry);
     let _ = tokio::task::spawn_blocking(move || jobs.jobs.kill_all()).await;
     registry.services.stop_all().await;
+    registry.composes.stop_all().await;
     remove_if_present(&socket)?;
     remove_if_present(&state.pid())?;
     Ok(())
@@ -222,7 +227,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
             }
         }
         Request::Down { service, cwd } => match down(Arc::clone(registry), service, cwd, peer).await {
-            Ok(stopped) => Response::Down { stopped },
+            Ok((stopped, released)) => Response::Down { stopped, released },
             Err(error) => Response::Error {
                 message: format!("{error:#}"),
             },
@@ -272,32 +277,52 @@ fn start_job(
     Ok(jobs.start(&spec)?)
 }
 
+/// What a start request found out about the Service it asked for.
+enum Started {
+    Process(Start),
+    /// A Compose service, whose container is started by [`up_compose`].
+    Compose {
+        topology: topology::Topology,
+        grace: Duration,
+    },
+}
+
 fn start_service(
     registry: &Registry,
     name: &str,
     cwd: &Path,
     env: Vec<(String, String)>,
     gitignore: bool,
-) -> anyhow::Result<Start> {
+) -> anyhow::Result<Started> {
     let topology = topology_of(cwd)?;
     let worktree = topology.worktree.path.clone();
     {
         // Also on a Reuse, so that `--gitignore` is honored whenever it is asked. A Service that is not declared fails
         // here, before any file is written or Lease granted.
         let config = read_config(&worktree)?;
-        environment::check(name, declared(&config, &worktree, name)?)?;
+        let declared = declared(&config, &worktree, name)?;
+        environment::check(name, declared)?;
         environment::mirror(registry, &topology, &config, gitignore)?;
+        if let config::ServiceKind::Compose { .. } = declared.kind(name)? {
+            return Ok(Started::Compose {
+                grace: config.grace_period(declared),
+                topology,
+            });
+        }
     }
-    registry.services.start(&worktree, name, || {
+    let started = registry.services.start(&worktree, name, || {
         let config = read_config(&worktree)?;
         let declared = declared(&config, &worktree, name)?;
+        let config::ServiceKind::Process { run } = declared.kind(name)? else {
+            anyhow::bail!("service {name} changed to a Compose service while it was starting");
+        };
         // Granted under the start mutex, so that 2 Worktrees starting at once never get the same port.
         let injected = environment::injected(registry, &topology, &config, name, declared, true)?;
         // After the environment of the caller, so that a `PORT` of its own never wins over the Lease.
         let mut env = env;
         env.extend(injected.variables);
         Ok(ServiceSpec {
-            command: ports::render(&declared.run, &injected.leases),
+            command: ports::render(run, &injected.leases),
             cwd: worktree.clone(),
             env,
             health: HealthCheck {
@@ -311,6 +336,79 @@ fn start_service(
             restart: config.restart_policy(declared),
             idle: config.idle_timeout(declared),
         })
+    })?;
+    Ok(Started::Process(started))
+}
+
+/// Starts the container of the Compose service `name`, or finds it running for another Worktree, and waits until it
+/// is healthy.
+async fn up_compose(
+    registry: &Arc<Registry>,
+    name: &str,
+    topology: topology::Topology,
+    grace: Duration,
+    env: Vec<(String, String)>,
+) -> Result<Running, Box<Response>> {
+    let key = (topology.git_common_dir.clone(), name.to_owned());
+    let worktree = topology.worktree.path.clone();
+    let prepare = {
+        let (registry, name) = (Arc::clone(registry), name.to_owned());
+        move || prepare_compose(&registry, &name, &topology, env)
+    };
+    match registry.composes.up(key, worktree, grace, prepare).await {
+        Ok(brought) => Ok(Running::Compose {
+            outcome: brought.outcome,
+            port: brought.port,
+            health: brought.health,
+        }),
+        Err(error) => Err(Box::new(Response::Error {
+            message: format!("{error:#}"),
+        })),
+    }
+}
+
+/// What it takes to start the container of the Compose service `name`. Run only when the container does not run,
+/// so that the Leases of the Main worktree are granted anew then and never under a container using them.
+fn prepare_compose(
+    registry: &Registry,
+    name: &str,
+    topology: &topology::Topology,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<ComposeSpec> {
+    let worktree = &topology.worktree.path;
+    let config = read_config(worktree)?;
+    let declared = declared(&config, worktree, name)?;
+    let config::ServiceKind::Compose { service } = declared.kind(name)? else {
+        anyhow::bail!("service {name} changed to a Process service while it was starting");
+    };
+    // Granted under the lock of the container, so that 2 Worktrees starting at once never get different ports.
+    let injected = environment::injected(registry, topology, &config, name, declared, true)?;
+    let published = injected
+        .leases
+        .iter()
+        .map(|(port_name, &port)| Published {
+            port_name: port_name.clone(),
+            port,
+            variable: declared
+                .port_env
+                .get(port_name)
+                .cloned()
+                .unwrap_or_else(|| format!("PORT_{}", port_name.to_ascii_uppercase())),
+        })
+        .collect();
+    let mut env = env;
+    env.extend(injected.variables);
+    Ok(ComposeSpec {
+        name: name.to_owned(),
+        compose: service.to_owned(),
+        project_dir: topology.main()?.worktree.path,
+        env,
+        published,
+        health: HealthCheck {
+            port: injected.health_port,
+            http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
+        },
+        health_timeout: config.health_timeout(declared),
     })
 }
 
@@ -330,15 +428,19 @@ async fn down(
     service: Option<String>,
     cwd: PathBuf,
     peer: Option<i32>,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<(Vec<String>, Vec<Released>)> {
     // Resolving the Topology runs git, and naming the requester runs ps.
-    let (worktree, who) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        Ok((worktree_of(&cwd)?, requester::describe(peer, &cwd)))
+    let (topology, who) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        Ok((topology_of(&cwd)?, requester::describe(peer, &cwd)))
     })
     .await
     .context("the request could not be read")??;
+    let worktree = topology.worktree.path.clone();
     let stopping = registry.services.stop(&worktree, service.as_deref());
-    if let (Some(name), true) = (&service, stopping.is_empty()) {
+    let released = registry
+        .composes
+        .release(&topology.git_common_dir, &worktree, service.as_deref());
+    if let (Some(name), true) = (&service, stopping.is_empty() && released.is_empty()) {
         // Nothing to stop is fine for a declared Service, and a typo for any other.
         let (name, worktree) = (name.clone(), worktree.clone());
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -355,7 +457,10 @@ async fn down(
         service.ended().await;
         stopped.push(name);
     }
-    Ok(stopped)
+    for released in &released {
+        eprintln!("down {} of {} requested by {who}", released.service, worktree.display());
+    }
+    Ok((stopped, released))
 }
 
 /// The root of the Worktree holding `cwd`, where its Services are declared.
@@ -422,24 +527,28 @@ async fn up(
     };
     let mut needs = Vec::new();
     for current in needed.iter().chain(std::iter::once(target)) {
-        let (service, outcome) = match start(registry, current, &cwd, &env, gitignore).await {
-            Ok(started) => started,
+        let (outcome, port, health) = match start(registry, current, &cwd, &env, gitignore).await {
+            Ok(Running::Process { service, outcome }) => {
+                let health = service.healthy().await.map_err(|end| (end, service.output()));
+                (outcome, service.port(), health)
+            }
+            Ok(Running::Compose { outcome, port, health }) => (outcome, port, health),
             Err(response) => return *response,
         };
-        if let Err(end) = service.healthy().await {
+        if let Err((end, output)) = health {
             return Response::Unhealthy {
                 service: current.clone(),
                 outcome,
                 end,
-                output: service.output(),
+                output,
                 needed_by: (current != target).then(|| target.clone()),
             };
         }
         let reached = UpService {
             service: current.clone(),
             outcome,
-            port: service.port(),
-            url: service.port().map(|port| format!("http://localhost:{port}")),
+            port,
+            url: port.map(|port| format!("http://localhost:{port}")),
         };
         if current == target {
             return Response::Up {
@@ -463,6 +572,22 @@ fn start_order(cwd: &Path, name: &str) -> anyhow::Result<Vec<String>> {
     Ok(config.start_order(name)?)
 }
 
+/// A Service that was started or found running.
+enum Running {
+    /// A Process service, whose health is still to be waited for.
+    Process {
+        service: Arc<Service>,
+        outcome: StartOutcome,
+    },
+    /// A Compose service, already waited for: `health` tells whether its container answered in time, and if not,
+    /// how it ended and its recent logs.
+    Compose {
+        outcome: StartOutcome,
+        port: Option<u16>,
+        health: Result<(), (ServiceEnd, String)>,
+    },
+}
+
 /// Starts the Service `name`, or finds it running. A Service being stopped still holds its port, so this waits
 /// for its tree to be gone and asks again.
 async fn start(
@@ -471,14 +596,23 @@ async fn start(
     cwd: &Path,
     env: &[(String, String)],
     gitignore: bool,
-) -> Result<(Arc<Service>, StartOutcome), Box<Response>> {
+) -> Result<Running, Box<Response>> {
     loop {
-        let (registry, name, cwd, env) = (Arc::clone(registry), name.to_owned(), cwd.to_owned(), env.to_owned());
+        let (blocking, name, cwd, env) = (Arc::clone(registry), name.to_owned(), cwd.to_owned(), env.to_owned());
         // Resolving the Topology runs git, and reading the configuration and forking are blocking.
-        let started = tokio::task::spawn_blocking(move || start_service(&registry, &name, &cwd, env, gitignore)).await;
+        let started = tokio::task::spawn_blocking({
+            let (name, env) = (name.clone(), env.clone());
+            move || start_service(&blocking, &name, &cwd, env, gitignore)
+        })
+        .await;
         match started {
-            Ok(Ok(Start::Ready { service, outcome })) => return Ok((service, outcome)),
-            Ok(Ok(Start::Stopping(service))) => service.ended().await,
+            Ok(Ok(Started::Process(Start::Ready { service, outcome }))) => {
+                return Ok(Running::Process { service, outcome });
+            }
+            Ok(Ok(Started::Process(Start::Stopping(service)))) => service.ended().await,
+            Ok(Ok(Started::Compose { topology, grace })) => {
+                return up_compose(registry, &name, topology, grace, env).await;
+            }
             Ok(Err(error)) => {
                 return Err(Box::new(Response::Error {
                     message: format!("{error:#}"),

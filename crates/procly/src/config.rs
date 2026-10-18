@@ -44,6 +44,24 @@ pub(crate) enum ConfigError {
     WorktreeCopyPath { path: String },
     #[error("the user settings {path} holds only [settings], move [{key}] to a procly.toml")]
     UserSettingsScope { path: PathBuf, key: String },
+    #[error("service {service} must set exactly one of `run` (a Process service) and `compose` (a Compose service)")]
+    ServiceKind { service: String },
+    #[error("service {service} is {kind}, `{key}` is for {other} only")]
+    KeyOfOtherKind {
+        service: String,
+        key: &'static str,
+        kind: &'static str,
+        other: &'static str,
+    },
+    #[error(
+        "port_env of service {service} maps {port_name:?} to {variable:?}: it must name one of the Port names of the \
+         service, and a variable of upper case letters, digits and underscores that does not start with a digit"
+    )]
+    InvalidPortEnv {
+        service: String,
+        port_name: String,
+        variable: String,
+    },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
     Invalid {
         files: Vec<PathBuf>,
@@ -98,6 +116,9 @@ pub(crate) struct Settings {
     /// Where the Leases of Worktrees other than the Main worktree are drawn from.
     #[serde(default = "default_port_range", deserialize_with = "range")]
     pub(crate) port_range: Range,
+    /// How long a Compose service keeps running after the last Worktree that needed it stopped needing it.
+    #[serde(default = "default_grace_period", deserialize_with = "duration")]
+    pub(crate) grace_period: Duration,
 }
 
 impl Default for Settings {
@@ -109,19 +130,31 @@ impl Default for Settings {
             idle_stop: default_idle_stop(),
             idle_timeout: default_idle_timeout(),
             port_range: default_port_range(),
+            grace_period: default_grace_period(),
         }
     }
 }
 
-/// A Process service.
+/// A Process service, or a Compose service.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ServiceConfig {
-    /// The command, run by `/bin/sh -c` at the root of the Worktree.
-    pub(crate) run: String,
+    /// The command of a Process service, run by `/bin/sh -c` at the root of the Worktree.
+    #[serde(default)]
+    pub(crate) run: Option<String>,
+    /// The service of the compose file a Compose service maps to.
+    #[serde(default)]
+    pub(crate) compose: Option<String>,
     /// The port of each Port name.
     #[serde(default)]
     pub(crate) ports: BTreeMap<String, u16>,
+    /// The variable the compose file interpolates for each Port name, such as `DB_PORT` for `db`, for a Compose
+    /// service. The Lease of a Port name is always in `PORT_<NAME>` too.
+    #[serde(default)]
+    pub(crate) port_env: BTreeMap<String, String>,
+    /// Overrides `settings.grace_period` for this Compose service.
+    #[serde(default, deserialize_with = "optional_duration")]
+    pub(crate) grace_period: Option<Duration>,
     #[serde(default)]
     pub(crate) health: HealthConfig,
     /// The Derived variables of the Service: each value is a template over Leases and Worktree facts, rendered into
@@ -206,7 +239,74 @@ impl WorktreeConfig {
     }
 }
 
+/// What a Service runs, once its keys are known to agree.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ServiceKind<'a> {
+    Process {
+        run: &'a str,
+    },
+    /// A service of the compose file of the Repository.
+    Compose {
+        service: &'a str,
+    },
+}
+
 impl ServiceConfig {
+    /// Whether the Service `name` is a Process service or a Compose service, failing when its keys disagree: both or
+    /// neither of `run` and `compose`, or a key that belongs to the other kind.
+    pub(crate) fn kind(&self, name: &str) -> Result<ServiceKind<'_>, ConfigError> {
+        let wrong_key = |key, kind, other| ConfigError::KeyOfOtherKind {
+            service: name.to_owned(),
+            key,
+            kind,
+            other,
+        };
+        match (&self.run, &self.compose) {
+            (Some(run), None) => {
+                if self.grace_period.is_some() {
+                    return Err(wrong_key("grace_period", "a Process service", "a Compose service"));
+                }
+                if !self.port_env.is_empty() {
+                    return Err(wrong_key("port_env", "a Process service", "a Compose service"));
+                }
+                Ok(ServiceKind::Process { run })
+            }
+            (None, Some(service)) => {
+                let restart = &self.restart;
+                if restart.attempts.is_some() || restart.delay.is_some() {
+                    return Err(wrong_key("restart", "a Compose service", "a Process service"));
+                }
+                let idle = &self.idle;
+                if idle.stop.is_some() || idle.timeout.is_some() {
+                    return Err(wrong_key("idle", "a Compose service", "a Process service"));
+                }
+                self.check_port_env(name)?;
+                Ok(ServiceKind::Compose { service })
+            }
+            _ => Err(ConfigError::ServiceKind {
+                service: name.to_owned(),
+            }),
+        }
+    }
+
+    fn check_port_env(&self, name: &str) -> Result<(), ConfigError> {
+        for (port_name, variable) in &self.port_env {
+            let valid = !variable.starts_with(|c: char| c.is_ascii_digit())
+                && !variable.is_empty()
+                && variable
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+            if !valid || !self.ports.contains_key(port_name) {
+                return Err(ConfigError::InvalidPortEnv {
+                    service: name.to_owned(),
+                    port_name: port_name.clone(),
+                    variable: variable.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// The Port name the health check of the Service `name` probes, `None` when it declares no Port name.
     pub(crate) fn health_port_name(&self, name: &str) -> Result<Option<&str>, ConfigError> {
         match &self.health.port_name {
@@ -299,6 +399,19 @@ impl Config {
             .collect()
     }
 
+    /// How long the Compose service `service` keeps running once no Worktree needs it.
+    pub(crate) fn grace_period(&self, service: &ServiceConfig) -> Duration {
+        service.grace_period.unwrap_or(self.settings.grace_period)
+    }
+
+    /// Fails on the first Service whose keys disagree, so that no `up` starts anything from a configuration that
+    /// cannot be run.
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.services
+            .iter()
+            .try_for_each(|(name, service)| service.kind(name).map(|_| ()))
+    }
+
     /// How long `up` waits for `service` to become healthy.
     pub(crate) fn health_timeout(&self, service: &ServiceConfig) -> Duration {
         service.health.timeout.unwrap_or(self.settings.health_timeout)
@@ -329,6 +442,11 @@ fn default_restart_delay() -> Duration {
 
 fn default_port_range() -> Range {
     Range::DEFAULT
+}
+
+/// Long enough for an agent coming back from a short break to find the container warm.
+fn default_grace_period() -> Duration {
+    Duration::from_mins(5)
 }
 
 /// A Range written as `<start>-<end>`, such as `24000-24999`.
@@ -388,6 +506,7 @@ pub(crate) fn load(user_settings: Option<&Path>, worktree: &Path) -> Result<Conf
         .try_into()
         .map_err(|source| ConfigError::Invalid { files, source })?;
     config.worktree.validate()?;
+    config.validate()?;
     Ok(config)
 }
 
@@ -582,6 +701,95 @@ mod tests {
         assert_eq!(off.idle_timeout(&off.services["web"]), Some(Duration::from_mins(30)));
         let off = parsed("[settings]\nidle_stop = false\n[services.web]\nrun = 'x'\n");
         assert_eq!(off.idle_timeout(&off.services["web"]), None);
+    }
+
+    #[test]
+    fn a_service_is_a_process_by_its_run_and_a_compose_service_by_its_compose() {
+        let config = parsed("[services.web]\nrun = 'serve'\n[services.db]\ncompose = 'postgres'\n");
+        assert_eq!(
+            config.services["web"].kind("web").unwrap(),
+            ServiceKind::Process { run: "serve" }
+        );
+        assert_eq!(
+            config.services["db"].kind("db").unwrap(),
+            ServiceKind::Compose { service: "postgres" }
+        );
+    }
+
+    #[test]
+    fn a_service_sets_exactly_one_of_run_and_compose() {
+        for text in ["ports = { http = 3000 }\n", "run = 'x'\ncompose = 'db'\n"] {
+            assert!(
+                matches!(
+                    service(text).kind("db"),
+                    Err(ConfigError::ServiceKind { service }) if service == "db"
+                ),
+                "{text:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_service_refuses_the_keys_of_a_process_and_the_other_way_round() {
+        let key = |text: &str, name: &str| match service(text).kind(name) {
+            Err(ConfigError::KeyOfOtherKind { key, .. }) => key,
+            other => panic!("{text:?} gave {other:?}"),
+        };
+        assert_eq!(key("compose = 'db'\nrestart = { attempts = 1 }\n", "db"), "restart");
+        assert_eq!(key("compose = 'db'\nidle = { stop = false }\n", "db"), "idle");
+        assert_eq!(key("run = 'x'\ngrace_period = '1m'\n", "web"), "grace_period");
+        assert_eq!(
+            key(
+                "run = 'x'\nports = { http = 1 }\nport_env = { http = 'HTTP_PORT' }\n",
+                "web"
+            ),
+            "port_env"
+        );
+    }
+
+    #[test]
+    fn a_port_env_names_a_declared_port_and_a_valid_variable() {
+        let invalid = |text: &str| matches!(service(text).kind("db"), Err(ConfigError::InvalidPortEnv { .. }));
+        assert!(!invalid(
+            "compose = 'db'\nports = { db = 5432 }\nport_env = { db = 'DB_PORT' }\n"
+        ));
+        assert!(invalid(
+            "compose = 'db'\nports = { db = 5432 }\nport_env = { api = 'DB_PORT' }\n"
+        ));
+        for variable in ["db_port", "1PORT", "DB-PORT", ""] {
+            assert!(
+                invalid(&format!(
+                    "compose = 'db'\nports = {{ db = 5432 }}\nport_env = {{ db = '{variable}' }}\n"
+                )),
+                "{variable:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_service_waits_five_minutes_before_it_stops_unless_configured_otherwise() {
+        let config = parsed(
+            "[settings]\ngrace_period = '10m'\n\
+             [services.db]\ncompose = 'postgres'\n\
+             [services.cache]\ncompose = 'redis'\ngrace_period = '30s'\n",
+        );
+        assert_eq!(config.grace_period(&config.services["db"]), Duration::from_mins(10));
+        assert_eq!(config.grace_period(&config.services["cache"]), Duration::from_secs(30));
+        assert_eq!(Settings::default().grace_period, Duration::from_mins(5));
+    }
+
+    #[test]
+    fn loading_refuses_a_service_that_is_neither_a_process_nor_a_compose_service() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(VERSIONED_FILE),
+            "[services.db]\nports = { db = 5432 }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            load(None, dir.path()),
+            Err(ConfigError::ServiceKind { service }) if service == "db"
+        ));
     }
 
     fn worktree(text: &str) -> WorktreeConfig {
