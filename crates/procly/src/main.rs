@@ -26,6 +26,8 @@ const EXIT_TIMEOUT: u8 = 124;
 const OUTPUT_TAIL_LINES: usize = 20;
 /// The exit code of `up` for a Service that ended before it became healthy.
 const EXIT_SERVICE_ENDED: u8 = 3;
+/// The exit code of `up` for a Service whose process listened on another port than its Lease.
+const EXIT_PORT_MISMATCH: u8 = 4;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
@@ -208,6 +210,13 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                 ServiceEnd::Stopped => (
                     "was stopped by procly down before it became healthy".to_owned(),
                     EXIT_SERVICE_ENDED,
+                ),
+                ServiceEnd::PortMismatch { leased, actual } => (
+                    format!(
+                        "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
+                         tree was stopped"
+                    ),
+                    EXIT_PORT_MISMATCH,
                 ),
                 ServiceEnd::HealthTimeout { timeout_ms } => (
                     format!(

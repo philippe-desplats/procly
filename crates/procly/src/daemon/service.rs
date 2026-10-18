@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use super::health::HealthCheck;
+use super::listeners::listening_ports;
 use super::process_group::{DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group};
 use crate::output::{self, OutputBuffer};
 use crate::protocol::{ServiceEnd, StartOutcome};
@@ -45,6 +46,8 @@ pub(crate) struct ServiceSpec {
     pub(crate) env: Vec<(String, String)>,
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
+    /// The port of every Lease of the Service, which may listen on all of them.
+    pub(crate) leases: Vec<u16>,
 }
 
 /// A Service runs at most once per Worktree: it is keyed by the root of its Worktree and its name.
@@ -259,7 +262,7 @@ fn spawn(spec: ServiceSpec) -> Result<Arc<Service>, ServiceError> {
         stop: watch::Sender::new(None),
     });
     tokio::spawn(supervise(Arc::clone(&service), child, pumps));
-    tokio::spawn(check_health(Arc::clone(&service), spec.health, spec.health_timeout));
+    tokio::spawn(check_health(Arc::clone(&service), spec.health, spec.leases, spec.health_timeout));
     Ok(service)
 }
 
@@ -297,8 +300,9 @@ async fn stop_tree(child: &mut dyn ChildWrapper) {
     }
 }
 
-/// Marks the Service healthy once its health check passes, and stops it once `timeout` has passed without.
-async fn check_health(service: Arc<Service>, check: HealthCheck, timeout: Duration) {
+/// Marks the Service healthy once its health check passes, and stops it once `timeout` has passed without, or once
+/// it shows a Port mismatch.
+async fn check_health(service: Arc<Service>, check: HealthCheck, leases: Vec<u16>, timeout: Duration) {
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -307,6 +311,11 @@ async fn check_health(service: Arc<Service>, check: HealthCheck, timeout: Durati
         }
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
+            // What answered may be a Foreign process holding the Lease while the Service listens elsewhere.
+            if let Some(mismatch) = port_mismatch(&service, &check, &leases).await {
+                service.request_stop(mismatch);
+                return;
+            }
             // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
             service.state.send_if_modified(|state| {
                 let healthy = *state == ServiceState::Starting && !service.is_stopping();
@@ -318,9 +327,13 @@ async fn check_health(service: Arc<Service>, check: HealthCheck, timeout: Durati
             return;
         }
         if tokio::time::Instant::now() >= deadline {
-            service.request_stop(ServiceEnd::HealthTimeout {
-                timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-            });
+            // Only now, a Service may open another port, such as a debugger, long before the one of its Lease.
+            let end = port_mismatch(&service, &check, &leases)
+                .await
+                .unwrap_or(ServiceEnd::HealthTimeout {
+                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                });
+            service.request_stop(end);
             return;
         }
         tokio::select! {
@@ -328,6 +341,26 @@ async fn check_health(service: Arc<Service>, check: HealthCheck, timeout: Durati
             _ = state.changed() => {}
         }
     }
+}
+
+/// The Port mismatch of the Service, when its process group listens on the port of none of its Leases and not on
+/// the one its health check probes. `None` as long as its listeners cannot tell otherwise.
+async fn port_mismatch(service: &Service, check: &HealthCheck, leases: &[u16]) -> Option<ServiceEnd> {
+    let leased = check.port?;
+    let pgid = service.pid;
+    let listening = tokio::task::spawn_blocking(move || listening_ports(pgid)).await.ok()??;
+    mismatched_port(leased, leases, &listening).map(|actual| ServiceEnd::PortMismatch { leased, actual })
+}
+
+/// The port the Service listens on instead of its Lease `leased`, the lowest one when it listens on several.
+///
+/// A Service listening on no port at all tells nothing, it may run a container publishing the port from another
+/// process, so it is no Port mismatch.
+fn mismatched_port(leased: u16, leases: &[u16], listening: &[u16]) -> Option<u16> {
+    if listening.contains(&leased) {
+        return None;
+    }
+    listening.iter().copied().find(|port| !leases.contains(port))
 }
 
 fn end_of(status: ExitStatus) -> ServiceEnd {
@@ -350,5 +383,27 @@ async fn pump(mut reader: impl AsyncRead + Unpin, output: Arc<Mutex<OutputBuffer
     // An error reading a pipe means the Service closed it, which is the end of its output.
     while let Ok(read @ 1..) = reader.read(&mut chunk).await {
         output::lock(&output).push(&chunk[..read]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listening_on_the_lease_is_no_port_mismatch_whatever_else_is_open() {
+        assert_eq!(mismatched_port(24000, &[24000], &[9229, 24000]), None);
+    }
+
+    #[test]
+    fn listening_elsewhere_than_any_lease_is_a_port_mismatch_on_the_lowest_such_port() {
+        assert_eq!(mismatched_port(24000, &[24000, 24001], &[5173, 9229]), Some(5173));
+        assert_eq!(mismatched_port(24000, &[24000, 24001], &[24001, 5173]), Some(5173));
+    }
+
+    #[test]
+    fn listening_on_nothing_or_only_on_another_lease_is_no_port_mismatch() {
+        assert_eq!(mismatched_port(24000, &[24000], &[]), None);
+        assert_eq!(mismatched_port(24000, &[24000, 24001], &[24001]), None);
     }
 }

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 3;
+pub(crate) const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -104,6 +104,12 @@ pub(crate) enum ServiceEnd {
     },
     /// `down` stopped the Service.
     Stopped,
+    /// The process group of the Service listened on `actual` and not on its Lease `leased`, and its whole process
+    /// tree was stopped.
+    PortMismatch {
+        leased: u16,
+        actual: u16,
+    },
 }
 
 /// Whether a start request started new work or ended in Reuse.
@@ -230,7 +236,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":3,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":4,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

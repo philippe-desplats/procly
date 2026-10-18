@@ -3,6 +3,7 @@
 mod health;
 mod job;
 mod lease;
+mod listeners;
 mod process_group;
 mod requester;
 mod service;
@@ -281,6 +282,7 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
                 port: health_port,
                 http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
             },
+            leases: leases.values().copied().collect(),
             health_timeout: config.health_timeout(declared),
             name: name.to_owned(),
         })

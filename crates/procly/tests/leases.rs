@@ -179,3 +179,55 @@ fn each_port_name_gets_its_own_lease_injected_as_port_and_a_per_name_variable() 
     assert_ne!(port_test, http);
     assert!((start..=end).contains(&port_test), "{port_test} is outside {start}-{end}");
 }
+
+/// A `procly.toml` declaring `web` with `port` for `http`, whose command listens on `actual` instead.
+fn web_listening_elsewhere(port: u16, actual: u16) -> String {
+    format!(
+        "[services.web]\nrun = '{} --port {actual}'\nports = {{ http = {port} }}\nhealth = {{ timeout = '1s' }}\n",
+        test_server().display()
+    )
+}
+
+#[test]
+fn a_service_listening_on_another_port_is_a_port_mismatch_exiting_4() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (port, actual) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_listening_elsewhere(port, actual));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", common::stderr(&output));
+    assert!(
+        common::stderr(&output).starts_with(&format!(
+            "procly: service web listens on port {actual} instead of its Lease, port {port} (Port mismatch), its \
+             process tree was stopped, its recent output:\n"
+        )),
+        "{}",
+        common::stderr(&output)
+    );
+    assert!(std::net::TcpStream::connect(("127.0.0.1", actual)).is_err());
+}
+
+#[test]
+fn a_foreign_process_answering_on_the_lease_is_no_health_when_the_service_listens_elsewhere() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    write(&main, "procly.toml", &web_declaring(port));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", port)).expect("hold the Lease");
+    let actual = free_port();
+    write(&main, "procly.toml", &web_listening_elsewhere(port, actual));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", common::stderr(&output));
+    assert!(
+        common::stderr(&output).contains(&format!("listens on port {actual} instead of its Lease, port {port}")),
+        "{}",
+        common::stderr(&output)
+    );
+    drop(foreign);
+}
