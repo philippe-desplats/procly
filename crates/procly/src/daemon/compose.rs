@@ -423,9 +423,48 @@ impl Composes {
 
     /// Stops every container Procly started, without waiting for any Grace period, for a Daemon about to exit.
     pub(crate) async fn stop_all(&self) {
-        let containers: Vec<_> = self.table().values().cloned().collect();
+        let containers: Vec<_> = self
+            .table()
+            .iter()
+            .map(|(key, container)| (key.1.clone(), Arc::clone(container)))
+            .collect();
+        for (service, result) in self.stop_containers(containers).await {
+            if let Err(error) = result {
+                eprintln!("cannot stop the container of service {service}: {error}");
+            }
+        }
+    }
+
+    /// Stops every container Procly started for the Repository `repository`, without waiting for any Grace period,
+    /// and returns the names of the Compose services whose container it stopped. A container that was not running
+    /// is not named. The containers are stopped, never removed, so their volumes stay.
+    pub(crate) async fn stop_repository(&self, repository: &Path) -> Result<Vec<String>, ComposeError> {
+        let containers: Vec<_> = self
+            .table()
+            .iter()
+            .filter(|((path, _), _)| path == repository)
+            .map(|((_, service), container)| (service.clone(), Arc::clone(container)))
+            .collect();
+        let mut stopped = Vec::new();
+        let mut failure = None;
+        for (service, result) in self.stop_containers(containers).await {
+            match result {
+                Ok(true) => stopped.push(service),
+                Ok(false) => {}
+                Err(error) => failure = failure.or(Some(error)),
+            }
+        }
+        stopped.sort();
+        failure.map_or(Ok(stopped), Err)
+    }
+
+    /// Stops the containers at once, all together, and tells for each one whether it was running.
+    async fn stop_containers(
+        &self,
+        containers: Vec<(String, Arc<Container>)>,
+    ) -> Vec<(String, Result<bool, ComposeError>)> {
         let mut stopping = JoinSet::new();
-        for container in containers {
+        for (service, container) in containers {
             let leases = Arc::clone(&self.leases);
             stopping.spawn(async move {
                 let _commands = container.commands.lock().await;
@@ -435,14 +474,29 @@ impl Composes {
                     state.generation += 1;
                     state.alive.take()
                 };
-                let Some(alive) = alive else { return };
+                let Some(alive) = alive else {
+                    return (service, Ok(false));
+                };
                 match alive.docker.stop().await {
-                    Ok(()) => touch(leases, &alive).await,
-                    Err(error) => eprintln!("cannot stop the container of service {}: {error}", alive.docker.service),
+                    Ok(()) => {
+                        touch(leases, &alive).await;
+                        (service, Ok(true))
+                    }
+                    Err(error) => {
+                        // Still counted as running, so that asking again stops it.
+                        container.state().alive = Some(alive);
+                        (service, Err(error))
+                    }
                 }
             });
         }
-        while stopping.join_next().await.is_some() {}
+        let mut results = Vec::new();
+        while let Some(result) = stopping.join_next().await {
+            if let Ok(result) = result {
+                results.push(result);
+            }
+        }
+        results
     }
 
     fn container(&self, key: &ComposeKey) -> Arc<Container> {

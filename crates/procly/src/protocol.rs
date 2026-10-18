@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 11;
+pub(crate) const PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -30,8 +30,9 @@ pub(crate) enum Request {
         job: String,
     },
     /// Starts a declared Service of the Worktree holding `cwd`, or finds it running, and answers once it is healthy.
+    /// Without `service`, starts every declared Service that no Group covers.
     Up {
-        service: String,
+        service: Option<String>,
         cwd: PathBuf,
         /// The environment of the requesting command, as for `Run`.
         env: Vec<(String, String)>,
@@ -78,6 +79,11 @@ pub(crate) enum Request {
     Guard {
         cwd: PathBuf,
     },
+    /// Stops the Services of the Repository holding `cwd` and removes what Procly wrote into it, apart from the
+    /// Managed blocks that were edited.
+    Eject {
+        cwd: PathBuf,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,8 +107,14 @@ pub(crate) enum Response {
         outcome: StartOutcome,
         port: Option<u16>,
         url: Option<String>,
+        /// The Group running it, when the Service was covered by a Group that runs and nothing was started.
+        via: Option<String>,
         /// The Services it needs, in the order `up` brought them up.
         needs: Vec<UpService>,
+    },
+    /// Every Service `up` without a Service brought up or found running, in the order it brought them up.
+    UpAll {
+        services: Vec<UpService>,
     },
     /// The Service ended before it became healthy.
     Unhealthy {
@@ -142,6 +154,8 @@ pub(crate) enum Response {
         off: bool,
         services: Vec<String>,
     },
+    /// The Repository is ejected.
+    Eject(EjectReport),
     Error {
         message: String,
     },
@@ -256,11 +270,72 @@ pub(crate) struct SwitchReport {
     pub(crate) rules: Vec<BlockReport>,
 }
 
+/// What kind of file or text Procly wrote into a Repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Written {
+    /// The Rules block of an instruction file.
+    Rules,
+    /// The Guard of the Claude Code settings.
+    Guard,
+    /// The Managed block excluding the generated files from git.
+    Exclusions,
+    /// The Env file of a Worktree.
+    EnvFile,
+}
+
+impl Written {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Rules => "rules",
+            Self::Guard => "guard",
+            Self::Exclusions => "exclusions",
+            Self::EnvFile => "env file",
+        }
+    }
+}
+
+/// Something `eject` removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Removed {
+    pub(crate) kind: Written,
+    pub(crate) file: PathBuf,
+    /// Whether the file held nothing else, so that it was deleted with it.
+    pub(crate) deleted: bool,
+}
+
+/// Something `eject` left as it is because the developer edited it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Left {
+    pub(crate) kind: Written,
+    pub(crate) file: PathBuf,
+}
+
+/// A Service `eject` stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Stopped {
+    pub(crate) service: String,
+    /// The Worktree it ran for, `None` for a Compose service, whose container belongs to the Repository.
+    pub(crate) worktree: Option<PathBuf>,
+}
+
+/// What `eject` did to a Repository.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct EjectReport {
+    pub(crate) stopped: Vec<Stopped>,
+    pub(crate) removed: Vec<Removed>,
+    pub(crate) left: Vec<Left>,
+    /// What to undo in the `left` items, written for a coding agent. `None` when nothing was left.
+    pub(crate) prompt: Option<String>,
+}
+
 /// A healthy Service `up` brought up or found running.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct UpService {
     pub(crate) service: String,
     pub(crate) outcome: StartOutcome,
+    /// The Group running it, as for [`Response::Up`].
+    pub(crate) via: Option<String>,
     pub(crate) port: Option<u16>,
     pub(crate) url: Option<String>,
 }
@@ -483,7 +558,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":11,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":12,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

@@ -616,3 +616,30 @@ fn docker_a_container_started_outside_procly_is_a_foreign_process_in_status_unti
     let status = stdout(&fixture.procly.procly_in(&fixture.main, &["status"]));
     assert!(!status.contains("foreign container"), "{status}");
 }
+
+#[test]
+fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1h\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.project.container();
+    assert!(fixture.project.is_running());
+
+    let output = fixture.procly.procly_in(&fixture.other, &["eject"]);
+
+    // Without waiting for the Grace period, since the Repository is going back to how it was.
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("stopped db (Compose service, its volumes are kept)"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!fixture.project.is_running());
+    assert!(!listens(fixture.port));
+    // Stopped, never removed, and the data stays.
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}

@@ -14,6 +14,8 @@ pub(crate) struct HealthCheck {
     /// The port that must accept connections, `None` for a Service that listens on none and is healthy once started.
     pub(crate) port: Option<u16>,
     pub(crate) http: Option<HttpCheck>,
+    /// The checks of the Services a Group covers, which all must pass for the Group to be healthy.
+    pub(crate) covered: Vec<HealthCheck>,
 }
 
 /// An HTTP request sent once the port accepts connections.
@@ -24,8 +26,29 @@ pub(crate) struct HttpCheck {
 }
 
 impl HealthCheck {
-    /// Probes the Service once.
+    /// The port of every Lease this check probes, the covered Services' included.
+    pub(crate) fn ports(&self) -> Vec<u16> {
+        self.port
+            .into_iter()
+            .chain(self.covered.iter().filter_map(|covered| covered.port))
+            .collect()
+    }
+
+    /// Probes the Service once, and the Services it covers.
     pub(crate) async fn passes(&self) -> bool {
+        if !self.probe().await {
+            return false;
+        }
+        for covered in &self.covered {
+            if !covered.probe().await {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Probes the port of the check alone.
+    async fn probe(&self) -> bool {
         let Some(port) = self.port else { return true };
         for ip in LOOPBACKS {
             let Ok(stream) = TcpStream::connect((ip, port)).await else {

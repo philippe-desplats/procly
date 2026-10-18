@@ -78,3 +78,7 @@ The list is code, in `crates/procly/src/guard.rs`. Adding a command to it is a c
 `procly on` reverses it, and writes the Rules block back. Both commands are idempotent. A Rules block you edited is left as it is, and a Rules block whose file lost it is not written back. `procly agent install` run while the Repository is off writes the block that says so.
 
 The Rules block of a Worktree is rewritten only where Procly wrote it. Another Worktree holds the committed text until you commit the new one and merge it, but its Guard stands aside right away since the state is the Repository's.
+
+## Removing it all
+
+`procly off` removes nothing. To take the Rules blocks, the Guard, the exclusions and the Env files out of a Repository, see [Removing Procly from a Repository](eject.md).

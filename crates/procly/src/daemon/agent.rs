@@ -15,11 +15,11 @@ use crate::protocol::{BlockOutcome, BlockReport, InstallReport, Request, Respons
 use crate::topology::{self, Topology, TopologyError};
 
 /// The name of the Managed block holding the Rules block.
-const RULES: &str = "rules";
+pub(super) const RULES: &str = "rules";
 /// The Claude Code settings of a Worktree, relative to its root.
-const SETTINGS: &str = ".claude/settings.json";
+pub(super) const SETTINGS: &str = ".claude/settings.json";
 /// The instruction files Procly looks for, in order, when no file is named.
-const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+pub(super) const INSTRUCTION_FILES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum AgentError {
@@ -73,7 +73,7 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
 }
 
 /// The Rules block, one line per element. When the Repository is Off it says so, and tells agents to leave Procly be.
-fn rules(off: bool) -> &'static [&'static str] {
+pub(super) fn rules(off: bool) -> &'static [&'static str] {
     if off {
         &[
             "## Procly (off)",
@@ -173,7 +173,7 @@ fn instruction_file(worktree: &Path, requested: Option<&Path>) -> PathBuf {
 }
 
 /// `requested` with its symlinks resolved, which must sit inside the Worktree.
-fn contained(worktree: &Path, requested: &Path) -> Result<PathBuf, AgentError> {
+pub(super) fn contained(worktree: &Path, requested: &Path) -> Result<PathBuf, AgentError> {
     let outside = || AgentError::OutsideWorktree {
         file: requested.to_owned(),
         worktree: worktree.to_owned(),

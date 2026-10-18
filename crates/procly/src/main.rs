@@ -14,17 +14,18 @@ mod status;
 mod topology;
 mod unit;
 
+use std::fmt::Write as _;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, Conflict, Held, InitReport, JobEnd, Occupant, Released, Request, Response, ServiceEnd,
-    StartOutcome,
+    BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, Occupant, Released, Request, Response,
+    ServiceEnd, StartOutcome, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -70,7 +71,8 @@ enum Command {
         command: String,
     },
     /// Start a declared Service of the current Worktree, or find it running, wait until it is healthy and print
-    /// its name, `started` or `reused`, its URL and its port on one line.
+    /// its name, `started` or `reused`, its URL and its port on one line. A Service covered by a Group that runs is
+    /// `reused (via <group>)`. Without a Service, start every declared Service no Group covers, one line each.
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
                             (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
@@ -86,7 +88,7 @@ enum Command {
         /// of the git exclude file shared by the Repository.
         #[arg(long)]
         gitignore: bool,
-        service: String,
+        service: Option<String>,
     },
     /// Print the variables Procly injects into a Service of the current Worktree as shell exports: its Leases, its
     /// Derived variables, `PROCLY=1` and `PROCLY_SERVICE`. Without starting it, nor the environment of the caller.
@@ -135,6 +137,22 @@ enum Command {
     Off,
     /// Bring back the Guards and Rules blocks of this Repository after `procly off`.
     On,
+    /// Remove everything Procly wrote into this Repository: stop its Services, then take out the Rules blocks, the
+    /// Guard, the exclusion lines and the Env files that nobody edited, and print what was removed and what was left.
+    /// Docker volumes and Logical resources are kept. A Managed block you edited is left as it is, and a prompt
+    /// describing what to undo in it is printed.
+    #[command(
+        after_help = "Exit codes: 0 when the Repository is ejected, also when blocks were left because you edited them, \
+                      125 when Procly itself fails, such as for a container that cannot be stopped or the agent \
+                      CLI of `--agent` failing, in which case what eject removed stays removed. See docs/eject.md and \
+                      docs/exit-codes.md."
+    )]
+    Eject {
+        /// Hand the prompt to your own coding agent in its non-interactive mode, from the current directory, instead
+        /// of printing it. Without this flag no agent is ever run.
+        #[arg(long, value_enum)]
+        agent: Option<AgentCli>,
+    },
     /// The Claude Code hook that blocks the dev-server and compose commands Procly runs instead, and answers with
     /// the Procly command to run. It reads the tool call on its standard input and always exits 0.
     #[command(
@@ -146,6 +164,40 @@ enum Command {
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
+}
+
+/// A coding agent CLI that `eject --agent` can hand a prompt to, with the arguments that make it answer the prompt
+/// once and exit.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AgentCli {
+    /// `claude -p <prompt>`
+    Claude,
+    /// `codex exec <prompt>`
+    Codex,
+    /// `gemini -p <prompt>`
+    Gemini,
+    /// `opencode run <prompt>`
+    Opencode,
+}
+
+impl AgentCli {
+    fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Opencode => "opencode",
+        }
+    }
+
+    /// The arguments before the prompt.
+    fn non_interactive(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude | Self::Gemini => &["-p"],
+            Self::Codex => &["exec"],
+            Self::Opencode => &["run"],
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -270,6 +322,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         } => agent_install(&state, file),
         Command::Off => switch(&state, true),
         Command::On => switch(&state, false),
+        Command::Eject { agent } => eject(&state, agent),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Daemon => {
             daemon::run(&state)?;
@@ -296,7 +349,7 @@ fn tail(output: &str, lines: usize) -> &str {
 }
 
 /// Runs `up`, printing where to reach the healthy Service, or why it is not.
-fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<ExitCode> {
+fn up(state: &StateDir, service: Option<String>, gitignore: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Up {
         service,
@@ -308,6 +361,7 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
         Response::Up {
             service,
             outcome,
+            via,
             port,
             url,
             needs,
@@ -316,10 +370,20 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
             for need in needs {
                 eprintln!(
                     "{} (needed by {service})",
-                    reached(&need.service, need.outcome, need.url, need.port)
+                    reached(&need.service, need.outcome, need.via.as_deref(), need.url, need.port)
                 );
             }
-            println!("{}", reached(&service, outcome, url, port));
+            println!("{}", reached(&service, outcome, via.as_deref(), url, port));
+            Ok(ExitCode::SUCCESS)
+        }
+        // Every Service was asked for, so stdout holds them all, in the order they came up.
+        Response::UpAll { services } => {
+            for up in services {
+                println!(
+                    "{}",
+                    reached(&up.service, up.outcome, up.via.as_deref(), up.url, up.port)
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         Response::Unhealthy {
@@ -333,50 +397,7 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
                 Some(needed_by) => format!("{service}, needed by {needed_by},"),
                 None => service,
             };
-            let (why, code) = match end {
-                ServiceEnd::Exited { code } => (
-                    format!("exited with code {code} before it became healthy"),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Signaled { signal } => (
-                    format!("was killed by signal {signal} before it became healthy"),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Stopped => (
-                    "was stopped by procly down before it became healthy".to_owned(),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Idle { timeout_ms } => (
-                    format!(
-                        "was stopped after {} idle",
-                        duration::format(Duration::from_millis(timeout_ms))
-                    ),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::Failed { restarts } => (
-                    format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::PortMismatch { leased, actual } => (
-                    format!(
-                        "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
-                         tree was stopped"
-                    ),
-                    EXIT_PORT_MISMATCH,
-                ),
-                // Ends a Daemon finds when it restarts, which `up` never waits on, since it starts the Service again.
-                ServiceEnd::Lost | ServiceEnd::Orphaned { .. } | ServiceEnd::NotListening { .. } => (
-                    "ended when the Daemon restarted, before it became healthy".to_owned(),
-                    EXIT_SERVICE_ENDED,
-                ),
-                ServiceEnd::HealthTimeout { timeout_ms } => (
-                    format!(
-                        "did not become healthy within {}, its process tree was stopped",
-                        duration::format(Duration::from_millis(timeout_ms))
-                    ),
-                    EXIT_TIMEOUT,
-                ),
-            };
+            let (why, code) = unhealthy(end);
             if output.is_empty() {
                 eprintln!("procly: service {service} {why}, it printed nothing");
             } else {
@@ -391,6 +412,54 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
             needed_by,
         } => Ok(conflicted(service, &conflicts, needed_by)),
         other => unexpected(other),
+    }
+}
+
+/// Why a Service is not healthy, after its name, and the exit code of `up` for it.
+fn unhealthy(end: ServiceEnd) -> (String, u8) {
+    match end {
+        ServiceEnd::Exited { code } => (
+            format!("exited with code {code} before it became healthy"),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Signaled { signal } => (
+            format!("was killed by signal {signal} before it became healthy"),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Stopped => (
+            "was stopped by procly down before it became healthy".to_owned(),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Idle { timeout_ms } => (
+            format!(
+                "was stopped after {} idle",
+                duration::format(Duration::from_millis(timeout_ms))
+            ),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::Failed { restarts } => (
+            format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::PortMismatch { leased, actual } => (
+            format!(
+                "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
+                 tree was stopped"
+            ),
+            EXIT_PORT_MISMATCH,
+        ),
+        // Ends a Daemon finds when it restarts, which `up` never waits on, since it starts the Service again.
+        ServiceEnd::Lost | ServiceEnd::Orphaned { .. } | ServiceEnd::NotListening { .. } => (
+            "ended when the Daemon restarted, before it became healthy".to_owned(),
+            EXIT_SERVICE_ENDED,
+        ),
+        ServiceEnd::HealthTimeout { timeout_ms } => (
+            format!(
+                "did not become healthy within {}, its process tree was stopped",
+                duration::format(Duration::from_millis(timeout_ms))
+            ),
+            EXIT_TIMEOUT,
+        ),
     }
 }
 
@@ -456,11 +525,16 @@ fn env(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
     }
 }
 
-/// Where to reach a Service that is up: its name, `started` or `reused`, its URL and its port.
-fn reached(service: &str, outcome: StartOutcome, url: Option<String>, port: Option<u16>) -> String {
+/// Where to reach a Service that is up: its name, `started` or `reused` and the Group it runs in when it is covered
+/// by one, its URL and its port.
+fn reached(service: &str, outcome: StartOutcome, via: Option<&str>, url: Option<String>, port: Option<u16>) -> String {
+    let outcome = match via {
+        Some(group) => format!("{} (via {group})", outcome.as_str()),
+        None => outcome.as_str().to_owned(),
+    };
     match (url, port) {
-        (Some(url), Some(port)) => format!("{service} {} {url} port {port}", outcome.as_str()),
-        _ => format!("{service} {}", outcome.as_str()),
+        (Some(url), Some(port)) => format!("{service} {outcome} {url} port {port}"),
+        _ => format!("{service} {outcome}"),
     }
 }
 
@@ -567,6 +641,95 @@ fn switch(state: &StateDir, off: bool) -> anyhow::Result<ExitCode> {
         }
         other => unexpected(other),
     }
+}
+
+/// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands
+/// to the coding agent instead.
+fn eject(state: &StateDir, agent: Option<AgentCli>) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let report = match client::send(state, &Request::Eject { cwd })? {
+        Response::Eject(report) => report,
+        other => return unexpected(other),
+    };
+    print(&eject_summary(&report))?;
+    let Some(prompt) = &report.prompt else {
+        if let Some(agent) = agent {
+            eprintln!(
+                "procly: nothing was left, so there is no prompt to hand to {}",
+                agent.program()
+            );
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    match agent {
+        None => {
+            eprintln!(
+                "procly: {} edited, left as it is, the prompt below describes what to undo, `procly eject --agent \
+                 <cli>` hands it to your coding agent",
+                items_were(report.left.len())
+            );
+            print(&format!("\n{prompt}"))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(agent) => {
+            eprintln!("procly: handing the prompt to {}", agent.program());
+            let status = std::process::Command::new(agent.program())
+                .args(agent.non_interactive())
+                .arg(prompt)
+                .status()
+                .with_context(|| format!("cannot run {}, is it installed and on the PATH?", agent.program()))?;
+            if status.success() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                anyhow::bail!(
+                    "{} exited with {status}, what it was to undo is left as it is",
+                    agent.program()
+                )
+            }
+        }
+    }
+}
+
+/// `1 item was` or `3 items were`, for the items eject left.
+fn items_were(count: usize) -> String {
+    match count {
+        1 => "1 item was".to_owned(),
+        _ => format!("{count} items were"),
+    }
+}
+
+/// One line per Service stopped, per file removed and per file left, then what eject never touches.
+fn eject_summary(report: &EjectReport) -> String {
+    let mut text = String::new();
+    for stopped in &report.stopped {
+        let _ = match &stopped.worktree {
+            Some(worktree) => writeln!(text, "stopped {} of {}", stopped.service, worktree.display()),
+            None => writeln!(
+                text,
+                "stopped {} (Compose service, its volumes are kept)",
+                stopped.service
+            ),
+        };
+    }
+    for removed in &report.removed {
+        let deleted = if removed.deleted && removed.kind != Written::EnvFile {
+            ", the file held nothing else and was deleted"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            text,
+            "removed {} {}{deleted}",
+            removed.kind.as_str(),
+            removed.file.display()
+        );
+    }
+    for left in &report.left {
+        let _ = writeln!(text, "left {} {}, edited", left.kind.as_str(), left.file.display());
+    }
+    text.push_str("left Docker volumes and Logical resources\n");
+    text.push_str("left the files copied by worktree init and the state of the Daemon, Leases and off\n");
+    text
 }
 
 /// Runs the Guard for a Claude Code `PreToolUse` hook: reads the tool call on stdin and, for a command it knows while
