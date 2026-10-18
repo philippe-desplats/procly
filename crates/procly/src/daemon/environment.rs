@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use super::Registry;
 use super::lease::{LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
-use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig};
+use crate::config::{self, Config, ConfigError, PortConfig, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts};
 use crate::envfile;
 use crate::ports::{self, PortsError};
@@ -66,7 +66,12 @@ pub(super) struct Injected {
 /// health check probes. Run before any Lease is granted, so that a request bound to fail stores none.
 pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Option<&'a str>, EnvironmentError> {
     let health_port_name = declared.health_port_name(name)?;
-    ports::check(name, &declared.run, declared.ports.keys())?;
+    // A Compose service has no command, so no placeholder either.
+    let command = match declared.kind(name)? {
+        ServiceKind::Process { run } => run,
+        ServiceKind::Compose { .. } => "",
+    };
+    ports::check(name, command, declared.ports.keys())?;
     Ok(health_port_name)
 }
 
@@ -175,6 +180,8 @@ fn grant_referenced(
     Ok(table)
 }
 
+/// Grants the Leases of the Service `service`. The container of a Compose service is shared by every Worktree, so it
+/// holds the Leases of the Main worktree, whichever Worktree asks.
 fn grant(
     registry: &Registry,
     topology: &Topology,
@@ -184,10 +191,23 @@ fn grant(
     ports: &BTreeMap<String, PortConfig>,
     keep: bool,
 ) -> Result<BTreeMap<String, u16>, EnvironmentError> {
-    let pinned = branch.map(|name| PinnedBranch {
-        name,
-        ports: config.pinned.get(name).and_then(|pinned| pinned.ports.get(service)),
-    });
+    let shared;
+    let compose = config
+        .services
+        .get(service)
+        .is_some_and(|declared| declared.compose.is_some());
+    // The container of a Compose service is shared by every Worktree, so it holds the Leases of the Main worktree
+    // and never those of a Pinned branch.
+    let (topology, pinned) = if compose {
+        shared = topology.main()?;
+        (&shared, None)
+    } else {
+        let pinned = branch.map(|name| PinnedBranch {
+            name,
+            ports: config.pinned.get(name).and_then(|pinned| pinned.ports.get(service)),
+        });
+        (topology, pinned)
+    };
     Ok(registry.leases.grant(&LeaseRequest {
         topology,
         service,
@@ -196,7 +216,7 @@ fn grant(
         declared: &config.declared_ports(),
         pinned,
         expiry: config.settings.lease_expiry,
-        running: &registry.services.running(),
+        running: &registry.running(),
         keep,
     })?)
 }

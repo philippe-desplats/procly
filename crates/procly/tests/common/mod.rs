@@ -327,3 +327,20 @@ pub fn git_output(dir: &Path, args: &[&str]) -> String {
     assert_success(&output);
     stdout(&output)
 }
+
+/// Whether `docker compose` v2 and a running Docker engine are available, printing why a Docker test is skipped
+/// otherwise. A Docker test starts with `if !require_docker() { return; }`.
+pub fn require_docker() -> bool {
+    let works = |args: &[&str]| {
+        Command::new("docker")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|output| output.status.success())
+    };
+    let available = works(&["compose", "version"]) && works(&["info"]);
+    if !available {
+        eprintln!("skipped: docker compose v2 and a running Docker engine are required");
+    }
+    available
+}

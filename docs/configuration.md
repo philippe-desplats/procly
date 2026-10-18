@@ -46,6 +46,11 @@ ports = { http = 4000 }
 [services.worker]
 run = "pnpm --filter worker start"
 
+[services.db]
+compose = "postgres"
+ports = { db = 5432 }
+env = { DB_PORT = "{services.db.ports.db}" }
+
 [worktree]
 copy = [".env", "certs"]
 setup = ["pnpm install"]
@@ -67,16 +72,18 @@ web = { http = 3200 }
 | `idle_timeout` | `"30m"` | How long a Service must be idle to be stopped. |
 | `port_range` | `"24000-24999"` | The Range, bounds included, from which Worktrees other than the Main worktree draw their Leases. The default sits below the ephemeral ports of Linux and macOS. |
 | `lease_expiry` | `"30d"` | How long a Lease that no Service used is kept. Past it, the Lease is dropped and its port returns to the Range. Leases of Pinned branches never expire. |
+| `grace_period` | `"10m"` | How long the container of a Compose service keeps running once no Worktree needs it, see [Compose services](#compose-services). |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
 ## `[services.<name>]`
 
-A Process service. The name is the one given to `procly up` and `procly down`.
+A Process service (`run`) or a Compose service (`compose`). The name is the one given to `procly up` and `procly down`. A Service sets exactly one of `run` and `compose`, and a key that belongs to the other kind is an error.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `run` | yes | The command, run by `/bin/sh -c` at the root of the Worktree, in its own process group, with the environment of the `procly up` that started it. Each `{ports.<name>}` in it is replaced with the leased port of that Port name, for tools that ignore `PORT`. |
+| `run` | one of `run` and `compose` | The command, run by `/bin/sh -c` at the root of the Worktree, in its own process group, with the environment of the `procly up` that started it. Each `{ports.<name>}` in it is replaced with the leased port of that Port name, for tools that ignore `PORT`. |
+| `compose` | one of `run` and `compose` | The service of the compose file of the Repository this Service maps to, see [Compose services](#compose-services). |
 | `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`, or a table with the declared port and a Pool, such as `{ http = { port = 3000, pool = [3100, 3101] } }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
 | `env` | no | The Derived variables of the Service, see [Derived variables](#derived-variables). |
 | `needs` | no | The names of the Services to start first, such as `["db", "api"]`. See below. |
@@ -88,6 +95,40 @@ A Process service. The name is the one given to `procly up` and `procly down`.
 If a need does not become healthy, `up` stops there and exits with the code of that failure (3, 4 or 124). The Service you asked for is not started. A need that is not declared, or needs that loop back to each other, make `up` fail with 125 before anything starts.
 
 `needs` is about starting. `procly down web` leaves what `web` needs running, and a restart of `web` does not start its needs again.
+
+## Compose services
+
+A Compose service maps to a service of the compose file the Repository already has, which Procly never modifies (ADR 0004). `procly up db` runs `docker compose up --detach --wait` for that service and nothing else: Procly does not define a container, and it uses only the `docker compose` v2 CLI.
+
+```toml
+[services.db]
+compose = "postgres"
+ports = { db = 5432 }
+env = { DB_PORT = "{services.db.ports.db}" }
+```
+
+```yaml
+# compose.yaml
+services:
+  postgres:
+    image: postgres:17
+    ports:
+      - "${DB_PORT:-5432}:5432"
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `compose` | none | The name of the service in the compose file. |
+| `env` | none | The Derived variables of the Service, rendered and handed to `docker compose` for the compose file to interpolate, see [Derived variables](#derived-variables). `PORT_<NAME>` is always set too. |
+| `grace_period` | `settings.grace_period` | How long the container keeps running once no Worktree needs it. |
+
+`restart` and `idle` are for Process services and are errors on a Compose service. `needs` and `health` work as they do for a Process service, `up` waits until the container runs, or is healthy when the compose file defines a health check, and then until the health check of Procly passes.
+
+The container is in Shared mode, the only mode of this version: one container serves every Worktree of the Repository, from the compose file of the Main worktree and under the compose project name that file gives. Its Leases are the ones of the Main worktree, so every Worktree reads the same ports, from `procly up` and from `procly env`. A Pinned branch never changes them, and they do not expire while the container runs, nor right after it stops. The Leases reach the compose file through the environment of `docker compose`: `PORT_<NAME>`, `PORT`, the Derived variables of the Service, `PROCLY` and `PROCLY_SERVICE`. The compose file must publish each Lease, which Procly checks with `docker compose config`, and `procly up` fails with 125 naming the variables the compose file may interpolate when it does not.
+
+Containers are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting.
+
+`procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon stops the containers it started when it exits, since it would lose count of the Worktrees that need them.
 
 ## Ports and Leases
 
