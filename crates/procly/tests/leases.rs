@@ -149,3 +149,33 @@ fn an_unreadable_lease_document_fails_up_with_125_naming_it() {
     assert_eq!(output.status.code(), Some(125));
     assert!(common::stderr(&output).contains("leases.json"), "{}", common::stderr(&output));
 }
+
+#[test]
+fn each_port_name_gets_its_own_lease_injected_as_port_and_a_per_name_variable() {
+    let procly = Procly::new();
+    let (start, end) = procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = common::git_worktree_add(&main, "app-other");
+    let env = procly.scratch().join("env");
+    let config = format!(
+        "[services.web]\nrun = 'echo \"$PORT $PORT_HTTP $PORT_TEST {{ports.test}}\" > {}; exec {} --port {{ports.http}}'\n\
+         ports = {{ http = {}, test = {} }}\nhealth = {{ port = 'http' }}\n",
+        env.display(),
+        test_server().display(),
+        free_port(),
+        free_port()
+    );
+    write(&other, "procly.toml", &config);
+
+    let http = port_of(&procly.procly_in(&other, &["up", "web"]));
+
+    let env = std::fs::read_to_string(&env).expect("the service wrote its environment");
+    let values: Vec<u16> = env.split_whitespace().map(|port| port.parse().unwrap()).collect();
+    let [port, port_http, port_test, placeholder] = values[..] else {
+        panic!("unexpected environment {env:?}")
+    };
+    assert_eq!((port, port_http), (http, http));
+    assert_eq!(placeholder, port_test);
+    assert_ne!(port_test, http);
+    assert!((start..=end).contains(&port_test), "{port_test} is outside {start}-{end}");
+}

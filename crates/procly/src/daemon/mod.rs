@@ -268,9 +268,11 @@ fn start_service(registry: &Registry, name: &str, cwd: &Path, env: Vec<(String, 
             range: config.settings.port_range,
             declared: &config.declared_ports(),
         })?;
-        let health_port = declared
-            .health_port_name(name)?
-            .map(|port_name| leases[port_name]);
+        let health_port_name = declared.health_port_name(name)?;
+        let health_port = health_port_name.map(|port_name| leases[port_name]);
+        // After the environment of the caller, so that a `PORT` of its own never wins over the Lease.
+        let mut env = env;
+        env.extend(ports::environment(name, &leases, health_port_name)?);
         Ok(ServiceSpec {
             command: ports::render(name, &declared.run, &leases)?,
             cwd: worktree.clone(),

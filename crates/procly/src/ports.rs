@@ -55,6 +55,32 @@ impl fmt::Display for Range {
 pub(crate) enum PortsError {
     #[error("the command of service {service} uses the placeholder {{ports.{name}}}, but {name} is not one of its Port names")]
     UnknownPlaceholder { service: String, name: String },
+    #[error("Port name {name:?} of service {service} must be made of lowercase letters, digits and underscores")]
+    InvalidPortName { service: String, name: String },
+}
+
+/// The variables carrying the Leases of a Service: `PORT` for the Port name its health check probes, which is the
+/// only one or the one `health.port` names, and `PORT_<NAME>` for each Port name, such as `PORT_HTTP`.
+pub(crate) fn environment(
+    service: &str,
+    leases: &BTreeMap<String, u16>,
+    health_port_name: Option<&str>,
+) -> Result<Vec<(String, String)>, PortsError> {
+    let mut variables = Vec::with_capacity(leases.len() + 1);
+    for (name, port) in leases {
+        // Lowercase only, so that 2 Port names never map to the same variable.
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+            return Err(PortsError::InvalidPortName {
+                service: service.to_owned(),
+                name: name.clone(),
+            });
+        }
+        variables.push((format!("PORT_{}", name.to_ascii_uppercase()), port.to_string()));
+    }
+    if let Some(port) = health_port_name.and_then(|name| leases.get(name)) {
+        variables.push(("PORT".to_owned(), port.to_string()));
+    }
+    Ok(variables)
 }
 
 /// Replaces each `{ports.<name>}` of `command` with the leased port of that Port name.
@@ -113,6 +139,30 @@ mod tests {
     fn a_range_must_be_two_ordered_ports() {
         for text in ["24000", "24000-", "a-b", "24999-24000", "0-10", "24000-70000"] {
             assert!(text.parse::<Range>().is_err(), "{text} parsed");
+        }
+    }
+
+    #[test]
+    fn port_carries_the_health_port_and_each_port_name_its_own_variable() {
+        assert_eq!(
+            environment("web", &leases(), Some("http")).unwrap(),
+            [
+                ("PORT_HTTP".to_owned(), "24000".to_owned()),
+                ("PORT_TEST".to_owned(), "24001".to_owned()),
+                ("PORT".to_owned(), "24000".to_owned()),
+            ]
+        );
+        assert!(environment("worker", &BTreeMap::new(), None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_port_name_must_fit_in_one_variable_of_its_own() {
+        for name in ["Http", "api-http", ""] {
+            let leases = BTreeMap::from([(name.to_owned(), 24000)]);
+            assert!(
+                matches!(environment("web", &leases, None), Err(PortsError::InvalidPortName { .. })),
+                "{name:?} was accepted"
+            );
         }
     }
 
