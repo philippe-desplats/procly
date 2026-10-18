@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 5;
+pub(crate) const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -35,6 +35,14 @@ pub(crate) enum Request {
         cwd: PathBuf,
         /// The environment of the requesting command, as for `Run`.
         env: Vec<(String, String)>,
+        /// Writes the exclusion of the generated files to the `.gitignore` of the Worktree and not to the shared git
+        /// exclude file, unless a block of Procly already sits in the `.gitignore`.
+        gitignore: bool,
+    },
+    /// The variables Procly injects into the Service `service` of the Worktree holding `cwd`, without starting it.
+    Env {
+        service: String,
+        cwd: PathBuf,
     },
     /// Stops a Service of the Worktree holding `cwd`, or every Service of it without `service`, and answers once
     /// their trees are gone.
@@ -85,6 +93,10 @@ pub(crate) enum Response {
         end: ServiceEnd,
         /// The recent output of the Service, to tell why.
         output: String,
+    },
+    /// The variables Procly injects into the Service, by name.
+    Env {
+        variables: Vec<(String, String)>,
     },
     /// The Services `down` stopped, by name.
     Down {
@@ -264,7 +276,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":5,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":6,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

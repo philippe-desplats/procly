@@ -276,3 +276,22 @@ impl Procly {
         wait_until_gone(pid);
     }
 }
+
+/// Like [`git`], and returns what the command printed on stdout.
+pub fn git_output(dir: &Path, args: &[&str]) -> String {
+    let mut command = Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert_success(&output);
+    stdout(&output)
+}
