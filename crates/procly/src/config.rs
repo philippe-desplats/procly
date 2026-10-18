@@ -65,6 +65,8 @@ pub(crate) enum ConfigError {
     },
     #[error("service {service} sets `driver` but declares no `resources` for it to create")]
     DriverWithoutResources { service: String },
+    #[error("driver {name:?} of service {service} must be a file name: lowercase letters, digits, hyphens and underscores")]
+    DriverName { service: String, name: String },
     #[error("service {service} declares `resources` but sets no `driver` to create them")]
     ResourcesWithoutDriver { service: String },
     #[error(
@@ -480,6 +482,14 @@ impl ServiceConfig {
             }
             _ => {}
         }
+        if let Some(driver) = &self.driver
+            && !is_driver_name(driver)
+        {
+            return Err(ConfigError::DriverName {
+                service: name.to_owned(),
+                name: driver.clone(),
+            });
+        }
         for (key, resource) in &self.resources {
             let template = match &resource.seed {
                 Seed::Template(template) => Some(template),
@@ -637,6 +647,14 @@ impl Config {
     pub(crate) fn health_timeout(&self, service: &ServiceConfig) -> Duration {
         service.health.timeout.unwrap_or(self.settings.health_timeout)
     }
+}
+
+/// Whether `text` can name the file of a Driver without leaving the directory that holds it.
+fn is_driver_name(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 /// Whether `text` is a lowercase letter then lowercase letters, digits and underscores: a word every Driver can use as
@@ -1057,6 +1075,24 @@ mod tests {
             service("compose = 'db'\nresources = { dev = { name = 'app' } }\n").kind("db"),
             Err(ConfigError::ResourcesWithoutDriver { service }) if service == "db"
         ));
+    }
+
+    #[test]
+    fn a_driver_is_named_by_a_file_name_that_cannot_leave_the_directory_of_drivers() {
+        for bad in ["../x", "a/b", "A", "", "a.b", "a b"] {
+            let text = format!(
+                "compose = 'db'\ndriver = '{bad}'\nresources = {{ dev = {{ name = 'app' }} }}\n"
+            );
+            assert!(
+                matches!(
+                    service(&text).kind("db"),
+                    Err(ConfigError::DriverName { name, .. }) if name == bad
+                ),
+                "{bad:?}"
+            );
+        }
+        let ok = "compose = 'db'\ndriver = 'my-db_2'\nresources = { dev = { name = 'app' } }\n";
+        assert!(service(ok).kind("db").is_ok());
     }
 
     #[test]
