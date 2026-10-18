@@ -42,11 +42,11 @@ On Linux, `sha256sum --check` replaces `shasum -a 256 --check`.
 ## cargo
 
 ```console
-$ cargo install --locked --git https://github.com/philippe-desplats/procly --bin procly
+$ cargo install --locked --git https://github.com/philippe-desplats/procly --tag v0.1.0 --bin procly
 ```
 
-`--bin procly` leaves out `procly-test-server`, a fixture of the tests that the crate also builds. From a clone, `cargo install --locked --path crates/procly --bin procly` does the same. The toolchain pinned in `rust-toolchain.toml` is the one the CI builds with, an older compiler is refused.
+`--tag` installs a release, leave it out to install the head of the default branch. `--bin procly` leaves out `procly-test-server`, a fixture of the tests that the crate also builds. From a clone, `cargo install --locked --path crates/procly --bin procly` does the same. A compiler older than the `rust-version` of the crate is refused.
 
 ## Checking the installation
 
-`procly --version` prints `procly` and the version of the release, the same string as the tag without its `v`. A binary installed through Homebrew, from a release archive, or by `cargo install` from a tag reports the same version.
+`procly --version` prints `procly` and the version of the release, the same string as the tag without its `v`. A binary installed through Homebrew, from a release archive, or by `cargo install --tag` reports the same version.

@@ -6,6 +6,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -61,9 +64,6 @@ jobs:
       - uses: actions/checkout@v7
       # rustup reads rust-toolchain.toml and installs the pinned toolchain.
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
       # Every runner builds for its own architecture, so no cross toolchain is involved. Only `procly` is shipped,
       # `procly-test-server` is a fixture of the tests.
       - run: cargo build --release --locked --bin procly
@@ -103,6 +103,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       GH_TOKEN: ${{ github.token }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
@@ -124,7 +125,7 @@ jobs:
             --title "Procly ${VERSION}" \
             --generate-notes \
             --verify-tag \
-            --prerelease=${{ needs.version.outputs.prerelease }}
+            --prerelease="${PRERELEASE}"
       # Handed to the next job, which renders the Homebrew formula from the checksums.
       - uses: actions/upload-artifact@v4
         with:
@@ -177,4 +178,4 @@ jobs:
             exit 0
           fi
           git commit -m "procly ${VERSION}"
-          git push
+          git push origin HEAD

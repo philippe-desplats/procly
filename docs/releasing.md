@@ -23,13 +23,15 @@ The workflow then runs 4 jobs in order:
 
 A version with a hyphen, such as `0.2.0-rc.1`, is published as a prerelease and never reaches the tap.
 
-A failed `build` publishes nothing. A failed `homebrew` leaves the GitHub release in place: fix the cause and run the job again from the Actions page, it only rewrites the formula.
+The Linux arm64 build runs on a hosted arm runner, which GitHub provides for free to public repositories only.
+
+A failed `build` publishes nothing. A failed `homebrew` leaves the GitHub release in place: fix the cause and run the job again from the Actions page, it only rewrites the formula. A failed `release` after the GitHub release was created cannot be run again: delete the release and its tag on GitHub, then push the tag again.
 
 ## One-time setup of the tap
 
 The tap is the repository `philippe-desplats/homebrew-procly`, with the formula at `Formula/procly.rb`. Homebrew resolves `brew install philippe-desplats/procly/procly` to it by name.
 
-1. Create the repository, empty and public.
+1. Create the repository, public and initialised with a README, since the workflow cannot check out a repository that has no commit.
 2. Create a fine-grained personal access token limited to that repository, with the `Contents` permission set to read and write.
 3. Store it as the secret `HOMEBREW_TAP_TOKEN` in the settings of the Procly repository.
 
