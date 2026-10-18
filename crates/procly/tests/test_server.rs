@@ -14,7 +14,7 @@ fn the_test_server_listens_on_port_and_exits_on_request() {
         .output()
         .unwrap();
     assert_success(&output);
-    let job = stdout(&output).trim().to_owned();
+    let (job, _) = common::started(&output);
 
     assert_eq!(http_get(port, "/"), "ok\n");
     assert_eq!(http_get(port, "/exit/7"), "ok\n");

@@ -39,7 +39,7 @@ fn concurrent_first_commands_share_one_daemon() {
         .map(|run| {
             let output = run.wait_with_output().unwrap();
             assert_success(&output);
-            stdout(&output).trim().to_owned()
+            common::started(&output).0
         })
         .collect();
 

@@ -66,14 +66,14 @@ impl Procly {
 
     /// Runs `procly run` with the given arguments and returns the Job identifier it printed.
     pub fn run(&self, args: &[&str]) -> String {
+        self.start(args).0
+    }
+
+    /// Runs `procly run` with the given arguments and returns the Job identifier and the outcome it printed.
+    pub fn start(&self, args: &[&str]) -> (String, String) {
         let output = self.procly(&[&["run"], args].concat());
         assert_success(&output);
-        let job = stdout(&output).trim().to_owned();
-        assert!(
-            !job.is_empty() && !job.contains(char::is_whitespace),
-            "unexpected job id {job:?}"
-        );
-        job
+        started(&output)
     }
 
     fn daemon_pid(&self) -> Option<Pid> {
@@ -89,6 +89,17 @@ impl Drop for Procly {
             wait_until_gone(pid);
         }
     }
+}
+
+/// Splits the `<job> <outcome>` line printed by `procly run`.
+pub fn started(output: &Output) -> (String, String) {
+    let line = stdout(output);
+    let words: Vec<&str> = line.split_whitespace().collect();
+    assert!(
+        matches!(words.as_slice(), [_, "started" | "reused"]) && line.ends_with('\n') && line.lines().count() == 1,
+        "unexpected run output {line:?}"
+    );
+    (words[0].to_owned(), words[1].to_owned())
 }
 
 pub fn stdout(output: &Output) -> String {
@@ -135,6 +146,41 @@ pub fn read_pid(path: &Path) -> Pid {
         pid.is_some()
     });
     Pid::from_raw(pid.expect("the pid was read"))
+}
+
+/// `git` isolated from the developer's configuration and from any `GIT_*` variable of a calling hook.
+pub fn git(dir: &Path, args: &[&str]) {
+    let mut command = Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "user.name=Procly Test", "-c", "user.email=test@example.com"])
+        .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert_success(&output);
+}
+
+/// Creates a Repository with one commit in `parent/name`, and returns its Main worktree, canonicalized.
+pub fn git_repository(parent: &Path, name: &str) -> PathBuf {
+    git(parent, &["init", "--quiet", name]);
+    let main = parent.join(name).canonicalize().expect("canonicalize the repository");
+    git(&main, &["commit", "--quiet", "--allow-empty", "--message", "initial"]);
+    main
+}
+
+/// Adds a Worktree next to the Main worktree, on a new branch, and returns it canonicalized.
+pub fn git_worktree_add(main: &Path, name: &str) -> PathBuf {
+    let path = main.parent().expect("the Main worktree has a parent").join(name);
+    git(main, &["worktree", "add", "--quiet", &path.to_string_lossy()]);
+    path.canonicalize().expect("canonicalize the worktree")
 }
 
 /// The path of the bundled test server fixture.

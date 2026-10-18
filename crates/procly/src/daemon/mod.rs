@@ -1,11 +1,12 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
 mod job;
+mod status;
 
 use std::fs::{self, File, Permissions, TryLockError};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,9 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
-use self::job::{JobSpec, Jobs};
-use crate::protocol::{self, Request, Response};
+use self::job::{Fingerprint, JobSpec, Jobs};
+use crate::protocol::{self, Request, Response, StartOutcome};
 use crate::state_dir::StateDir;
+use crate::topology;
 
 /// Runs the Daemon until it receives `SIGTERM` or `SIGINT`.
 ///
@@ -106,7 +108,13 @@ async fn handle(stream: UnixStream, jobs: Arc<Jobs>) {
         }
     };
     // The client may be gone, as when an agent interrupts `procly wait`, nobody is left to tell.
-    let _ = writer.write_all(protocol::encode(response).as_bytes()).await;
+    let line = protocol::encode(response).unwrap_or_else(|error| {
+        protocol::encode(Response::Error {
+            message: format!("cannot send the answer, a path in it is not valid UTF-8: {error}"),
+        })
+        .expect("an error answer holds only a string, which always serializes")
+    });
+    let _ = writer.write_all(line.as_bytes()).await;
 }
 
 async fn dispatch(request: Request, jobs: &Arc<Jobs>) -> Response {
@@ -117,18 +125,15 @@ async fn dispatch(request: Request, jobs: &Arc<Jobs>) -> Response {
             env,
             timeout_ms,
         } => {
-            let spec = JobSpec {
-                command,
-                cwd,
-                env,
-                timeout: Duration::from_millis(timeout_ms),
-            };
             let jobs = Arc::clone(jobs);
-            // Opening a terminal and forking are blocking system calls.
-            match tokio::task::spawn_blocking(move || jobs.start(&spec)).await {
-                Ok(Ok(job)) => Response::Started { job },
+            // Resolving the Topology runs git, and opening a terminal and forking are blocking system calls.
+            let started = tokio::task::spawn_blocking(move || {
+                start_job(&jobs, command, &cwd, env, Duration::from_millis(timeout_ms))
+            });
+            match started.await {
+                Ok(Ok((job, outcome))) => Response::Run { job, outcome },
                 Ok(Err(error)) => Response::Error {
-                    message: format!("{:#}", anyhow::Error::from(error)),
+                    message: format!("{error:#}"),
                 },
                 Err(error) => Response::Error {
                     message: format!("the job could not be started: {error}"),
@@ -149,7 +154,43 @@ async fn dispatch(request: Request, jobs: &Arc<Jobs>) -> Response {
             Some(job) => Response::Logs { output: job.output() },
             None => unknown_job(&id),
         },
+        Request::Status { cwd, all } => {
+            let jobs = Arc::clone(jobs);
+            match tokio::task::spawn_blocking(move || status::report(&jobs, &cwd, all)).await {
+                Ok(Ok(report)) => Response::Status(report),
+                Ok(Err(error)) => Response::Error {
+                    message: format!("{error:#}"),
+                },
+                Err(error) => Response::Error {
+                    message: format!("the status could not be read: {error}"),
+                },
+            }
+        }
     }
+}
+
+fn start_job(
+    jobs: &Jobs,
+    command: String,
+    cwd: &Path,
+    env: Vec<(String, String)>,
+    timeout: Duration,
+) -> anyhow::Result<(String, StartOutcome)> {
+    let cwd = topology::canonicalize(cwd)?;
+    // A Job runs anywhere, even where git fails, it is then deduplicated by its directory and command alone.
+    let topology = topology::resolve(&cwd).unwrap_or_else(|error| {
+        eprintln!(
+            "cannot resolve the topology of {}, running the job outside any repository: {error}",
+            cwd.display()
+        );
+        None
+    });
+    let spec = JobSpec {
+        fingerprint: Fingerprint { topology, cwd, command },
+        env,
+        timeout,
+    };
+    Ok(jobs.start(&spec)?)
 }
 
 fn unknown_job(id: &str) -> Response {

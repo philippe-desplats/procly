@@ -4,6 +4,8 @@ mod duration;
 mod output;
 mod protocol;
 mod state_dir;
+mod status;
+mod topology;
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -35,7 +37,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Start a Job running a shell command in the current directory, and print its identifier.
+    /// Start a Job running a shell command in the current directory, and print its identifier and `started`, or
+    /// `reused` when the same command already runs in the same Worktree and directory.
     Run {
         /// Kill the Job's whole process tree once it has run this long (`90s`, `5m`, `1h`).
         #[arg(long, default_value = "30m", value_parser = duration::parse)]
@@ -47,6 +50,15 @@ enum Command {
     Wait { job: String },
     /// Print the recent output of a running or ended Job.
     Logs { job: String },
+    /// Print the Repository, the current Worktree and its Jobs.
+    Status {
+        /// Report every Worktree of every Repository the Daemon knows, not only the current one.
+        #[arg(long)]
+        all: bool,
+        /// Print JSON carrying a `schema_version`, instead of compact text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
@@ -78,7 +90,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
                 timeout_ms,
             };
             match client::send(&state, &request)? {
-                Response::Started { job } => println!("{job}"),
+                Response::Run { job, outcome } => println!("{job} {}", outcome.as_str()),
                 other => return unexpected(other),
             }
             Ok(ExitCode::SUCCESS)
@@ -97,6 +109,20 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             other => unexpected(other),
         },
+        Command::Status { all, json } => {
+            let cwd = std::env::current_dir().context("cannot read the current directory")?;
+            match client::send(&state, &Request::Status { cwd, all })? {
+                Response::Status(report) => {
+                    print(&if json {
+                        status::json(&report)
+                    } else {
+                        status::text(&report)
+                    })?;
+                    Ok(ExitCode::SUCCESS)
+                }
+                other => unexpected(other),
+            }
+        }
         Command::Daemon => {
             daemon::run(&state)?;
             Ok(ExitCode::SUCCESS)

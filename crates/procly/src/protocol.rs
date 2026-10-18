@@ -6,13 +6,15 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::topology::Worktree;
+
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 1;
+pub(crate) const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub(crate) enum Request {
-    /// Starts a Job and answers as soon as it is spawned.
+    /// Starts a Job and answers as soon as it is spawned, or answers with the running Job of the same Fingerprint.
     Run {
         command: String,
         cwd: PathBuf,
@@ -27,15 +29,74 @@ pub(crate) enum Request {
     Logs {
         job: String,
     },
+    /// The Topology and the Jobs of the Worktree holding `cwd`, or of every Worktree with `all`.
+    Status {
+        cwd: PathBuf,
+        all: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "response", rename_all = "snake_case")]
 pub(crate) enum Response {
-    Started { job: String },
+    Run { job: String, outcome: StartOutcome },
     Ended { output: String, end: JobEnd },
     Logs { output: String },
+    Status(StatusReport),
     Error { message: String },
+}
+
+/// Whether a start request started new work or ended in Reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StartOutcome {
+    Started,
+    Reused,
+}
+
+impl StartOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Reused => "reused",
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct StatusReport {
+    pub(crate) repositories: Vec<RepositoryStatus>,
+    /// Jobs started in a directory outside any Repository.
+    pub(crate) jobs_outside_repositories: Vec<JobStatus>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct RepositoryStatus {
+    pub(crate) git_common_dir: PathBuf,
+    pub(crate) worktrees: Vec<WorktreeStatus>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct WorktreeStatus {
+    #[serde(flatten)]
+    pub(crate) worktree: Worktree,
+    pub(crate) jobs: Vec<JobStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JobStatus {
+    pub(crate) id: String,
+    pub(crate) command: String,
+    pub(crate) cwd: PathBuf,
+    #[serde(flatten)]
+    pub(crate) state: JobState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum JobState {
+    Running,
+    Ended { end: JobEnd },
 }
 
 /// How a Job ended.
@@ -92,12 +153,11 @@ pub(crate) fn decode<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, Deco
     Ok(envelope.body)
 }
 
-/// Encodes one message as a line, newline included.
-pub(crate) fn encode<T: Serialize>(body: T) -> String {
-    let mut line = serde_json::to_string(&Envelope::new(body))
-        .expect("protocol messages hold only strings, integers and paths, which always serialize");
+/// Encodes one message as a line, newline included. Fails only on a path that is not valid UTF-8.
+pub(crate) fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error> {
+    let mut line = serde_json::to_string(&Envelope::new(body))?;
     line.push('\n');
-    line
+    Ok(line)
 }
 
 #[cfg(test)]
@@ -108,14 +168,23 @@ mod tests {
     fn a_message_round_trips_through_a_line() {
         let line = encode(Request::Wait {
             job: "3f9a1c2e".to_owned(),
-        });
-        assert_eq!(line, "{\"version\":1,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        })
+        .unwrap();
+        assert_eq!(line, "{\"version\":2,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 
     #[test]
+    fn a_path_that_is_not_utf8_fails_to_encode_instead_of_panicking() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let cwd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/src/caf\xe9"));
+        assert!(encode(Request::Status { cwd, all: false }).is_err());
+    }
+
+    #[test]
     fn another_protocol_version_is_refused_before_its_body_is_read() {
-        let line = r#"{"version":2,"request":"teleport"}"#;
-        assert!(matches!(decode::<Request>(line), Err(DecodeError::Version(2))));
+        let line = r#"{"version":3,"request":"teleport"}"#;
+        assert!(matches!(decode::<Request>(line), Err(DecodeError::Version(3))));
     }
 }

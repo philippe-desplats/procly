@@ -43,6 +43,8 @@ pub(crate) enum ClientError {
         #[source]
         source: io::Error,
     },
+    #[error("cannot send the request, a path in it is not valid UTF-8")]
+    Encode(#[source] serde_json::Error),
     #[error("the daemon closed the connection without answering")]
     NoResponse,
     #[error("unreadable answer from the daemon")]
@@ -51,15 +53,14 @@ pub(crate) enum ClientError {
 
 /// Sends one request to the Daemon, starting it first if it is not running.
 pub(crate) fn send(state: &StateDir, request: &Request) -> Result<Response, ClientError> {
+    let request = protocol::encode(request).map_err(ClientError::Encode)?;
     let stream = connect_or_start(state)?;
     let connection_error = |source| ClientError::Connection {
         path: state.socket(),
         source,
     };
 
-    (&stream)
-        .write_all(protocol::encode(request).as_bytes())
-        .map_err(connection_error)?;
+    (&stream).write_all(request.as_bytes()).map_err(connection_error)?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line).map_err(connection_error)?;
     if line.is_empty() {

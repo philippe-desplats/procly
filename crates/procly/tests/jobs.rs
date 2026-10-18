@@ -134,7 +134,7 @@ fn the_job_runs_in_the_callers_directory_and_environment() {
         .output()
         .unwrap();
     assert_success(&output);
-    let job = stdout(&output).trim().to_owned();
+    let (job, _) = common::started(&output);
     let output = procly.procly(&["wait", &job]);
 
     let cwd = procly.scratch().canonicalize().unwrap();

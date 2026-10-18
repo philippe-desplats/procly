@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher as _;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
@@ -16,7 +16,8 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::output::OutputBuffer;
-use crate::protocol::JobEnd;
+use crate::protocol::{JobEnd, JobState, JobStatus, StartOutcome};
+use crate::topology::Topology;
 
 /// The recent output kept per Job.
 const OUTPUT_CAPACITY: usize = 1024 * 1024;
@@ -50,20 +51,44 @@ pub(crate) enum JobError {
 
 #[derive(Debug)]
 pub(crate) struct JobSpec {
-    pub(crate) command: String,
-    pub(crate) cwd: PathBuf,
+    pub(crate) fingerprint: Fingerprint,
     pub(crate) env: Vec<(String, String)>,
     pub(crate) timeout: Duration,
+}
+
+/// The identity of a Job: its Worktree, working directory and command.
+#[derive(Debug)]
+pub(crate) struct Fingerprint {
+    /// `None` outside any Repository. The rest of the Topology is kept to report the Job.
+    pub(crate) topology: Option<Topology>,
+    /// Canonicalized, so that 2 spellings of one directory give one Fingerprint.
+    pub(crate) cwd: PathBuf,
+    pub(crate) command: String,
+}
+
+impl Fingerprint {
+    fn matches(&self, other: &Self) -> bool {
+        self.worktree() == other.worktree() && self.cwd == other.cwd && self.command == other.command
+    }
+
+    fn worktree(&self) -> Option<&Path> {
+        self.topology.as_ref().map(|topology| topology.worktree.path.as_path())
+    }
 }
 
 /// Every Job the Daemon knows about, running or ended.
 #[derive(Debug, Default)]
 pub(crate) struct Jobs {
     table: Mutex<HashMap<String, Arc<Job>>>,
+    /// Held from the Fingerprint lookup to the insert, so that 2 concurrent requests never both start the Job,
+    /// while the table itself stays free for requests that only read it.
+    starting: Mutex<()>,
 }
 
 #[derive(Debug)]
 pub(crate) struct Job {
+    fingerprint: Fingerprint,
+    started_at: Instant,
     /// The PTY child leads its own session, so its pid is also the id of the process group holding its tree.
     pid: Pid,
     output: Arc<Mutex<OutputBuffer>>,
@@ -71,68 +96,60 @@ pub(crate) struct Job {
 }
 
 impl Jobs {
-    /// Spawns the Job and returns its identifier, without waiting for it. Must run inside the Tokio runtime.
-    pub(crate) fn start(&self, spec: &JobSpec) -> Result<String, JobError> {
-        let pair = native_pty_system().openpty(PTY_SIZE).map_err(JobError::OpenPty)?;
-        // Taken before the spawn, so that no error path is left between spawning and supervising the child.
-        let reader = pair.master.try_clone_reader().map_err(JobError::OpenPty)?;
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.args(["-c", &spec.command]);
-        command.cwd(&spec.cwd);
-        command.env_clear();
-        for (name, value) in &spec.env {
-            command.env(name, value);
+    /// Returns the running Job with the Fingerprint of `spec`, or spawns a new one without waiting for it.
+    /// Must run inside the Tokio runtime.
+    pub(crate) fn start(&self, spec: &JobSpec) -> Result<(String, StartOutcome), JobError> {
+        // Held through the spawn, which takes milliseconds on a blocking thread and never spans an await.
+        let _starting = self
+            .starting
+            .lock()
+            .expect("the start mutex is never poisoned, no code panics while holding it");
+        let running = self
+            .table()
+            .iter()
+            .find(|(_, job)| job.fingerprint.matches(&spec.fingerprint) && job.end.borrow().is_none())
+            .map(|(id, _)| id.clone());
+        if let Some(id) = running {
+            return Ok((id, StartOutcome::Reused));
         }
-        let mut child = pair.slave.spawn_command(command).map_err(|source| JobError::Spawn {
-            command: spec.command.clone(),
-            cwd: spec.cwd.clone(),
-            source,
-        })?;
-        // The reader below only reaches end of file once every slave handle is closed.
-        drop(pair.slave);
-
-        let pid = child
-            .process_id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .map(Pid::from_raw);
-        let Some(pid) = pid else {
-            // Unreachable on Unix, where every spawned child has a pid, but never leave a child unreaped.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(JobError::NoPid);
-        };
-
-        let output = Arc::new(Mutex::new(OutputBuffer::new(OUTPUT_CAPACITY)));
-        let (reader_done_tx, reader_done) = oneshot::channel();
-        let pump_output = Arc::clone(&output);
-        tokio::task::spawn_blocking(move || {
-            pump(reader, &pump_output);
-            let _ = reader_done_tx.send(());
-        });
-        let waiter = tokio::task::spawn_blocking(move || {
-            let status = wait_for_exit(pid);
-            // Reaped by `wait_for_exit`, the handle has nothing left to release.
-            drop(child);
-            status
-        });
-
-        let job = Arc::new(Job {
-            pid,
-            output,
-            end: watch::Sender::new(None),
-        });
-        tokio::spawn(supervise(
-            Arc::clone(&job),
-            pair.master,
-            waiter,
-            reader_done,
-            spec.timeout,
-        ));
-        Ok(self.insert(job))
+        let job = spawn(spec)?;
+        let mut table = self.table();
+        loop {
+            let id = new_job_id();
+            if !table.contains_key(&id) {
+                table.insert(id.clone(), job);
+                return Ok((id, StartOutcome::Started));
+            }
+        }
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<Arc<Job>> {
         self.table().get(id).cloned()
+    }
+
+    /// Every Job with its Topology, in the order they started.
+    pub(crate) fn statuses(&self) -> Vec<(Option<Topology>, JobStatus)> {
+        let mut jobs: Vec<_> = self
+            .table()
+            .iter()
+            .map(|(id, job)| (id.clone(), Arc::clone(job)))
+            .collect();
+        jobs.sort_by_key(|(_, job)| job.started_at);
+        jobs.into_iter()
+            .map(|(id, job)| {
+                let state = match *job.end.borrow() {
+                    Some(end) => JobState::Ended { end },
+                    None => JobState::Running,
+                };
+                let status = JobStatus {
+                    id,
+                    command: job.fingerprint.command.clone(),
+                    cwd: job.fingerprint.cwd.clone(),
+                    state,
+                };
+                (job.fingerprint.topology.clone(), status)
+            })
+            .collect()
     }
 
     /// Kills the tree of every running Job, for a Daemon about to exit.
@@ -144,22 +161,82 @@ impl Jobs {
         }
     }
 
-    fn insert(&self, job: Arc<Job>) -> String {
-        let mut table = self.table();
-        loop {
-            let id = new_job_id();
-            if !table.contains_key(&id) {
-                table.insert(id.clone(), job);
-                return id;
-            }
-        }
-    }
-
     fn table(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Job>>> {
         self.table
             .lock()
             .expect("the job table mutex is never poisoned, no code panics while holding it")
     }
+}
+
+/// Spawns the Job in a PTY and starts supervising it.
+fn spawn(spec: &JobSpec) -> Result<Arc<Job>, JobError> {
+    let Fingerprint {
+        command: shell_command,
+        cwd,
+        ..
+    } = &spec.fingerprint;
+    let pair = native_pty_system().openpty(PTY_SIZE).map_err(JobError::OpenPty)?;
+    // Taken before the spawn, so that no error path is left between spawning and supervising the child.
+    let reader = pair.master.try_clone_reader().map_err(JobError::OpenPty)?;
+    let mut command = CommandBuilder::new("/bin/sh");
+    command.args(["-c", shell_command]);
+    command.cwd(cwd);
+    command.env_clear();
+    for (name, value) in &spec.env {
+        command.env(name, value);
+    }
+    let mut child = pair.slave.spawn_command(command).map_err(|source| JobError::Spawn {
+        command: shell_command.clone(),
+        cwd: cwd.clone(),
+        source,
+    })?;
+    // The reader below only reaches end of file once every slave handle is closed.
+    drop(pair.slave);
+
+    let pid = child
+        .process_id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .map(Pid::from_raw);
+    let Some(pid) = pid else {
+        // Unreachable on Unix, where every spawned child has a pid, but never leave a child unreaped.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(JobError::NoPid);
+    };
+
+    let output = Arc::new(Mutex::new(OutputBuffer::new(OUTPUT_CAPACITY)));
+    let (reader_done_tx, reader_done) = oneshot::channel();
+    let pump_output = Arc::clone(&output);
+    tokio::task::spawn_blocking(move || {
+        pump(reader, &pump_output);
+        let _ = reader_done_tx.send(());
+    });
+    let waiter = tokio::task::spawn_blocking(move || {
+        let status = wait_for_exit(pid);
+        // Reaped by `wait_for_exit`, the handle has nothing left to release.
+        drop(child);
+        status
+    });
+
+    let job = Arc::new(Job {
+        fingerprint: Fingerprint {
+            topology: spec.fingerprint.topology.clone(),
+            cwd: cwd.clone(),
+            command: shell_command.clone(),
+        },
+        started_at: Instant::now(),
+        pid,
+        output,
+        end: watch::Sender::new(None),
+    });
+    tokio::spawn(supervise(
+        Arc::clone(&job),
+        pair.master,
+        waiter,
+        reader_done,
+        spec.timeout,
+    ));
+    Ok(job)
 }
 
 impl Job {
