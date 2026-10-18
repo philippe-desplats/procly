@@ -290,3 +290,138 @@ fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver
     // The one container, not one recreated for the second Worktree.
     assert_eq!(fixture.project.container(), container);
 }
+
+/// A command Seed that writes `marker` in the new resource through the container, and notes on the host that it ran.
+fn marking_seed(project: &Project, ran: &Path) -> String {
+    format!(
+        "docker compose -p {} exec -T db sh -c \"echo from-seed > /data/res/$PROCLY_RESOURCE_NAME/marker\" \
+         && echo \"$PROCLY_RESOURCE $PROCLY_RESOURCE_NAME $PROCLY_RESOURCE_URL\" >> {}",
+        project.name,
+        ran.display()
+    )
+}
+
+#[test]
+fn docker_each_seed_variant_gives_a_new_resource_its_content_and_an_existing_one_is_left_alone() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
+    let ran = fixture.procly.scratch().join("seed-ran");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    // The template is a resource the container already holds, as a database a team restored once would be.
+    fixture
+        .project
+        .exec("mkdir -p /data/res/base && echo from-template > /data/res/base/marker");
+    fs::write(
+        fixture.main.join("procly.local.toml"),
+        format!(
+            "[services.db.resources.copied]\nname = 'app_copied'\nseed = {{ template = 'base' }}\n\
+             [services.db.resources.filled]\nname = 'app_filled'\nseed = {{ run = '{}' }}\n",
+            marking_seed(&fixture.project, &ran)
+        ),
+    )
+    .expect("write the local config");
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_success(&output);
+    let content = |resource: &str| fixture.project.exec(&format!("cat /data/res/{resource}/marker 2>&1"));
+    // Empty: nothing in it. Template: a copy of it. Command: what the command wrote, told which resource it fills.
+    assert_eq!(fixture.project.exec("ls /data/res/app_plain"), "");
+    assert_eq!(content("app_copied"), "from-template\n");
+    assert_eq!(content("app_filled"), "from-seed\n");
+    let port = fixture.port;
+    assert_eq!(
+        fs::read_to_string(&ran).expect("the seed ran"),
+        format!("filled app_filled dir://localhost:{port}/app_filled\n")
+    );
+
+    // A resource that exists is neither seeded again nor touched, whatever it holds.
+    fixture.project.exec("echo edited > /data/res/app_copied/marker");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_eq!(content("app_copied"), "edited\n");
+    assert_eq!(fs::read_to_string(&ran).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn docker_a_seed_that_fails_drops_the_resource_it_just_created_so_that_the_next_up_seeds_it_again() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let failing = |run: &str| {
+        format!(
+            "[services.db.resources.filled]\nname = 'app_filled'\nseed = {{ run = \"{run}\", timeout = '1m' }}\n"
+        )
+    };
+    fs::write(fixture.main.join("procly.local.toml"), failing("echo no luck >&2; exit 7")).expect("write the config");
+
+    let failed = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(failed.status.code(), Some(125));
+    let message = stderr(&failed);
+    assert!(message.contains("the seed of resource app_filled of service db failed"), "{message}");
+    assert!(message.contains("exited with 7"), "{message}");
+    assert!(message.contains("no luck"), "{message}");
+    assert!(message.contains("has been dropped"), "{message}");
+    assert!(
+        fixture.procly.daemon_log().contains("has been dropped"),
+        "the Daemon log does not say it"
+    );
+    // The resource that existed before is still there, the failed one is not.
+    assert_eq!(resources(&fixture.project), ["app_plain"]);
+
+    fs::write(fixture.main.join("procly.local.toml"), failing("true")).expect("write the config");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_eq!(resources(&fixture.project), ["app_filled", "app_plain"]);
+}
+
+#[test]
+fn docker_a_seed_that_never_ends_is_killed_at_its_timeout_and_drops_its_resource() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    fs::write(
+        fixture.main.join("procly.local.toml"),
+        "[services.db.resources.slow]\nname = 'app_slow'\nseed = { run = 'sleep 30', timeout = '1s' }\n",
+    )
+    .expect("write the config");
+
+    let failed = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(failed.status.code(), Some(125));
+    let message = stderr(&failed);
+    assert!(message.contains("did not end within 1s"), "{message}");
+    assert_eq!(resources(&fixture.project), ["app_plain"]);
+}
+
+#[test]
+fn docker_a_template_seed_needs_a_driver_with_a_copy_command_and_an_existing_template() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    fs::write(
+        fixture.main.join("procly.local.toml"),
+        "[services.db.resources.copied]\nname = 'app_copied'\nseed = { template = 'missing' }\n",
+    )
+    .expect("write the config");
+
+    let missing = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(missing.status.code(), Some(125));
+    let message = stderr(&missing);
+    assert!(message.contains("could not create resource app_copied"), "{message}");
+    assert_eq!(resources(&fixture.project), ["app_plain"]);
+
+    let no_copy = DIRECTORY_DRIVER.replace("copy = 'cp -r /data/res/{template} /data/res/{resource}'\n", "");
+    write_driver_file(&fixture.main.join(".procly/drivers"), "dir", &no_copy);
+    let refused = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    assert_eq!(refused.status.code(), Some(125));
+    assert!(stderr(&refused).contains("has no `copy` command"), "{}", stderr(&refused));
+}
