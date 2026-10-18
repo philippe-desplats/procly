@@ -20,7 +20,7 @@ guard /home/me/app/.claude/settings.json unchanged
 It runs in the Worktree holding the current directory and writes 2 things, both inside that Worktree. Commit them like any other file, so that every Worktree of the Repository gets them.
 
 1. The Rules block goes into `AGENTS.md`, or into `CLAUDE.md` when that is the only instruction file you have. When there is neither, it creates `AGENTS.md`. Pass `--file <path>` to name another file. The file must sit inside the Worktree, and a path that resolves outside it, through `..` or a symlink, is refused. Procly never writes into a global instruction file such as `~/.claude/CLAUDE.md`.
-2. The Guard goes into `.claude/settings.json`, as a `PreToolUse` hook group on the `Bash` tool whose command is `procly guard`. The rest of the file is kept as it is, with its keys in the same order.
+2. The Guard goes into `.claude/settings.json`, as a `PreToolUse` hook group on the `Bash` tool whose command is `procly guard`. The rest of the file is kept, with its keys in the same order, but the file is written again in JSON with 2 spaces of indentation, so a different layout of yours is lost.
 
 The Rules block is a Managed block. In Markdown its markers are HTML comments, so the instruction file renders as before:
 
@@ -61,7 +61,7 @@ The Guard reads each simple command of the line, so `cd apps/web && PORT=3000 np
 | A backend dev server | `nodemon`, `ts-node-dev`, `tsx watch`, `node ace serve`, `adonis serve`, `rails server`, `rails s`, `flask run`, `python manage.py runserver`, `django-admin runserver`, `php artisan serve`, `uvicorn`, `gunicorn`, `hypercorn`, `hugo server`, `jekyll serve`, `ember serve` |
 | Containers | `docker compose up`, `docker compose start`, `docker-compose up`, `docker-compose start`, with any option before the subcommand such as `-f`, `--profile` or `--project-name` |
 
-A launcher in front of a command does not hide it: variables (`PORT=3000`), `env`, `nohup`, `exec`, `time`, `npx`, `bunx`, `pnpx`, `pnpm exec`, `pnpm dlx`, `yarn exec`, `yarn dlx`, `bun x`, `npm exec`, `bundle exec`, `poetry run` and `uv run`. Programs run by path (`./node_modules/.bin/next dev`) and `python3.12` count as their basename.
+A launcher in front of a command does not hide it: variables (`PORT=3000`), `env`, `nohup`, `exec`, `time`, `command`, `setsid`, the keywords `then`, `do` and `else`, `npx`, `bunx`, `pnpx`, `pnpm exec`, `pnpm dlx`, `yarn exec`, `yarn dlx`, `bun x`, `npm exec`, `bundle exec`, `poetry run` and `uv run`. Programs run by path (`./node_modules/.bin/next dev`) and `python3.12` count as their basename.
 
 Not recognized, so let through: `npm test`, `npm run build`, `npm install`, `next build`, `vite build`, `docker compose ps`, `docker compose logs`, `docker compose run`, `docker compose down` and everything else.
 

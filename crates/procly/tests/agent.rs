@@ -147,6 +147,27 @@ fn no_instruction_file_outside_the_worktree_is_ever_written() {
 }
 
 #[test]
+fn a_default_file_or_settings_directory_that_links_out_of_the_worktree_is_refused() {
+    let procly = Procly::new();
+    let home = procly.scratch().join("home");
+    let global = home.join(".claude/CLAUDE.md");
+    write(&global, "my global rules\n");
+    let linked_file = git_repository(procly.scratch(), "linked-file");
+    std::os::unix::fs::symlink(&global, linked_file.join("AGENTS.md")).expect("link the global file");
+    let linked_dir = git_repository(procly.scratch(), "linked-dir");
+    std::os::unix::fs::symlink(home.join(".claude"), linked_dir.join(".claude")).expect("link the global directory");
+
+    for repository in [&linked_file, &linked_dir] {
+        let output = procly.procly_in(repository, &["agent", "install"]);
+        assert_eq!(output.status.code(), Some(125), "{}", stderr(&output));
+        assert!(stderr(&output).contains("outside the Worktree"), "{}", stderr(&output));
+    }
+
+    assert_eq!(read(&global), "my global rules\n");
+    assert!(!home.join(".claude/settings.json").exists());
+}
+
+#[test]
 fn a_named_file_inside_the_worktree_takes_the_rules_block() {
     let procly = Procly::new();
     let main = repository_with_instructions(&procly);

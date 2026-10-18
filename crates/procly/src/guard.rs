@@ -75,7 +75,7 @@ pub(crate) fn denial(recognized: &Recognized, services: &[String]) -> String {
 /// The first command of `command_line` that starts a dev server or containers, `None` when none does.
 pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
     segments(command_line).into_iter().find_map(|segment| {
-        let words = unwrap(&segment.words);
+        let words = strip_launchers(&segment.words);
         // A shell given a command line to run: `bash -c 'npm run dev'`.
         if let [shell, flag, inner, ..] = words
             && matches!(basename(shell), "sh" | "bash" | "zsh" | "dash")
@@ -179,7 +179,7 @@ fn is_assignment(word: &str) -> bool {
 
 /// The words of a command without what only launches it: variables set for it, `nohup`, `exec`, `time`, `npx`,
 /// `pnpm exec`, `bundle exec` and the like.
-fn unwrap(mut words: &[String]) -> &[String] {
+fn strip_launchers(mut words: &[String]) -> &[String] {
     loop {
         let Some(first) = words.first() else {
             return words;
@@ -187,7 +187,14 @@ fn unwrap(mut words: &[String]) -> &[String] {
         let second = words.get(1).map(String::as_str);
         let skip = match (basename(first), second) {
             _ if is_assignment(first) => 1,
-            ("env" | "nohup" | "exec" | "time" | "command" | "setsid" | "npx" | "bunx" | "pnpx", _) => 1,
+            // `command -v vite` asks where a program is and starts nothing.
+            ("command", Some("-v" | "-V")) => return words,
+            // Also the keywords that open a command in a shell script: `if ready; then npm run dev; fi`.
+            (
+                "env" | "nohup" | "exec" | "time" | "command" | "setsid" | "npx" | "bunx" | "pnpx" | "then" | "do"
+                | "else" | "!" | "{",
+                _,
+            ) => 1,
             ("pnpm" | "yarn", Some("exec" | "dlx"))
             | ("bun", Some("x"))
             | ("npm" | "bundle", Some("exec"))
@@ -274,10 +281,7 @@ fn classify(words: &[String]) -> Option<Kind> {
     }
     match program {
         "npm" | "pnpm" | "yarn" | "bun" | "turbo" => {
-            let positional = positional(
-                rest,
-                &["--workspace", "-w", "--prefix", "--filter", "-F", "--dir", "-C"],
-            );
+            let positional = positional(rest, &["--workspace", "--prefix", "--filter", "-F", "--dir", "-C"]);
             let script = match (program, positional.as_slice()) {
                 ("npm", ["start", ..]) => Some("start"),
                 ("npm", [..]) => script_after_run(&positional),
@@ -487,6 +491,8 @@ mod tests {
             ("echo started; docker compose up -d", Kind::Compose),
             ("echo $(npm run dev)", Kind::DevServer),
             ("true |\n  npm run dev", Kind::DevServer),
+            ("if ready; then npm run dev; fi", Kind::DevServer),
+            ("pnpm -w dev", Kind::DevServer),
         ] {
             assert_eq!(kind(command), Some(expected), "{command}");
         }
@@ -502,6 +508,7 @@ mod tests {
             "cat package.json | grep dev",
             "man docker-compose",
             "which vite",
+            "command -v vite",
             "ls dev",
             "bash --norc script.sh",
             "vite --version",

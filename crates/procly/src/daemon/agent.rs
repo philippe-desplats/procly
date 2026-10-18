@@ -106,11 +106,11 @@ pub(super) fn install(registry: &Registry, cwd: &Path, file: Option<&Path>) -> R
         .expect("the agent mutex is never poisoned, no code panics while holding it");
     let topology = topology_in(cwd)?;
     let worktree = &topology.worktree.path;
-    let instructions = instruction_file(worktree, file)?;
+    let instructions = contained(worktree, &instruction_file(worktree, file))?;
     let off = registry.offs.is_off(&topology.git_common_dir)?;
 
     // The settings first, since a file that is not JSON is the likelier failure and nothing is written then.
-    let settings = worktree.join(SETTINGS);
+    let settings = contained(worktree, &worktree.join(SETTINGS))?;
     let guard = hook::install(&registry.managed, &settings)?;
     let rules = registry.managed.write(&instructions, RULES, rules(off))?;
     Ok(InstallReport {
@@ -161,12 +161,19 @@ pub(super) fn guard(registry: &Registry, cwd: &Path) -> Result<(bool, Vec<String
     Ok((off, services))
 }
 
-/// The instruction file to write: the one asked for, which must sit inside the Worktree, or the default one.
-fn instruction_file(worktree: &Path, requested: Option<&Path>) -> Result<PathBuf, AgentError> {
-    let Some(requested) = requested else {
-        let existing = INSTRUCTION_FILES.iter().find(|name| worktree.join(name).is_file());
-        return Ok(worktree.join(existing.unwrap_or(&INSTRUCTION_FILES[0])));
-    };
+/// The instruction file to write: the one asked for, or the default one.
+fn instruction_file(worktree: &Path, requested: Option<&Path>) -> PathBuf {
+    requested.map_or_else(
+        || {
+            let existing = INSTRUCTION_FILES.iter().find(|name| worktree.join(name).is_file());
+            worktree.join(existing.unwrap_or(&INSTRUCTION_FILES[0]))
+        },
+        Path::to_owned,
+    )
+}
+
+/// `requested` with its symlinks resolved, which must sit inside the Worktree.
+fn contained(worktree: &Path, requested: &Path) -> Result<PathBuf, AgentError> {
     let outside = || AgentError::OutsideWorktree {
         file: requested.to_owned(),
         worktree: worktree.to_owned(),

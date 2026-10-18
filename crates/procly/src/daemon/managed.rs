@@ -303,7 +303,7 @@ fn locate(syntax: Syntax, text: &str, block: &str) -> Located {
     let mut start = None;
     for line in text.split_inclusive('\n') {
         let end = offset + line.len();
-        let marker = line.trim_end_matches(['\n', '\r']);
+        let marker = line.trim_end();
         match start {
             None if marker == open => start = Some((offset, end)),
             Some((block_start, content_start)) if marker == close => {
@@ -466,6 +466,12 @@ mod tests {
             render(Syntax::Html, "rules", "text\n"),
             "<!-- >>> procly managed block: rules >>> -->\ntext\n<!-- <<< procly managed block: rules <<< -->\n"
         );
+    }
+
+    #[test]
+    fn a_marker_line_an_editor_padded_with_spaces_still_marks_the_block() {
+        let text = render(Syntax::Html, "rules", "x\n").replace("-->\n", "-->  \n");
+        assert!(matches!(locate(Syntax::Html, &text, "rules"), Located::Found { .. }));
     }
 
     #[test]
