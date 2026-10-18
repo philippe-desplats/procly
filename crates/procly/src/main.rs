@@ -3,19 +3,21 @@ mod config;
 mod daemon;
 mod duration;
 mod output;
+mod ports;
 mod protocol;
 mod state_dir;
 mod status;
 mod topology;
 
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
-use crate::protocol::{JobEnd, Request, Response, ServiceEnd, StartOutcome};
+use crate::protocol::{InitReport, JobEnd, Request, Response, ServiceEnd, StartOutcome};
 use crate::state_dir::StateDir;
 
 /// The exit code of `wait` for a Job killed on timeout, and of `up` for a Service never healthy, the one
@@ -25,6 +27,8 @@ const EXIT_TIMEOUT: u8 = 124;
 const OUTPUT_TAIL_LINES: usize = 20;
 /// The exit code of `up` for a Service that ended before it became healthy.
 const EXIT_SERVICE_ENDED: u8 = 3;
+/// The exit code of `up` for a Service whose process listened on another port than its Lease.
+const EXIT_PORT_MISMATCH: u8 = 4;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
@@ -34,9 +38,10 @@ const EXIT_PROCLY_FAILURE: u8 = 125;
     version,
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
-                  healthy, 124 when `wait` finds the Job timed out or `up` waited past the health timeout, 125 when \
-                  Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
-                  signal N). See docs/exit-codes.md."
+                  healthy, 4 when `up` finds a Port mismatch, 124 when `wait` finds the Job timed out or `up` \
+                  waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
+                  signal N) and `worktree init` with the code of the setup command that failed. See \
+                  docs/exit-codes.md."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -59,9 +64,10 @@ enum Command {
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
                             (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
-                            until Procly gave up restarting it), 124 when it did not \
-                            become healthy within its health timeout and its process tree was stopped, 125 when \
-                            Procly itself fails. See docs/exit-codes.md."
+                            until Procly gave up restarting it), 4 when it listened on another port than its Lease \
+                            (Port mismatch) and its process tree was stopped, 124 when it did not become healthy \
+                            within its health timeout and its process tree was stopped, 125 when Procly itself \
+                            fails. See docs/exit-codes.md."
     )]
     Up { service: String },
     /// Stop a Service of the current Worktree, or all of its Services without an argument, with their whole
@@ -80,9 +86,29 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Prepare a Worktree.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
+}
+
+#[derive(Debug, Subcommand)]
+enum WorktreeCommand {
+    /// Make a fresh Worktree ready: copy the untracked files listed in `[worktree] copy` from the Main worktree
+    /// when the Worktree lacks them, then run the `[worktree] setup` commands that have not succeeded yet.
+    #[command(
+        after_help = "Exit codes: 0 when the Worktree is ready, also when there was nothing to do, the exit code of \
+                      the first setup command that failed (128 + N when killed by signal N, 124 past its time limit), \
+                      which runs again on the next init, 125 when Procly itself fails. See docs/exit-codes.md."
+    )]
+    Init {
+        /// The Worktree to prepare, or any directory in it. Defaults to the current directory.
+        path: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -148,6 +174,9 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
                 other => unexpected(other),
             }
         }
+        Command::Worktree {
+            command: WorktreeCommand::Init { path },
+        } => worktree_init(&state, path),
         Command::Daemon => {
             daemon::run(&state)?;
             Ok(ExitCode::SUCCESS)
@@ -233,6 +262,13 @@ fn up(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
                     format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
                     EXIT_SERVICE_ENDED,
                 ),
+                ServiceEnd::PortMismatch { leased, actual } => (
+                    format!(
+                        "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
+                         tree was stopped"
+                    ),
+                    EXIT_PORT_MISMATCH,
+                ),
                 ServiceEnd::HealthTimeout { timeout_ms } => (
                     format!(
                         "did not become healthy within {}, its process tree was stopped",
@@ -282,6 +318,71 @@ fn down(state: &StateDir, service: Option<String>) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         other => unexpected(other),
+    }
+}
+
+/// Runs `worktree init`, printing one line per file copied and per setup command run.
+fn worktree_init(state: &StateDir, path: Option<PathBuf>) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let path = path.map_or(cwd.clone(), |path| cwd.join(path));
+    let request = Request::WorktreeInit {
+        path,
+        env: caller_env(),
+    };
+    match client::send(state, &request)? {
+        Response::WorktreeInit(report) => {
+            if report.copied.is_empty() && report.ran.is_empty() {
+                println!("nothing to do");
+            }
+            print_init(&report);
+            Ok(ExitCode::SUCCESS)
+        }
+        Response::SetupFailed {
+            report,
+            command,
+            end,
+            output,
+        } => {
+            print_init(&report);
+            let (why, code) = match end {
+                JobEnd::Exited { code } => (
+                    format!("exited with code {code}"),
+                    u8::try_from(code).unwrap_or(EXIT_PROCLY_FAILURE),
+                ),
+                JobEnd::Signaled { signal } => (
+                    format!("was killed by signal {signal}"),
+                    u8::try_from(128 + signal).unwrap_or(EXIT_PROCLY_FAILURE),
+                ),
+                JobEnd::TimedOut { timeout_ms } => (
+                    format!(
+                        "ran past {}, its process tree was killed",
+                        duration::format(Duration::from_millis(timeout_ms))
+                    ),
+                    EXIT_TIMEOUT,
+                ),
+            };
+            let retry = "it will run again on the next worktree init";
+            if output.is_empty() {
+                eprintln!("procly: setup command `{command}` {why}, it printed nothing, {retry}");
+            } else {
+                eprintln!("procly: setup command `{command}` {why}, {retry}, its recent output:");
+                eprint!("{}", tail(&output, OUTPUT_TAIL_LINES));
+            }
+            Ok(ExitCode::from(code))
+        }
+        other => unexpected(other),
+    }
+}
+
+fn print_init(report: &InitReport) {
+    for path in &report.missing {
+        eprintln!("procly: {path} is not in the Main worktree, nothing to copy");
+    }
+    for path in &report.copied {
+        println!("copied {path}");
+    }
+    for command in &report.ran {
+        println!("ran {command}");
     }
 }
 

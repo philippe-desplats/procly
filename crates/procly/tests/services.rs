@@ -336,23 +336,24 @@ fn down_stops_the_whole_process_group_of_the_service_and_the_daemon_logs_who_ask
 #[test]
 fn down_without_a_service_stops_every_service_of_the_worktree_only() {
     let procly = Procly::new();
+    procly.narrow_range();
     let main = git_repository(procly.scratch(), "app");
     let other = common::git_worktree_add(&main, "app-other");
-    let (web, api, elsewhere) = (free_port(), free_port(), free_port());
-    let server = test_server();
-    let config = |web: u16, api: u16| {
-        format!(
-            "[services.web]\nrun = '{server} --port {web}'\nports = {{ http = {web} }}\n\
-             [services.api]\nrun = '{server} --port {api}'\nports = {{ http = {api} }}\n",
-            server = server.display()
-        )
-    };
-    write(&main, "procly.toml", &config(web, api));
-    write(&other, "procly.toml", &config(elsewhere, free_port()));
+    let (web, api) = (free_port(), free_port());
+    let config = format!(
+        "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\n\
+         [services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n",
+        server = test_server().display()
+    );
+    write(&main, "procly.toml", &config);
+    write(&other, "procly.toml", &config);
     for service in ["web", "api"] {
         assert_success(&procly.procly_in(&main, &["up", service]));
     }
-    assert_success(&procly.procly_in(&other, &["up", "web"]));
+    let output = procly.procly_in(&other, &["up", "web"]);
+    assert_success(&output);
+    let elsewhere = stdout(&output);
+    let elsewhere = elsewhere.trim_end().rsplit(' ').next().expect("a port");
 
     let output = procly.procly_in(&main, &["down"]);
 

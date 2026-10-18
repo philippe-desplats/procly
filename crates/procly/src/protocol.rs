@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 4;
+pub(crate) const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -46,6 +46,13 @@ pub(crate) enum Request {
     Status {
         cwd: PathBuf,
         all: bool,
+    },
+    /// Prepares the Worktree holding `path`: copies the listed files from the Main worktree, then runs the setup
+    /// commands it has not run yet, and answers once they have ended.
+    WorktreeInit {
+        path: PathBuf,
+        /// The environment of the requesting command, handed to the setup commands as for `Run`.
+        env: Vec<(String, String)>,
     },
 }
 
@@ -87,6 +94,16 @@ pub(crate) enum Response {
     Down {
         stopped: Vec<String>,
     },
+    /// The Worktree is prepared.
+    WorktreeInit(InitReport),
+    /// A setup command failed, and the ones after it were not run.
+    SetupFailed {
+        report: InitReport,
+        command: String,
+        end: JobEnd,
+        /// The recent output of the command, to tell why.
+        output: String,
+    },
     Error {
         message: String,
     },
@@ -124,6 +141,12 @@ pub(crate) enum ServiceEnd {
     /// The Service crashed again after being restarted `restarts` times, which is as often as it may be.
     Failed {
         restarts: u32,
+    },
+    /// The process group of the Service listened on `actual` and not on its Lease `leased`, and its whole process
+    /// tree was stopped.
+    PortMismatch {
+        leased: u16,
+        actual: u16,
     },
 }
 
@@ -178,6 +201,17 @@ pub(crate) struct JobStatus {
 pub(crate) enum JobState {
     Running,
     Ended { end: JobEnd },
+}
+
+/// What `worktree init` changed in a Worktree.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct InitReport {
+    /// The listed paths that were copied, as listed.
+    pub(crate) copied: Vec<String>,
+    /// The listed paths the Main worktree does not hold.
+    pub(crate) missing: Vec<String>,
+    /// The setup commands that ran and succeeded.
+    pub(crate) ran: Vec<String>,
 }
 
 /// How a Job ended.
@@ -251,7 +285,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":4,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":6,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

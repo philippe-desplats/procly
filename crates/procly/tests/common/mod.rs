@@ -281,3 +281,30 @@ pub fn http_response(port: u16, path: &str) -> String {
     });
     response.expect("the response was read")
 }
+
+impl Procly {
+    /// Gives the Daemon a narrow Range of its own in the user settings, so that tests running in parallel, each with
+    /// its own Daemon, never draw the same ports. Returns its bounds.
+    ///
+    /// The Ranges sit below the ephemeral ports of Linux and macOS, so that [`free_port`] never returns one of them,
+    /// and each test of a binary gets the next one, offset by the pid against other test runs on the same machine.
+    pub fn narrow_range(&self) -> (u16, u16) {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let slot = (std::process::id() * 7 + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 600;
+        let start = 20_000 + u16::try_from(slot * 20).expect("600 slots of 20 ports fit below 32768");
+        let end = start + 19;
+        std::fs::write(
+            self.config_dir().join("config.toml"),
+            format!("[settings]\nport_range = \"{start}-{end}\"\n"),
+        )
+        .expect("write the user settings");
+        (start, end)
+    }
+
+    /// Stops the Daemon and waits until it has exited, the next command starts a new one.
+    pub fn stop_daemon(&self) {
+        let pid = self.daemon_pid().expect("a Daemon runs");
+        kill(pid, Signal::SIGTERM).expect("signal the Daemon");
+        wait_until_gone(pid);
+    }
+}

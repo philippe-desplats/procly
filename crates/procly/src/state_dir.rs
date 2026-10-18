@@ -1,4 +1,4 @@
-//! The per-user state directory holding the Daemon socket, its lock, pid file and log.
+//! The per-user state directory holding the Daemon socket, its lock, pid file and log, and its persistent state.
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
@@ -75,6 +75,11 @@ impl StateDir {
 
     pub(crate) fn log(&self) -> PathBuf {
         self.path.join("daemon.log")
+    }
+
+    /// The document holding every Lease.
+    pub(crate) fn leases(&self) -> PathBuf {
+        self.path.join("leases.json")
     }
 }
 
