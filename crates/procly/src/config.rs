@@ -72,7 +72,7 @@ pub(crate) enum ConfigError {
     #[error("service {service} declares `resources` but sets no `driver` to create them")]
     ResourcesWithoutDriver { service: String },
     #[error(
-        "resource {resource} of service {service} has {name:?}, which must start with a lowercase letter and hold only lowercase letters, digits and underscores"
+        "resource {resource} of service {service} has {name:?}, which must start with a lowercase letter and hold only lowercase letters, digits and underscores, never 2 in a row and never at the end for a name"
     )]
     ResourceName {
         service: String,
@@ -497,10 +497,11 @@ impl ServiceConfig {
                 Seed::Template(template) => Some(template),
                 _ => None,
             };
+            // The name is followed by `__` and the slug in other Worktrees, a template is an existing name as it is.
             let unsafe_name = std::iter::once(key)
-                .chain(std::iter::once(&resource.name))
                 .chain(template)
-                .find(|text| !is_resource_name(text));
+                .find(|text| !is_resource_name(text))
+                .or_else(|| Some(&resource.name).filter(|name| !is_declared_name(name)));
             if let Some(text) = unsafe_name {
                 return Err(ConfigError::ResourceName {
                     service: name.to_owned(),
@@ -649,6 +650,12 @@ impl Config {
     pub(crate) fn health_timeout(&self, service: &ServiceConfig) -> Duration {
         service.health.timeout.unwrap_or(self.settings.health_timeout)
     }
+}
+
+/// Whether `text` can name a resource in the Main worktree: a resource name that holds no `__` and does not end with
+/// `_`, so that the `__` before the slug is always the first one.
+fn is_declared_name(text: &str) -> bool {
+    is_resource_name(text) && !text.contains("__") && !text.ends_with('_')
 }
 
 /// Whether `text` can name the file of a Driver without leaving the directory that holds it.
@@ -1122,6 +1129,17 @@ mod tests {
             ("De v".to_owned(), "De v".to_owned())
         );
         assert!(service(&with("dev_2", "app_2", "'empty'")).kind("db").is_ok());
+        // The Worktree slug is appended after a double underscore, which names never hold so that 2 Worktrees never
+        // share a resource.
+        for bad in ["app__x", "app_"] {
+            assert_eq!(
+                name(&with("dev", bad, "'empty'")),
+                ("dev".to_owned(), bad.to_owned()),
+                "{bad:?}"
+            );
+        }
+        // A template is an existing resource, written as it is.
+        assert!(service(&with("dev", "app", "{ template = 'base__2' }")).kind("db").is_ok());
     }
 
     #[test]

@@ -40,7 +40,7 @@ fn exported(output: &std::process::Output, name: &str) -> String {
         .to_owned()
 }
 
-/// A Repository `app` with a second Worktree `app-other` (slug `app_other`, so its resources end in `_app_other`), and the port of its database.
+/// A Repository `app` with a second Worktree `app-other` (slug `app_other`, so its resources end in `__app_other`), and the port of its database.
 fn repository(procly: &Procly, driver: &str) -> (PathBuf, PathBuf, u16) {
     let main = git_repository(procly.scratch(), "app");
     let other = git_worktree_add(&main, "app-other");
@@ -73,9 +73,9 @@ fn each_worktree_reads_its_own_database_url_through_a_derived_variable() {
     assert_eq!(exported(&in_main, "DATABASE_URL"), url("app"));
     assert_eq!(exported(&in_main, "TEST_DATABASE_URL"), url("app_test"));
     assert_eq!(exported(&in_main, "DATABASE_NAME"), "app");
-    assert_eq!(exported(&in_other, "DATABASE_URL"), url("app_app_other"));
-    assert_eq!(exported(&in_other, "TEST_DATABASE_URL"), url("app_test_app_other"));
-    assert_eq!(exported(&in_other, "DATABASE_NAME"), "app_app_other");
+    assert_eq!(exported(&in_other, "DATABASE_URL"), url("app__app_other"));
+    assert_eq!(exported(&in_other, "TEST_DATABASE_URL"), url("app_test__app_other"));
+    assert_eq!(exported(&in_other, "DATABASE_NAME"), "app__app_other");
 }
 
 #[test]
@@ -88,11 +88,11 @@ fn the_connection_urls_are_mirrored_in_the_env_file_of_the_worktree() {
     let env_file = fs::read_to_string(other.join(".env.procly")).expect("read the Env file");
     assert!(
         env_file.contains(&format!(
-            "DATABASE_URL=postgresql://postgres:postgres@localhost:{port}/app_app_other\n"
+            "DATABASE_URL=postgresql://postgres:postgres@localhost:{port}/app__app_other\n"
         )),
         "{env_file}"
     );
-    assert!(env_file.contains("/app_test_app_other\n"), "{env_file}");
+    assert!(env_file.contains("/app_test__app_other\n"), "{env_file}");
 }
 
 #[test]
@@ -304,7 +304,7 @@ fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver
     );
     assert_eq!(
         resources(&fixture.project),
-        ["app", "app_app_other", "app_test", "app_test_app_other"]
+        ["app", "app__app_other", "app_test", "app_test__app_other"]
     );
     // The one container, not one recreated for the second Worktree.
     assert_eq!(fixture.project.container(), container);
@@ -505,12 +505,12 @@ fn docker_postgres_2_worktrees_get_distinct_databases_for_dev_and_test_in_one_co
 
     assert_eq!(
         databases(&fixture.project),
-        ["app", "app_app_other", "app_test", "app_test_app_other"]
+        ["app", "app__app_other", "app_test", "app_test__app_other"]
     );
     assert_eq!(fixture.project.container(), container);
-    // The URL the Worktree reads is the one of its own database, on the port the container publishes.
-    let url = exported(&fixture.procly.procly_in(&fixture.other, &["env", "db"]), "PORT");
-    assert_eq!(url, fixture.port.to_string());
+    // The container publishes the Lease of the Main worktree, which every Worktree reads.
+    let port = exported(&fixture.procly.procly_in(&fixture.other, &["env", "db"]), "PORT");
+    assert_eq!(port, fixture.port.to_string());
 }
 
 #[test]

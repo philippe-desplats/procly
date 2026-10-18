@@ -163,7 +163,7 @@ A Service with `driver` declares at least one resource, and a Service with `reso
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `name` | required | The name of the resource in the Main worktree. Any other Worktree appends its Worktree slug, so `app` is `app_app_other` in a Worktree in `app-other`. It starts with a lowercase letter and holds lowercase letters, digits and underscores, since it is put in commands run in the container. |
+| `name` | required | The name of the resource in the Main worktree. Any other Worktree appends `__` and its Worktree slug, so `app` is `app__app_other` in a Worktree in `app-other`, and 2 resources never share a name. It starts with a lowercase letter and holds lowercase letters, digits and underscores, never 2 in a row and none at the end, since it is put in commands run in the container. |
 | `seed` | `"empty"` | The initial content of a new resource, see below. |
 
 The key of the resource (`dev` and `test` above) is how templates name it. It follows the same rules as `name`.

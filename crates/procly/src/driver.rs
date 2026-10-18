@@ -135,12 +135,15 @@ impl Driver {
     }
 
     /// The name of a resource in a Worktree: the declared name in the Main worktree, which keeps the names of the
-    /// configuration, and the declared name followed by the slug anywhere else.
+    /// configuration, and the declared name, a double underscore and the slug anywhere else.
+    ///
+    /// A declared name holds no double underscore and a slug neither, so the first one is where to split, and 2
+    /// different resources never get one name, in the same Worktree or in 2 of them.
     pub(crate) fn resource_name(&self, declared: &str, slug: &str, main: bool) -> Result<String, DriverError> {
         let name = if main {
             declared.to_owned()
         } else {
-            format!("{declared}_{slug}")
+            format!("{declared}__{slug}")
         };
         match self.max_length {
             Some(max) if name.len() > max => Err(DriverError::NameTooLong {
@@ -277,7 +280,23 @@ mod tests {
         assert_eq!(driver.resource_name("app", "app_feature", true).unwrap(), "app");
         assert_eq!(
             driver.resource_name("app_test", "feature_x", false).unwrap(),
-            "app_test_feature_x"
+            "app_test__feature_x"
+        );
+    }
+
+    #[test]
+    fn two_worktrees_never_get_the_same_name_for_different_resources() {
+        // `app` in the worktree `test_x` and `app_test` in the worktree `x` would both be `app_test_x` with a single
+        // underscore. A name holds no double underscore, a slug neither, so the first one is the split.
+        let driver = driver(MINIMAL);
+        assert_ne!(
+            driver.resource_name("app", "test_x", false).unwrap(),
+            driver.resource_name("app_test", "x", false).unwrap()
+        );
+        // And none of them is the name of a resource of the Main worktree.
+        assert_ne!(
+            driver.resource_name("app", "test", false).unwrap(),
+            driver.resource_name("app_test", "x", true).unwrap()
         );
     }
 
