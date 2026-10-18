@@ -7,6 +7,7 @@
 )]
 
 use std::io::{Read as _, Write as _};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use tempfile::TempDir;
+use tokio::net::TcpSocket;
 
 /// How long a test waits for an asynchronous effect before failing.
 pub const DEADLINE: Duration = Duration::from_secs(10);
@@ -247,13 +249,39 @@ pub fn test_server() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_procly-test-server"))
 }
 
-/// A port nothing listens on right now.
+/// A port nothing listens on right now, and that the Daemon will accept as a Lease when a test declares it.
+///
+/// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, which the standard library
+/// sets. A port in `TIME_WAIT` passes the standard bind and fails the Daemon's, and the ephemeral ports this hands out
+/// are the ones the suite's own connections use as source ports and leave in `TIME_WAIT` when they close first. Under
+/// load that sent the Lease of a test to the Range, away from the port it declared.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("read the ephemeral port")
-        .port()
+    loop {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind an ephemeral port")
+            .local_addr()
+            .expect("read the ephemeral port")
+            .port();
+        if accepted_by_the_daemon(port) {
+            return port;
+        }
+    }
+}
+
+/// Whether the bind the Daemon checks a Lease with succeeds on `port`, IPv4 and IPv6.
+fn accepted_by_the_daemon(port: u16) -> bool {
+    let v4 = TcpSocket::new_v4().and_then(|socket| socket.bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))));
+    if v4.is_err() {
+        return false;
+    }
+    match TcpSocket::new_v6().and_then(|socket| socket.bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))) {
+        Ok(()) => true,
+        // A host without IPv6 has nothing listening on it.
+        Err(error) => matches!(
+            error.raw_os_error(),
+            Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
+        ),
+    }
 }
 
 /// Sends `GET <path>` to the test server on `port`, retrying until it accepts connections, and returns the body.

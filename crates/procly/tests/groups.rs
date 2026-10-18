@@ -15,14 +15,30 @@ fn listens(port: u16) -> bool {
     TcpStream::connect(("127.0.0.1", port)).is_ok()
 }
 
+/// The Lease of `service` in the Worktree `dir`, as `procly env` prints it.
+///
+/// A test never assumes that the Main worktree got the port it declared: `free_port` releases its port at once, and
+/// another process can take it before the Daemon checks it with a bind, which sends the Lease to the Range. The test
+/// reads the port it was given instead, once the Services it asks about run, since a running Service keeps its Lease.
+fn lease_of(procly: &Procly, dir: &Path, service: &str) -> u16 {
+    let output = procly.procly_in(dir, &["env", service]);
+    assert_success(&output);
+    stdout(&output)
+        .lines()
+        .find_map(|line| line.strip_prefix("export PORT='"))
+        .and_then(|port| port.trim_end_matches('\'').parse().ok())
+        .unwrap_or_else(|| panic!("no Lease of {service} in {}", stdout(&output)))
+}
+
 /// A monorepo whose dev command `dev` runs the test servers of `web` and `api` in one shell, from the Leases it is
-/// handed. It appends a line to `starts` each time it starts and records its environment in `seen`.
+/// handed. It appends a line to `starts` each time it starts and records its environment in `seen`. `web` and `api`
+/// run on their own on their Lease, `web` and `api` being the ports they declare.
 fn monorepo(web: u16, api: u16, starts: &Path, seen: &Path) -> String {
     let server = test_server();
     format!(
-        "[services.web]\nrun = '{server} --port {web}'\nports = {{ http = {web} }}\n\
+        "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\n\
          [services.web.env]\nWEB_URL = 'http://localhost:{{services.web.ports.http}}'\n\
-         [services.api]\nrun = '{server} --port {api}'\nports = {{ http = {api} }}\n\
+         [services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n\
          [services.api.env]\nAPI_URL = 'http://localhost:{{services.api.ports.http}}'\n\
          [services.dev]\ncovers = ['web', 'api']\n\
          run = \"echo start >> {starts}; echo \\\"$PROCLY_SERVICE $WEB_URL $API_URL $PORT_WEB_HTTP $PORT_API_HTTP\\\" > {seen}; \
@@ -49,6 +65,7 @@ fn a_group_runs_as_one_unit_with_the_leases_and_derived_variables_of_every_servi
 
     assert_success(&output);
     assert_eq!(stdout(&output), "dev started\n");
+    let (web, api) = (lease_of(&procly, &main, "web"), lease_of(&procly, &main, "api"));
     assert!(
         listens(web) && listens(api),
         "both covered Services listen once up returns"
@@ -65,6 +82,35 @@ fn a_group_runs_as_one_unit_with_the_leases_and_derived_variables_of_every_servi
 }
 
 #[test]
+fn a_group_runs_on_the_leases_it_is_given_when_the_ports_its_services_declare_are_taken() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    // Something else already listens on the declared ports, which sends the Leases of the Main worktree to the Range.
+    let taken: Vec<_> = (0..2)
+        .map(|_| std::net::TcpListener::bind(("127.0.0.1", 0)).expect("hold a port"))
+        .collect();
+    let [web, api] = [0, 1].map(|i| taken[i].local_addr().expect("read the port").port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
+
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+
+    let (leased_web, leased_api) = (lease_of(&procly, &main, "web"), lease_of(&procly, &main, "api"));
+    assert!(![web, api].contains(&leased_web) && ![web, api].contains(&leased_api));
+    assert!(listens(leased_web) && listens(leased_api));
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        format!("dev http://localhost:{leased_web} http://localhost:{leased_api} {leased_web} {leased_api}\n")
+    );
+    let reused = procly.procly_in(&main, &["up", "web"]);
+    assert_eq!(
+        stdout(&reused),
+        format!("web reused (via dev) http://localhost:{leased_web} port {leased_web}\n")
+    );
+}
+
+#[test]
 fn a_start_request_for_a_covered_service_while_the_group_runs_answers_reused_via_the_group() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
@@ -72,6 +118,7 @@ fn a_start_request_for_a_covered_service_while_the_group_runs_answers_reused_via
     let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
     write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
     assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    let web = lease_of(&procly, &main, "web");
 
     let output = procly.procly_in(&main, &["up", "web"]);
 
@@ -94,6 +141,7 @@ fn a_group_and_a_service_it_covers_never_run_side_by_side() {
     let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
     write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
     assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let api = lease_of(&procly, &main, "api");
 
     let refused = procly.procly_in(&main, &["up", "dev"]);
 
@@ -120,6 +168,7 @@ fn stopping_a_covered_service_while_its_group_runs_points_to_the_group() {
     let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
     write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
     assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    let web = lease_of(&procly, &main, "web");
 
     let output = procly.procly_in(&main, &["down", "web"]);
 
@@ -138,8 +187,8 @@ fn up_without_arguments_starts_every_declared_service_respecting_needs() {
         &main,
         "procly.toml",
         &format!(
-            "[services.web]\nrun = '{server} --port {web}'\nports = {{ http = {web} }}\nneeds = ['api']\n\
-             [services.api]\nrun = '{server} --port {api}'\nports = {{ http = {api} }}\n",
+            "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\nneeds = ['api']\n\
+             [services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n",
             server = server.display()
         ),
     );
@@ -147,6 +196,7 @@ fn up_without_arguments_starts_every_declared_service_respecting_needs() {
     let output = procly.procly_in(&main, &["up"]);
 
     assert_success(&output);
+    let (web, api) = (lease_of(&procly, &main, "web"), lease_of(&procly, &main, "api"));
     assert_eq!(
         stdout(&output),
         format!("api started http://localhost:{api} port {api}\nweb started http://localhost:{web} port {web}\n")
@@ -171,6 +221,7 @@ fn up_without_arguments_starts_a_group_and_not_the_services_it_covers() {
     assert_success(&output);
     assert_eq!(stdout(&output), "dev started\n");
     assert_eq!(start_count(&starts), 1);
+    let api = lease_of(&procly, &main, "api");
     let covered = procly.procly_in(&main, &["up", "api"]);
     assert_eq!(
         stdout(&covered),
@@ -211,6 +262,7 @@ fn a_group_is_healthy_only_once_every_service_it_covers_answers() {
 
     assert_eq!(output.status.code(), Some(124), "stderr: {}", stderr(&output));
     assert!(stderr(&output).contains("within 2s"), "{}", stderr(&output));
+    let web = lease_of(&procly, &main, "web");
     eventually("the group is stopped", || !listens(web));
 }
 
@@ -225,6 +277,8 @@ fn env_prints_what_a_group_receives() {
     let output = procly.procly_in(&main, &["env", "dev"]);
 
     assert_success(&output);
+    // Granted by the `env` above, and kept: a Lease stays as it is until a Service starts on it.
+    let (web, api) = (lease_of(&procly, &main, "web"), lease_of(&procly, &main, "api"));
     assert_eq!(
         stdout(&output),
         format!(
@@ -243,6 +297,7 @@ fn a_group_running_when_the_daemon_was_killed_is_reattached_and_still_covers_its
     let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
     write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
     assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    let (web, api) = (lease_of(&procly, &main, "web"), lease_of(&procly, &main, "api"));
 
     procly.kill_daemon();
     let covered = procly.procly_in(&main, &["up", "web"]);
@@ -288,16 +343,6 @@ fn worktree_with(main: &Path, name: &str, config: &str) -> std::path::PathBuf {
     worktree
 }
 
-/// The Lease of `web` in `worktree`, read without starting anything.
-fn lease_of_web(procly: &Procly, worktree: &Path) -> u16 {
-    let output = procly.procly_in(worktree, &["env", "web"]);
-    stdout(&output)
-        .lines()
-        .find_map(|line| line.strip_prefix("export PORT='"))
-        .and_then(|port| port.trim_end_matches('\'').parse().ok())
-        .expect("the Lease of web")
-}
-
 #[test]
 fn the_leases_of_the_services_a_group_covers_do_not_expire_while_it_runs() {
     let procly = Procly::with_clock();
@@ -305,7 +350,7 @@ fn the_leases_of_the_services_a_group_covers_do_not_expire_while_it_runs() {
     let main = git_repository(procly.scratch(), "app");
     let config = group_config();
     let long_running = worktree_with(&main, "app-long", &config);
-    let leased = lease_of_web(&procly, &long_running);
+    let leased = lease_of(&procly, &long_running, "web");
     assert_success(&procly.procly_in(&long_running, &["up", "dev"]));
 
     // 31 days since the Lease was granted, and the Group runs.
@@ -324,7 +369,7 @@ fn the_leases_of_the_services_a_group_covers_are_dated_again_once_it_ends() {
     let main = git_repository(procly.scratch(), "app");
     let config = group_config();
     let long_running = worktree_with(&main, "app-long", &config);
-    let leased = lease_of_web(&procly, &long_running);
+    let leased = lease_of(&procly, &long_running, "web");
     assert_success(&procly.procly_in(&long_running, &["up", "dev"]));
     procly.advance_clock(Duration::from_hours(29 * 24));
     assert_success(&procly.procly_in(&long_running, &["down", "dev"]));
@@ -348,8 +393,8 @@ fn a_group_that_no_longer_listens_on_the_lease_of_a_covered_service_is_not_reatt
         &main,
         "procly.toml",
         &format!(
-            "[services.web]\nrun = '{server} --port {web}'\nports = {{ http = {web} }}\n\
-             [services.api]\nrun = '{server} --port {api}'\nports = {{ http = {api} }}\n\
+            "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\n\
+             [services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n\
              [services.dev]\ncovers = ['web', 'api']\n\
              run = '{server} --port $PORT_WEB_HTTP & echo $! > {web_pid}; exec {server} --port $PORT_API_HTTP'\n",
             server = server.display(),
@@ -357,6 +402,7 @@ fn a_group_that_no_longer_listens_on_the_lease_of_a_covered_service_is_not_reatt
         ),
     );
     assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    let web = lease_of(&procly, &main, "web");
     procly.kill_daemon();
     // `web` dies while no Daemon watches, the leader of the Group and `api` live on.
     nix::sys::signal::kill(common::read_pid(&web_pid), nix::sys::signal::Signal::SIGKILL).expect("kill web");
@@ -364,8 +410,8 @@ fn a_group_that_no_longer_listens_on_the_lease_of_a_covered_service_is_not_reatt
 
     let output = procly.procly_in(&main, &["up", "api"]);
 
-    assert_success(&output);
-    // Not `reused (via dev)`: the Group was stopped, and `api` starts on its own.
+    // Not `reused (via dev)`: the Group was stopped, and `api` starts on its own, on the Lease it gets now.
+    let api = port_of(&output);
     assert_eq!(
         stdout(&output),
         format!("api started http://localhost:{api} port {api}\n")
