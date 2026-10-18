@@ -63,7 +63,8 @@ enum Command {
         command: String,
     },
     /// Start a declared Service of the current Worktree, or find it running, wait until it is healthy and print
-    /// its name, `started` or `reused`, its URL and its port on one line.
+    /// its name, `started` or `reused`, its URL and its port on one line. A Service covered by a Group that runs is
+    /// `reused (via <group>)`. Without a Service, start every declared Service no Group covers, one line each.
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
                             (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
@@ -77,7 +78,7 @@ enum Command {
         /// of the git exclude file shared by the Repository.
         #[arg(long)]
         gitignore: bool,
-        service: String,
+        service: Option<String>,
     },
     /// Print the variables Procly injects into a Service of the current Worktree as shell exports: its Leases, its
     /// Derived variables, `PROCLY=1` and `PROCLY_SERVICE`. Without starting it, nor the environment of the caller.
@@ -241,7 +242,7 @@ fn tail(output: &str, lines: usize) -> &str {
 }
 
 /// Runs `up`, printing where to reach the healthy Service, or why it is not.
-fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<ExitCode> {
+fn up(state: &StateDir, service: Option<String>, gitignore: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Up {
         service,
@@ -253,6 +254,7 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
         Response::Up {
             service,
             outcome,
+            via,
             port,
             url,
             needs,
@@ -261,10 +263,20 @@ fn up(state: &StateDir, service: String, gitignore: bool) -> anyhow::Result<Exit
             for need in needs {
                 eprintln!(
                     "{} (needed by {service})",
-                    reached(&need.service, need.outcome, need.url, need.port)
+                    reached(&need.service, need.outcome, need.via.as_deref(), need.url, need.port)
                 );
             }
-            println!("{}", reached(&service, outcome, url, port));
+            println!("{}", reached(&service, outcome, via.as_deref(), url, port));
+            Ok(ExitCode::SUCCESS)
+        }
+        // Every Service was asked for, so stdout holds them all, in the order they came up.
+        Response::UpAll { services } => {
+            for up in services {
+                println!(
+                    "{}",
+                    reached(&up.service, up.outcome, up.via.as_deref(), up.url, up.port)
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         Response::Unhealthy {
@@ -346,11 +358,16 @@ fn env(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
     }
 }
 
-/// Where to reach a Service that is up: its name, `started` or `reused`, its URL and its port.
-fn reached(service: &str, outcome: StartOutcome, url: Option<String>, port: Option<u16>) -> String {
+/// Where to reach a Service that is up: its name, `started` or `reused` and the Group it runs in when it is covered
+/// by one, its URL and its port.
+fn reached(service: &str, outcome: StartOutcome, via: Option<&str>, url: Option<String>, port: Option<u16>) -> String {
+    let outcome = match via {
+        Some(group) => format!("{} (via {group})", outcome.as_str()),
+        None => outcome.as_str().to_owned(),
+    };
     match (url, port) {
-        (Some(url), Some(port)) => format!("{service} {} {url} port {port}", outcome.as_str()),
-        _ => format!("{service} {}", outcome.as_str()),
+        (Some(url), Some(port)) => format!("{service} {outcome} {url} port {port}"),
+        _ => format!("{service} {outcome}"),
     }
 }
 

@@ -16,8 +16,9 @@ fn version_flag_prints_the_package_version() {
 
 #[test]
 fn a_usage_error_exits_2() {
+    // A command that fails to parse never reaches the Daemon, so this never starts one under the real home.
     let output = Command::new(env!("CARGO_BIN_EXE_procly"))
-        .arg("up")
+        .arg("wait")
         .output()
         .expect("the procly binary runs");
 
@@ -37,6 +38,21 @@ fn the_help_of_up_lists_its_exit_codes() {
         help.contains("3 when it stopped before it became healthy")
             && help.contains("4 when it listened on another port than its Lease")
             && help.contains("124 when it did not"),
+        "{help}"
+    );
+}
+
+#[test]
+fn the_help_of_up_tells_what_a_group_and_no_argument_do() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .args(["up", "--help"])
+        .output()
+        .expect("the procly binary runs");
+
+    assert!(output.status.success(), "exit status: {}", output.status);
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("reused (via <group>)") && help.contains("Without a Service, start every declared Service"),
         "{help}"
     );
 }

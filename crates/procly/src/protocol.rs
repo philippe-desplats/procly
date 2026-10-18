@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 9;
+pub(crate) const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -30,8 +30,9 @@ pub(crate) enum Request {
         job: String,
     },
     /// Starts a declared Service of the Worktree holding `cwd`, or finds it running, and answers once it is healthy.
+    /// Without `service`, starts every declared Service that no Group covers.
     Up {
-        service: String,
+        service: Option<String>,
         cwd: PathBuf,
         /// The environment of the requesting command, as for `Run`.
         env: Vec<(String, String)>,
@@ -85,8 +86,14 @@ pub(crate) enum Response {
         outcome: StartOutcome,
         port: Option<u16>,
         url: Option<String>,
+        /// The Group running it, when the Service was covered by a Group that runs and nothing was started.
+        via: Option<String>,
         /// The Services it needs, in the order `up` brought them up.
         needs: Vec<UpService>,
+    },
+    /// Every Service `up` without a Service brought up or found running, in the order it brought them up.
+    UpAll {
+        services: Vec<UpService>,
     },
     /// The Service ended before it became healthy.
     Unhealthy {
@@ -127,6 +134,8 @@ pub(crate) enum Response {
 pub(crate) struct UpService {
     pub(crate) service: String,
     pub(crate) outcome: StartOutcome,
+    /// The Group running it, as for [`Response::Up`].
+    pub(crate) via: Option<String>,
     pub(crate) port: Option<u16>,
     pub(crate) url: Option<String>,
 }
@@ -345,7 +354,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":9,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":10,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

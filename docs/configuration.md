@@ -87,6 +87,7 @@ A Process service (`run`) or a Compose service (`compose`). The name is the one 
 | `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`, or a table with the declared port and a Pool, such as `{ http = { port = 3000, pool = [3100, 3101] } }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
 | `env` | no | The Derived variables of the Service, see [Derived variables](#derived-variables). |
 | `needs` | no | The names of the Services to start first, such as `["db", "api"]`. See below. |
+| `covers` | no | The names of the Services this Process service covers, which makes it a Group. See [Groups](#groups). |
 
 ### `needs`
 
@@ -95,6 +96,45 @@ A Process service (`run`) or a Compose service (`compose`). The name is the one 
 If a need does not become healthy, `up` stops there and exits with the code of that failure (3, 4 or 124). The Service you asked for is not started. A need that is not declared, or needs that loop back to each other, make `up` fail with 125 before anything starts.
 
 `needs` is about starting. `procly down web` leaves what `web` needs running, and a restart of `web` does not start its needs again.
+
+## Groups
+
+A Group is a Process service that covers other Services. It runs one command, usually the monorepo-wide dev command, as one unit, so a team can adopt Procly without splitting that command into one per app. The Services it covers stay declared with their own Port names, Derived variables and health settings, which is where the Group takes its Leases and variables from.
+
+```toml
+[services.web]
+run = "pnpm --filter web dev --port {ports.http}"
+ports = { http = 3000 }
+env = { WEB_URL = "http://localhost:{services.web.ports.http}" }
+
+[services.api]
+run = "pnpm --filter api dev --port {ports.http}"
+ports = { http = 4000 }
+
+[services.dev]
+run = "turbo dev"
+covers = ["web", "api"]
+```
+
+`procly up dev` starts `turbo dev` in a process group of its own, with the environment of the caller and then, for every covered Service:
+
+- Its Leases, as `PORT_<SERVICE>_<NAME>`, such as `PORT_WEB_HTTP` and `PORT_API_HTTP`. The plain `PORT` and `PORT_<NAME>` of a Service would collide between 2 covered Services, so a Group gets none of them. A Service name is written in upper case, every character that is not a letter or a digit becoming an underscore.
+- Its Derived variables, such as `WEB_URL`.
+- `PROCLY=1` and `PROCLY_SERVICE`, the name of the Group.
+
+The Group is healthy once every covered Service answers its health check on its Lease, as it would on its own. If one never does, `up` stops the tree of the Group and exits with 124. A Port mismatch on any Lease is reported as for a Service. `procly env dev` prints the same variables without starting anything.
+
+A Group and the Services it covers never run side by side in one Worktree:
+
+- `procly up web` while `dev` runs starts nothing and answers `web reused (via dev) http://localhost:3000 port 3000`, with the Lease of `web`.
+- `procly up dev` while `web` or `api` runs on its own is refused with exit code 125, and starts nothing. Stop them with `procly down web` first.
+- `procly down web` while `dev` runs is refused with exit code 125 and points to `procly down dev`, since `web` is not a process of its own.
+
+`up dev` starts what `dev` needs and what the Services it covers need, but not the covered Services. A need that points to a Service of the same Group is the Group itself. A Group refuses `ports`, `env`, and the `health` keys `port`, `path` and `status`, which are the ones of the Services it covers, and `health.timeout` is its own. It covers at least 1 Service, each one a declared Process service that is not itself a Group, and no Service is covered by 2 Groups. The Leases of a covered Service count as used as long as its Group runs, and are dated again when it ends.
+
+## `procly up` without arguments
+
+`procly up` starts every declared Service that no Group covers, each one after the Services it needs, and waits for each to be healthy before the next one starts. A Group stands for the Services it covers. It replaces the monorepo-wide dev command, with the Leases and the environment of each Service. Stdout holds one line per Service, in the order they came up, `started` or `reused`, with the URL and the port when the Service has one. A Service that does not become healthy stops the sequence and `up` exits with its code (3, 4 or 124), as for a single Service. An empty configuration makes it fail with 125.
 
 ## Compose services
 

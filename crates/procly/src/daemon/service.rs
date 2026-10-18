@@ -48,6 +48,11 @@ pub(crate) enum ServiceError {
     },
     #[error("service {service} started without a process id")]
     NoPid { service: String },
+    #[error(
+        "cannot start group {group}, the services it covers run on their own: {}, stop them with `procly down` first",
+        .services.join(", ")
+    )]
+    CoveredRunning { group: String, services: Vec<String> },
 }
 
 /// What a Service runs, read from the configuration.
@@ -68,6 +73,19 @@ pub(crate) struct ServiceSpec {
     pub(crate) idle: Option<Duration>,
     /// The port of every Lease of the Service, which may listen on all of them.
     pub(crate) lease_ports: Vec<u16>,
+    /// The Services it covers when it is a Group, whose Leases it holds.
+    pub(crate) covers: Vec<String>,
+}
+
+/// How a Service relates to the Groups of its Worktree when it is started.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Relation<'a> {
+    /// Neither a Group nor covered by one.
+    Alone,
+    /// A Group covering these Services, none of which may run on its own.
+    Group { covers: &'a [String] },
+    /// Covered by this Group, whose running answers a start request with a Reuse.
+    Covered { by: &'a str },
 }
 
 /// A Service runs at most once per Worktree: it is keyed by the root of its Worktree and its name.
@@ -87,6 +105,8 @@ pub(crate) struct Services {
 pub(crate) struct Service {
     port: Option<u16>,
     topology: Topology,
+    /// The Services it covers when it is a Group.
+    covers: Vec<String>,
     /// Whether a previous Daemon started the Service, and this one found it running when it started.
     reattached: bool,
     /// The output of every run of the Service, restarts included.
@@ -103,6 +123,8 @@ pub(crate) enum Start {
     Ready {
         service: Arc<Service>,
         outcome: StartOutcome,
+        /// The Group running the Service that was asked for, which is covered by it.
+        via: Option<String>,
     },
     /// The Service is being stopped: wait for [`Service::ended`], then ask again.
     Stopping(Arc<Service>),
@@ -129,11 +151,15 @@ impl Services {
 
     /// Returns the running Service `name` of `worktree`, or spawns it from the spec built by `spec`, without
     /// waiting for it to be healthy. A Service being stopped is no Reuse, it still holds its port until it ends.
+    ///
+    /// A Service covered by a Group that runs is the Group's, and a Group does not start over a Service it covers
+    /// that runs on its own. Both are decided under the start mutex, so that no 2 requests start one of each.
     /// Must run inside the Tokio runtime.
     pub(crate) fn start<E: From<ServiceError>>(
         &self,
         worktree: &Path,
         name: &str,
+        relation: Relation<'_>,
         spec: impl FnOnce() -> Result<ServiceSpec, E>,
     ) -> Result<Start, E> {
         // Held through the configuration read and the spawn, on a blocking thread and never across an await.
@@ -142,23 +168,59 @@ impl Services {
             .lock()
             .expect("the start mutex is never poisoned, no code panics while holding it");
         let key = (worktree.to_owned(), name.to_owned());
-        if let Some(service) = self.table().get(&key).filter(|service| service.is_running()) {
-            let service = Arc::clone(service);
+        let (owner, via) = match relation {
+            Relation::Covered { by } => (by, Some(by.to_owned())),
+            Relation::Alone | Relation::Group { .. } => (name, None),
+        };
+        let running = self
+            .table()
+            .get(&(worktree.to_owned(), owner.to_owned()))
+            .filter(|service| service.is_running())
+            .map(Arc::clone);
+        if let Some(service) = running {
             return Ok(if service.is_stopping() {
                 Start::Stopping(service)
             } else {
                 Start::Ready {
                     service,
                     outcome: StartOutcome::Reused,
+                    via,
                 }
             });
+        }
+        if let Relation::Group { covers } = relation {
+            let table = self.table();
+            let alone: Vec<String> = covers
+                .iter()
+                .filter(|covered| {
+                    table
+                        .get(&(worktree.to_owned(), (*covered).clone()))
+                        .is_some_and(|service| service.is_running())
+                })
+                .cloned()
+                .collect();
+            if !alone.is_empty() {
+                return Err(ServiceError::CoveredRunning {
+                    group: name.to_owned(),
+                    services: alone,
+                }
+                .into());
+            }
         }
         let service = spawn(spec()?, self.clock.clone(), Arc::clone(&self.records))?;
         self.table().insert(key, Arc::clone(&service));
         Ok(Start::Ready {
             service,
             outcome: StartOutcome::Started,
+            via: None,
         })
+    }
+
+    /// Whether the Service `name` of `worktree` runs.
+    pub(crate) fn runs(&self, worktree: &Path, name: &str) -> bool {
+        self.table()
+            .get(&(worktree.to_owned(), name.to_owned()))
+            .is_some_and(|service| service.is_running())
     }
 
     /// Asks every running Service of `worktree`, or only the one named `name`, to stop, and returns them sorted by
@@ -179,12 +241,16 @@ impl Services {
         stopping
     }
 
-    /// The Worktree root and the name of every running Service.
+    /// The Worktree root and the name of every running Service, a running Group counting for the Services it covers
+    /// too, as it holds their Leases.
     pub(crate) fn running(&self) -> BTreeSet<ServiceKey> {
         self.table()
             .iter()
             .filter(|(_, service)| service.is_running())
-            .map(|(key, _)| key.clone())
+            .flat_map(|((worktree, name), service)| {
+                let covered = service.covers.iter().map(|covered| (worktree.clone(), covered.clone()));
+                std::iter::once((worktree.clone(), name.clone())).chain(covered)
+            })
             .collect()
     }
 
@@ -216,6 +282,7 @@ impl Services {
         let service = Arc::new(Service {
             port: record.port,
             topology: record.topology(),
+            covers: record.covers.clone(),
             reattached: true,
             output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
             state: watch::Sender::new(ServiceState::Healthy),
@@ -239,6 +306,7 @@ impl Services {
         let service = Arc::new(Service {
             port: record.port,
             topology: record.topology(),
+            covers: record.covers.clone(),
             reattached: false,
             output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
             state: watch::Sender::new(ServiceState::Ended(end)),
@@ -354,6 +422,7 @@ fn spawn(spec: ServiceSpec, clock: Clock, records: Arc<ServiceRecords>) -> Resul
     let service = Arc::new(Service {
         port: spec.health.port,
         topology: spec.topology.clone(),
+        covers: spec.covers.clone(),
         reattached: false,
         output,
         state: watch::Sender::new(ServiceState::Starting),
@@ -373,6 +442,7 @@ fn record_of(spec: &ServiceSpec) -> ServiceRecord {
         started: None,
         port: spec.health.port,
         lease_ports: spec.lease_ports.clone(),
+        covers: spec.covers.clone(),
         idle_ms: spec
             .idle
             .map(|idle| u64::try_from(idle.as_millis()).unwrap_or(u64::MAX)),
@@ -632,6 +702,7 @@ pub(super) async fn listens_on_lease(pgid: Pid, port: u16, lease_ports: &[u16]) 
     let check = HealthCheck {
         port: Some(port),
         http: None,
+        covered: Vec::new(),
     };
     check.passes().await && ownership(pgid, Some(port), lease_ports).await == Ownership::Listening
 }
@@ -685,7 +756,7 @@ async fn check_health(
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
-            match ownership(pgid, check.port, lease_ports).await {
+            match ownership_all(pgid, check, lease_ports).await {
                 Ownership::Listening => {
                     // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
                     return service.state.send_if_modified(|state| {
@@ -705,7 +776,7 @@ async fn check_health(
         }
         if tokio::time::Instant::now() >= deadline {
             // Only now when nothing answers, a Service may open another port, such as a debugger, long before its Lease.
-            let end = match ownership(pgid, check.port, lease_ports).await {
+            let end = match ownership_all(pgid, check, lease_ports).await {
                 Ownership::Elsewhere(mismatch) => mismatch,
                 Ownership::Listening | Ownership::Pending => ServiceEnd::HealthTimeout {
                     timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
@@ -774,6 +845,18 @@ enum Ownership {
     Elsewhere(ServiceEnd),
     /// It listens on no port yet, or only on another of its Leases.
     Pending,
+}
+
+/// The verdict on every port the check probes, the first that is not `Listening` deciding: a Group listens on the
+/// Lease of each Service it covers.
+async fn ownership_all(pgid: Pid, check: &HealthCheck, lease_ports: &[u16]) -> Ownership {
+    for port in check.ports() {
+        match ownership(pgid, Some(port), lease_ports).await {
+            Ownership::Listening => {}
+            other => return other,
+        }
+    }
+    Ownership::Listening
 }
 
 async fn ownership(pgid: Pid, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {
