@@ -39,7 +39,55 @@ pub(super) fn listeners(port: Option<u16>) -> Option<Vec<Listener>> {
     let address = port.map_or_else(|| "-iTCP".to_owned(), |port| format!("-iTCP:{port}"));
     // `+c 0` prints the whole command name instead of its first 9 characters.
     let output = lsof(&["+c", "0", "-nP", &address, "-sTCP:LISTEN", "-Fpgcn"])?;
-    Some(parse_listeners(&String::from_utf8_lossy(&output.stdout)))
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(unused_mut, reason = "only the Linux build widens the names")
+    )]
+    let mut listeners = parse_listeners(&String::from_utf8_lossy(&output.stdout));
+    #[cfg(target_os = "linux")]
+    for listener in &mut listeners {
+        listener.command = widen_command(listener.pid, &listener.command);
+    }
+    Some(listeners)
+}
+
+/// The kernel keeps 15 characters of the name of a command, in `comm`, which is all `lsof` reads on Linux.
+#[cfg(any(target_os = "linux", test))]
+const COMM_LIMIT: usize = 15;
+
+/// The name `comm` stands for when the kernel cut it, read from the executable or the first argument of the process
+/// `pid`, `comm` itself when neither tells more, such as for a process of another user or one that has exited.
+#[cfg(target_os = "linux")]
+fn widen_command(pid: i32, comm: &str) -> String {
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+    let executable = executable.as_deref().and_then(std::path::Path::to_str);
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
+    let first_argument = cmdline
+        .as_deref()
+        .and_then(|cmdline| cmdline.split(|byte| *byte == 0).next())
+        .and_then(|argument| std::str::from_utf8(argument).ok());
+    full_command(comm, executable, first_argument)
+}
+
+/// `comm` when it is whole, else the file name of `executable` or of `first_argument` that it is the start of.
+///
+/// A name that `comm` is not the start of is another program, such as the interpreter of a script, or a name the
+/// process gave itself, and it never replaces `comm`. A deleted executable shows as `/path/name (deleted)`.
+#[cfg(any(target_os = "linux", test))]
+fn full_command(comm: &str, executable: Option<&str>, first_argument: Option<&str>) -> String {
+    if comm.len() < COMM_LIMIT {
+        return comm.to_owned();
+    }
+    [
+        executable.map(|path| path.strip_suffix(" (deleted)").unwrap_or(path)),
+        first_argument,
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|path| path.rsplit('/').next())
+    .find(|name| name.len() > comm.len() && name.starts_with(comm))
+    .unwrap_or(comm)
+    .to_owned()
 }
 
 /// The working directory of each of the processes `pids` that `lsof` can read.
@@ -163,6 +211,51 @@ mod tests {
         let output = "p4242\nf3\nn127.0.0.1:5173\nf4\nn[::1]:5173\nf5\nn*:24000\np4243\nf6\nn*:9229\n";
         assert_eq!(ports(output), [5173, 9229, 24000]);
         assert_eq!(ports(""), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn widens_a_command_the_kernel_cut_to_15_characters_from_its_executable() {
+        let cut = "procly-test-ser";
+        assert_eq!(
+            full_command(cut, Some("/tmp/target/debug/procly-test-server"), None),
+            "procly-test-server"
+        );
+        assert_eq!(
+            full_command(cut, Some("/tmp/target/debug/procly-test-server (deleted)"), None),
+            "procly-test-server"
+        );
+    }
+
+    #[test]
+    fn widens_a_cut_command_from_the_first_argument_when_the_executable_is_unreadable() {
+        let cut = "procly-test-ser";
+        assert_eq!(
+            full_command(cut, None, Some("./target/debug/procly-test-server")),
+            "procly-test-server"
+        );
+        assert_eq!(
+            full_command(cut, None, Some("procly-test-server")),
+            "procly-test-server"
+        );
+    }
+
+    #[test]
+    fn keeps_the_command_when_it_is_whole_or_nothing_tells_more() {
+        assert_eq!(
+            full_command("postgres", Some("/usr/lib/postgresql/16/bin/postgres"), None),
+            "postgres"
+        );
+        assert_eq!(full_command("procly-test-ser", None, None), "procly-test-ser");
+        // The interpreter of a script is another program than the one `comm` names.
+        assert_eq!(
+            full_command("long-script-name", Some("/usr/bin/python3"), Some("python3")),
+            "long-script-name"
+        );
+        // A name the process gave itself is not the start of its executable.
+        assert_eq!(
+            full_command("node server", Some("/usr/bin/node"), Some("node")),
+            "node server"
+        );
     }
 
     #[test]
