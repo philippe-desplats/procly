@@ -7,10 +7,8 @@
 //! id reserved, so its members are orphans of the Service and are stopped. A pid now held by another process is
 //! never signalled.
 
-use nix::unistd::Pid;
-
 use super::listeners::listening_ports;
-use super::process_group::{self, Identity};
+use super::process_group::{self, Identity, Pid};
 use super::record::ServiceRecord;
 use super::service::{Services, listens_on_lease};
 use super::store::StoreError;

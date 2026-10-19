@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 15;
+pub(crate) const PROTOCOL_VERSION: u32 = 16;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -25,8 +25,14 @@ pub(crate) enum Request {
     },
     /// Answers once the Job has ended.
     Wait { job: String },
-    /// Answers the recent output of the Job `name`, or else of the Service `name` of the Worktree holding `cwd`.
-    Logs { name: String, cwd: PathBuf },
+    /// Answers the recent output of the Job `name`, or else of the Service `name` of the Worktree holding `cwd`. The
+    /// output of a Compose service is the one of its container, read with `docker compose` in `env`.
+    Logs {
+        name: String,
+        cwd: PathBuf,
+        /// The environment of the requesting command, as for `Up`.
+        env: Vec<(String, String)>,
+    },
     /// Starts a declared Service of the Worktree holding `cwd`, or finds it running, and answers once it is healthy.
     /// Without `service`, starts every declared Service that no Group covers.
     Up {
@@ -138,7 +144,10 @@ pub(crate) enum Response {
     /// Whether the Guard stands for the Repository, and the Services it declares for the Worktree.
     Guard {
         off: bool,
-        services: Vec<String>,
+        /// Whether the directory asked about is the root of its Worktree, where a dev command of the whole Repository
+        /// runs.
+        at_root: bool,
+        services: Vec<GuardService>,
     },
     /// The Repository is ejected.
     Eject(EjectReport),
@@ -461,6 +470,16 @@ pub(crate) enum ServiceState {
     },
 }
 
+/// A declared Service, as the Guard matches a command it blocks against it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GuardService {
+    pub(crate) name: String,
+    /// The command of a Process service or a Group.
+    pub(crate) run: Option<String>,
+    /// The service of the compose file a Compose service maps to.
+    pub(crate) compose: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct JobStatus {
     pub(crate) id: String,
@@ -559,7 +578,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":15,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":16,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

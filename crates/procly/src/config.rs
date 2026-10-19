@@ -38,6 +38,8 @@ pub(crate) enum ConfigError {
     AmbiguousHealthPort { service: String, names: Vec<String> },
     #[error("health.port of service {service} is {name}, which is not one of its Port names")]
     UnknownHealthPort { service: String, name: String },
+    #[error("health.path of service {service} is {path:?}, which is neither a path nor an http:// URL with a host")]
+    HealthUrl { service: String, path: String },
     #[error("service {service} needs {need}, which is not declared")]
     UnknownNeed { service: String, need: String },
     #[error("services need each other in a loop: {}", .cycle.join(" -> "))]
@@ -171,6 +173,12 @@ pub(crate) struct Settings {
     /// unset.
     #[serde(default)]
     pub(crate) isolation: Option<IsolationMode>,
+    /// How long a setup command of `worktree init` may run before its whole process tree is killed.
+    #[serde(default = "default_setup_timeout", deserialize_with = "duration")]
+    pub(crate) setup_timeout: Duration,
+    /// How long one command of a Driver may run in the container.
+    #[serde(default = "default_driver_timeout", deserialize_with = "duration")]
+    pub(crate) driver_timeout: Duration,
 }
 
 impl Default for Settings {
@@ -185,6 +193,8 @@ impl Default for Settings {
             lease_expiry: default_lease_expiry(),
             grace_period: default_grace_period(),
             isolation: None,
+            setup_timeout: default_setup_timeout(),
+            driver_timeout: default_driver_timeout(),
         }
     }
 }
@@ -467,7 +477,8 @@ pub(crate) struct HealthConfig {
     /// The Port name to probe, needed only when the Service declares several.
     #[serde(rename = "port")]
     pub(crate) port_name: Option<String>,
-    /// The path of an HTTP request sent once the port accepts connections, `/` when only `status` is set.
+    /// The path of an HTTP request sent once the port accepts connections, `/` when only `status` is set, or an
+    /// `http://` URL giving the `Host` header and the path of that request.
     pub(crate) path: Option<String>,
     /// The status that HTTP request must answer, 200 when only `path` is set.
     pub(crate) status: Option<u16>,
@@ -520,6 +531,7 @@ impl ServiceConfig {
             kind,
             other,
         };
+        self.health.validate(name)?;
         match (&self.run, &self.compose) {
             (Some(run), None) => {
                 if self.grace_period.is_some() {
@@ -642,16 +654,53 @@ impl ServiceConfig {
     }
 }
 
+/// The HTTP request of a health check, sent to the Lease the check probes whatever the URL names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HttpProbe {
+    /// The `Host` header of a check given a URL, the host and port of that URL.
+    pub(crate) host: Option<String>,
+    pub(crate) path: String,
+    pub(crate) status: u16,
+}
+
+/// What `health.path` holds an `http://` URL after.
+const HTTP_SCHEME: &str = "http://";
+
 impl HealthConfig {
-    /// The path and status of the HTTP check, `None` when the TCP connection alone makes the Service healthy.
-    pub(crate) fn http(&self) -> Option<(String, u16)> {
+    /// The HTTP request of the check, `None` when the TCP connection alone makes the Service healthy.
+    pub(crate) fn http(&self) -> Option<HttpProbe> {
         if self.path.is_none() && self.status.is_none() {
             return None;
         }
-        Some((
-            self.path.clone().unwrap_or_else(|| "/".to_owned()),
-            self.status.unwrap_or(200),
-        ))
+        let path = self.path.as_deref().unwrap_or("/");
+        let (host, path) = match path.strip_prefix(HTTP_SCHEME) {
+            Some(url) => {
+                let (host, path) = url.find('/').map_or((url, "/"), |slash| url.split_at(slash));
+                (Some(host.to_owned()), path.to_owned())
+            }
+            None => (None, path.to_owned()),
+        };
+        Some(HttpProbe {
+            host,
+            path,
+            status: self.status.unwrap_or(200),
+        })
+    }
+
+    /// Fails on a `path` that names another scheme than `http://`, or a URL without a host.
+    fn validate(&self, service: &str) -> Result<(), ConfigError> {
+        let Some(path) = &self.path else { return Ok(()) };
+        let refused = match path.strip_prefix(HTTP_SCHEME) {
+            Some(url) => url.split('/').next().is_none_or(str::is_empty),
+            None => path.contains("://"),
+        };
+        if refused {
+            return Err(ConfigError::HealthUrl {
+                service: service.to_owned(),
+                path: path.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -917,6 +966,15 @@ fn default_port_range() -> Range {
 /// Long enough for an agent coming back from a short break to find the container warm.
 fn default_grace_period() -> Duration {
     Duration::from_mins(10)
+}
+
+/// Long enough for a cold install.
+fn default_setup_timeout() -> Duration {
+    Duration::from_mins(30)
+}
+
+fn default_driver_timeout() -> Duration {
+    Duration::from_mins(5)
 }
 
 /// Long enough to cover a branch left aside during a holiday.
@@ -1684,5 +1742,36 @@ mod tests {
     #[test]
     fn up_without_arguments_needs_a_declared_service() {
         assert!(matches!(parsed("").start_order_all(), Err(ConfigError::NoServices)));
+    }
+
+    #[test]
+    fn a_health_path_may_be_an_http_url_giving_the_host_header() {
+        let probe = |text: &str| service(&format!("run = 'x'\n[health]\n{text}\n")).health.http();
+        assert_eq!(
+            probe("path = 'http://app.localhost:3000/health?deep=1'"),
+            Some(HttpProbe {
+                host: Some("app.localhost:3000".to_owned()),
+                path: "/health?deep=1".to_owned(),
+                status: 200,
+            })
+        );
+        assert_eq!(
+            probe("path = 'http://app.localhost'\nstatus = 204"),
+            Some(HttpProbe {
+                host: Some("app.localhost".to_owned()),
+                path: "/".to_owned(),
+                status: 204,
+            })
+        );
+        assert_eq!(probe("path = '/health'").and_then(|probe| probe.host), None);
+        for refused in ["https://app.localhost/health", "http:///health", "ftp://x"] {
+            assert!(
+                matches!(
+                    service(&format!("run = 'x'\n[health]\npath = '{refused}'\n")).kind("web"),
+                    Err(ConfigError::HealthUrl { .. })
+                ),
+                "{refused}"
+            );
+        }
     }
 }

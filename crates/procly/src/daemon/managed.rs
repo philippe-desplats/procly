@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use super::atomic_file::{self, Mode};
 use super::store::{self, StoreError};
 
 /// The version of the format of the document of fingerprints, bumped when a field changes meaning or disappears.
@@ -366,14 +367,7 @@ pub(super) fn write_text(file: &Path, text: &str) -> Result<(), ManagedError> {
     if let Some(dir) = file.parent() {
         fs::create_dir_all(dir).map_err(write_error)?;
     }
-    let mut partial = file.as_os_str().to_owned();
-    partial.push(".procly-partial");
-    let partial = PathBuf::from(partial);
-    fs::write(&partial, text).map_err(write_error)?;
-    if let Ok(metadata) = fs::metadata(file) {
-        fs::set_permissions(&partial, metadata.permissions()).map_err(write_error)?;
-    }
-    fs::rename(&partial, file).map_err(write_error)
+    atomic_file::replace(file, text.as_bytes(), Mode::Kept).map_err(write_error)
 }
 
 /// What to do with `text` to make it hold the block `block` with `content`, and the text to write, if any.

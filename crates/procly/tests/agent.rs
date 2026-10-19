@@ -286,25 +286,62 @@ fn the_guard_blocks_a_known_dev_server_command_and_answers_with_the_procly_comma
     let procly = Procly::new();
     let main = repository_with_services(&procly);
 
-    for command in [
-        "npm run dev",
-        "pnpm --filter web dev",
-        "yarn start",
-        "bun run dev:web",
-        "next dev -p 3001",
-        "cd apps/web && PORT=3000 npx vite",
-        "bash -c 'bun run dev'",
-        "node ace serve --hmr",
-        "docker compose up -d",
-        "docker-compose -f compose.dev.yml up db",
+    for (command, instead) in [
+        // The command of a declared Service, or the start of it.
+        ("npm run dev", "`procly up web`"),
+        ("npm run dev -- --host", "`procly up web`"),
+        // A dev command of the whole Repository, run at its root.
+        ("yarn start", "`procly up`"),
+        ("bash -c 'bun run dev'", "`procly up`"),
+        // Nothing declared starts it, the agent picks the Service.
+        ("pnpm --filter web dev", "`procly up <service>`"),
+        ("bun run dev:web", "`procly up <service>`"),
+        ("next dev -p 3001", "`procly up <service>`"),
+        ("cd apps/web && PORT=3000 npx vite", "`procly up <service>`"),
+        ("cd apps/web && npm start", "`procly up <service>`"),
+        ("node ace serve --hmr", "`procly up <service>`"),
+        ("docker compose up -d", "`procly up <service>`"),
+        ("docker-compose -f compose.dev.yml up db", "`procly up <service>`"),
     ] {
         let reason = denial(&guard(&procly, &main, command)).unwrap_or_else(|| panic!("{command} went through"));
-        assert!(reason.contains("`procly up <service>`"), "{command}: {reason}");
+        assert!(reason.contains(&format!("Run {instead}")), "{command}: {reason}");
         assert!(
             reason.contains("web, api") || reason.contains("api, web"),
             "{command}: {reason}"
         );
     }
+}
+
+#[test]
+fn the_guard_answers_a_compose_command_with_the_compose_services_it_starts() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join("procly.toml"),
+        "[services.db]\ncompose = 'postgres'\n[services.cache]\ncompose = 'redis'\n[services.web]\nrun = 'npm run dev'\n",
+    );
+
+    for (command, instead) in [
+        ("docker compose up -d postgres", "`procly up db`"),
+        ("docker-compose -f compose.dev.yml up redis", "`procly up cache`"),
+        ("docker compose up -d", "`procly up cache && procly up db`"),
+        ("docker compose up mailpit", "`procly up <service>`"),
+    ] {
+        let reason = denial(&guard(&procly, &main, command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(reason.contains(&format!("Run {instead}")), "{command}: {reason}");
+    }
+}
+
+#[test]
+fn the_guard_sends_a_root_dev_command_run_below_the_root_to_the_service_to_pick() {
+    let procly = Procly::new();
+    let main = repository_with_services(&procly);
+    let below = main.join("apps/web");
+    std::fs::create_dir_all(&below).unwrap();
+
+    let reason = denial(&guard(&procly, &below, "yarn start")).expect("blocked");
+
+    assert!(reason.contains("Run `procly up <service>`"), "{reason}");
 }
 
 #[test]

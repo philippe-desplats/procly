@@ -289,6 +289,54 @@ fn an_http_health_check_expects_200_by_default_and_never_passes_on_another_statu
 }
 
 #[test]
+fn an_http_health_check_given_a_url_sends_its_path_and_host_to_the_lease() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let health = "[services.web.health]\npath = 'http://app.localhost:3000/host/app.localhost:3000'\ntimeout = '5s'\n";
+    write(&main, "procly.toml", &format!("{}{health}", web_on(port)));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("web started http://localhost:{port} port {port}\n")
+    );
+}
+
+#[test]
+fn an_http_health_check_given_a_url_of_another_host_never_passes() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let health = "[services.web.health]\npath = 'http://other.localhost/host/app.localhost'\ntimeout = '1s'\n";
+    write(&main, "procly.toml", &format!("{}{health}", web_on(port)));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(output.status.code(), Some(124), "stderr: {}", common::stderr(&output));
+}
+
+#[test]
+fn a_health_url_that_is_not_http_is_refused_before_anything_starts() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let health = "[services.web.health]\npath = 'https://app.localhost/health'\n";
+    write(&main, "procly.toml", &format!("{}{health}", web_on(port)));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(output.status.code(), Some(125));
+    let stderr = common::stderr(&output);
+    assert!(
+        stderr.contains("https://app.localhost/health") && stderr.contains("http://"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn down_stops_the_whole_process_group_of_the_service_and_the_daemon_logs_who_asked() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");

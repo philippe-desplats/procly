@@ -38,8 +38,8 @@ const INSTALL_URL: &str = "https://docs.docker.com/compose/install/";
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
 /// How many lines of the logs of a container that never became healthy `up` shows.
 const LOG_LINES: &str = "20";
-/// How long a command of a Driver may run in the container.
-const DRIVER_COMMAND_TIMEOUT: Duration = Duration::from_mins(5);
+/// How many lines of the logs of a container `procly logs` shows, its recent output as for a Process service.
+const RECENT_LOG_LINES: &str = "1000";
 /// How long the Driver waits between 2 probes of a container that is not ready to create resources.
 const READY_INTERVAL: Duration = Duration::from_millis(250);
 /// How many characters of the output of a failed command an error shows, its end being where the cause is.
@@ -124,8 +124,10 @@ pub(crate) enum ComposeError {
         container: String,
         timeout: String,
     },
-    #[error(transparent)]
-    Prepare(#[from] anyhow::Error),
+    #[error("the service could not be started")]
+    Prepare(#[source] tokio::task::JoinError),
+    #[error("the resources could not be worked out")]
+    Plan(#[source] tokio::task::JoinError),
 }
 
 /// What it takes to start the container of one Compose service.
@@ -140,7 +142,7 @@ pub(crate) struct ComposeSpec {
     /// The environment of the caller, then the Leases and the variables the compose file interpolates.
     pub(crate) env: Vec<(String, String)>,
     /// The Leases of the Service, which the compose file must publish.
-    pub(crate) published: Vec<Published>,
+    pub(crate) published: Vec<PublishedLease>,
     /// The names of the variables the compose file may interpolate the Leases from.
     pub(crate) variables: Vec<String>,
     /// The names of the variables Procly injected into `env`, which the record of the container keeps.
@@ -161,6 +163,8 @@ pub(crate) struct ResourcePlan {
     pub(crate) jobs: Arc<Jobs>,
     /// How long the container may take to accept the commands of the Driver.
     pub(crate) ready_timeout: Duration,
+    /// How long one command of the Driver may run in the container.
+    pub(crate) command_timeout: Duration,
 }
 
 /// A Logical resource a Worktree needs.
@@ -173,7 +177,7 @@ pub(crate) struct PlannedResource {
 
 /// A Lease the compose file must publish on the host.
 #[derive(Debug)]
-pub(crate) struct Published {
+pub(crate) struct PublishedLease {
     pub(crate) port_name: String,
     pub(crate) port: u16,
 }
@@ -301,18 +305,20 @@ impl Composes {
     ///
     /// A container that Procly started and that still runs is a Reuse, whatever the Worktree. Otherwise `prepare`
     /// builds what it takes to start it, on a blocking thread. Either way, `plan` builds the Logical resources
-    /// of the Worktree, which are created in the container when it lacks them.
-    pub(crate) async fn up<P, R>(
+    /// of the Worktree, which are created in the container when it lacks them. A failure of `prepare` or `plan`
+    /// is returned as it is, so that the caller keeps its own error type.
+    pub(crate) async fn up<E, P, R>(
         &self,
         key: ComposeKey,
         worktree: PathBuf,
         grace: Duration,
         prepare: P,
         plan: R,
-    ) -> Result<Brought, ComposeError>
+    ) -> Result<Brought, E>
     where
-        P: FnOnce() -> anyhow::Result<ComposeSpec> + Send + 'static,
-        R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
+        E: From<ComposeError> + Send + 'static,
+        P: FnOnce() -> Result<ComposeSpec, E> + Send + 'static,
+        R: FnOnce() -> Result<Option<ResourcePlan>, E> + Send + 'static,
     {
         let container = self.container(&key);
         let _commands = container.commands.lock().await;
@@ -336,7 +342,7 @@ impl Composes {
 
         let spec = tokio::task::spawn_blocking(prepare)
             .await
-            .map_err(|error| anyhow::anyhow!("the service could not be started: {error}"))??;
+            .map_err(ComposeError::Prepare)??;
         let port = spec.health.port;
         let began = Instant::now();
         let (docker, found) = start(&spec).await?;
@@ -349,7 +355,8 @@ impl Composes {
                         service: spec.name.clone(),
                         container: adopted.name,
                         timeout: duration::format(spec.health_timeout),
-                    });
+                    }
+                    .into());
                 }
                 docker.create_resources(planned(plan).await?.as_ref()).await?;
                 eprintln!(
@@ -373,7 +380,7 @@ impl Composes {
         };
         if health.is_ok() {
             let created = match planned(plan).await {
-                Ok(planned) => docker.create_resources(planned.as_ref()).await,
+                Ok(planned) => docker.create_resources(planned.as_ref()).await.map_err(E::from),
                 Err(error) => Err(error),
             };
             if let Err(error) = created {
@@ -392,7 +399,7 @@ impl Composes {
             }
         }
         if let Err(end) = health {
-            let logs = docker.logs().await;
+            let logs = docker.logs(LOG_LINES).await;
             // Stopped, never removed: the data stays, and the next `up` starts it again.
             let _ = docker.stop().await;
             return Ok(Brought {
@@ -408,6 +415,29 @@ impl Composes {
             port,
             health: Ok(()),
         })
+    }
+
+    /// The recent output of the container of the Compose service `name`, the service `compose` of the compose file
+    /// of `project_dir`, the Main worktree, whether it runs or not. Read with `docker compose logs` in `env`, so that
+    /// the compose file interpolates as it does for `up`.
+    pub(crate) async fn logs(
+        &self,
+        name: &str,
+        compose: &str,
+        project_dir: PathBuf,
+        env: Vec<(String, String)>,
+    ) -> Result<String, ComposeError> {
+        let mut docker = Docker {
+            service: name.to_owned(),
+            compose: compose.to_owned(),
+            project_dir,
+            project: String::new(),
+            env,
+            recorded_env: Vec::new(),
+        };
+        docker.check_available().await?;
+        docker.project = docker.config().await?.name;
+        Ok(docker.logs(RECENT_LOG_LINES).await)
     }
 
     /// Lets `worktree` go of the containers of the Repository `repository`, of the Compose service `name` only when
@@ -710,13 +740,12 @@ fn millis(duration: Duration) -> u64 {
 }
 
 /// What the Worktree needs in the container, built on a blocking thread.
-async fn planned<R>(plan: R) -> Result<Option<ResourcePlan>, ComposeError>
+async fn planned<E, R>(plan: R) -> Result<Option<ResourcePlan>, E>
 where
-    R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
+    E: From<ComposeError> + Send + 'static,
+    R: FnOnce() -> Result<Option<ResourcePlan>, E> + Send + 'static,
 {
-    Ok(tokio::task::spawn_blocking(plan)
-        .await
-        .map_err(|error| anyhow::anyhow!("the resources could not be worked out: {error}"))??)
+    tokio::task::spawn_blocking(plan).await.map_err(ComposeError::Plan)?
 }
 
 /// Stops the container of the Service `key` once the clock reaches `deadline`, unless a Worktree needed it again in
@@ -891,9 +920,9 @@ async fn run_seed(plan: &ResourcePlan, wanted: &PlannedResource, run: &str, time
 
 /// How a command that failed ended, with the end of what it printed.
 fn failure(output: &Output) -> String {
-    let mut printed = text(&output.stderr);
+    let mut printed = trimmed_output(&output.stderr);
     if printed.is_empty() {
-        printed = text(&output.stdout);
+        printed = trimmed_output(&output.stdout);
     }
     format!("{}: {}", output.status, tail(&printed))
 }
@@ -938,9 +967,9 @@ impl Docker {
             Err(error) => return Err(unavailable(format!("cannot run docker: {error}"))),
         };
         if !output.status.success() {
-            return Err(unavailable(text(&output.stderr)));
+            return Err(unavailable(trimmed_output(&output.stderr)));
         }
-        let version = text(&output.stdout);
+        let version = trimmed_output(&output.stdout);
         match major(&version) {
             Some(major) if major < 2 => Err(unavailable(format!("found docker compose {version}"))),
             _ => Ok(()),
@@ -961,7 +990,10 @@ impl Docker {
         let services = ["ps", "--status", "running", "--services"];
         match self.project_output(&services).await {
             Ok(output) => {
-                output.status.success() && text(&output.stdout).lines().any(|service| service == self.compose)
+                output.status.success()
+                    && trimmed_output(&output.stdout)
+                        .lines()
+                        .any(|service| service == self.compose)
             }
             Err(_) => false,
         }
@@ -1031,8 +1063,8 @@ impl Docker {
     }
 
     /// The recent logs of the container.
-    async fn logs(&self) -> String {
-        let logs = ["logs", "--no-color", "--tail", LOG_LINES, &self.compose];
+    async fn logs(&self, lines: &str) -> String {
+        let logs = ["logs", "--no-color", "--tail", lines, &self.compose];
         match self.project_output(&logs).await {
             Ok(output) => {
                 let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1060,7 +1092,7 @@ impl Docker {
             let script = |command: &str| Driver::command(command, name, template);
             // A check that cannot run says nothing about the resource: creating on its word could hit one that exists,
             // and a failed Seed would then drop it.
-            match self.exec(&script(&plan.driver.check)).await {
+            match self.exec(plan, &script(&plan.driver.check)).await {
                 Ok(output) if output.status.success() => continue,
                 Ok(_) => {}
                 Err(error) => {
@@ -1123,7 +1155,7 @@ impl Docker {
     async fn wait_ready(&self, plan: &ResourcePlan, ready: &str) -> Result<(), ComposeError> {
         let deadline = Instant::now() + plan.ready_timeout;
         loop {
-            let reason = match self.exec(ready).await {
+            let reason = match self.exec(plan, ready).await {
                 Ok(output) if output.status.success() => return Ok(()),
                 Ok(output) => failure(&output),
                 Err(error) => error.to_string(),
@@ -1147,7 +1179,7 @@ impl Docker {
         name: &str,
         script: &str,
     ) -> Result<(), ComposeError> {
-        let reason = match self.exec(script).await {
+        let reason = match self.exec(plan, script).await {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => failure(&output),
             Err(error) => error.to_string(),
@@ -1161,14 +1193,14 @@ impl Docker {
         })
     }
 
-    /// Runs a shell script in the container of the service, which must run.
-    async fn exec(&self, script: &str) -> std::io::Result<Output> {
+    /// Runs a shell script of the Driver of `plan` in the container of the service, which must run.
+    async fn exec(&self, plan: &ResourcePlan, script: &str) -> std::io::Result<Output> {
         let args = ["exec", "-T", &self.compose, "sh", "-c", script];
-        match tokio::time::timeout(DRIVER_COMMAND_TIMEOUT, self.project_output(&args)).await {
+        match tokio::time::timeout(plan.command_timeout, self.project_output(&args)).await {
             Ok(output) => output,
             Err(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("it did not end within {}", duration::format(DRIVER_COMMAND_TIMEOUT)),
+                format!("it did not end within {}", duration::format(plan.command_timeout)),
             )),
         }
     }
@@ -1205,7 +1237,7 @@ impl Docker {
         Err(ComposeError::Command {
             service: self.service.clone(),
             args: args.join(" "),
-            stderr: text(&output.stderr),
+            stderr: trimmed_output(&output.stderr),
         })
     }
 
@@ -1288,7 +1320,8 @@ fn major(version: &str) -> Option<u32> {
     version.trim_start_matches('v').split('.').next()?.parse().ok()
 }
 
-fn text(bytes: &[u8]) -> String {
+/// The output of a command as trimmed text, an invalid UTF-8 sequence read as a replacement character.
+fn trimmed_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_owned()
 }
 

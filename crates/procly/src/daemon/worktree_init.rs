@@ -14,14 +14,16 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use super::Registry;
+use super::atomic_file::{self, Mode};
 use super::job::{Fingerprint, JobSpec};
+use super::store;
 use crate::protocol::{InitReport, JobEnd, Response};
 use crate::topology::{self, Topology};
 
-/// How long a setup command may run before its whole process tree is killed, long enough for a cold install.
-const SETUP_TIMEOUT: Duration = Duration::from_mins(30);
 /// The record of the setup commands that succeeded, in the git directory of the Worktree.
 const RECORD_FILE: &str = "procly-worktree-init.json";
+/// The version of the format of the record, a state document like the ones of the state directory (ADR 0012).
+const RECORD_VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 enum InitError {
@@ -40,22 +42,10 @@ enum InitError {
     },
     #[error("the Repository holding {worktree} has no Main worktree to copy from")]
     NoMainWorktree { worktree: PathBuf },
-    #[error("cannot write {path}")]
-    WriteRecord {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("{path} is not valid, remove it to run every setup command again")]
-    InvalidRecord {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
 }
 
 /// The setup commands that succeeded in a Worktree, by their text.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Record {
     setup: Vec<String>,
 }
@@ -64,6 +54,8 @@ struct Record {
 struct Prepared {
     report: InitReport,
     setup: Vec<String>,
+    /// How long each setup command may run before its whole process tree is killed.
+    setup_timeout: Duration,
     record_path: PathBuf,
     record: Record,
 }
@@ -95,6 +87,7 @@ pub(super) async fn run(
     let Prepared {
         mut report,
         setup,
+        setup_timeout,
         record_path,
         mut record,
     } = tokio::task::spawn_blocking(move || prepare(&prepared_topology))
@@ -111,7 +104,7 @@ pub(super) async fn run(
                 command: command.clone(),
             },
             env: env.clone(),
-            timeout: SETUP_TIMEOUT,
+            timeout: setup_timeout,
         };
         let jobs = Arc::clone(&registry);
         // Opening a terminal and forking are blocking system calls.
@@ -133,8 +126,8 @@ pub(super) async fn run(
             });
         }
         record.setup.push(command.clone());
-        let (path, saved) = (record_path.clone(), serde_json::to_string(&record)?);
-        tokio::task::spawn_blocking(move || write_record(&path, &saved))
+        let (path, saved) = (record_path.clone(), record.clone());
+        tokio::task::spawn_blocking(move || store::save(&path, RECORD_VERSION, &saved))
             .await
             .context("the record could not be written")??;
         report.ran.push(command);
@@ -171,10 +164,11 @@ fn prepare(topology: &Topology) -> anyhow::Result<Prepared> {
         }
     }
     let record_path = topology::git_dir(&worktree)?.join(RECORD_FILE);
-    let record = read_record(&record_path)?;
+    let record = store::load(&record_path, RECORD_VERSION)?.unwrap_or_default();
     Ok(Prepared {
         report,
         setup: config.worktree.setup,
+        setup_timeout: config.settings.setup_timeout,
         record_path,
         record,
     })
@@ -207,32 +201,6 @@ fn exists(path: &Path) -> Result<bool, InitError> {
             source,
         }),
     }
-}
-
-/// The record at `path`, empty when the Worktree has not run any setup command.
-fn read_record(path: &Path) -> Result<Record, InitError> {
-    match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|source| InitError::InvalidRecord {
-            path: path.to_owned(),
-            source,
-        }),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Record::default()),
-        Err(source) => Err(InitError::Read {
-            path: path.to_owned(),
-            source,
-        }),
-    }
-}
-
-/// Replaces the record at `path` in one step, so that a crash never leaves half of it.
-fn write_record(path: &Path, text: &str) -> Result<(), InitError> {
-    let write_error = |source| InitError::WriteRecord {
-        path: path.to_owned(),
-        source,
-    };
-    let partial = path.with_extension("json.partial");
-    fs::write(&partial, text).map_err(write_error)?;
-    fs::rename(&partial, path).map_err(write_error)
 }
 
 /// Copies `source` to `destination` wherever the destination is absent, directories file by file. Returns whether
@@ -272,11 +240,11 @@ fn copy_entry(source: &Path, destination: &Path) -> Result<bool, InitError> {
         std::os::unix::fs::symlink(target, destination).map_err(copy_error)?;
     } else {
         // Copied aside then renamed, so that an interrupted copy never leaves a truncated file that counts as present.
-        let mut partial = destination.as_os_str().to_owned();
-        partial.push(".procly-partial");
-        let partial = PathBuf::from(partial);
-        fs::copy(source, &partial).map_err(copy_error)?;
-        fs::rename(&partial, destination).map_err(copy_error)?;
+        let mode = Mode::Exactly(source.metadata().map_err(copy_error)?.permissions());
+        atomic_file::replace_with(destination, mode, |file| {
+            io::copy(&mut fs::File::open(source)?, file).map(|_| ())
+        })
+        .map_err(copy_error)?;
     }
     Ok(true)
 }

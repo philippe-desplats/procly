@@ -74,6 +74,8 @@ web = { http = 3200 }
 | `lease_expiry` | `"30d"` | How long a Lease that no Service used is kept. Past it, the Lease is dropped and its port returns to the Range. Leases of Pinned branches never expire. |
 | `grace_period` | `"10m"` | How long the container of a Compose service keeps running once no Worktree needs it, see [Compose services](#compose-services). |
 | `isolation` | none | The Isolation mode of every Compose service that sets a `driver` and no `isolation` of its own, `"shared"` or `"logical"`, see [Isolation mode](#isolation-mode). Logical when unset. |
+| `setup_timeout` | `"30m"` | How long each setup command of `procly worktree init` may run before its whole process tree is killed and `worktree init` exits with 124, long enough for a cold install. See [Worktree init](worktree-init.md). |
+| `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125. |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
@@ -170,9 +172,9 @@ services:
 
 The container is in Shared mode when the Service sets no `driver`, and in Logical mode when it does unless `isolation` says otherwise, see [Isolation mode](#isolation-mode) and [Logical resources and Drivers](#logical-resources-and-drivers). In both, one container serves every Worktree of the Repository, from the compose file of the Main worktree and under the compose project name that file gives. Its Leases are the ones of the Main worktree, so every Worktree reads the same ports, from `procly up` and from `procly env`. A Pinned branch never changes them, and they do not expire while the container runs, nor right after it stops. The Leases reach the compose file through the environment of `docker compose`: `PORT_<NAME>`, `PORT`, the Derived variables of the Service, `PROCLY` and `PROCLY_SERVICE`. The compose file must publish each Lease, which Procly checks with `docker compose config`, and `procly up` fails with 125 naming the variables the compose file may interpolate when it does not.
 
-Containers are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting.
+Containers are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting. One limit in v0.1: `docker compose up` also starts the `depends_on` services of the compose file that do not run yet, and Procly neither counts nor stops them. When the Grace period of the Service ends, only its own container stops, and those dependencies keep running until a `docker compose stop` of their own. Procly cannot tell whether another compose service, or a developer, still needs them, and it never stops a container it does not own. Declare such a dependency as a Compose service of its own, listed in `needs`, to have it counted and stopped like any other.
 
-`procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon records each container it started or adopted in `containers.json` of its state directory, with the Worktrees that need it and the end of a running Grace period, so a Daemon that exits or crashes leaves its containers running and the next Daemon resumes their counts and Grace periods, see [The Daemon across crashes and sessions](daemon.md#containers-after-a-crash-or-a-restart). A Worktree whose directory no longer exists, removed without `procly down`, stops counting.
+`procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon records each container it started or adopted in `containers.json` of its state directory, with the Worktrees that need it and the end of a running Grace period, so a Daemon that exits or crashes leaves its containers running and the next Daemon resumes their counts and Grace periods, see [The Daemon across crashes and sessions](daemon.md#containers-after-a-crash-or-a-restart). A Worktree whose directory no longer exists, removed without `procly down`, stops counting. `procly status` does not list Compose services in v0.1, only Process services, Groups and Jobs, see [JSON output](json.md#status).
 
 ### Containers started outside Procly
 
@@ -288,7 +290,7 @@ A Driver is a TOML file named after the technology. Postgres ships with Procly a
 | `index` | no | `true` when the resources are the numbers 0 to `capacity` minus 1, which Procly hands out one per resource and Worktree, so `{resource}` is a number. It needs a `capacity` and has no `max_length`. |
 | `capacity` | with `index` | How many resources the container holds. With `index`, Procly allocates at most that many and fails with a clear error past it, see [Numbered resources](#numbered-resources). Without it, the value is read and not enforced. |
 
-Commands run in the container of the Compose service with `docker compose exec`, by `sh -c`. `{resource}` and `{template}` are replaced by the names, which hold only lowercase letters, digits and underscores, and every other brace is left alone, so `${POSTGRES_USER}` reaches the shell of the container. A command that runs past 5 minutes is stopped. An unknown key in a Driver file is an error, and so is a Driver that no place holds, which names the places searched.
+Commands run in the container of the Compose service with `docker compose exec`, by `sh -c`. `{resource}` and `{template}` are replaced by the names, which hold only lowercase letters, digits and underscores, and every other brace is left alone, so `${POSTGRES_USER}` reaches the shell of the container. A command that runs past `settings.driver_timeout`, 5 minutes by default, is stopped. An unknown key in a Driver file is an error, and so is a Driver that no place holds, which names the places searched.
 
 The bundled Postgres Driver creates one database per resource with `createdb`, as the user `${POSTGRES_USER:-postgres}` of the container, and builds `postgresql://postgres:postgres@localhost:{port}/{resource}`. A Repository whose container uses other credentials copies the file to `.procly/drivers/postgres.toml` and edits the URL.
 
@@ -309,7 +311,7 @@ env = { CACHE_PORT = "{services.cache.ports.redis}" }
 REDIS_URL = "{services.cache.resources.main.url}"
 ```
 
-Indexes are handed out on first use and stored in `indexes.json` of the state directory, so a Worktree keeps its index across restarts of the Service and of the Daemon, in `procly env`, the Env file and `procly up` alike. Each resource of a Service has an index of its own, numbered in the alphabetical order of the resource keys. The Main worktree has the lowest ones, whichever Worktree asks first, so an app that never picks a database reads the one it always did. An index is never given back, also when its Worktree is removed.
+Indexes are handed out on first use and stored in `indexes.json` of the state directory, so a Worktree keeps its index across restarts of the Service and of the Daemon, in `procly env`, the Env file and `procly up` alike. Each resource of a Service has an index of its own, numbered in the alphabetical order of the resource keys. The Main worktree has the lowest ones, whichever Worktree asks first, so an app that never picks a database reads the one it always did. An index is never given back, also when its Worktree is removed: in v0.1 Redis indexes are never released, and a collection of the indexes of removed Worktrees is planned for v0.2.
 
 When every index is taken, `procly env` and `procly up` exit with 125 and tell the way out, and the Worktrees that have an index keep it:
 
@@ -327,9 +329,11 @@ Each Port name of a Service gets a Lease in each Worktree, a port that stays the
 - Any other Worktree, and the Main worktree when its declared port is taken, gets the first port of the Pool of the Port name that no Lease holds and that nothing listens on, checked with a real `bind`. A Pool is a short list of ports registered once with third parties, such as OAuth or WebAuthn callbacks, so that they keep working in secondary Worktrees.
 - Without a Pool, or once every port of the Pool is taken, it gets the first port of `settings.port_range` that no Lease holds, that the configuration does not declare, Pools included, and that nothing listens on.
 
-A Lease that no Service used for `settings.lease_expiry` is dropped, and its port returns to the Range. The Lease of a running Service counts as used.
+A Lease that no Service used for `settings.lease_expiry` is dropped, and its port returns to the Range. The Lease of a running Service counts as used. Expiry is swept per Repository, on a request from that Repository, since `lease_expiry` comes from its own `procly.toml` and `procly.local.toml`, which the Daemon reads only then. The Leases of a Repository nobody runs anything in keep their ports until its next request, which then drops the expired ones before it grants any. A Range shared by many dormant Repositories can therefore run short, widen `settings.port_range` in the user settings when it does.
 
 One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way, and a Pinned branch does the same toward its explicit port. Every other Lease stays the same across restarts.
+
+A declared port already taken when its first Lease is granted is not an error, by design. The Main worktree moves to the Pool or the Range as above, `procly up` prints the port it got in its URL and `port`, and `procly env` and the Env file carry it, so the Service and everything reading its Derived variables agree on it. Failing instead would keep the Main worktree from working whenever another stack holds a common port such as 5432, while the move costs nothing once the declared port is free again, the next start takes it back. A conflict, exit 5, is for a Compose service whose Lease is held at the moment its container starts, see [Compose services](#compose-services), not for a declared port that never was its Lease.
 
 The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
 
@@ -404,10 +408,12 @@ The rest of the file is kept byte for byte, and writing the block again changes 
 
 Health is a TCP connection to the Lease of the Service, on `127.0.0.1` or `::1`, optionally followed by an HTTP `GET`.
 
+The request always goes to the Lease, whatever a URL names. A URL gives the `Host` header of the request, its host and port as written, for a dev server that answers only on a host name of its own, and the path. Without a URL, the `Host` header is `localhost` with the Lease. Only `http://` is accepted, any other scheme, or a URL without a host, fails before anything starts.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `port` | the only Port name | The Port name to probe, required when the Service declares several. |
-| `path` | none | The path of the HTTP check. Setting `path` or `status` turns the HTTP check on, with `/` as the default path. |
+| `path` | none | The path of the HTTP check, such as `/api/health`, or an `http://` URL such as `http://app.localhost/api/health`. Setting `path` or `status` turns the HTTP check on, with `/` as the default path. |
 | `status` | `200` | The status the HTTP check must answer. |
 | `timeout` | `settings.health_timeout` | The health timeout of this Service. |
 

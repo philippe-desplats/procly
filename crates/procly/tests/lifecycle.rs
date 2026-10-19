@@ -268,6 +268,13 @@ fn let_the_daemon_look(duration_ms: u64) {
     std::thread::sleep(Duration::from_millis(duration_ms));
 }
 
+/// How long an idle test lets real time pass after the first look before it moves the clock. Idleness averages the
+/// CPU time of a Service over the real time since that look, and `ps` counts CPU time in hundredths of a second on
+/// macOS: a last tick of the startup of the Service, landing a fraction of a second after the look, reads as over 1%
+/// of a CPU, makes it busy at the very reading of the clock the test then holds still, and it never stops. Over
+/// 2.5 s, even 2 ticks stay under 1%.
+const FIRST_LOOK_MS: u64 = 2500;
+
 #[test]
 fn an_idle_service_stops_after_its_timeout_says_why_and_is_not_restarted() {
     let procly = Procly::with_clock();
@@ -282,7 +289,7 @@ fn an_idle_service_stops_after_its_timeout_says_why_and_is_not_restarted() {
     );
     write(&main, "procly.toml", &config);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
-    let_the_daemon_look(300);
+    let_the_daemon_look(FIRST_LOOK_MS);
 
     procly.advance_clock(Duration::from_mins(9));
     let_the_daemon_look(300);
@@ -360,7 +367,7 @@ fn idle_stop_is_set_in_the_settings_and_can_be_disabled_per_service() {
     for service in ["kept", "dropped"] {
         assert_success(&procly.procly_in(&main, &["up", service]));
     }
-    let_the_daemon_look(300);
+    let_the_daemon_look(FIRST_LOOK_MS);
 
     procly.advance_clock(Duration::from_mins(5));
 

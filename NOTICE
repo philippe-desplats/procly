@@ -1,0 +1,8 @@
+Procly
+Copyright (c) 2026 Philippe Desplats
+
+Procly is licensed under either of the MIT license (LICENSE-MIT) or the Apache License, Version 2.0 (LICENSE-APACHE), at your option.
+
+Prior art
+
+Procly reuses ideas from Portly, a local process supervisor for coding agents released under the MIT license: its proven mechanics for PTYs, process-group stop, restart backoff, health checks, waiting on a Job with its real exit code, and port-occupant and Docker-publisher lookup. Procly is not a fork of Portly and rewrites those mechanics in Rust, see docs/adr/0001-own-supervisor-single-authority.md.

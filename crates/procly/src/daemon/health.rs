@@ -5,6 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 
+use crate::config::{HealthConfig, HttpProbe};
+
 /// A dev server may listen on IPv4, on IPv6 only (Vite on macOS binds `::1`), or on both.
 const LOOPBACKS: [IpAddr; 2] = [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
 
@@ -13,19 +15,21 @@ const LOOPBACKS: [IpAddr; 2] = [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6
 pub(crate) struct HealthCheck {
     /// The port that must accept connections, `None` for a Service that listens on none and is healthy once started.
     pub(crate) port: Option<u16>,
-    pub(crate) http: Option<HttpCheck>,
+    pub(crate) http: Option<HttpProbe>,
     /// The checks of the Services a Group covers, which all must pass for the Group to be healthy.
     pub(crate) covered: Vec<HealthCheck>,
 }
 
-/// An HTTP request sent once the port accepts connections.
-#[derive(Debug, Clone)]
-pub(crate) struct HttpCheck {
-    pub(crate) path: String,
-    pub(crate) status: u16,
-}
-
 impl HealthCheck {
+    /// The check a Service declares, probing `port`, the Lease of its health Port name.
+    pub(crate) fn declared(port: Option<u16>, health: &HealthConfig) -> Self {
+        Self {
+            port,
+            http: health.http(),
+            covered: Vec::new(),
+        }
+    }
+
     /// The port of every Lease this check probes, the covered Services' included.
     pub(crate) fn ports(&self) -> Vec<u16> {
         self.port
@@ -56,24 +60,24 @@ impl HealthCheck {
             };
             return match &self.http {
                 None => true,
-                Some(http) => http.status_of(stream, port).await == Some(http.status),
+                Some(http) => status_of(http, stream, port).await == Some(http.status),
             };
         }
         false
     }
 }
 
-impl HttpCheck {
-    async fn status_of(&self, mut stream: TcpStream, port: u16) -> Option<u16> {
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n",
-            self.path
-        );
-        stream.write_all(request.as_bytes()).await.ok()?;
-        let mut status_line = String::new();
-        BufReader::new(stream).read_line(&mut status_line).await.ok()?;
-        status(&status_line)
-    }
+/// Sends the request of `http` on `stream`, connected to `port`, and reads the status it answers.
+async fn status_of(http: &HttpProbe, mut stream: TcpStream, port: u16) -> Option<u16> {
+    let host = http.host.clone().unwrap_or_else(|| format!("localhost:{port}"));
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n",
+        http.path
+    );
+    stream.write_all(request.as_bytes()).await.ok()?;
+    let mut status_line = String::new();
+    BufReader::new(stream).read_line(&mut status_line).await.ok()?;
+    status(&status_line)
 }
 
 /// The status code of an HTTP status line such as `HTTP/1.1 200 OK`.

@@ -225,6 +225,31 @@ fn docker_an_up_during_the_grace_period_keeps_the_container_running() {
 }
 
 #[test]
+fn docker_the_lease_of_a_running_container_does_not_expire() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+
+    // Past the 30 days a Lease no Service uses is kept, while the container runs all along.
+    fixture.procly.advance_clock(Duration::from_hours(31 * 24));
+    // The declared port moves, so that a Lease that had expired would be granted again on the new one.
+    std::fs::write(fixture.main.join("procly.toml"), config(free_port(), "")).expect("write the config");
+    let output = fixture.procly.procly_in(&fixture.main, &["env", "db"]);
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains(&format!("export DB_PORT='{port}'\n")),
+        "{}",
+        stdout(&output)
+    );
+    assert!(fixture.project.is_running());
+    assert!(listens(port));
+}
+
+#[test]
 fn docker_a_process_service_starts_the_compose_service_it_needs_first() {
     if !require_docker() {
         return;
@@ -524,6 +549,62 @@ fn docker_a_container_holding_the_lease_without_matching_labels_is_a_conflict_pr
         "{error}"
     );
     assert!(foreign.is_running(), "Procly stopped a container it does not own");
+    assert!(
+        fixture.project.container().is_empty(),
+        "Procly created the container anyway"
+    );
+
+    run_stop_command(&error);
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+}
+
+/// A test server started by the test itself, outside Procly, killed when the test ends, passed or failed.
+struct Outside(std::process::Child);
+
+impl Outside {
+    fn listen(port: u16) -> Self {
+        let child = Command::new(test_server())
+            .args(["--port", &port.to_string()])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("the test server starts");
+        let outside = Self(child);
+        eventually("the test server to listen", || listens(port));
+        outside
+    }
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn docker_a_process_holding_the_lease_is_a_conflict_naming_the_kill_command_procly_never_runs() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    // Granted first, so that the Lease is the port the process takes.
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["env", "db"]));
+    let outside = Outside::listen(port);
+    let pid = outside.0.id();
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "port {port} of its Lease is held by process {pid} procly-test-server started outside Procly, stop it \
+             with `kill {pid}`"
+        )),
+        "{error}"
+    );
+    assert!(listens(port), "Procly stopped a process it did not start");
     assert!(
         fixture.project.container().is_empty(),
         "Procly created the container anyway"
@@ -901,5 +982,79 @@ fn docker_a_recorded_container_that_no_longer_runs_is_forgotten_and_never_stoppe
             .contains("no longer runs with the labels of its compose service"),
         "{}",
         fixture.procly.daemon_log()
+    );
+}
+
+#[test]
+fn docker_a_recorded_container_replaced_by_one_without_matching_labels_is_forgotten_and_never_stopped() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    let port = fixture.port;
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    fixture.procly.kill_daemon();
+    // The same name and the same port, started by plain `docker run`, so without the labels of compose.
+    assert_success(&fixture.project.docker(&["rm", "--stop", "--force", "db"]));
+    let foreign = Foreign::run(&format!("{}-db-1", fixture.project.name), Some(port));
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    assert!(
+        fixture
+            .procly
+            .daemon_log()
+            .contains("no longer runs with the labels of its compose service"),
+        "{}",
+        fixture.procly.daemon_log()
+    );
+    // No longer counted as the container of db, so there is nothing to let go of.
+    let down = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+    assert_success(&down);
+    assert_eq!(stdout(&down), "db not running\n");
+    fixture.procly.advance_clock(Duration::from_mins(2));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(foreign.is_running(), "Procly stopped a container it no longer owns");
+    // Neither its own container nor reused, it is what keeps db from starting.
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!(
+            "container name {} is held by a container compose did not create for this service",
+            foreign.name
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert!(foreign.is_running(), "Procly stopped a container it does not own");
+}
+
+#[test]
+fn docker_logs_of_a_compose_service_prints_the_recent_output_of_its_container() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let talking = compose_file(&fixture.project.name).replace(
+        "command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]",
+        "command: [\"sh\", \"-c\", \"echo procly-logs-marker; exec nc -lk -p 80 -e /bin/cat\"]",
+    );
+    std::fs::write(fixture.main.join("compose.yaml"), talking).expect("write the compose file");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+
+    // From the other Worktree too, since the container serves every Worktree of the Repository.
+    let text = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    let json = fixture.procly.procly_in(&fixture.main, &["logs", "db", "--json"]);
+
+    assert_success(&text);
+    assert!(stdout(&text).contains("procly-logs-marker"), "{}", stdout(&text));
+    assert_success(&json);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&json)).expect("logs --json prints one document");
+    assert_eq!(document["name"], "db", "{document}");
+    assert!(
+        document["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("procly-logs-marker")),
+        "{document}"
     );
 }

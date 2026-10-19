@@ -118,7 +118,7 @@ fn technology(image: &str) -> Option<&'static Technology> {
 
 /// A port a compose service publishes on the host.
 #[derive(Debug, PartialEq, Eq)]
-struct Published {
+struct PortMapping {
     /// The variable the compose file reads the port from, as `DB_PORT` in `${DB_PORT:-5432}`.
     variable: Option<String>,
     /// The host port the file writes, or the default of its variable.
@@ -167,7 +167,7 @@ fn colon_parts(text: &str) -> Vec<&str> {
 
 /// A short mapping such as `"5432:5432"`, `"127.0.0.1:${DB_PORT:-5432}:5432"` or `"6379:6379/tcp"`. A mapping that
 /// publishes no host port, a range or a UDP port is not one Procly leases.
-fn short_mapping(text: &str) -> Option<Published> {
+fn short_mapping(text: &str) -> Option<PortMapping> {
     let text = match text.rsplit_once('/') {
         Some((mapping, "tcp")) => mapping,
         Some(_) => return None,
@@ -178,7 +178,7 @@ fn short_mapping(text: &str) -> Option<Published> {
         return None;
     };
     let (variable, port) = host_port(host)?;
-    Some(Published {
+    Some(PortMapping {
         variable,
         port,
         target: target.trim().parse().ok()?,
@@ -186,7 +186,7 @@ fn short_mapping(text: &str) -> Option<Published> {
 }
 
 /// A long mapping, `{ target: 5432, published: "${DB_PORT:-5432}" }`.
-fn long_mapping(mapping: &Value) -> Option<Published> {
+fn long_mapping(mapping: &Value) -> Option<PortMapping> {
     if mapping
         .get("protocol")
         .and_then(Value::as_str)
@@ -200,7 +200,7 @@ fn long_mapping(mapping: &Value) -> Option<Published> {
         _ => None,
     };
     let (variable, port) = host_port(&text("published")?)?;
-    Some(Published {
+    Some(PortMapping {
         variable,
         port,
         target: text("target")?.parse().ok()?,
@@ -208,7 +208,7 @@ fn long_mapping(mapping: &Value) -> Option<Published> {
 }
 
 /// The ports a compose service publishes.
-fn published(service: &Value) -> Vec<Published> {
+fn published(service: &Value) -> Vec<PortMapping> {
     service
         .get("ports")
         .and_then(Value::as_sequence)
@@ -281,7 +281,7 @@ fn resource_name(raw: &str) -> String {
 
 /// The Port name of a published port: the one a variable Procly sets spells out (`PORT_DB` is `db`), the well-known
 /// name of the port of its technology, or `port` for the only port and `port_<target>` among several.
-fn port_name(mapping: &Published, technology: Option<&Technology>, alone: bool) -> String {
+fn port_name(mapping: &PortMapping, technology: Option<&Technology>, alone: bool) -> String {
     let from_variable = mapping
         .variable
         .as_deref()
@@ -394,8 +394,8 @@ mod tests {
     use super::*;
     use crate::driver::Driver;
 
-    fn mapping(variable: Option<&str>, port: u16, target: u16) -> Published {
-        Published {
+    fn mapping(variable: Option<&str>, port: u16, target: u16) -> PortMapping {
+        PortMapping {
             variable: variable.map(str::to_owned),
             port,
             target,

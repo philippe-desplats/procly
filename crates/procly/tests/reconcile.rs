@@ -3,7 +3,8 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::{Signal, kill, killpg};
+use nix::unistd::Pid;
 
 use common::{Procly, assert_success, free_port, git_repository, read_pid, stdout, test_server};
 
@@ -39,6 +40,19 @@ fn chatty_web_on(port: u16, starts: &Path, pid: &Path) -> String {
     )
 }
 
+/// Kills the process group led by `0` when the test ends, passed or failed.
+///
+/// A test that fails while no Daemon runs leaves nobody to stop its Services, and the test server [`chatty_run`]
+/// starts in the background of the shell outlives the shell, re-parented to init and still listening.
+struct ReapGroup(Pid);
+
+impl Drop for ReapGroup {
+    fn drop(&mut self) {
+        // Already gone in the usual case, once `down` or the Daemon stopped it.
+        let _ = killpg(self.0, Signal::SIGKILL);
+    }
+}
+
 /// The command of the `web` of [`chatty_web_on`].
 fn chatty_run(starts: &Path, pid: &Path) -> String {
     format!(
@@ -59,6 +73,7 @@ fn a_service_that_keeps_printing_after_the_daemon_was_killed_stays_alive_and_is_
     write(&main, "procly.toml", &chatty_web_on(port, &starts, &pid));
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let leader = read_pid(&pid);
+    let _group = ReapGroup(leader);
 
     procly.kill_daemon();
     // Long enough for several ticks to be printed while no Daemon runs.
@@ -100,6 +115,7 @@ fn logs_of_a_reattached_service_show_its_output_from_before_and_after_the_daemon
     let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
     write(&main, "procly.toml", &chatty_web_on(free_port(), &starts, &pid));
     assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let _group = ReapGroup(read_pid(&pid));
     common::eventually("a few ticks", || last_tick(&procly, &main) >= 3);
     let before = last_tick(&procly, &main);
 
@@ -134,6 +150,7 @@ fn logs_of_a_reattached_service_keep_the_output_from_before_the_daemon_last_empt
         &format!("[services.web]\nrun = '{run}'\nports = {{ http = {port} }}\n"),
     );
     assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let _group = ReapGroup(read_pid(&pid));
     common::eventually("a few ticks", || last_tick(&procly, &main) >= 3);
 
     procly.kill_daemon();
@@ -155,6 +172,7 @@ fn the_output_file_of_a_reattached_service_is_removed_once_it_is_stopped() {
     let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
     write(&main, "procly.toml", &chatty_web_on(free_port(), &starts, &pid));
     assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let _group = ReapGroup(read_pid(&pid));
     procly.kill_daemon();
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     assert_eq!(output_files(&procly), 1);
@@ -409,4 +427,51 @@ fn an_unreadable_service_document_fails_up_with_125_naming_it_until_it_is_remove
     std::fs::remove_file(&document).expect("remove the document");
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     assert_eq!(lines(&starts), ["start"]);
+}
+
+/// The bytes the output files of the state directory hold, their previous files included.
+fn output_bytes(procly: &Procly) -> u64 {
+    std::fs::read_dir(procly.state_dir().join("output")).map_or(0, |entries| {
+        entries
+            .filter_map(|entry| entry.ok()?.metadata().ok())
+            .map(|metadata| metadata.len())
+            .sum()
+    })
+}
+
+#[test]
+fn the_output_file_of_a_service_stays_bounded_while_no_daemon_runs() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    // About 12 megabytes a second, many times what the output file may hold, once the Daemon is gone.
+    let filler = procly.scratch().join("filler");
+    std::fs::write(&filler, "procly-flood\n".repeat(256 * 1024 / 13)).expect("write the filler");
+    let run = format!(
+        "echo start >> {starts}; echo $$ > {pid}; {server} & while true; do cat {filler}; sleep 0.02; done",
+        starts = starts.display(),
+        pid = pid.display(),
+        server = test_server().display(),
+        filler = filler.display()
+    );
+    write(
+        &main,
+        "procly.toml",
+        &format!("[services.web]\nrun = '{run}'\nports = {{ http = {port} }}\n"),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let _group = ReapGroup(read_pid(&pid));
+
+    procly.kill_daemon();
+    std::thread::sleep(Duration::from_secs(2));
+
+    // 4 megabytes at most in the file, 1 in its previous file, and one read of output past the limit.
+    let held = output_bytes(&procly);
+    assert!(
+        held <= 5 * 1024 * 1024 + 64 * 1024,
+        "the output files hold {held} bytes"
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert!(stdout(&procly.procly_in(&main, &["logs", "web"])).contains("procly-flood\n"));
 }

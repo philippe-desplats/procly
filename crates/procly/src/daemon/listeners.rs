@@ -1,13 +1,12 @@
 //! The TCP ports a process group listens on, to tell whether a Service listens on its Lease, and every process
 //! listening on TCP, to name what holds a port or runs in a Worktree.
 
+use super::process_group::Pid;
 use std::collections::BTreeMap;
 use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
-
-use nix::unistd::Pid;
 
 /// Where `lsof` lives on macOS and on Linux, tried after the `PATH` of the Daemon, which may lack `/usr/sbin`.
 const LSOF: [&str; 3] = ["lsof", "/usr/sbin/lsof", "/usr/bin/lsof"];

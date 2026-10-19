@@ -55,9 +55,16 @@ Claude Code runs `procly guard` before every Bash command of the agent, with the
 
   ```text
   `npm run dev` starts a dev server. This repository runs its dev servers through Procly, so that
-  parallel worktrees never start the same one twice or fight over a port. Run `procly up <service>`
+  parallel worktrees never start the same one twice or fight over a port. Run `procly up web`
   instead. Declared Services: api, web.
   ```
+
+The Procly command in the answer is the equivalent of the blocked one, found in this order:
+
+1. The declared Process service or Group whose `run` starts the same way as the blocked command, one being the start of the other word by word, a `{ports.<name>}` standing for any port: `npm run dev -- --host` against `run = "npm run dev"` answers `procly up web`. Both must run from the same directory, so `cd apps/api && pnpm dev` only matches a `run` that changes to `apps/api` too. The longest match wins, and 2 Services matching as long as each other give no equivalent.
+2. For `docker compose up`, the Compose services whose `compose` it names, or all of them when it names none: `procly up cache && procly up db`.
+3. For the dev script of a whole Repository, `npm start`, `pnpm dev` or `turbo run dev` with no option narrowing it to one package, run at the root of the Worktree with no `cd` before it, `procly up`, which starts every Service no Group covers.
+4. Otherwise `procly up <service>`, the agent picking among the declared Services the answer lists.
 
 The Guard never breaks the agent. It exits with 0 whatever happens, and lets the command through when it cannot judge it, when the Daemon cannot answer, when the input is not a Bash tool call, and when the directory is not in a git Repository. Only Claude Code is covered. The hooks of other agents are not verified yet.
 

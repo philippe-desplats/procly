@@ -6,10 +6,13 @@
 //! ones, so the nearest file wins.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::placeholder;
 
 /// Where the Drivers of a Repository live, relative to the root of a Worktree.
 pub(crate) const REPOSITORY_DIR: &str = ".procly/drivers";
@@ -215,46 +218,39 @@ impl Driver {
         leases: &BTreeMap<String, u16>,
         health_port: Option<u16>,
     ) -> Result<String, DriverError> {
-        let mut rendered = String::with_capacity(self.url.len());
-        let mut rest = self.url.as_str();
-        while let Some(open) = rest.find('{') {
-            rendered.push_str(&rest[..open]);
-            rest = &rest[open..];
-            let Some(end) = rest.find('}') else { break };
-            let placeholder = &rest[1..end];
-            match placeholder {
-                "resource" => rendered.push_str(name),
-                "port" => {
-                    let port = health_port.ok_or_else(|| DriverError::NoPort {
-                        driver: self.name.clone(),
-                    })?;
-                    rendered.push_str(&port.to_string());
-                }
-                _ => match placeholder.strip_prefix("ports.") {
-                    Some(port_name) => {
-                        let port = leases.get(port_name).ok_or_else(|| DriverError::UnknownPort {
+        placeholder::render(&self.url, |braced| match braced {
+            "resource" => Ok(Some(name.to_owned())),
+            "port" => health_port
+                .map(|port| Some(port.to_string()))
+                .ok_or_else(|| DriverError::NoPort {
+                    driver: self.name.clone(),
+                }),
+            // Any other brace is not ours, kept as it is.
+            _ => braced
+                .strip_prefix("ports.")
+                .map(|port_name| {
+                    leases
+                        .get(port_name)
+                        .map(u16::to_string)
+                        .ok_or_else(|| DriverError::UnknownPort {
                             driver: self.name.clone(),
                             name: port_name.to_owned(),
-                        })?;
-                        rendered.push_str(&port.to_string());
-                    }
-                    // Not ours, kept as it is.
-                    None => rendered.push_str(&rest[..=end]),
-                },
-            }
-            rest = &rest[end + 1..];
-        }
-        rendered.push_str(rest);
-        Ok(rendered)
+                        })
+                })
+                .transpose(),
+        })
     }
 
     /// A command of the Driver with `{resource}` and `{template}` replaced, both already checked to be plain words.
     pub(crate) fn command(command: &str, resource: &str, template: Option<&str>) -> String {
-        let rendered = command.replace("{resource}", resource);
-        match template {
-            Some(template) => rendered.replace("{template}", template),
-            None => rendered,
-        }
+        let Ok(rendered) = placeholder::render(command, |braced| {
+            Ok::<_, Infallible>(match braced {
+                "resource" => Some(resource.to_owned()),
+                "template" => template.map(str::to_owned),
+                _ => None,
+            })
+        });
+        rendered
     }
 }
 

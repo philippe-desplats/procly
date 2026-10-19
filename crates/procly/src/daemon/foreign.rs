@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::listeners;
+use super::process_group;
 use crate::protocol::{ForeignProcess, Occupant};
 use crate::topology;
 
@@ -154,7 +155,7 @@ pub(super) fn in_worktrees(
 ) -> Vec<Vec<ForeignProcess>> {
     let mut foreign = vec![Vec::new(); worktrees.len()];
     let daemon = i32::try_from(std::process::id()).unwrap_or_default();
-    let daemon_group = nix::unistd::getpgrp().as_raw();
+    let daemon_group = process_group::own_group().as_raw();
     let listening: Vec<_> = listeners::listeners(None)
         .unwrap_or_default()
         .into_iter()
