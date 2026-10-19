@@ -560,6 +560,19 @@ fn launch(
         source,
     })?;
     let path = file.path;
+    // Never a pipe of the Daemon, which would die with it and take the Service down at its next write.
+    let (stdout, stderr) = match output_file::start_writer(&path) {
+        Ok((stdout, stderr)) => (Stdio::from(stdout), Stdio::from(stderr)),
+        Err(error) => {
+            eprintln!(
+                "cannot start the writer of the output file {}, service {} appends to it directly, unbounded while no \
+                 daemon runs: {error}",
+                path.display(),
+                spec.name
+            );
+            (Stdio::from(file.stdout), Stdio::from(file.stderr))
+        }
+    };
     let mut command = CommandWrap::with_new("/bin/sh", |command| {
         command
             .arg("-c")
@@ -568,9 +581,8 @@ fn launch(
             .env_clear()
             .envs(spec.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
-            // Not pipes, which would die with this Daemon and take the Service down at its next write.
-            .stdout(Stdio::from(file.stdout))
-            .stderr(Stdio::from(file.stderr));
+            .stdout(stdout)
+            .stderr(stderr);
     });
     process_group::lead_group(&mut command);
     let spawned = command.spawn();

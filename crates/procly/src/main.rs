@@ -226,6 +226,9 @@ enum Command {
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
+    /// Append the standard input to the output file of a Service, keeping it bounded. The Daemon starts it.
+    #[command(hide = true)]
+    OutputFile { path: PathBuf },
 }
 
 /// A coding agent CLI that `eject --agent` can hand a prompt to, with the arguments that make it answer the prompt
@@ -336,6 +339,11 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
     if let Command::Guard = command {
         return Ok(guard_hook());
     }
+    // The writer of an output file outlives the Daemon, it needs nothing from the state directory.
+    if let Command::OutputFile { path } = &command {
+        daemon::write_output(path)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let state = StateDir::resolve()?;
     match command {
         Command::Run { timeout, json, command } => {
@@ -381,28 +389,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             other => unexpected(other),
         },
-        Command::Logs { json, job_or_service } => {
-            let cwd = std::env::current_dir().context("cannot read the current directory")?;
-            let request = Request::Logs {
-                name: job_or_service.clone(),
-                cwd,
-                env: caller_env(),
-            };
-            match client::send(&state, &request)? {
-                Response::Logs { output } => {
-                    if json.json {
-                        json::print(&json::Logs {
-                            name: &job_or_service,
-                            output: &output,
-                        })?;
-                    } else {
-                        print(&output)?;
-                    }
-                    Ok(ExitCode::SUCCESS)
-                }
-                other => unexpected(other),
-            }
-        }
+        Command::Logs { json, job_or_service } => logs(&state, &job_or_service, json.json),
         Command::Status { all, json } => {
             let cwd = std::env::current_dir().context("cannot read the current directory")?;
             match client::send(&state, &Request::Status { cwd, all })? {
@@ -429,10 +416,35 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Eject { agent, json } => eject(&state, agent, json.json),
         Command::Init { json } => init(&state, json.json),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
+        Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
         Command::Daemon => {
             daemon::run(&state)?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// Prints the recent output of the Job or the Service `job_or_service`.
+fn logs(state: &StateDir, job_or_service: &str, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let request = Request::Logs {
+        name: job_or_service.to_owned(),
+        cwd,
+        env: caller_env(),
+    };
+    match client::send(state, &request)? {
+        Response::Logs { output } => {
+            if json {
+                json::print(&json::Logs {
+                    name: job_or_service,
+                    output: &output,
+                })?;
+            } else {
+                print(&output)?;
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
     }
 }
 

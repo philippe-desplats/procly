@@ -139,6 +139,12 @@ pub(super) fn own_group() -> Pid {
     nix::unistd::getpgrp()
 }
 
+/// Makes the spawned command, which serves a Service without belonging to its tree, lead a process group of its own,
+/// so that stopping the Service never signals it and it outlives the Daemon.
+pub(super) fn detach(command: &mut tokio::process::Command) {
+    command.process_group(0);
+}
+
 /// Makes the spawned command lead a process group of its own, so that a signal to the group reaches its whole tree.
 pub(super) fn lead_group(command: &mut CommandWrap) {
     command.wrap(ProcessGroup::leader());

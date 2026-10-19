@@ -428,3 +428,50 @@ fn an_unreadable_service_document_fails_up_with_125_naming_it_until_it_is_remove
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     assert_eq!(lines(&starts), ["start"]);
 }
+
+/// The bytes the output files of the state directory hold, their previous files included.
+fn output_bytes(procly: &Procly) -> u64 {
+    std::fs::read_dir(procly.state_dir().join("output")).map_or(0, |entries| {
+        entries
+            .filter_map(|entry| entry.ok()?.metadata().ok())
+            .map(|metadata| metadata.len())
+            .sum()
+    })
+}
+
+#[test]
+fn the_output_file_of_a_service_stays_bounded_while_no_daemon_runs() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    // About 12 megabytes a second, many times what the output file may hold, once the Daemon is gone.
+    let filler = procly.scratch().join("filler");
+    std::fs::write(&filler, "procly-flood\n".repeat(256 * 1024 / 13)).expect("write the filler");
+    let run = format!(
+        "echo start >> {starts}; echo $$ > {pid}; {server} & while true; do cat {filler}; sleep 0.02; done",
+        starts = starts.display(),
+        pid = pid.display(),
+        server = test_server().display(),
+        filler = filler.display()
+    );
+    write(
+        &main,
+        "procly.toml",
+        &format!("[services.web]\nrun = '{run}'\nports = {{ http = {port} }}\n"),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let _group = ReapGroup(read_pid(&pid));
+
+    procly.kill_daemon();
+    std::thread::sleep(Duration::from_secs(2));
+
+    // 4 megabytes at most in the file, 1 in its previous file, and one read of output past the limit.
+    let held = output_bytes(&procly);
+    assert!(
+        held <= 5 * 1024 * 1024 + 64 * 1024,
+        "the output files hold {held} bytes"
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert!(stdout(&procly.procly_in(&main, &["logs", "web"])).contains("procly-flood\n"));
+}

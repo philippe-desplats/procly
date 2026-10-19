@@ -17,7 +17,7 @@ The Daemon log names every Service it re-attached or stopped this way, with its 
 
 A re-attached Service is not a child of the new Daemon, which brings 3 limits:
 
-- Its output went to the previous Daemon and is lost. A Service that prints after the crash writes to a closed pipe and usually dies of it, the Daemon then sees it ended.
+- Its output is kept, without the restart showing in it. A Service writes into a pipe read by a writer of its own, `procly output-file`, which outlives the Daemon and appends to an output file in the `output` directory of the state directory. The next Daemon reads that file, so `procly logs` shows what the Service printed before, during and after the restart. While no Daemon runs, the writer keeps the file bounded: once it holds 4 MiB, it moves the last MiB, as much as the output buffer of a Service holds, into a `.prev` file next to it and empties the file. A Service printing with no Daemon running therefore takes at most about 5 MiB of disk, its most recent output, and what it printed before that is dropped. A running Daemon empties the file the same way at 1 MiB, once it has read it.
 - Its exit code is unknown when it ends, and it is not restarted: its next `up` starts it again.
 - It is stopped like any other Service, `SIGTERM` to its whole group then `SIGKILL`, but the Daemon looks at it every 100 ms rather than waiting for it.
 

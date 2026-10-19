@@ -110,6 +110,13 @@ impl Registry {
     }
 }
 
+/// Appends the standard input to the output file at `path` until it ends, keeping the file bounded: the writer of the
+/// output file of a Service, see [`output_file`].
+pub(crate) fn write_output(path: &Path) -> anyhow::Result<()> {
+    output_file::write(io::stdin().lock(), path)
+        .with_context(|| format!("cannot write the output file {}", path.display()))
+}
+
 /// Runs the Daemon until it receives `SIGTERM` or `SIGINT`.
 ///
 /// Returns at once when another Daemon already holds the lock on this state directory.
