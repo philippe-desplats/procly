@@ -325,3 +325,26 @@ fn setup_commands_run_in_a_worktree_of_a_repository_without_a_main_worktree() {
     assert_success(&output);
     assert_eq!(stdout(&output), "ran echo ready >> setup.log\n");
 }
+
+#[test]
+fn the_record_is_a_versioned_document_and_a_newer_one_is_refused() {
+    let procly = Procly::new();
+    let (main, worktree) = repository_with_worktree(&procly, "[worktree]\nsetup = ['echo ran >> log']\n");
+    let record = main.join(".git/worktrees/feature/procly-worktree-init.json");
+
+    assert_success(&procly.procly_in(&worktree, &["worktree", "init"]));
+    let written: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(written["version"], 1, "{written}");
+    assert_eq!(written["setup"], serde_json::json!(["echo ran >> log"]), "{written}");
+
+    write(&record, "{\"version\": 2, \"setup\": []}");
+    let refused = procly.procly_in(&worktree, &["worktree", "init"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", stderr(&refused));
+    let message = stderr(&refused);
+    assert!(
+        message.contains("procly-worktree-init.json") && message.contains("written by a newer procly"),
+        "{message}"
+    );
+    assert_eq!(fs::read_to_string(worktree.join("log")).unwrap(), "ran\n");
+}

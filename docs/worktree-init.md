@@ -35,7 +35,7 @@ $ procly worktree init --json
 
 A command counts as done once it exits with 0, and it is identified by its text. A second `worktree init` therefore changes nothing, a command added to the list later runs alone, and a command that failed runs again. The `worktree init` exits with the code of the failing command, see [exit codes](exit-codes.md), and prints the end of its output on stderr.
 
-The record of the commands that succeeded lives in the git directory of the Worktree, so removing the Worktree removes it, and a Worktree created again at the same path starts afresh. Delete `procly-worktree-init.json` in that directory to run every setup command again.
+The record of the commands that succeeded lives in the git directory of the Worktree, so removing the Worktree removes it, and a Worktree created again at the same path starts afresh. Delete `procly-worktree-init.json` in that directory to run every setup command again. It is a versioned state document like the ones of the state directory (ADR 0012), so a record written by a newer Procly is refused rather than misread.
 
 Run in the Main worktree, `worktree init` has nothing to copy and only runs the setup commands.
 

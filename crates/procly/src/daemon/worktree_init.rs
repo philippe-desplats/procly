@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::Registry;
 use super::atomic_file::{self, Mode};
 use super::job::{Fingerprint, JobSpec};
+use super::store;
 use crate::protocol::{InitReport, JobEnd, Response};
 use crate::topology::{self, Topology};
 
@@ -23,6 +24,8 @@ use crate::topology::{self, Topology};
 const SETUP_TIMEOUT: Duration = Duration::from_mins(30);
 /// The record of the setup commands that succeeded, in the git directory of the Worktree.
 const RECORD_FILE: &str = "procly-worktree-init.json";
+/// The version of the format of the record, a state document like the ones of the state directory (ADR 0012).
+const RECORD_VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
 enum InitError {
@@ -41,22 +44,10 @@ enum InitError {
     },
     #[error("the Repository holding {worktree} has no Main worktree to copy from")]
     NoMainWorktree { worktree: PathBuf },
-    #[error("cannot write {path}")]
-    WriteRecord {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("{path} is not valid, remove it to run every setup command again")]
-    InvalidRecord {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
 }
 
 /// The setup commands that succeeded in a Worktree, by their text.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Record {
     setup: Vec<String>,
 }
@@ -134,8 +125,8 @@ pub(super) async fn run(
             });
         }
         record.setup.push(command.clone());
-        let (path, saved) = (record_path.clone(), serde_json::to_string(&record)?);
-        tokio::task::spawn_blocking(move || write_record(&path, &saved))
+        let (path, saved) = (record_path.clone(), record.clone());
+        tokio::task::spawn_blocking(move || store::save(&path, RECORD_VERSION, &saved))
             .await
             .context("the record could not be written")??;
         report.ran.push(command);
@@ -172,7 +163,7 @@ fn prepare(topology: &Topology) -> anyhow::Result<Prepared> {
         }
     }
     let record_path = topology::git_dir(&worktree)?.join(RECORD_FILE);
-    let record = read_record(&record_path)?;
+    let record = store::load(&record_path, RECORD_VERSION)?.unwrap_or_default();
     Ok(Prepared {
         report,
         setup: config.worktree.setup,
@@ -208,30 +199,6 @@ fn exists(path: &Path) -> Result<bool, InitError> {
             source,
         }),
     }
-}
-
-/// The record at `path`, empty when the Worktree has not run any setup command.
-fn read_record(path: &Path) -> Result<Record, InitError> {
-    match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|source| InitError::InvalidRecord {
-            path: path.to_owned(),
-            source,
-        }),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Record::default()),
-        Err(source) => Err(InitError::Read {
-            path: path.to_owned(),
-            source,
-        }),
-    }
-}
-
-/// Replaces the record at `path` in one step, so that a crash never leaves half of it.
-fn write_record(path: &Path, text: &str) -> Result<(), InitError> {
-    let write_error = |source| InitError::WriteRecord {
-        path: path.to_owned(),
-        source,
-    };
-    atomic_file::replace(path, text.as_bytes(), Mode::Kept).map_err(write_error)
 }
 
 /// Copies `source` to `destination` wherever the destination is absent, directories file by file. Returns whether
