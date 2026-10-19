@@ -6,3 +6,4 @@ A Repository must keep working exactly as before Procly, with its original scrip
 
 - Procly never writes to the user's global agent instruction files on its own, unlike Portly's onboarding.
 - Existing setup scripts become one-line wrappers around `procly worktree init`, so the previous script stays recoverable from git.
+- The Guard is a Managed block that holds no markers, since JSON allows no comments. It is identified by its content, the hook group whose command is `procly guard`, and by the fingerprint of that group recorded when Procly wrote it. A group with the recorded fingerprint is Procly's and is removed mechanically, a group the user edited is left in place and described in the generated prompt, as for any other Managed block. The fingerprint is FNV-1a over 64 bits of the content, stored with a version prefix so that a later Procly compares it the same way.
