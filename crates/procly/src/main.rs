@@ -75,7 +75,8 @@ enum Command {
     /// Start a Job running a shell command in the current directory, print its identifier on stdout, and on stderr
     /// `started`, or `reused` when the same command already runs in the same Worktree and directory.
     Run {
-        /// Kill the Job's whole process tree once it has run this long (`90s`, `5m`, `1h`).
+        /// Kill the Job's whole process tree once it has run this long, as a number followed by `ms`, `s`, `m`, `h` or `d`
+        /// (`500ms`, `90s`, `5m`, `1h`), a bare number meaning seconds. `procly wait` then exits with 124.
         #[arg(long, default_value = "30m", value_parser = duration::parse)]
         timeout: Duration,
         #[command(flatten)]
