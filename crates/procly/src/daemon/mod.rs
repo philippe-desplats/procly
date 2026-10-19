@@ -3,6 +3,7 @@
 mod agent;
 mod clock;
 mod compose;
+mod container_record;
 mod cpu;
 mod eject;
 mod environment;
@@ -42,6 +43,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use self::clock::Clock;
 use self::compose::{ComposeError, ComposeSpec, Composes, PlannedResource, Published, ResourcePlan};
+use self::container_record::ContainerRecords;
 use self::health::{HealthCheck, HttpCheck};
 use self::index::Indexes;
 use self::job::{Fingerprint, JobSpec, Jobs};
@@ -76,19 +78,23 @@ struct Registry {
     /// Set once the Services recorded by the previous Daemon are reconciled. Left unset when their document cannot
     /// be read, so that the request after it is fixed or removed reconciles again.
     reconciled: tokio::sync::OnceCell<()>,
+    /// Set once the containers recorded by the previous Daemon are reconciled, apart from the Services, so that a
+    /// container document that cannot be read never has the Services re-attached twice.
+    containers_reconciled: tokio::sync::OnceCell<()>,
 }
 
 impl Registry {
-    /// Waits until the Services recorded by the previous Daemon are reconciled, which the first request touching
-    /// Services runs if the Daemon has not finished it yet. A request that starts, stops or reports Services waits
-    /// for it, so that it never starts a Service still running from before the restart.
+    /// Waits until the Services and the containers recorded by the previous Daemon are reconciled, which the first
+    /// request touching Services runs if the Daemon has not finished it yet. A request that starts, stops or reports
+    /// Services waits for it, so that it never starts a Service still running from before the restart, nor loses
+    /// count of the Worktrees that need a container.
     async fn reconciled(&self) -> Result<(), String> {
+        let message = |error: store::StoreError| format!("{:#}", anyhow::Error::from(error));
         self.reconciled
-            .get_or_try_init(|| async {
-                reconcile::run(&self.services)
-                    .await
-                    .map_err(|error| format!("{:#}", anyhow::Error::from(error)))
-            })
+            .get_or_try_init(|| async { reconcile::run(&self.services).await.map_err(message) })
+            .await?;
+        self.containers_reconciled
+            .get_or_try_init(|| async { self.composes.reconcile().await.map_err(message) })
             .await
             .map(|&()| ())
     }
@@ -159,7 +165,11 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
             ServiceRecords::new(state.services()),
             OutputFiles::new(state.outputs()),
         ),
-        composes: Composes::new(clock.clone(), Arc::clone(&leases)),
+        composes: Composes::new(
+            clock.clone(),
+            Arc::clone(&leases),
+            ContainerRecords::new(state.containers()),
+        ),
         leases,
         indexes: Indexes::new(state.indexes()),
         managed: ManagedBlocks::new(state.managed_blocks()),
@@ -168,6 +178,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         mirroring: Mutex::default(),
         initializing: Mutex::default(),
         reconciled: tokio::sync::OnceCell::new(),
+        containers_reconciled: tokio::sync::OnceCell::new(),
     });
     // After the socket is bound, so that the command that started this Daemon is not left waiting to connect while
     // orphans are stopped, and its request waits for the reconciliation instead.
@@ -202,7 +213,8 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     let jobs = Arc::clone(&registry);
     let _ = tokio::task::spawn_blocking(move || jobs.jobs.kill_all()).await;
     registry.services.stop_all().await;
-    registry.composes.stop_all().await;
+    // The containers keep running, recorded with the Worktrees that need them, so that the next Daemon resumes their
+    // counts and Grace periods.
     remove_if_present(&socket)?;
     remove_if_present(&state.pid())?;
     Ok(())
@@ -594,6 +606,7 @@ fn prepare_compose(
         .map(|port_name| format!("PORT_{}", port_name.to_ascii_uppercase()))
         .chain(declared.env.keys().cloned())
         .collect();
+    let injected_names = injected.variables.iter().map(|(name, _)| name.clone()).collect();
     let mut env = env;
     env.extend(injected.variables);
     Ok(ComposeSpec {
@@ -603,6 +616,7 @@ fn prepare_compose(
         env,
         published,
         variables,
+        injected: injected_names,
         health: HealthCheck {
             port: injected.health_port,
             http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
@@ -684,9 +698,17 @@ async fn down(
     .context("the request could not be read")??;
     let worktree = topology.worktree.path.clone();
     let stopping = registry.services.stop(&worktree, service.as_deref());
-    let released = registry
-        .composes
-        .release(&topology.git_common_dir, &worktree, service.as_deref());
+    let released = {
+        let (registry, worktree, service) = (Arc::clone(&registry), worktree.clone(), service.clone());
+        // Whether the other Worktrees still exist is read from the disk, and the record is written to it.
+        tokio::task::spawn_blocking(move || {
+            registry
+                .composes
+                .release(&topology.git_common_dir, &worktree, service.as_deref())
+        })
+        .await
+        .context("the containers could not be released")?
+    };
     if let (Some(name), true) = (&service, stopping.is_empty() && released.is_empty()) {
         // Nothing to stop is fine for a declared Service, and a typo for any other.
         let (name, worktree, registry) = (name.clone(), worktree.clone(), Arc::clone(&registry));

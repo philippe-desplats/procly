@@ -172,7 +172,7 @@ The container is in Shared mode when the Service sets no `driver`, and in Logica
 
 Containers are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting.
 
-`procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon stops the containers it started when it exits, since it would lose count of the Worktrees that need them.
+`procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon records each container it started or adopted in `containers.json` of its state directory, with the Worktrees that need it and the end of a running Grace period, so a Daemon that exits or crashes leaves its containers running and the next Daemon resumes their counts and Grace periods, see [The Daemon across crashes and sessions](daemon.md#containers-after-a-crash-or-a-restart). A Worktree whose directory no longer exists, removed without `procly down`, stops counting.
 
 ### Containers started outside Procly
 
