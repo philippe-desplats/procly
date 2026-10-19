@@ -1,6 +1,7 @@
 //! The `--json` output of every command: one document on stdout, rendered client side from the same response as the
 //! text, so that the Daemon knows nothing of it.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Context as _;
@@ -88,6 +89,8 @@ pub(crate) struct Reached<'a> {
     via: Option<&'a str>,
     port: Option<u16>,
     url: Option<&'a str>,
+    /// Every Lease of the Service, by Port name.
+    ports: &'a BTreeMap<String, u16>,
     /// The Service that needs this one, when `up` was asked for that one instead.
     needed_by: Option<&'a str>,
 }
@@ -101,6 +104,7 @@ impl<'a> Reached<'a> {
             via: up.via.as_deref(),
             port: up.port,
             url: up.url.as_deref(),
+            ports: &up.ports,
             needed_by,
         }
     }

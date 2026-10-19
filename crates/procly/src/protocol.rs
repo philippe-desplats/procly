@@ -2,6 +2,7 @@
 //!
 //! One connection carries one request and one response, each a single line of JSON.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 14;
+pub(crate) const PROTOCOL_VERSION: u32 = 15;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -90,6 +91,8 @@ pub(crate) enum Response {
         outcome: StartOutcome,
         port: Option<u16>,
         url: Option<String>,
+        /// Every Lease of the Service, by Port name.
+        ports: BTreeMap<String, u16>,
         /// The Group running it, when the Service was covered by a Group that runs and nothing was started.
         via: Option<String>,
         /// The Services it needs, in the order `up` brought them up.
@@ -334,6 +337,8 @@ pub(crate) struct UpService {
     pub(crate) via: Option<String>,
     pub(crate) port: Option<u16>,
     pub(crate) url: Option<String>,
+    /// Every Lease of the Service, by Port name, the one `port` is the health check's among them.
+    pub(crate) ports: BTreeMap<String, u16>,
 }
 
 /// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.
@@ -554,7 +559,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":14,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":15,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

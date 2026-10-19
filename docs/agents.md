@@ -22,6 +22,8 @@ $ procly agent install --json
 {"schema_version":1,"rules":{"file":"/home/me/app/AGENTS.md","outcome":"written"},"guard":{"file":"/home/me/app/.claude/settings.json","outcome":"written"},"off":false}
 $ procly off --json
 {"schema_version":1,"off":true,"rules":[{"file":"/home/me/app/AGENTS.md","outcome":"written"}]}
+$ procly on --json
+{"schema_version":1,"off":false,"rules":[{"file":"/home/me/app/AGENTS.md","outcome":"written"}]}
 ```
 
 ## `procly agent install`

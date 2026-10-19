@@ -465,6 +465,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
             via,
             port,
             url,
+            ports,
             needs,
         } => {
             let requested = UpService {
@@ -473,6 +474,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
                 via,
                 port,
                 url,
+                ports,
             };
             up_reached(&requested, &needs, json)
         }

@@ -118,6 +118,7 @@ fn up_json_carries_the_outcome_and_the_lease_of_the_service_it_reached() {
             "via": null,
             "port": port,
             "url": format!("http://localhost:{port}"),
+            "ports": { "http": port },
             "needed_by": null,
         }])
     );
@@ -127,6 +128,46 @@ fn up_json_carries_the_outcome_and_the_lease_of_the_service_it_reached() {
     assert_eq!(
         stdout(&text),
         format!("web reused http://localhost:{port} port {port}\n")
+    );
+}
+
+#[test]
+fn up_json_carries_every_lease_of_a_service_declaring_2_port_names() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (http, admin) = (free_port(), free_port());
+    let config = format!(
+        "[services.multi]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {http}, admin = {admin} }}\nhealth = {{ port = 'http' }}\n",
+        test_server().display()
+    );
+    write(&main, "procly.toml", &config);
+
+    let asked = json_succeeded(&procly.procly_in(&main, &["up", "--json", "multi"]));
+    let all = json_succeeded(&procly.procly_in(&main, &["up", "--json"]));
+
+    let leases = json_succeeded(&procly.procly_in(&main, &["env", "--json", "multi"]));
+    let (http, admin) = (&leases["variables"]["PORT_HTTP"], &leases["variables"]["PORT_ADMIN"]);
+    let http = http
+        .as_str()
+        .and_then(|port| port.parse::<u64>().ok())
+        .expect("the http Lease");
+    let admin = admin
+        .as_str()
+        .and_then(|port| port.parse::<u64>().ok())
+        .expect("the admin Lease");
+    assert_ne!(http, admin);
+    for document in [&asked, &all] {
+        let service = &document["services"][0];
+        assert_eq!(service["ports"], json!({ "admin": admin, "http": http }));
+        // The existing keys are unchanged: `port` is still the Lease of the health check.
+        assert_eq!(service["port"], json!(http));
+        assert_eq!(service["url"], json!(format!("http://localhost:{http}")));
+    }
+    // The text prints what it always did.
+    let text = procly.procly_in(&main, &["up", "multi"]);
+    assert_eq!(
+        stdout(&text),
+        format!("multi reused http://localhost:{http} port {http}\n")
     );
 }
 

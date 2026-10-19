@@ -68,8 +68,12 @@ Installing the unit again on macOS unloads it first, which stops the Daemon it s
 With `--json`, the 3 commands print the `path` of the unit and their result: `installed` for `unit install`, `installed`, `starts_with_session` and `daemon_running` for `unit inspect`, and `removed` for `unit remove`, which is `false` when no unit was installed. See [JSON output](json.md).
 
 ```console
+$ procly unit install --json
+{"schema_version":1,"path":"/home/me/Library/LaunchAgents/io.github.philippe-desplats.procly.plist","installed":true}
 $ procly unit inspect --json
 {"schema_version":1,"path":"/home/me/Library/LaunchAgents/io.github.philippe-desplats.procly.plist","installed":true,"starts_with_session":true,"daemon_running":true}
+$ procly unit remove --json
+{"schema_version":1,"path":"/home/me/Library/LaunchAgents/io.github.philippe-desplats.procly.plist","removed":true}
 ```
 
 ## Foreign processes

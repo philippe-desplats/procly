@@ -10,7 +10,7 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 - The exit code is the same with and without `--json`, see [exit codes](exit-codes.md). A conflict, a Port mismatch or a Service that did not become healthy still exits with its own code, and its document says why.
 - A command that fails still reports on stderr, as without `--json`: the Daemon that cannot be reached, a Service that is not declared, the diagnostic of an `up` that ends unhealthy or in conflict. A failure of Procly itself prints no document at all.
 - The lines of stderr that only tell what the document carries are not printed, such as `started` and `reused` after `run`, the `(needed by …)` lines of `up`, `wrote …` after `init`, and the notes about a Managed block left as it is.
-- The document carries what the text says and no more. Paths are absolute, durations are in milliseconds, and output is the text the process printed.
+- The document carries what the text says, and `up` adds every Lease of a Service under `ports`, which the text leaves to `procly env`. Paths are absolute, durations are in milliseconds, and output is the text the process printed.
 
 ## Commands
 
@@ -58,11 +58,11 @@ $ procly logs --json 3f9a1c2e
 
 ## `up`
 
-A healthy `up` lists the Services it reached in the order they came up, the Services the one you asked for needs first. `needed_by` names the Service that needs it, and is `null` for a Service you asked for. `port` is the Lease the Service listens on and `url` where to reach it, both `null` for a Service without a port. `via` is the Group that runs a covered Service, or `null`.
+A healthy `up` lists the Services it reached in the order they came up, the Services the one you asked for needs first. `needed_by` names the Service that needs it, and is `null` for a Service you asked for. `port` is the Lease the Service listens on and `url` where to reach it, both `null` for a Service without a port. `ports` holds every Lease of the Service by Port name, such as `{"admin":4102,"http":4101}` for a Service declaring `http` and `admin`, and is empty for a Service without a port. `port` is always one of them, the one health check probes. `via` is the Group that runs a covered Service, or `null`.
 
 ```console
 $ procly up --json web
-{"schema_version":1,"result":"healthy","services":[{"service":"api","outcome":"started","via":null,"port":4100,"url":"http://localhost:4100","needed_by":"web"},{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","needed_by":null}]}
+{"schema_version":1,"result":"healthy","services":[{"service":"api","outcome":"started","via":null,"port":4100,"url":"http://localhost:4100","ports":{"http":4100},"needed_by":"web"},{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"needed_by":null}]}
 ```
 
 `procly up --json` without a Service lists every Service it brought up, all with a `needed_by` of `null`.
