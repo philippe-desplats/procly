@@ -333,6 +333,8 @@ A Lease that no Service used for `settings.lease_expiry` is dropped, and its por
 
 One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way, and a Pinned branch does the same toward its explicit port. Every other Lease stays the same across restarts.
 
+A declared port already taken when its first Lease is granted is not an error, by design. The Main worktree moves to the Pool or the Range as above, `procly up` prints the port it got in its URL and `port`, and `procly env` and the Env file carry it, so the Service and everything reading its Derived variables agree on it. Failing instead would keep the Main worktree from working whenever another stack holds a common port such as 5432, while the move costs nothing once the declared port is free again, the next start takes it back. A conflict, exit 5, is for a Compose service whose Lease is held at the moment its container starts, see [Compose services](#compose-services), not for a declared port that never was its Lease.
+
 The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
 
 | Variable | Value |
