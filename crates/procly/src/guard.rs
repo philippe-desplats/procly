@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
+use crate::protocol::GuardService;
+
 /// What a recognized command starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -22,6 +24,8 @@ pub(crate) struct Recognized {
     pub(crate) kind: Kind,
     /// The command that matched, as typed, without the `cd` or the variables around it.
     pub(crate) command: String,
+    /// Whether a `cd` or a `pushd` before it moved away from the directory the command line was run in.
+    pub(crate) moved: bool,
 }
 
 /// The Bash tool call a `PreToolUse` hook receives on its standard input.
@@ -44,38 +48,164 @@ pub(crate) fn tool_call(input: &str) -> Option<ToolCall> {
     })
 }
 
-/// The answer that makes Claude Code refuse the call and tell the agent why.
-pub(crate) fn denial(recognized: &Recognized, services: &[String]) -> String {
-    let Recognized { kind, command } = recognized;
-    let instead = match kind {
+/// The answer that makes Claude Code refuse the call and tell the agent why, with the Procly command to run instead:
+/// the one of the declared Service the blocked command starts, `procly up` for a dev command of the whole Repository
+/// run at the root of its Worktree, or else `procly up <service>` for the agent to pick among `services`. `at_root`
+/// tells whether the command line was run at the root of the Worktree.
+pub(crate) fn denial(recognized: &Recognized, services: &[GuardService], at_root: bool) -> String {
+    let Recognized { kind, command, .. } = recognized;
+    let why = match kind {
         Kind::DevServer => {
             "starts a dev server. This repository runs its dev servers through Procly, so that parallel worktrees \
-             never start the same one twice or fight over a port. Run `procly up <service>` instead."
+             never start the same one twice or fight over a port."
         }
         Kind::Compose => {
-            "starts containers. This repository runs them through Procly, which shares one container between its \
-             worktrees. Run `procly up <service>` for the Compose service instead."
+            "starts containers. This repository runs them through Procly, which shares one container \
+             between its worktrees."
         }
+    };
+    let instead = match (equivalent(recognized, services, at_root), kind) {
+        (Some(equivalent), _) => format!("Run `{equivalent}` instead."),
+        (None, Kind::DevServer) => "Run `procly up <service>` instead.".to_owned(),
+        (None, Kind::Compose) => "Run `procly up <service>` for the Compose service instead.".to_owned(),
     };
     let declared = if services.is_empty() {
         "No Service is declared in procly.toml yet, declare it there first.".to_owned()
     } else {
-        format!("Declared Services: {}.", services.join(", "))
+        let names: Vec<&str> = services.iter().map(|service| service.name.as_str()).collect();
+        format!("Declared Services: {}.", names.join(", "))
     };
     json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": format!("`{command}` {instead} {declared}"),
+            "permissionDecisionReason": format!("`{command}` {why} {instead} {declared}"),
         }
     })
     .to_string()
 }
 
+/// The Procly command that does what the blocked command does, `None` when nothing declared tells.
+fn equivalent(recognized: &Recognized, services: &[GuardService], at_root: bool) -> Option<String> {
+    let blocked = words_of(&recognized.command);
+    let blocked = strip_launchers(&blocked);
+    match recognized.kind {
+        Kind::DevServer => {
+            let declared = services
+                .iter()
+                .filter_map(|service| {
+                    let run = words_of_dev_command(service.run.as_deref()?);
+                    let matched = same_start(blocked, strip_launchers(&run))?;
+                    Some((matched, service))
+                })
+                // The longest match wins, the first declared one among equals.
+                .fold(None::<(usize, &GuardService)>, |best, (matched, service)| match best {
+                    Some((longest, _)) if longest >= matched => best,
+                    _ => Some((matched, service)),
+                });
+            match declared {
+                Some((_, service)) => Some(format!("procly up {}", service.name)),
+                None => {
+                    (at_root && !recognized.moved && runs_the_whole_repository(blocked)).then(|| "procly up".to_owned())
+                }
+            }
+        }
+        Kind::Compose => {
+            let named = compose_services(blocked);
+            let started: Vec<String> = services
+                .iter()
+                .filter(|service| {
+                    service
+                        .compose
+                        .as_ref()
+                        .is_some_and(|compose| named.is_empty() || named.contains(&compose.as_str()))
+                })
+                .map(|service| format!("procly up {}", service.name))
+                .collect();
+            (!started.is_empty()).then(|| started.join(" && "))
+        }
+    }
+}
+
+/// The words of the first simple command of `command`.
+fn words_of(command: &str) -> Vec<String> {
+    segments(command)
+        .into_iter()
+        .next()
+        .map(|segment| segment.words)
+        .unwrap_or_default()
+}
+
+/// The words of the command of a Service that starts its dev server, the first one when none does.
+fn words_of_dev_command(run: &str) -> Vec<String> {
+    words_of(&recognize(run).map_or_else(|| run.to_owned(), |recognized| recognized.command))
+}
+
+/// How many words `blocked` and `run` share from their start, when one of them is the start of the other, a
+/// `{ports.<name>}` of `run` standing for any port.
+fn same_start(blocked: &[String], run: &[String]) -> Option<usize> {
+    let shared = blocked.len().min(run.len());
+    let same = blocked
+        .iter()
+        .zip(run)
+        .all(|(blocked, run)| blocked == run || run.contains("{ports."));
+    (same && shared > 0).then_some(shared)
+}
+
+/// The package managers whose dev script, run at the root of a Repository, runs the dev servers of all of it.
+const ROOT_RUNNERS: [&str; 5] = ["npm", "pnpm", "yarn", "bun", "turbo"];
+
+/// The options of a package manager that narrow a command to one package of a monorepo.
+const PACKAGE_OPTIONS: [&str; 8] = [
+    "--workspace",
+    "-w",
+    "--prefix",
+    "--filter",
+    "-F",
+    "--dir",
+    "-C",
+    "--cwd",
+];
+
+/// Whether `words` run the dev script of a whole Repository: `pnpm dev`, `npm start`, `turbo run dev`, with no
+/// option narrowing it to one package and a plain script name.
+fn runs_the_whole_repository(words: &[String]) -> bool {
+    let Some((program, rest)) = words.split_first() else {
+        return false;
+    };
+    if !ROOT_RUNNERS.contains(&basename(program)) || rest.iter().any(|word| PACKAGE_OPTIONS.contains(&word.as_str())) {
+        return false;
+    }
+    let positional = positional(rest, &[]);
+    let script = script_after_run(&positional).or_else(|| positional.first().copied());
+    script.is_some_and(|script| matches!(script, "dev" | "start" | "serve" | "develop"))
+}
+
+/// The services of the compose file `docker compose up` names, empty when it names none and starts them all.
+fn compose_services(words: &[String]) -> Vec<&str> {
+    let after = match words.first().map(|program| basename(program)) {
+        Some("docker") => words
+            .iter()
+            .position(|word| word == "compose")
+            .map_or(&[][..], |at| &words[at + 1..]),
+        _ => words.get(1..).unwrap_or_default(),
+    };
+    positional(after, &COMPOSE_OPTIONS_WITH_VALUE)
+        .into_iter()
+        .skip_while(|word| !matches!(*word, "up" | "start"))
+        .skip(1)
+        .collect()
+}
+
 /// The first command of `command_line` that starts a dev server or containers, `None` when none does.
 pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
+    let mut moved = false;
     segments(command_line).into_iter().find_map(|segment| {
         let words = strip_launchers(&segment.words);
+        if matches!(words.first().map(|word| basename(word)), Some("cd" | "pushd")) {
+            moved = true;
+            return None;
+        }
         // A shell given a command line to run: `bash -c 'npm run dev'`.
         if let [shell, flag, inner, ..] = words
             && matches!(basename(shell), "sh" | "bash" | "zsh" | "dash")
@@ -83,11 +213,15 @@ pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
             && !flag.starts_with("--")
             && flag.contains('c')
         {
-            return recognize(inner);
+            return recognize(inner).map(|recognized| Recognized {
+                moved: moved || recognized.moved,
+                ..recognized
+            });
         }
         classify(words).map(|kind| Recognized {
             kind,
             command: segment.text.clone(),
+            moved,
         })
     })
 }
@@ -547,21 +681,100 @@ mod tests {
         assert_eq!(tool_call(r#""npm run dev""#), None);
     }
 
+    fn process(name: &str, run: &str) -> GuardService {
+        GuardService {
+            name: name.to_owned(),
+            run: Some(run.to_owned()),
+            compose: None,
+        }
+    }
+
     #[test]
     fn the_denial_names_the_command_the_services_and_the_procly_command() {
-        let recognized = Recognized {
-            kind: Kind::DevServer,
-            command: "npm run dev".to_owned(),
-        };
-        let answer: Value = serde_json::from_str(&denial(&recognized, &["api".to_owned(), "web".to_owned()])).unwrap();
+        let recognized = recognize("npm run dev").unwrap();
+        let services = [process("api", "node api.js"), process("web", "next dev")];
+        let answer: Value = serde_json::from_str(&denial(&recognized, &services, true)).unwrap();
         let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap();
         assert!(reason.starts_with("`npm run dev` starts a dev server."), "{reason}");
         assert!(
-            reason.contains("`procly up <service>`") && reason.ends_with("Declared Services: api, web."),
+            reason.contains("Run `procly up` instead.") && reason.ends_with("Declared Services: api, web."),
             "{reason}"
         );
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn the_equivalent_is_the_service_whose_command_starts_the_same_way() {
+        let services = [
+            process("web", "pnpm --filter web dev --port {ports.http}"),
+            process("docs", "cd docs && npx astro dev"),
+            process("dev", "pnpm dev"),
+        ];
+        let equivalent = |command: &str, at_root: bool| equivalent(&recognize(command).unwrap(), &services, at_root);
+        assert_eq!(
+            equivalent("pnpm --filter web dev", false).as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(
+            equivalent("pnpm --filter web dev --port 3000", false).as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(equivalent("astro dev --host", true).as_deref(), Some("procly up docs"));
+        assert_eq!(equivalent("pnpm dev", true).as_deref(), Some("procly up dev"));
+        assert_eq!(equivalent("pnpm --filter api dev", true), None);
+    }
+
+    #[test]
+    fn a_dev_command_of_the_whole_repository_at_its_root_is_procly_up() {
+        let services = [process("web", "node server.js")];
+        let equivalent = |command: &str, at_root: bool| equivalent(&recognize(command).unwrap(), &services, at_root);
+        for command in [
+            "npm start",
+            "pnpm dev",
+            "yarn run dev",
+            "bun run serve",
+            "turbo run dev",
+        ] {
+            assert_eq!(equivalent(command, true).as_deref(), Some("procly up"), "{command}");
+            assert_eq!(equivalent(command, false), None, "{command}");
+        }
+        for command in [
+            "cd apps/web && pnpm dev",
+            "pnpm --filter web dev",
+            "npm run dev:web",
+            "next dev",
+        ] {
+            assert_eq!(equivalent(command, true), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_compose_command_is_the_compose_services_it_names_or_all_of_them() {
+        let compose = |name: &str, service: &str| GuardService {
+            name: name.to_owned(),
+            run: None,
+            compose: Some(service.to_owned()),
+        };
+        let services = [
+            compose("cache", "redis"),
+            compose("db", "postgres"),
+            process("web", "next dev"),
+        ];
+        let equivalent = |command: &str| equivalent(&recognize(command).unwrap(), &services, true);
+        assert_eq!(
+            equivalent("docker compose -f dev.yml up -d postgres").as_deref(),
+            Some("procly up db")
+        );
+        assert_eq!(
+            equivalent("docker-compose up --wait redis postgres").as_deref(),
+            Some("procly up cache && procly up db")
+        );
+        assert_eq!(
+            equivalent("docker compose up -d").as_deref(),
+            Some("procly up cache && procly up db")
+        );
+        assert_eq!(equivalent("docker compose up mailpit"), None);
     }
 }

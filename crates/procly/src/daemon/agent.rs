@@ -11,7 +11,7 @@ use super::hook::{self, HookError};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use super::store::StoreError;
 use super::{Registry, blocking, read_config};
-use crate::protocol::{BlockOutcome, BlockReport, InstallReport, Request, Response, SwitchReport};
+use crate::protocol::{BlockOutcome, BlockReport, GuardService, InstallReport, Request, Response, SwitchReport};
 use crate::topology::{self, Topology, TopologyError};
 
 /// The name of the Managed block holding the Rules block.
@@ -58,7 +58,9 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
     let work = move || match request {
         Request::AgentInstall { cwd, file } => install(&registry, &cwd, file.as_deref()).map(Response::AgentInstall),
         Request::Switch { cwd, off } => switch(&registry, &cwd, off).map(Response::Switched),
-        Request::Guard { cwd } => guard(&registry, &cwd).map(|(off, services)| Response::Guard { off, services }),
+        Request::Guard { cwd } => {
+            guard(&registry, &cwd).map(|(off, at_root, services)| Response::Guard { off, at_root, services })
+        }
         other => unreachable!("only agent requests are handed to the agent module, not {other:?}"),
     };
     blocking("the agent request could not be answered", move || Ok(work()?))
@@ -144,15 +146,27 @@ pub(super) fn switch(registry: &Registry, cwd: &Path, off: bool) -> Result<Switc
     Ok(SwitchReport { off, rules: reports })
 }
 
-/// Whether the Repository holding `cwd` is Off, and the Services its Worktree declares, which the Guard names in its
-/// answer. A configuration that cannot be read declares none: the Guard still answers.
-pub(super) fn guard(registry: &Registry, cwd: &Path) -> Result<(bool, Vec<String>), AgentError> {
+/// Whether the Repository holding `cwd` is Off, whether `cwd` is the root of its Worktree, and the Services the
+/// Worktree declares, which the Guard matches the command it blocks against and names in its answer. A configuration
+/// that cannot be read declares none: the Guard still answers.
+pub(super) fn guard(registry: &Registry, cwd: &Path) -> Result<(bool, bool, Vec<GuardService>), AgentError> {
     let topology = topology_in(cwd)?;
     let off = registry.offs.is_off(&topology.git_common_dir)?;
+    let at_root = topology::canonicalize(cwd).is_ok_and(|cwd| cwd == topology.worktree.path);
     let services = read_config(&topology.worktree.path)
-        .map(|config| config.services.keys().cloned().collect())
+        .map(|config| {
+            config
+                .services
+                .into_iter()
+                .map(|(name, declared)| GuardService {
+                    name,
+                    run: declared.run,
+                    compose: declared.compose,
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    Ok((off, services))
+    Ok((off, at_root, services))
 }
 
 /// The instruction file to write: the one asked for, or the default one.

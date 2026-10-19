@@ -1004,7 +1004,11 @@ fn guard_hook() -> ExitCode {
         Ok(client::send(&state, &Request::Guard { cwd })?)
     });
     match asked {
-        Ok(Response::Guard { off: false, services }) => println!("{}", guard::denial(&recognized, &services)),
+        Ok(Response::Guard {
+            off: false,
+            at_root,
+            services,
+        }) => println!("{}", guard::denial(&recognized, &services, at_root)),
         Ok(Response::Guard { off: true, .. }) => {}
         Ok(Response::Error { message }) => eprintln!("procly guard: {message}, letting the command through"),
         Ok(other) => eprintln!("procly guard: unexpected answer {other:?}, letting the command through"),

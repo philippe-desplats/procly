@@ -144,7 +144,10 @@ pub(crate) enum Response {
     /// Whether the Guard stands for the Repository, and the Services it declares for the Worktree.
     Guard {
         off: bool,
-        services: Vec<String>,
+        /// Whether the directory asked about is the root of its Worktree, where a dev command of the whole Repository
+        /// runs.
+        at_root: bool,
+        services: Vec<GuardService>,
     },
     /// The Repository is ejected.
     Eject(EjectReport),
@@ -465,6 +468,16 @@ pub(crate) enum ServiceState {
     Ended {
         end: ServiceEnd,
     },
+}
+
+/// A declared Service, as the Guard matches a command it blocks against it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GuardService {
+    pub(crate) name: String,
+    /// The command of a Process service or a Group.
+    pub(crate) run: Option<String>,
+    /// The service of the compose file a Compose service maps to.
+    pub(crate) compose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
