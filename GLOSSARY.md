@@ -31,7 +31,7 @@ The launchd agent on macOS, or the systemd user unit on Linux, that starts the D
 _Avoid_: service unit, autostart, daemon service
 
 **Reconciliation**:
-What a starting Daemon does with the Services a previous Daemon recorded: it re-attaches the ones still running and listening on their Lease, stops what is left of the others and reports what became of each. Re-attaching takes back the supervision of a running process group, unlike Reuse, which is the answer to a start request.
+What a starting Daemon does with the Services and the containers a previous Daemon recorded: it re-attaches the Services still running and listening on their Lease, stops what is left of the others and reports what became of each, and it takes the recorded containers back with their Worktree count and their Grace period. Re-attaching takes back the supervision of a running process group, unlike Reuse, which is the answer to a start request.
 _Avoid_: recovery, resync
 
 ### Services
@@ -153,7 +153,7 @@ _Avoid_: bootstrap, setup script, provisioning
 ### Agent integration and reversibility
 
 **Guard**:
-An agent hook that blocks a known dev-server command and answers with the equivalent Procly command.
+An agent hook that blocks a known dev-server command and answers with the equivalent Procly command. It has no markers, since its file is JSON, and is identified by its content and by the fingerprint recorded when Procly wrote it.
 _Avoid_: interceptor, blocker
 
 **Rules block**:
@@ -179,7 +179,7 @@ _Avoid_: uninstall, teardown
 - A **Group** covers one or more **Services**, and a start request for a covered **Service** while its **Group** runs ends in **Reuse**.
 - A **Service** declares zero or more **Port names**, and each **Port name** gets one **Lease** per **Worktree**, or per **Pinned branch**.
 - A **Lease** is drawn from the declared port in the **Main worktree**, then from the **Pool**, then from the **Range**.
-- A **Compose service** has exactly one **Isolation mode** per **Repository**.
+- A **Compose service** has exactly one **Isolation mode**.
 - A **Logical** container holds one or more **Logical resources** per **Worktree**, created by its **Driver** and filled by its **Seed**.
 - A **Shared** or **Logical** container is reference-counted by **Worktrees** and stops after its **Grace period**.
 - **Derived variables** are injected into every **Process service** and mirrored in the **Env file**.
