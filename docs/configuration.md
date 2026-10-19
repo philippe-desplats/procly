@@ -309,7 +309,7 @@ env = { CACHE_PORT = "{services.cache.ports.redis}" }
 REDIS_URL = "{services.cache.resources.main.url}"
 ```
 
-Indexes are handed out on first use and stored in `indexes.json` of the state directory, so a Worktree keeps its index across restarts of the Service and of the Daemon, in `procly env`, the Env file and `procly up` alike. Each resource of a Service has an index of its own, numbered in the alphabetical order of the resource keys. The Main worktree has the lowest ones, whichever Worktree asks first, so an app that never picks a database reads the one it always did. An index is never given back, also when its Worktree is removed.
+Indexes are handed out on first use and stored in `indexes.json` of the state directory, so a Worktree keeps its index across restarts of the Service and of the Daemon, in `procly env`, the Env file and `procly up` alike. Each resource of a Service has an index of its own, numbered in the alphabetical order of the resource keys. The Main worktree has the lowest ones, whichever Worktree asks first, so an app that never picks a database reads the one it always did. An index is never given back, also when its Worktree is removed: in v0.1 Redis indexes are never released, and a collection of the indexes of removed Worktrees is planned for v0.2.
 
 When every index is taken, `procly env` and `procly up` exit with 125 and tell the way out, and the Worktrees that have an index keep it:
 
