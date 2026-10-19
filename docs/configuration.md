@@ -404,10 +404,12 @@ The rest of the file is kept byte for byte, and writing the block again changes 
 
 Health is a TCP connection to the Lease of the Service, on `127.0.0.1` or `::1`, optionally followed by an HTTP `GET`.
 
+The request always goes to the Lease, whatever a URL names. A URL gives the `Host` header of the request, its host and port as written, for a dev server that answers only on a host name of its own, and the path. Without a URL, the `Host` header is `localhost` with the Lease. Only `http://` is accepted, any other scheme, or a URL without a host, fails before anything starts.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `port` | the only Port name | The Port name to probe, required when the Service declares several. |
-| `path` | none | The path of the HTTP check. Setting `path` or `status` turns the HTTP check on, with `/` as the default path. |
+| `path` | none | The path of the HTTP check, such as `/api/health`, or an `http://` URL such as `http://app.localhost/api/health`. Setting `path` or `status` turns the HTTP check on, with `/` as the default path. |
 | `status` | `200` | The status the HTTP check must answer. |
 | `timeout` | `settings.health_timeout` | The health timeout of this Service. |
 
