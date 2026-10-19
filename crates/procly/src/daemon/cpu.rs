@@ -1,10 +1,9 @@
 //! The CPU time used by a process group, read with `ps` which macOS and Linux both ship.
 
+use super::process_group::Pid;
 use std::io;
 use std::process::Command;
 use std::time::Duration;
-
-use nix::unistd::Pid;
 
 /// The CPU time all the live members of the process group `pgid` have used so far. A member that ended takes
 /// its share with it, so this can go down.

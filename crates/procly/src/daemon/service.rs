@@ -2,14 +2,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
-use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nix::unistd::Pid;
-use process_wrap::tokio::{ChildWrapper, CommandWrap, ProcessGroup};
+use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use tokio::sync::watch;
 
 use super::clock::Clock;
@@ -18,7 +16,7 @@ use super::health::HealthCheck;
 use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
 use super::output_file::{self, OutputFiles, Tail};
-use super::process_group::{self, STOP_TIMEOUT, kill_group};
+use super::process_group::{self, Pid, kill_group, stop_tree};
 use super::record::{ServiceRecord, ServiceRecords};
 use crate::config::RestartPolicy;
 use crate::output::{self, OutputBuffer};
@@ -574,7 +572,7 @@ fn launch(
             .stdout(Stdio::from(file.stdout))
             .stderr(Stdio::from(file.stderr));
     });
-    command.wrap(ProcessGroup::leader());
+    process_group::lead_group(&mut command);
     let spawned = command.spawn();
     // The handles the process writes with are its own now, the Daemon keeps none.
     drop(command);
@@ -644,7 +642,7 @@ async fn supervise(
         ever_healthy |= healthy;
         let exited_by_itself = exited.is_some();
         let ended = if let Some(status) = exited {
-            end_of(status.expect("waiting fails only when the daemon lost track of its own child"))
+            process_group::service_end(status.expect("waiting fails only when the daemon lost track of its own child"))
         } else {
             stop_tree(process.child.as_mut()).await;
             stop.borrow()
@@ -735,19 +733,6 @@ fn describe(end: ServiceEnd) -> String {
         | ServiceEnd::NotListening { .. } => {
             unreachable!("only a process that exited by itself is described")
         }
-    }
-}
-
-/// Stops the leader of the process group: `SIGTERM` to the whole group, then `SIGKILL` after the stop timeout.
-async fn stop_tree(child: &mut dyn ChildWrapper) {
-    if let Err(error) = child.signal(nix::libc::SIGTERM) {
-        eprintln!("cannot send SIGTERM to process group {:?}: {error}", child.id());
-    }
-    if tokio::time::timeout(STOP_TIMEOUT, child.wait()).await.is_err() {
-        if let Err(error) = child.start_kill() {
-            eprintln!("cannot kill process group {:?}: {error}", child.id());
-        }
-        let _ = child.wait().await;
     }
 }
 
@@ -983,15 +968,6 @@ fn ownership_of(leased: u16, lease_ports: &[u16], listening: &[u16]) -> Ownershi
     match listening.iter().copied().find(|port| !lease_ports.contains(port)) {
         Some(actual) => Ownership::Elsewhere(ServiceEnd::PortMismatch { leased, actual }),
         None => Ownership::Pending,
-    }
-}
-
-fn end_of(status: ExitStatus) -> ServiceEnd {
-    match status.signal() {
-        Some(signal) => ServiceEnd::Signaled { signal },
-        None => ServiceEnd::Exited {
-            code: status.code().expect("an exit status without a signal carries a code"),
-        },
     }
 }
 

@@ -19,6 +19,7 @@ mod listeners;
 mod managed;
 mod off;
 mod output_file;
+#[cfg(unix)]
 mod process_group;
 mod propose;
 mod reconcile;

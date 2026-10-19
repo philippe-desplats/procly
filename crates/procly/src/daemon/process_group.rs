@@ -1,11 +1,22 @@
-//! Signals to the process group of a Job or a Service, which reach its whole tree.
+//! The Unix side of the spawn and stop boundary (docs/rules/processes.md): process groups of Jobs and Services,
+//! the signals that reach their whole tree, and how their leader ended.
+//!
+//! Every other module goes through this interface and never calls the system itself, so that a Windows port adds a
+//! `#[cfg(windows)]` sibling of this module with the same interface, built on Job Objects, and changes nothing else.
 
-use std::process::Command;
+use std::os::unix::process::ExitStatusExt as _;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill, killpg};
-use nix::unistd::Pid;
+use nix::sys::wait::{WaitStatus, waitpid};
+/// The id of a process or of a process group, which every module names processes by.
+pub(super) use nix::unistd::Pid;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, ProcessGroup};
+use tokio::task::JoinHandle;
+
+use crate::protocol::{JobEnd, ServiceEnd};
 
 /// How long a stopped tree gets between `SIGTERM` and `SIGKILL`.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -54,11 +65,15 @@ pub(super) struct Identity {
 /// `ps` would compute a date from them that moves with the clock, and a Service would then no longer be recognized.
 /// macOS keeps the date itself, which `ps` prints, with the locale and the time zone fixed so that a Daemon started
 /// from a shell and one started by the session manager read the same.
+#[cfg(target_os = "linux")]
 pub(super) fn identity(pid: Pid) -> Option<Identity> {
-    if cfg!(target_os = "linux") {
-        return parse_proc_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?);
-    }
-    let output = Command::new("ps")
+    parse_proc_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// See the Linux version above.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn identity(pid: Pid) -> Option<Identity> {
+    let output = std::process::Command::new("ps")
         .args(["-o", "pgid=,lstart=", "-p", &pid.to_string()])
         .env("LC_ALL", "C")
         .env("TZ", "UTC")
@@ -68,6 +83,7 @@ pub(super) fn identity(pid: Pid) -> Option<Identity> {
     parse_identity(&String::from_utf8_lossy(&output.stdout))
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Reads the process group and the start of `/proc/<pid>/stat`, the 5th and 22nd fields, counted after the name of
 /// the command, which may hold spaces and parentheses itself.
 fn parse_proc_stat(stat: &str) -> Option<Identity> {
@@ -82,6 +98,7 @@ fn parse_proc_stat(stat: &str) -> Option<Identity> {
     })
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 /// Reads the line `ps -o pgid=,lstart=` prints, such as `4242 Sun Oct 18 20:52:01 2026`.
 fn parse_identity(line: &str) -> Option<Identity> {
     let (pgid, started) = line.trim().split_once(char::is_whitespace)?;
@@ -115,6 +132,63 @@ pub(super) async fn stop_group(pgid: Pid) {
     }
     // Sending signals sleeps between attempts, which must not park a runtime worker.
     let _ = tokio::task::spawn_blocking(move || kill_group(pgid)).await;
+}
+
+/// The process group of the Daemon itself, whose members Procly never counts as Foreign processes.
+pub(super) fn own_group() -> Pid {
+    nix::unistd::getpgrp()
+}
+
+/// Makes the spawned command lead a process group of its own, so that a signal to the group reaches its whole tree.
+pub(super) fn lead_group(command: &mut CommandWrap) {
+    command.wrap(ProcessGroup::leader());
+}
+
+/// Stops the leader of the process group of a Service: `SIGTERM` to the whole group, then `SIGKILL` after the stop
+/// timeout.
+pub(super) async fn stop_tree(child: &mut dyn ChildWrapper) {
+    if let Err(error) = child.signal(Signal::SIGTERM as i32) {
+        eprintln!("cannot send SIGTERM to process group {:?}: {error}", child.id());
+    }
+    if tokio::time::timeout(STOP_TIMEOUT, child.wait()).await.is_err() {
+        if let Err(error) = child.start_kill() {
+            eprintln!("cannot kill process group {:?}: {error}", child.id());
+        }
+        let _ = child.wait().await;
+    }
+}
+
+/// How the leader of a Service ended, from its exit status.
+pub(super) fn service_end(status: ExitStatus) -> ServiceEnd {
+    match status.signal() {
+        Some(signal) => ServiceEnd::Signaled { signal },
+        None => ServiceEnd::Exited {
+            code: status.code().expect("an exit status without a signal carries a code"),
+        },
+    }
+}
+
+/// Reaps the leader of a Job with `waitpid`, which tells an exit code from a signal, unlike `portable_pty::Child`,
+/// and tells how it ended. Blocking.
+pub(super) fn wait_for_job(pid: Pid) -> JobEnd {
+    loop {
+        match waitpid(pid, None) {
+            Ok(WaitStatus::Signaled(_, signal, _)) => return JobEnd::Signaled { signal: signal as i32 },
+            Ok(WaitStatus::Exited(_, code)) => return JobEnd::Exited { code },
+            Ok(_) | Err(Errno::EINTR) => {}
+            Err(error) => panic!("cannot wait for job process {pid}, which only the daemon reaps: {error}"),
+        }
+    }
+}
+
+/// Stops the leader of the process group of a Job, reaped by `waiter`: `SIGTERM` to the whole group, then `SIGKILL`
+/// after the stop timeout.
+pub(super) async fn stop_job_tree(pgid: Pid, mut waiter: JoinHandle<JobEnd>) {
+    signal_group(pgid, Signal::SIGTERM);
+    if tokio::time::timeout(STOP_TIMEOUT, &mut waiter).await.is_err() {
+        signal_group(pgid, Signal::SIGKILL);
+        let _ = waiter.await;
+    }
 }
 
 #[cfg(test)]
