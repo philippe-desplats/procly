@@ -47,6 +47,13 @@ Installing the unit again on macOS unloads it first, which stops the Daemon it s
 
 `procly unit remove` stops the Daemon the unit started, which stops its Services, and the next command starts a Daemon on demand again.
 
+With `--json`, the 3 commands print the `path` of the unit and their result: `installed` for `unit install`, `installed`, `starts_with_session` and `daemon_running` for `unit inspect`, and `removed` for `unit remove`, which is `false` when no unit was installed. See [JSON output](json.md).
+
+```console
+$ procly unit inspect --json
+{"schema_version":1,"path":"/home/me/Library/LaunchAgents/io.github.philippe-desplats.procly.plist","installed":true,"starts_with_session":true,"daemon_running":true}
+```
+
 ## Foreign processes
 
 `procly status` lists under each Worktree what runs in it without Procly having started it, so that an agent that bypassed Procly shows up:

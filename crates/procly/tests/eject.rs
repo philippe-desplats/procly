@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use common::{
-    Procly, assert_success, eventually, free_port, git, git_output, git_repository, git_worktree_add, stderr, stdout,
-    test_server,
+    Procly, assert_success, eventually, free_port, git, git_output, git_repository, git_worktree_add, json_document,
+    json_schema_version, json_succeeded, stderr, stdout, test_server,
 };
 
 const RULES_OPEN: &str = "<!-- >>> procly managed block: rules >>> -->";
@@ -465,4 +465,59 @@ fn a_settings_file_indented_with_4_spaces_comes_back_byte_for_byte() {
 
     assert_eq!(read(&main.join(".claude/settings.json")), own);
     assert_eq!(git_output(&main, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn eject_json_carries_what_was_stopped_removed_and_left_and_the_prompt() {
+    let procly = Procly::new();
+    let main = repository_with_an_edited_rules_block(&procly);
+
+    let output = eject_with_path(&procly, &main, &procly.scratch().join("no-bin"), &["--json"]);
+
+    let document = json_succeeded(&output);
+    assert_eq!(document["schema_version"], json_schema_version(&procly));
+    assert_eq!(
+        document["stopped"],
+        serde_json::json!([{ "service": "web", "worktree": main }])
+    );
+    let removed = |kind: &str| {
+        document["removed"]
+            .as_array()
+            .expect("a list of removed items")
+            .iter()
+            .any(|item| item["kind"] == kind)
+    };
+    assert!(
+        removed("guard") && removed("exclusions") && removed("env_file"),
+        "{document}"
+    );
+    assert!(!removed("rules"), "{document}");
+    assert_eq!(
+        document["left"],
+        serde_json::json!([{ "kind": "rules", "file": main.join("AGENTS.md") }])
+    );
+    let prompt = document["prompt"].as_str().expect("the prompt of what was left");
+    assert!(
+        prompt.contains(&format!("{}: the Rules block", main.join("AGENTS.md").display())),
+        "{prompt}"
+    );
+    assert_eq!(document["agent"], serde_json::json!(null));
+}
+
+#[test]
+fn eject_json_with_an_agent_keeps_stdout_to_the_document_and_names_the_agent() {
+    let procly = Procly::new();
+    let main = repository_with_an_edited_rules_block(&procly);
+    let bin = procly.scratch().join("bin");
+    write(&bin.join("claude"), "#!/bin/sh\necho the agent talks\n");
+    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).expect("make it executable");
+
+    let output = eject_with_path(&procly, &main, &bin, &["--json", "--agent", "claude"]);
+
+    assert_success(&output);
+    let document = json_document(&output);
+    assert_eq!(document["agent"], serde_json::json!("claude"));
+    assert_eq!(document["prompt"], serde_json::json!(null));
+    assert_eq!(document["left"][0]["kind"], serde_json::json!("rules"));
+    assert!(stderr(&output).contains("the agent talks"), "{}", stderr(&output));
 }

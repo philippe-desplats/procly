@@ -1,6 +1,6 @@
 # Exit codes
 
-Every `procly` command exits with one of these codes. They are stable: an agent may branch on them without parsing the output, and a change to this table is a breaking change of the CLI (ADR 0009).
+Every `procly` command exits with one of these codes. They are stable: an agent may branch on them without parsing the output, and a change to this table is a breaking change of the CLI (ADR 0009). `--json` changes none of them, see [JSON output](json.md).
 
 | Code | Meaning | Commands |
 | --- | --- | --- |

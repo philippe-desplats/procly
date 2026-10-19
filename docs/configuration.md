@@ -135,7 +135,7 @@ A Group and the Services it covers never run side by side in one Worktree:
 
 ## `procly up` without arguments
 
-`procly up` starts every declared Service that no Group covers, each one after the Services it needs, and waits for each to be healthy before the next one starts. A Group stands for the Services it covers. It replaces the monorepo-wide dev command, with the Leases and the environment of each Service. Stdout holds one line per Service, in the order they came up, `started` or `reused`, with the URL and the port when the Service has one. A Service that does not become healthy stops the sequence and `up` exits with its code (3, 4 or 124), as for a single Service. An empty configuration makes it fail with 125.
+`procly up` starts every declared Service that no Group covers, each one after the Services it needs, and waits for each to be healthy before the next one starts. A Group stands for the Services it covers. It replaces the monorepo-wide dev command, with the Leases and the environment of each Service. Stdout holds one line per Service, in the order they came up, `started` or `reused`, with the URL and the port when the Service has one. A Service that does not become healthy stops the sequence and `up` exits with its code (3, 4 or 124), as for a single Service. An empty configuration makes it fail with 125. With `--json`, the document lists the same Services in the same order under `services`, see [JSON output](json.md#up).
 
 ## Compose services
 
@@ -372,6 +372,13 @@ The variables are injected into the environment of the Service, so they win over
 
 ```console
 $ eval "$(procly env web)" && pnpm --filter web test
+```
+
+With `--json`, the variables are the object `variables`, in the same order. See [JSON output](json.md).
+
+```console
+$ procly env --json web
+{"schema_version":1,"service":"web","variables":{"PORT":"4101","PORT_HTTP":"4101","PROCLY":"1","PROCLY_SERVICE":"web"}}
 ```
 
 ## The Env file

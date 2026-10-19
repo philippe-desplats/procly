@@ -6,6 +6,7 @@ mod driver;
 mod duration;
 mod envfile;
 mod guard;
+mod json;
 mod output;
 mod ports;
 mod proposal;
@@ -22,11 +23,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
     BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, Occupant, Released, Request, Response,
-    ServiceEnd, StartOutcome, Written,
+    ServiceEnd, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -43,6 +44,15 @@ const EXIT_PORT_MISMATCH: u8 = 4;
 const EXIT_CONFLICT: u8 = 5;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
+
+/// The flag that turns the text of a command into one JSON document.
+#[derive(Debug, Clone, Copy, Args)]
+struct JsonFlag {
+    /// Print one JSON document carrying a `schema_version` on stdout instead of text. A command that fails still
+    /// reports on stderr and exits with the same code. See docs/json.md.
+    #[arg(long)]
+    json: bool,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -68,6 +78,8 @@ enum Command {
         /// Kill the Job's whole process tree once it has run this long (`90s`, `5m`, `1h`).
         #[arg(long, default_value = "30m", value_parser = duration::parse)]
         timeout: Duration,
+        #[command(flatten)]
+        json: JsonFlag,
         /// The command, run by `/bin/sh -c`.
         command: String,
     },
@@ -89,6 +101,8 @@ enum Command {
         /// of the git exclude file shared by the Repository.
         #[arg(long)]
         gitignore: bool,
+        #[command(flatten)]
+        json: JsonFlag,
         service: Option<String>,
     },
     /// Print the variables Procly injects into a Service of the current Worktree as shell exports: its Leases, its
@@ -98,13 +112,25 @@ enum Command {
                       Exit codes: 0 on success, 125 when Procly itself fails, such as for a Service that is not \
                       declared or a Derived variable that cannot be rendered. See docs/exit-codes.md."
     )]
-    Env { service: String },
+    Env {
+        #[command(flatten)]
+        json: JsonFlag,
+        service: String,
+    },
     /// Stop a Service of the current Worktree, or all of its Services without an argument, with their whole
     /// process trees. The Daemon logs who asked. A Compose service is let go of instead: its container keeps
     /// running while another Worktree needs it, then stops after its Grace period.
-    Down { service: Option<String> },
+    Down {
+        #[command(flatten)]
+        json: JsonFlag,
+        service: Option<String>,
+    },
     /// Wait for a Job to end, print its output and exit with its exit code (124 on timeout).
-    Wait { job: String },
+    Wait {
+        #[command(flatten)]
+        json: JsonFlag,
+        job: String,
+    },
     /// Print the recent output of a running or ended Job, or of a Service of the current Worktree.
     #[command(
         after_help = "A Job identifier printed by `procly run` names that Job, any other name a Service of the current \
@@ -112,7 +138,11 @@ enum Command {
                       when Procly itself fails, such as for a name that is neither a Job nor a Service. See \
                       docs/exit-codes.md."
     )]
-    Logs { job_or_service: String },
+    Logs {
+        #[command(flatten)]
+        json: JsonFlag,
+        job_or_service: String,
+    },
     /// Print the Repository, the current Worktree and its Jobs.
     Status {
         /// Report every Worktree of every Repository the Daemon knows, not only the current one.
@@ -141,9 +171,15 @@ enum Command {
     },
     /// Make the Guards and Rules blocks of this Repository stand aside, so that its agents start dev servers and
     /// containers as they did before Procly. Nothing is removed, `procly on` brings them back.
-    Off,
+    Off {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
     /// Bring back the Guards and Rules blocks of this Repository after `procly off`.
-    On,
+    On {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
     /// Remove everything Procly wrote into this Repository: stop its Services, then take out the Rules blocks, the
     /// Guard, the exclusion lines and the Env files that nobody edited, and print what was removed and what was left.
     /// Docker volumes and Logical resources are kept. A Managed block you edited is left as it is, and a prompt
@@ -156,9 +192,12 @@ enum Command {
     )]
     Eject {
         /// Hand the prompt to your own coding agent in its non-interactive mode, from the current directory, instead
-        /// of printing it. Without this flag no agent is ever run.
+        /// of printing it. Without this flag no agent is ever run. With `--json`, the standard output of the agent
+        /// goes to stderr.
         #[arg(long, value_enum)]
         agent: Option<AgentCli>,
+        #[command(flatten)]
+        json: JsonFlag,
     },
     /// The Claude Code hook that blocks the dev-server and compose commands Procly runs instead, and answers with
     /// the Procly command to run. It reads the tool call on its standard input and always exits 0.
@@ -177,7 +216,10 @@ enum Command {
                       file, a package.json or compose file that cannot be read, or a directory that is not in a \
                       git Repository. See docs/init.md and docs/exit-codes.md."
     )]
-    Init,
+    Init {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
@@ -231,6 +273,8 @@ enum AgentCommand {
         /// The instruction file for the Rules block, inside the Worktree. Defaults to `AGENTS.md`, then `CLAUDE.md`.
         #[arg(long)]
         file: Option<PathBuf>,
+        #[command(flatten)]
+        json: JsonFlag,
     },
 }
 
@@ -244,6 +288,8 @@ enum WorktreeCommand {
                       which runs again on the next init, 125 when Procly itself fails. See docs/exit-codes.md."
     )]
     Init {
+        #[command(flatten)]
+        json: JsonFlag,
         /// The Worktree to prepare, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
     },
@@ -253,13 +299,22 @@ enum WorktreeCommand {
 enum UnitCommand {
     /// Write the Session unit and have the session manager start the Daemon now and with every session, restarting
     /// it if it crashes. Run it again after moving the procly executable or the state directory.
-    Install,
+    Install {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
     /// Print where the Session unit is, whether it is installed, whether it starts the Daemon with the session and
     /// whether that Daemon runs now.
-    Inspect,
+    Inspect {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
     /// Stop the Daemon the Session unit started, with its Services, and remove the unit. The next command starts a
     /// Daemon on demand again.
-    Remove,
+    Remove {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
 }
 
 fn main() -> ExitCode {
@@ -280,7 +335,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
     }
     let state = StateDir::resolve()?;
     match command {
-        Command::Run { timeout, command } => {
+        Command::Run { timeout, json, command } => {
             let cwd = std::env::current_dir().context("cannot read the current directory")?;
             let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
             let request = Request::Run {
@@ -291,6 +346,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             };
             match client::send(&state, &request)? {
                 // The identifier alone on stdout, so that `procly wait "$(procly run …)"` works.
+                Response::Run { job, outcome } if json.json => json::print(&json::Run { job: &job, outcome })?,
                 Response::Run { job, outcome } => {
                     println!("{job}");
                     eprintln!("{}", outcome.as_str());
@@ -299,27 +355,45 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Up { gitignore, service } => up(&state, service, gitignore),
-        Command::Env { service } => env(&state, service),
-        Command::Down { service } => down(&state, service),
-        Command::Wait { job } => match client::send(&state, &Request::Wait { job: job.clone() })? {
+        Command::Up {
+            gitignore,
+            json,
+            service,
+        } => up(&state, service, gitignore, json.json),
+        Command::Env { json, service } => env(&state, &service, json.json),
+        Command::Down { json, service } => down(&state, service, json.json),
+        Command::Wait { json, job } => match client::send(&state, &Request::Wait { job: job.clone() })? {
             Response::Ended { output, end } => {
-                print(&output)?;
+                if json.json {
+                    json::print(&json::Wait {
+                        job: &job,
+                        exit_code: job_exit_code(end),
+                        end,
+                        output: &output,
+                    })?;
+                } else {
+                    print(&output)?;
+                }
                 Ok(exit_code(&job, end))
             }
             other => unexpected(other),
         },
-        Command::Logs { job_or_service } => {
+        Command::Logs { json, job_or_service } => {
             let cwd = std::env::current_dir().context("cannot read the current directory")?;
-            match client::send(
-                &state,
-                &Request::Logs {
-                    name: job_or_service,
-                    cwd,
-                },
-            )? {
+            let request = Request::Logs {
+                name: job_or_service.clone(),
+                cwd,
+            };
+            match client::send(&state, &request)? {
                 Response::Logs { output } => {
-                    print(&output)?;
+                    if json.json {
+                        json::print(&json::Logs {
+                            name: &job_or_service,
+                            output: &output,
+                        })?;
+                    } else {
+                        print(&output)?;
+                    }
                     Ok(ExitCode::SUCCESS)
                 }
                 other => unexpected(other),
@@ -340,16 +414,16 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
         }
         Command::Worktree {
-            command: WorktreeCommand::Init { path },
-        } => worktree_init(&state, path),
+            command: WorktreeCommand::Init { json, path },
+        } => worktree_init(&state, path, json.json),
         Command::Unit { command } => unit(&state, &command),
         Command::Agent {
-            command: AgentCommand::Install { file },
-        } => agent_install(&state, file),
-        Command::Off => switch(&state, true),
-        Command::On => switch(&state, false),
-        Command::Eject { agent } => eject(&state, agent),
-        Command::Init => init(&state),
+            command: AgentCommand::Install { file, json },
+        } => agent_install(&state, file, json.json),
+        Command::Off { json } => switch(&state, true, json.json),
+        Command::On { json } => switch(&state, false, json.json),
+        Command::Eject { agent, json } => eject(&state, agent, json.json),
+        Command::Init { json } => init(&state, json.json),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Daemon => {
             daemon::run(&state)?;
@@ -376,7 +450,7 @@ fn tail(output: &str, lines: usize) -> &str {
 }
 
 /// Runs `up`, printing where to reach the healthy Service, or why it is not.
-fn up(state: &StateDir, service: Option<String>, gitignore: bool) -> anyhow::Result<ExitCode> {
+fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Up {
         service,
@@ -393,53 +467,101 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool) -> anyhow::Res
             url,
             needs,
         } => {
-            // Stdout is the requested Service alone, what it needed is told on stderr.
-            for need in needs {
-                eprintln!(
-                    "{} (needed by {service})",
-                    reached(&need.service, need.outcome, need.via.as_deref(), need.url, need.port)
-                );
-            }
-            println!("{}", reached(&service, outcome, via.as_deref(), url, port));
-            Ok(ExitCode::SUCCESS)
+            let requested = UpService {
+                service,
+                outcome,
+                via,
+                port,
+                url,
+            };
+            up_reached(&requested, &needs, json)
         }
-        // Every Service was asked for, so stdout holds them all, in the order they came up.
-        Response::UpAll { services } => {
-            for up in services {
-                println!(
-                    "{}",
-                    reached(&up.service, up.outcome, up.via.as_deref(), up.url, up.port)
-                );
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        Response::UpAll { services } => up_all(&services, json),
         Response::Unhealthy {
             service,
             end,
             output,
             needed_by,
             ..
-        } => {
-            let service = match needed_by {
-                Some(needed_by) => format!("{service}, needed by {needed_by},"),
-                None => service,
-            };
-            let (why, code) = unhealthy(end);
-            if output.is_empty() {
-                eprintln!("procly: service {service} {why}, it printed nothing");
-            } else {
-                eprintln!("procly: service {service} {why}, its recent output:");
-                eprint!("{}", tail(&output, OUTPUT_TAIL_LINES));
-            }
-            Ok(ExitCode::from(code))
-        }
+        } => up_unhealthy(service, end, &output, needed_by, json),
         Response::Conflict {
             service,
             conflicts,
             needed_by,
-        } => Ok(conflicted(service, &conflicts, needed_by)),
+        } => {
+            if json {
+                json::print(&json::Up::Conflict {
+                    service: &service,
+                    needed_by: needed_by.as_deref(),
+                    conflicts: &conflicts,
+                })?;
+            }
+            Ok(conflicted(service, &conflicts, needed_by))
+        }
         other => unexpected(other),
     }
+}
+
+/// Prints the Service `up` was asked for, healthy, after the `needs` it brought up first.
+fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow::Result<ExitCode> {
+    if json {
+        let services = needs
+            .iter()
+            .map(|need| json::Reached::new(need, Some(&requested.service)))
+            .chain([json::Reached::new(requested, None)])
+            .collect();
+        json::print(&json::Up::Healthy { services })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    // Stdout is the requested Service alone, what it needed is told on stderr.
+    for need in needs {
+        eprintln!("{} (needed by {})", reached_line(need), requested.service);
+    }
+    println!("{}", reached_line(requested));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints every Service `up` brought up or found running, since every Service was asked for, in the order they came up.
+fn up_all(services: &[UpService], json: bool) -> anyhow::Result<ExitCode> {
+    if json {
+        let services = services.iter().map(|up| json::Reached::new(up, None)).collect();
+        json::print(&json::Up::Healthy { services })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    for up in services {
+        println!("{}", reached_line(up));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints why a Service is not healthy, on stderr and, with `json`, in a document on stdout.
+fn up_unhealthy(
+    service: String,
+    end: ServiceEnd,
+    output: &str,
+    needed_by: Option<String>,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    if json {
+        json::print(&json::Up::Unhealthy {
+            service: &service,
+            needed_by: needed_by.as_deref(),
+            end,
+            output: tail(output, OUTPUT_TAIL_LINES),
+        })?;
+    }
+    let service = match needed_by {
+        Some(needed_by) => format!("{service}, needed by {needed_by},"),
+        None => service,
+    };
+    let (why, code) = unhealthy(end);
+    if output.is_empty() {
+        eprintln!("procly: service {service} {why}, it printed nothing");
+    } else {
+        eprintln!("procly: service {service} {why}, its recent output:");
+        eprint!("{}", tail(output, OUTPUT_TAIL_LINES));
+    }
+    Ok(ExitCode::from(code))
 }
 
 /// Why a Service is not healthy, after its name, and the exit code of `up` for it.
@@ -541,11 +663,24 @@ fn conflict_line(conflict: &Conflict) -> String {
 }
 
 /// Runs `env`, printing one `export` line per variable.
-fn env(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
+fn env(state: &StateDir, service: &str, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    match client::send(state, &Request::Env { service, cwd })? {
+    match client::send(
+        state,
+        &Request::Env {
+            service: service.to_owned(),
+            cwd,
+        },
+    )? {
         Response::Env { variables } => {
-            print(&envfile::exports(&variables))?;
+            if json {
+                json::print(&json::Env {
+                    service,
+                    variables: json::Variables(&variables),
+                })?;
+            } else {
+                print(&envfile::exports(&variables))?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         other => unexpected(other),
@@ -554,25 +689,34 @@ fn env(state: &StateDir, service: String) -> anyhow::Result<ExitCode> {
 
 /// Where to reach a Service that is up: its name, `started` or `reused` and the Group it runs in when it is covered
 /// by one, its URL and its port.
-fn reached(service: &str, outcome: StartOutcome, via: Option<&str>, url: Option<String>, port: Option<u16>) -> String {
-    let outcome = match via {
-        Some(group) => format!("{} (via {group})", outcome.as_str()),
-        None => outcome.as_str().to_owned(),
+fn reached_line(up: &UpService) -> String {
+    let service = &up.service;
+    let outcome = match &up.via {
+        Some(group) => format!("{} (via {group})", up.outcome.as_str()),
+        None => up.outcome.as_str().to_owned(),
     };
-    match (url, port) {
+    match (&up.url, up.port) {
         (Some(url), Some(port)) => format!("{service} {outcome} {url} port {port}"),
         _ => format!("{service} {outcome}"),
     }
 }
 
 /// Runs `down`, printing one line per Service.
-fn down(state: &StateDir, service: Option<String>) -> anyhow::Result<ExitCode> {
+fn down(state: &StateDir, service: Option<String>, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Down {
         service: service.clone(),
         cwd,
     };
     match client::send(state, &request)? {
+        Response::Down { stopped, released } if json => {
+            json::print(&json::Down {
+                service: service.as_deref(),
+                stopped: &stopped,
+                released: &released,
+            })?;
+            Ok(ExitCode::SUCCESS)
+        }
         Response::Down { stopped, released } => {
             match service {
                 Some(service) if stopped.is_empty() && released.is_empty() => println!("{service} not running"),
@@ -597,20 +741,42 @@ fn unit(state: &StateDir, command: &UnitCommand) -> anyhow::Result<ExitCode> {
     let unit = unit::Unit::resolve(state)?;
     let path = unit.path.display();
     match command {
-        UnitCommand::Install => {
+        UnitCommand::Install { json } => {
             unit.install()?;
-            println!("installed {path}");
+            if json.json {
+                json::print(&json::UnitInstalled {
+                    path: &unit.path,
+                    installed: true,
+                })?;
+            } else {
+                println!("installed {path}");
+            }
         }
-        UnitCommand::Inspect => {
+        UnitCommand::Inspect { json } => {
             let inspection = unit.inspect()?;
-            let yes_no = |yes| if yes { "yes" } else { "no" };
-            println!("unit {path}");
-            println!("installed {}", yes_no(inspection.installed));
-            println!("starts with the session {}", yes_no(inspection.enabled));
-            println!("daemon running {}", yes_no(inspection.running));
+            if json.json {
+                json::print(&json::UnitInspection {
+                    path: &unit.path,
+                    installed: inspection.installed,
+                    starts_with_session: inspection.enabled,
+                    daemon_running: inspection.running,
+                })?;
+            } else {
+                let yes_no = |yes| if yes { "yes" } else { "no" };
+                println!("unit {path}");
+                println!("installed {}", yes_no(inspection.installed));
+                println!("starts with the session {}", yes_no(inspection.enabled));
+                println!("daemon running {}", yes_no(inspection.running));
+            }
         }
-        UnitCommand::Remove => {
-            if unit.remove()? {
+        UnitCommand::Remove { json } => {
+            let removed = unit.remove()?;
+            if json.json {
+                json::print(&json::UnitRemoved {
+                    path: &unit.path,
+                    removed,
+                })?;
+            } else if removed {
                 println!("removed {path}");
             } else {
                 println!("not installed {path}");
@@ -639,10 +805,14 @@ fn let_go(released: &Released) -> String {
 }
 
 /// Runs `agent install`, printing what became of the Rules block and of the Guard.
-fn agent_install(state: &StateDir, file: Option<PathBuf>) -> anyhow::Result<ExitCode> {
+fn agent_install(state: &StateDir, file: Option<PathBuf>, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let file = file.map(|file| cwd.join(file));
     match client::send(state, &Request::AgentInstall { cwd, file })? {
+        Response::AgentInstall(report) if json => {
+            json::print(&report)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Response::AgentInstall(report) => {
             print_block("rules", &report.rules);
             print_block("guard", &report.guard);
@@ -656,9 +826,13 @@ fn agent_install(state: &StateDir, file: Option<PathBuf>) -> anyhow::Result<Exit
 }
 
 /// Runs `off` or `on`, printing the new state and what became of the Rules blocks.
-fn switch(state: &StateDir, off: bool) -> anyhow::Result<ExitCode> {
+fn switch(state: &StateDir, off: bool, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     match client::send(state, &Request::Switch { cwd, off })? {
+        Response::Switched(report) if json => {
+            json::print(&report)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Response::Switched(report) => {
             println!("{}", if report.off { "off" } else { "on" });
             for block in &report.rules {
@@ -671,9 +845,13 @@ fn switch(state: &StateDir, off: bool) -> anyhow::Result<ExitCode> {
 }
 
 /// Runs `init`, printing the proposal on stdout and on stderr whether it was written.
-fn init(state: &StateDir) -> anyhow::Result<ExitCode> {
+fn init(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     match client::send(state, &Request::Init { cwd })? {
+        Response::Init(report) if json => {
+            json::print(&report)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Response::Init(report) => {
             print(&report.toml)?;
             if report.written {
@@ -692,15 +870,27 @@ fn init(state: &StateDir) -> anyhow::Result<ExitCode> {
 
 /// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands
 /// to the coding agent instead.
-fn eject(state: &StateDir, agent: Option<AgentCli>) -> anyhow::Result<ExitCode> {
+fn eject(state: &StateDir, agent: Option<AgentCli>, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let report = match client::send(state, &Request::Eject { cwd })? {
         Response::Eject(report) => report,
         other => return unexpected(other),
     };
-    print(&eject_summary(&report))?;
+    // The document comes before the agent runs, so that it exists even when the agent fails.
+    if json {
+        let handed_to = agent.filter(|_| report.prompt.is_some());
+        json::print(&json::Eject {
+            stopped: &report.stopped,
+            removed: &report.removed,
+            left: &report.left,
+            prompt: report.prompt.as_deref().filter(|_| handed_to.is_none()),
+            agent: handed_to.map(AgentCli::program),
+        })?;
+    } else {
+        print(&eject_summary(&report))?;
+    }
     let Some(prompt) = &report.prompt else {
-        if let Some(agent) = agent {
+        if let (Some(agent), false) = (agent, json) {
             eprintln!(
                 "procly: nothing was left, so there is no prompt to hand to {}",
                 agent.program()
@@ -710,19 +900,26 @@ fn eject(state: &StateDir, agent: Option<AgentCli>) -> anyhow::Result<ExitCode> 
     };
     match agent {
         None => {
-            eprintln!(
-                "procly: {} edited, left as it is, the prompt below describes what to undo, `procly eject --agent \
-                 <cli>` hands it to your coding agent",
-                items_were(report.left.len())
-            );
-            print(&format!("\n{prompt}"))?;
+            if !json {
+                eprintln!(
+                    "procly: {} edited, left as it is, the prompt below describes what to undo, `procly eject \
+                     --agent <cli>` hands it to your coding agent",
+                    items_were(report.left.len())
+                );
+                print(&format!("\n{prompt}"))?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         Some(agent) => {
-            eprintln!("procly: handing the prompt to {}", agent.program());
-            let status = std::process::Command::new(agent.program())
-                .args(agent.non_interactive())
-                .arg(prompt)
+            let mut command = std::process::Command::new(agent.program());
+            command.args(agent.non_interactive()).arg(prompt);
+            if json {
+                // Stdout holds the document alone.
+                command.stdout(std::io::stderr());
+            } else {
+                eprintln!("procly: handing the prompt to {}", agent.program());
+            }
+            let status = command
                 .status()
                 .with_context(|| format!("cannot run {}, is it installed and on the PATH?", agent.program()))?;
             if status.success() {
@@ -822,7 +1019,7 @@ fn print_block(name: &str, block: &BlockReport) {
 }
 
 /// Runs `worktree init`, printing one line per file copied and per setup command run.
-fn worktree_init(state: &StateDir, path: Option<PathBuf>) -> anyhow::Result<ExitCode> {
+fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let path = path.map_or(cwd.clone(), |path| cwd.join(path));
     let request = Request::WorktreeInit {
@@ -830,6 +1027,10 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>) -> anyhow::Result<Exit
         env: caller_env(),
     };
     match client::send(state, &request)? {
+        Response::WorktreeInit(report) if json => {
+            json::print(&json::WorktreeInit::Ready { report: &report })?;
+            Ok(ExitCode::SUCCESS)
+        }
         Response::WorktreeInit(report) => {
             if report.copied.is_empty() && report.ran.is_empty() {
                 println!("nothing to do");
@@ -843,7 +1044,16 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>) -> anyhow::Result<Exit
             end,
             output,
         } => {
-            print_init(&report);
+            if json {
+                json::print(&json::WorktreeInit::SetupFailed {
+                    report: &report,
+                    command: &command,
+                    end,
+                    output: tail(&output, OUTPUT_TAIL_LINES),
+                })?;
+            } else {
+                print_init(&report);
+            }
             let (why, code) = match end {
                 JobEnd::Exited { code } => (
                     format!("exited with code {code}"),
@@ -886,17 +1096,22 @@ fn print_init(report: &InitReport) {
     }
 }
 
-fn exit_code(job: &str, end: JobEnd) -> ExitCode {
+/// The exit code of `wait` for a Job that ended as `end`.
+fn job_exit_code(end: JobEnd) -> u8 {
     match end {
-        JobEnd::Exited { code } => ExitCode::from(u8::try_from(code).unwrap_or(EXIT_PROCLY_FAILURE)),
+        JobEnd::Exited { code } => u8::try_from(code).unwrap_or(EXIT_PROCLY_FAILURE),
         // The shell convention, so `wait` exits as the command would have in a terminal.
-        JobEnd::Signaled { signal } => ExitCode::from(u8::try_from(128 + signal).unwrap_or(EXIT_PROCLY_FAILURE)),
-        JobEnd::TimedOut { timeout_ms } => {
-            let timeout = duration::format(Duration::from_millis(timeout_ms));
-            eprintln!("procly: job {job} timed out after {timeout}, its process tree was killed");
-            ExitCode::from(EXIT_TIMEOUT)
-        }
+        JobEnd::Signaled { signal } => u8::try_from(128 + signal).unwrap_or(EXIT_PROCLY_FAILURE),
+        JobEnd::TimedOut { .. } => EXIT_TIMEOUT,
     }
+}
+
+fn exit_code(job: &str, end: JobEnd) -> ExitCode {
+    if let JobEnd::TimedOut { timeout_ms } = end {
+        let timeout = duration::format(Duration::from_millis(timeout_ms));
+        eprintln!("procly: job {job} timed out after {timeout}, its process tree was killed");
+    }
+    ExitCode::from(job_exit_code(end))
 }
 
 fn print(output: &str) -> anyhow::Result<()> {
