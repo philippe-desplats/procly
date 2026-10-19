@@ -19,10 +19,12 @@ use tokio::process::Command;
 use tokio::task::JoinSet;
 
 use super::clock::Clock;
+use super::container_record::{ContainerRecord, ContainerRecords, Key as ContainerKey};
 use super::foreign::{self, Container as ListedContainer};
 use super::health::HealthCheck;
 use super::job::{Fingerprint, JobSpec, Jobs};
 use super::lease::Leases;
+use super::store::StoreError;
 use crate::config::Seed;
 use crate::derived::Resource;
 use crate::driver::Driver;
@@ -141,6 +143,8 @@ pub(crate) struct ComposeSpec {
     pub(crate) published: Vec<Published>,
     /// The names of the variables the compose file may interpolate the Leases from.
     pub(crate) variables: Vec<String>,
+    /// The names of the variables Procly injected into `env`, which the record of the container keeps.
+    pub(crate) injected: Vec<String>,
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
 }
@@ -184,15 +188,23 @@ pub(crate) struct Brought {
 }
 
 /// A Compose service is shared by the Worktrees of one Repository, so it is keyed by the Repository and its name.
-pub(crate) type ComposeKey = (PathBuf, String);
+pub(crate) type ComposeKey = ContainerKey;
 
 /// Every container Procly started from a compose file.
 #[derive(Debug)]
 pub(crate) struct Composes {
+    ledger: Ledger,
+    table: Mutex<HashMap<ComposeKey, Arc<Container>>>,
+}
+
+/// What a container is accounted in besides the table: the clock its Grace period runs on, the Leases dated when it
+/// stops, and the record the next Daemon reconciles.
+#[derive(Debug, Clone)]
+struct Ledger {
     clock: Clock,
     /// Dated again when a container stops, so that its Leases do not expire the moment it does.
     leases: Arc<Leases>,
-    table: Mutex<HashMap<ComposeKey, Arc<Container>>>,
+    records: Arc<ContainerRecords>,
 }
 
 #[derive(Debug, Default)]
@@ -211,6 +223,9 @@ struct State {
     /// Bumped whenever a Worktree starts needing the container, so that a stop waiting out its Grace period knows it
     /// was overtaken.
     generation: u64,
+    /// When the running Grace period ends, as time since the Unix epoch on the clock, `None` while a Worktree needs
+    /// the container.
+    deadline: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,15 +243,58 @@ struct Docker {
     project_dir: PathBuf,
     project: String,
     env: Vec<(String, String)>,
+    /// The part of `env` the record keeps: what reaches the engine, and the variables Procly injected.
+    recorded_env: Vec<(String, String)>,
 }
 
 impl Composes {
-    pub(crate) fn new(clock: Clock, leases: Arc<Leases>) -> Self {
+    pub(crate) fn new(clock: Clock, leases: Arc<Leases>, records: ContainerRecords) -> Self {
         Self {
-            clock,
-            leases,
+            ledger: Ledger {
+                clock,
+                leases,
+                records: Arc::new(records),
+            },
             table: Mutex::default(),
         }
+    }
+
+    /// Reconciles the containers recorded by the previous Daemon with the ones Docker runs, before any request
+    /// counts them. One that still runs with the labels of its compose service is re-attached with the Worktrees
+    /// that need it, and its Grace period resumes from its recorded deadline, stopping it at once when the deadline
+    /// passed while no Daemon ran. Any other is forgotten and never stopped, it is no longer the container Procly
+    /// started.
+    pub(crate) async fn reconcile(&self) -> Result<(), StoreError> {
+        let records = Arc::clone(&self.ledger.records);
+        // Docker is asked about each one, and whether its Worktrees still exist is read from the disk.
+        let kept = tokio::task::spawn_blocking(move || -> Result<_, StoreError> {
+            Ok(records.load()?.into_iter().filter_map(judge).collect::<Vec<_>>())
+        })
+        .await
+        .expect("loading the container records never panics")?;
+        let now = self.ledger.clock.since_epoch();
+        let mut expiring = Vec::new();
+        let mut recorded = Vec::new();
+        for record in kept {
+            let key = record.key();
+            let container = Arc::new(Container::reattached(record, now));
+            recorded.extend(container.record(&key));
+            if let Some(deadline) = container.state().deadline {
+                expiring.push((key.clone(), Arc::clone(&container), deadline));
+            }
+            self.table().insert(key, container);
+        }
+        let records = Arc::clone(&self.ledger.records);
+        let _ = tokio::task::spawn_blocking(move || records.replace(recorded)).await;
+        for (key, container, deadline) in expiring {
+            let stopping = stop_after(self.ledger.clone(), key, container, deadline, 0);
+            if deadline <= now {
+                stopping.await;
+            } else {
+                tokio::spawn(stopping);
+            }
+        }
+        Ok(())
     }
 
     /// Makes sure the container of the Compose service `key` runs for `worktree`, and waits until it is healthy.
@@ -267,10 +325,8 @@ impl Composes {
             alive.docker.create_resources(planned(plan).await?.as_ref()).await?;
             alive.grace = grace;
             let port = alive.port;
-            let mut state = container.state();
-            state.alive = Some(alive);
-            state.worktrees.insert(worktree);
-            state.generation += 1;
+            container.needed_by(alive, worktree);
+            self.ledger.recorded(&key, &container).await;
             return Ok(Brought {
                 outcome: StartOutcome::Reused,
                 port,
@@ -301,10 +357,8 @@ impl Composes {
                      service",
                     adopted.name, spec.name
                 );
-                let mut state = container.state();
-                state.alive = Some(Alive { docker, port, grace });
-                state.worktrees.insert(worktree);
-                state.generation += 1;
+                container.needed_by(Alive { docker, port, grace }, worktree);
+                self.ledger.recorded(&key, &container).await;
                 return Ok(Brought {
                     outcome: StartOutcome::Reused,
                     port,
@@ -328,6 +382,7 @@ impl Composes {
                     // Restarted after it was stopped from outside Procly: the Worktrees that already need it keep it,
                     // whatever one Worktree could not create in it.
                     container.state().alive = Some(Alive { docker, port, grace });
+                    self.ledger.recorded(&key, &container).await;
                 } else {
                     // A container that started but cannot hold the resources would be left running with nobody
                     // counting it.
@@ -346,10 +401,8 @@ impl Composes {
                 health: Err((end, logs)),
             });
         }
-        let mut state = container.state();
-        state.alive = Some(Alive { docker, port, grace });
-        state.worktrees.insert(worktree);
-        state.generation += 1;
+        container.needed_by(Alive { docker, port, grace }, worktree);
+        self.ledger.recorded(&key, &container).await;
         Ok(Brought {
             outcome: StartOutcome::Started,
             port,
@@ -358,39 +411,48 @@ impl Composes {
     }
 
     /// Lets `worktree` go of the containers of the Repository `repository`, of the Compose service `name` only when
-    /// given. A container no Worktree needs anymore stops once its Grace period has passed on the clock.
+    /// given. A Worktree whose directory no longer exists stops counting too. A container no Worktree needs anymore
+    /// stops once its Grace period has passed on the clock. Blocking, it reads the disk and writes the record.
     pub(crate) fn release(&self, repository: &Path, worktree: &Path, name: Option<&str>) -> Vec<Released> {
         let mut released = Vec::new();
         let containers: Vec<_> = self
             .table()
             .iter()
             .filter(|((path, service), _)| path == repository && name.is_none_or(|name| name == service))
-            .map(|((_, service), container)| (service.clone(), Arc::clone(container)))
+            .map(|(key, container)| (key.clone(), Arc::clone(container)))
             .collect();
-        for (service, container) in containers {
-            let mut state = container.state();
-            let Some(grace) = state.alive.as_ref().map(|alive| alive.grace) else {
-                continue;
+        for (key, container) in containers {
+            let let_go = {
+                let mut state = container.state();
+                let Some(grace) = state.alive.as_ref().map(|alive| alive.grace) else {
+                    continue;
+                };
+                let removed = forget_removed(&mut state.worktrees, &key.1);
+                let let_go = state.worktrees.remove(worktree);
+                if !let_go && !removed {
+                    continue;
+                }
+                let others = state.worktrees.len();
+                if others == 0 {
+                    let deadline = self.ledger.clock.since_epoch().saturating_add(grace);
+                    state.generation += 1;
+                    state.deadline = Some(deadline);
+                    tokio::spawn(stop_after(
+                        self.ledger.clone(),
+                        key.clone(),
+                        Arc::clone(&container),
+                        deadline,
+                        state.generation,
+                    ));
+                }
+                let_go.then(|| Released {
+                    service: key.1.clone(),
+                    others,
+                    grace_ms: millis(grace),
+                })
             };
-            if !state.worktrees.remove(worktree) {
-                continue;
-            }
-            let others = state.worktrees.len();
-            if others == 0 {
-                state.generation += 1;
-                tokio::spawn(stop_after(
-                    self.clock.clone(),
-                    Arc::clone(&self.leases),
-                    Arc::clone(&container),
-                    grace,
-                    state.generation,
-                ));
-            }
-            released.push(Released {
-                service,
-                others,
-                grace_ms: u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
-            });
+            self.ledger.record(&key, &container);
+            released.extend(let_go);
         }
         released.sort_by(|a, b| a.service.cmp(&b.service));
         released
@@ -421,20 +483,6 @@ impl Composes {
             .collect()
     }
 
-    /// Stops every container Procly started, without waiting for any Grace period, for a Daemon about to exit.
-    pub(crate) async fn stop_all(&self) {
-        let containers: Vec<_> = self
-            .table()
-            .iter()
-            .map(|(key, container)| (key.1.clone(), Arc::clone(container)))
-            .collect();
-        for (service, result) in self.stop_containers(containers).await {
-            if let Err(error) = result {
-                eprintln!("cannot stop the container of service {service}: {error}");
-            }
-        }
-    }
-
     /// Stops every container Procly started for the Repository `repository`, without waiting for any Grace period,
     /// and returns the names of the Compose services whose container it stopped. A container that was not running
     /// is not named. The containers are stopped, never removed, so their volumes stay.
@@ -443,7 +491,7 @@ impl Composes {
             .table()
             .iter()
             .filter(|((path, _), _)| path == repository)
-            .map(|((_, service), container)| (service.clone(), Arc::clone(container)))
+            .map(|(key, container)| (key.clone(), Arc::clone(container)))
             .collect();
         let mut stopped = Vec::new();
         let mut failure = None;
@@ -461,33 +509,32 @@ impl Composes {
     /// Stops the containers at once, all together, and tells for each one whether it was running.
     async fn stop_containers(
         &self,
-        containers: Vec<(String, Arc<Container>)>,
+        containers: Vec<(ComposeKey, Arc<Container>)>,
     ) -> Vec<(String, Result<bool, ComposeError>)> {
         let mut stopping = JoinSet::new();
-        for (service, container) in containers {
-            let leases = Arc::clone(&self.leases);
+        for (key, container) in containers {
+            let ledger = self.ledger.clone();
             stopping.spawn(async move {
                 let _commands = container.commands.lock().await;
                 let alive = {
                     let mut state = container.state();
                     state.worktrees.clear();
                     state.generation += 1;
+                    state.deadline = None;
                     state.alive.take()
                 };
                 let Some(alive) = alive else {
-                    return (service, Ok(false));
+                    return (key.1, Ok(false));
                 };
-                match alive.docker.stop().await {
-                    Ok(()) => {
-                        touch(leases, &alive).await;
-                        (service, Ok(true))
-                    }
-                    Err(error) => {
-                        // Still counted as running, so that asking again stops it.
-                        container.state().alive = Some(alive);
-                        (service, Err(error))
-                    }
+                let stopped = alive.docker.stop().await;
+                if stopped.is_ok() {
+                    touch(&ledger.leases, &alive).await;
+                } else {
+                    // Still counted as running, so that asking again stops it.
+                    container.state().alive = Some(alive);
                 }
+                ledger.recorded(&key, &container).await;
+                (key.1, stopped.map(|()| true))
             });
         }
         let mut results = Vec::new();
@@ -511,11 +558,155 @@ impl Composes {
 }
 
 impl Container {
+    /// The container of a record the previous Daemon left, which runs. Its Grace period starts now when its last
+    /// Worktrees were removed while no Daemon ran.
+    fn reattached(record: ContainerRecord, now: Duration) -> Self {
+        let grace = Duration::from_millis(record.grace_ms);
+        let worktrees: BTreeSet<PathBuf> = record.worktrees.into_iter().collect();
+        let deadline = match record.deadline_ms {
+            Some(deadline) => Some(Duration::from_millis(deadline)),
+            None if worktrees.is_empty() => Some(now.saturating_add(grace)),
+            None => None,
+        };
+        let docker = Docker {
+            service: record.service,
+            compose: record.compose,
+            project_dir: record.project_dir,
+            project: record.project,
+            env: record.env.clone(),
+            recorded_env: record.env,
+        };
+        Self {
+            commands: tokio::sync::Mutex::default(),
+            state: Mutex::new(State {
+                alive: Some(Alive {
+                    docker,
+                    port: record.port,
+                    grace,
+                }),
+                worktrees,
+                generation: 0,
+                deadline,
+            }),
+        }
+    }
+
+    /// Counts `worktree` among the Worktrees that need the container, which runs as `alive`, ending any Grace period.
+    fn needed_by(&self, alive: Alive, worktree: PathBuf) {
+        let mut state = self.state();
+        state.alive = Some(alive);
+        state.worktrees.insert(worktree);
+        state.generation += 1;
+        state.deadline = None;
+    }
+
+    /// The record of the container of the Service `key`, `None` when it does not run.
+    fn record(&self, key: &ComposeKey) -> Option<ContainerRecord> {
+        let state = self.state();
+        let alive = state.alive.as_ref()?;
+        Some(ContainerRecord {
+            repository: key.0.clone(),
+            service: key.1.clone(),
+            compose: alive.docker.compose.clone(),
+            project: alive.docker.project.clone(),
+            project_dir: alive.docker.project_dir.clone(),
+            env: alive.docker.recorded_env.clone(),
+            port: alive.port,
+            grace_ms: millis(alive.grace),
+            worktrees: state.worktrees.iter().cloned().collect(),
+            deadline_ms: state.deadline.map(millis),
+        })
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.state
             .lock()
             .expect("the container state mutex is never poisoned, no code panics while holding it")
     }
+}
+
+impl Ledger {
+    /// Writes the record of the container of the Service `key` as it is now. Blocking.
+    fn record(&self, key: &ComposeKey, container: &Container) {
+        self.records.update(key.clone(), || container.record(key));
+    }
+
+    /// Writes the record of the container of the Service `key` as it is now, on a blocking thread.
+    async fn recorded(&self, key: &ComposeKey, container: &Arc<Container>) {
+        let (ledger, key, container) = (self.clone(), key.clone(), Arc::clone(container));
+        let _ = tokio::task::spawn_blocking(move || ledger.record(&key, &container)).await;
+    }
+}
+
+/// Compares the record of one container with what Docker runs, and keeps it, without the Worktrees whose directory
+/// no longer exists, when it still runs with the labels of its compose service. Blocking.
+fn judge(mut record: ContainerRecord) -> Option<ContainerRecord> {
+    let label = format!(
+        "the container of service {} (compose project {}, service {})",
+        record.service, record.project, record.compose
+    );
+    let labels = [
+        format!("label=com.docker.compose.project={}", record.project),
+        format!("label=com.docker.compose.service={}", record.compose),
+    ];
+    match foreign::containers(&["--filter", &labels[0], "--filter", &labels[1]], Some(&record.env)) {
+        Some(found)
+            if found
+                .iter()
+                .any(|container| container.running && container.is_service(&record.project, &record.compose)) =>
+        {
+            eprintln!("{label} still runs after a restart of the Daemon, it is re-attached");
+        }
+        Some(_) => {
+            eprintln!(
+                "{label} no longer runs with the labels of its compose service after a restart of the Daemon, it is \
+                 forgotten and left alone"
+            );
+            return None;
+        }
+        // Dropping the counts while the engine is down would stop the container too early once it is back.
+        None => eprintln!("{label} could not be looked up, Docker did not answer, it is re-attached as recorded"),
+    }
+    let mut worktrees = record.worktrees.into_iter().collect();
+    forget_removed(&mut worktrees, &record.service);
+    record.worktrees = worktrees.into_iter().collect();
+    Some(record)
+}
+
+/// Stops counting the Worktrees whose directory no longer exists, removed without `procly down`, and tells whether
+/// there was one. Blocking.
+fn forget_removed(worktrees: &mut BTreeSet<PathBuf>, service: &str) -> bool {
+    let before = worktrees.len();
+    worktrees.retain(|worktree| {
+        let exists = worktree.exists();
+        if !exists {
+            eprintln!(
+                "the Worktree {} no longer exists, it stops needing the container of service {service}",
+                worktree.display()
+            );
+        }
+        exists
+    });
+    worktrees.len() != before
+}
+
+/// What of the environment of `docker compose` the record of a container keeps: what reaches the engine, and the
+/// variables Procly injected, named in `injected`. The rest is the caller's and may carry secrets.
+fn recorded_env(env: &[(String, String)], injected: &[String]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(name, _)| {
+            matches!(name.as_str(), "PATH" | "HOME")
+                || name.starts_with("DOCKER_")
+                || name.starts_with("COMPOSE_")
+                || injected.contains(name)
+        })
+        .cloned()
+        .collect()
+}
+
+/// A duration in milliseconds, as the records and the answers carry it.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What the Worktree needs in the container, built on a blocking thread.
@@ -528,9 +719,11 @@ where
         .map_err(|error| anyhow::anyhow!("the resources could not be worked out: {error}"))??)
 }
 
-/// Stops the container after `grace`, unless a Worktree needed it again in the meantime.
-async fn stop_after(clock: Clock, leases: Arc<Leases>, container: Arc<Container>, grace: Duration, generation: u64) {
-    clock.sleep(grace).await;
+/// Stops the container of the Service `key` once the clock reaches `deadline`, unless a Worktree needed it again in
+/// the meantime.
+async fn stop_after(ledger: Ledger, key: ComposeKey, container: Arc<Container>, deadline: Duration, generation: u64) {
+    let clock = &ledger.clock;
+    clock.sleep(deadline.saturating_sub(clock.since_epoch())).await;
     let _commands = container.commands.lock().await;
     let alive = {
         let state = container.state();
@@ -542,8 +735,13 @@ async fn stop_after(clock: Clock, leases: Arc<Leases>, container: Arc<Container>
     let Some(alive) = alive else { return };
     match alive.docker.stop().await {
         Ok(()) => {
-            container.state().alive = None;
-            touch(leases, &alive).await;
+            {
+                let mut state = container.state();
+                state.alive = None;
+                state.deadline = None;
+            }
+            ledger.recorded(&key, &container).await;
+            touch(&ledger.leases, &alive).await;
             eprintln!(
                 "stopped the container of service {}, no Worktree needs it",
                 alive.docker.service
@@ -555,8 +753,12 @@ async fn stop_after(clock: Clock, leases: Arc<Leases>, container: Arc<Container>
 }
 
 /// Dates the Leases of a container that just stopped as used now, so that they do not expire at once.
-async fn touch(leases: Arc<Leases>, alive: &Alive) {
-    let (worktree, service) = (alive.docker.project_dir.clone(), alive.docker.service.clone());
+async fn touch(leases: &Arc<Leases>, alive: &Alive) {
+    let (leases, worktree, service) = (
+        Arc::clone(leases),
+        alive.docker.project_dir.clone(),
+        alive.docker.service.clone(),
+    );
     let touched = tokio::task::spawn_blocking(move || leases.touch(&worktree, &service)).await;
     if let Ok(Err(error)) = touched {
         eprintln!("cannot date the Leases of a container that stopped: {error:#}");
@@ -582,6 +784,7 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
         project_dir: spec.project_dir.clone(),
         project: String::new(),
         env: spec.env.clone(),
+        recorded_env: recorded_env(&spec.env, &spec.injected),
     };
     docker.check_available().await?;
     let stack = docker.config().await?;
@@ -1117,6 +1320,43 @@ mod tests {
     fn a_mapping_without_a_host_port_publishes_nothing() {
         assert!(!service(r#"[{"target": 80}]"#).publishes(80));
         assert!(!service("[]").publishes(80));
+    }
+
+    #[test]
+    fn the_record_keeps_what_reaches_the_engine_and_the_injected_variables_only() {
+        let env: Vec<(String, String)> = [
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/dev"),
+            ("DOCKER_HOST", "unix:///run/docker.sock"),
+            ("COMPOSE_PROFILES", "dev"),
+            ("API_TOKEN", "secret"),
+            ("PORT_DB", "5432"),
+            ("PORT_DB", "24000"),
+            ("DATABASE_URL", "postgres://localhost:24000/app"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect();
+        let injected = ["PORT_DB".to_owned(), "DATABASE_URL".to_owned()];
+
+        let kept: Vec<_> = recorded_env(&env, &injected)
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+
+        // The caller's own `PORT_DB` comes first and the injected one wins, as when `docker compose` ran.
+        assert_eq!(
+            kept,
+            [
+                "PATH=/usr/bin",
+                "HOME=/home/dev",
+                "DOCKER_HOST=unix:///run/docker.sock",
+                "COMPOSE_PROFILES=dev",
+                "PORT_DB=5432",
+                "PORT_DB=24000",
+                "DATABASE_URL=postgres://localhost:24000/app",
+            ]
+        );
     }
 
     #[test]
