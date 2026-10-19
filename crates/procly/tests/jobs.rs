@@ -145,11 +145,12 @@ fn the_job_runs_in_the_callers_directory_and_environment() {
 fn wait_and_logs_fail_with_125_for_an_unknown_job() {
     let procly = Procly::new();
 
-    for verb in ["wait", "logs"] {
+    // `logs` also reads the output of a Service, so its error names both.
+    for (verb, error) in [("wait", "no job nosuchjob"), ("logs", "no job or service nosuchjob")] {
         let output = procly.procly(&[verb, "nosuchjob"]);
         assert_eq!(output.status.code(), Some(125), "{verb}");
         assert!(
-            common::stderr(&output).contains("no job nosuchjob"),
+            common::stderr(&output).contains(error),
             "{verb}: {}",
             common::stderr(&output)
         );

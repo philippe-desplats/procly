@@ -1,6 +1,7 @@
 mod common;
 
 use std::path::Path;
+use std::time::Duration;
 
 use nix::sys::signal::{Signal, kill};
 
@@ -28,6 +29,157 @@ fn web_on(port: u16, starts: &Path, pid: &Path) -> String {
         pid = pid.display(),
         server = test_server().display()
     )
+}
+
+/// Like [`web_on`], for a `web` whose leader, the shell, prints a numbered tick every 50 ms for as long as it runs.
+fn chatty_web_on(port: u16, starts: &Path, pid: &Path) -> String {
+    format!(
+        "[services.web]\nrun = '{}'\nports = {{ http = {port} }}\n",
+        chatty_run(starts, pid)
+    )
+}
+
+/// The command of the `web` of [`chatty_web_on`].
+fn chatty_run(starts: &Path, pid: &Path) -> String {
+    format!(
+        "echo start >> {starts}; echo $$ > {pid}; {server} & i=0; while true; do i=$((i+1)); echo tick $i; sleep 0.05; \
+         done",
+        starts = starts.display(),
+        pid = pid.display(),
+        server = test_server().display()
+    )
+}
+
+#[test]
+fn a_service_that_keeps_printing_after_the_daemon_was_killed_stays_alive_and_is_reused() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &chatty_web_on(port, &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let leader = read_pid(&pid);
+
+    procly.kill_daemon();
+    // Long enough for several ticks to be printed while no Daemon runs.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        common::is_alive(leader),
+        "the service died printing after the daemon crashed"
+    );
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("web reused http://localhost:{port} port {port}\n")
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        common::is_alive(leader),
+        "the re-attached service died at its next write"
+    );
+    assert_eq!(lines(&starts), ["start"]);
+}
+
+/// The highest tick `logs web` prints, 0 before the first one.
+fn last_tick(procly: &Procly, main: &Path) -> u64 {
+    let output = procly.procly_in(main, &["logs", "web"]);
+    assert_success(&output);
+    stdout(&output)
+        .lines()
+        .filter_map(|line| line.strip_prefix("tick ")?.parse().ok())
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn logs_of_a_reattached_service_show_its_output_from_before_and_after_the_daemon_restart() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &chatty_web_on(free_port(), &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    common::eventually("a few ticks", || last_tick(&procly, &main) >= 3);
+    let before = last_tick(&procly, &main);
+
+    procly.kill_daemon();
+    std::thread::sleep(Duration::from_millis(300));
+
+    common::eventually("ticks printed after the restart", || {
+        last_tick(&procly, &main) >= before + 10
+    });
+    let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+    assert!(logs.lines().any(|line| line == "tick 1"), "{logs}");
+}
+
+#[test]
+fn logs_of_a_reattached_service_keep_the_output_from_before_the_daemon_last_emptied_its_output_file() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    // A burst of a megabyte and a half, which the Daemon empties once it has read it, with a marker in its last
+    // megabyte, the part the Daemon keeps.
+    let filler = procly.scratch().join("filler");
+    std::fs::write(&filler, "procly-filler\n".repeat(512 * 1024 / 14)).expect("write the filler");
+    let run = format!(
+        "cat {filler}; cat {filler}; echo procly-marker; cat {filler}; {}",
+        chatty_run(&starts, &pid),
+        filler = filler.display()
+    );
+    write(
+        &main,
+        "procly.toml",
+        &format!("[services.web]\nrun = '{run}'\nports = {{ http = {port} }}\n"),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    common::eventually("a few ticks", || last_tick(&procly, &main) >= 3);
+
+    procly.kill_daemon();
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+    assert!(logs.contains("procly-marker\n"), "the marker was lost with the restart");
+}
+
+/// The output files the Daemon holds in the state directory.
+fn output_files(procly: &Procly) -> usize {
+    std::fs::read_dir(procly.state_dir().join("output")).map_or(0, Iterator::count)
+}
+
+#[test]
+fn the_output_file_of_a_reattached_service_is_removed_once_it_is_stopped() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &chatty_web_on(free_port(), &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    procly.kill_daemon();
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_eq!(output_files(&procly), 1);
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    assert_eq!(output_files(&procly), 0);
+}
+
+#[test]
+fn the_output_file_of_a_service_that_ended_while_no_daemon_ran_is_removed_by_the_next_one() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &web_on(free_port(), &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let server = read_pid(&pid);
+    procly.kill_daemon();
+    kill(server, Signal::SIGKILL).expect("kill the server while no Daemon runs");
+    common::wait_until_gone(server);
+    assert_eq!(output_files(&procly), 1);
+
+    assert_success(&procly.procly_in(&main, &["status"]));
+
+    assert_eq!(output_files(&procly), 0);
 }
 
 #[test]
