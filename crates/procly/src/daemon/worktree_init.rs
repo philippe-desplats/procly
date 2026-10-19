@@ -14,6 +14,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use super::Registry;
+use super::atomic_file::{self, Mode};
 use super::job::{Fingerprint, JobSpec};
 use crate::protocol::{InitReport, JobEnd, Response};
 use crate::topology::{self, Topology};
@@ -230,9 +231,7 @@ fn write_record(path: &Path, text: &str) -> Result<(), InitError> {
         path: path.to_owned(),
         source,
     };
-    let partial = path.with_extension("json.partial");
-    fs::write(&partial, text).map_err(write_error)?;
-    fs::rename(&partial, path).map_err(write_error)
+    atomic_file::replace(path, text.as_bytes(), Mode::Kept).map_err(write_error)
 }
 
 /// Copies `source` to `destination` wherever the destination is absent, directories file by file. Returns whether
@@ -272,11 +271,11 @@ fn copy_entry(source: &Path, destination: &Path) -> Result<bool, InitError> {
         std::os::unix::fs::symlink(target, destination).map_err(copy_error)?;
     } else {
         // Copied aside then renamed, so that an interrupted copy never leaves a truncated file that counts as present.
-        let mut partial = destination.as_os_str().to_owned();
-        partial.push(".procly-partial");
-        let partial = PathBuf::from(partial);
-        fs::copy(source, &partial).map_err(copy_error)?;
-        fs::rename(&partial, destination).map_err(copy_error)?;
+        let mode = Mode::Exactly(source.metadata().map_err(copy_error)?.permissions());
+        atomic_file::replace_with(destination, mode, |file| {
+            io::copy(&mut fs::File::open(source)?, file).map(|_| ())
+        })
+        .map_err(copy_error)?;
     }
     Ok(true)
 }

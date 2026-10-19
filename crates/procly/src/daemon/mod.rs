@@ -1,6 +1,7 @@
 //! The Daemon: the single per-user authority, reachable only through a `0600` Unix socket (ADR 0003).
 
 mod agent;
+mod atomic_file;
 mod clock;
 mod compose;
 mod container_record;

@@ -5,13 +5,12 @@
 //! having the variables already set.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
-use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use super::Registry;
+use super::atomic_file::{self, Mode};
 use super::foreign;
 use super::health::{HealthCheck, HttpCheck};
 use super::index::{IndexError, IndexRequest};
@@ -460,15 +459,7 @@ fn write_env_file(worktree: &Path, text: &str) -> Result<(), EnvironmentError> {
     if fs::read_to_string(&path).is_ok_and(|current| current == text) {
         return Ok(());
     }
-    let partial = worktree.join(format!("{ENV_FILE}.partial"));
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&partial)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .and_then(|()| fs::rename(&partial, &path))
+    atomic_file::replace(&path, text.as_bytes(), Mode::Private)
         .map_err(|source| EnvironmentError::WriteEnvFile { path, source })
 }
 

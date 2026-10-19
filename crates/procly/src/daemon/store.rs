@@ -3,13 +3,14 @@
 //! The Daemon is the only writer, it holds the lock of the state directory, so a document needs no locking of its
 //! own. Each one is replaced atomically, a crash leaves either the previous content or the new one.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use super::atomic_file::{self, Mode};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StoreError {
@@ -82,35 +83,15 @@ pub(crate) fn load<T: DeserializeOwned>(path: &Path, version: u32) -> Result<Opt
     Ok(Some(document.body))
 }
 
-/// Replaces the document at `path`: written to a temporary file next to it, flushed to disk, then renamed over it.
-/// The file is readable by the user only, as the rest of the state directory.
+/// Replaces the document at `path` in one step, readable by the user only, as the rest of the state directory.
 pub(crate) fn save<T: Serialize>(path: &Path, version: u32, body: &T) -> Result<(), StoreError> {
     let mut text = serde_json::to_string_pretty(&Document { version, body }).map_err(|source| StoreError::Encode {
         path: path.to_owned(),
         source,
     })?;
     text.push('\n');
-    let temporary = path.with_extension("json.tmp");
-    let write_error = |path: &Path| {
-        let path = path.to_owned();
-        move |source| StoreError::Write { path, source }
-    };
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(write_error(&temporary))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(write_error(&temporary))?;
-    fs::rename(&temporary, path).map_err(write_error(path))?;
-    // The rename itself is durable only once the directory holding it is.
-    if let Some(dir) = path.parent() {
-        File::open(dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(write_error(dir))?;
-    }
-    Ok(())
+    atomic_file::replace(path, text.as_bytes(), Mode::Private).map_err(|source| StoreError::Write {
+        path: path.to_owned(),
+        source,
+    })
 }
