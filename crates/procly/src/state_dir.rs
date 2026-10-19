@@ -96,6 +96,12 @@ impl StateDir {
         self.path.join("services.json")
     }
 
+    /// The document recording every container Procly started or adopted, with the Worktrees that need it, which the
+    /// next Daemon reconciles after a crash or a restart.
+    pub(crate) fn containers(&self) -> PathBuf {
+        self.path.join("containers.json")
+    }
+
     /// The directory holding the output file of every running Service, which outlives a crash of the Daemon.
     pub(crate) fn outputs(&self) -> PathBuf {
         self.path.join("output")

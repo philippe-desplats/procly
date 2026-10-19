@@ -25,6 +25,24 @@ A Service still starting when the Daemon crashed is re-attached only if it alrea
 
 A `services.json` that cannot be read fails `up`, `down` and `status` with exit code 125 and its path, rather than starting Services that may still run. Fix or remove the file, the Services it recorded are then no longer known to Procly.
 
+## Containers after a crash or a restart
+
+The containers of Compose services outlive the Daemon too, whether it crashed or exited cleanly. The Daemon records each container it started or adopted in `containers.json`, in its state directory: the Repository, the compose project and service, the Worktrees that need it, and the end of its Grace period when one runs. The next Daemon compares these records with the containers Docker runs before it answers any `up`, `down`, `status` or `eject`:
+
+| Found | What the new Daemon does |
+| --- | --- |
+| The container runs with the compose labels of its project and service | Re-attaches it with the Worktrees that need it: `up` answers `reused`, `down` tells how many other Worktrees still need it, `status` does not list it as foreign and `eject` stops it |
+| It runs and its Grace period ended while no Daemon ran | Stops it before answering, never removes it, and keeps its volumes |
+| It runs and its Grace period has not ended | Stops it at the end recorded by the previous Daemon, unless a Worktree needs it again before |
+| It no longer runs, or runs without the labels of its compose service | Forgets it and never stops it, it is no longer the container Procly started |
+| Docker does not answer | Re-attaches it as recorded, so that its counts are not lost while the engine is down |
+
+A Worktree whose directory no longer exists, removed without `procly down`, stops counting when the Daemon reconciles and whenever `procly down` reads the count. A container no Worktree needs anymore then enters its Grace period.
+
+Only what `docker compose` needs to reach the engine is recorded with a container: `PATH`, `HOME`, the `DOCKER_*` and `COMPOSE_*` variables, and the variables Procly injected. The rest of the environment of the command that started it is never written to disk.
+
+A `containers.json` that cannot be read fails `up`, `down`, `status` and `eject` with exit code 125 and its path, as `services.json` does. Fix or remove the file, the containers it recorded are then no longer counted by Procly, and a `procly up` adopts a container still running with the labels of its compose service.
+
 ## Starting the Daemon with your session
 
 ```console

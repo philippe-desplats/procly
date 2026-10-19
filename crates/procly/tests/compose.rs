@@ -677,3 +677,229 @@ fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
     assert_eq!(fixture.project.container(), container);
     assert!(fixture.project.volume_exists());
 }
+
+#[test]
+fn an_unreadable_container_document_fails_up_down_status_and_eject_with_125_naming_it() {
+    let fixture = fixture("");
+    std::fs::create_dir_all(fixture.procly.state_dir()).unwrap();
+    let document = fixture.procly.state_dir().join("containers.json");
+    std::fs::write(&document, "{ not json").unwrap();
+
+    for args in [&["up", "db"][..], &["down"], &["status"], &["eject"]] {
+        let output = fixture.procly.procly_in(&fixture.main, args);
+
+        assert_eq!(output.status.code(), Some(125), "{args:?}");
+        assert!(
+            stderr(&output).contains(&format!("cannot parse {}, fix or remove it", document.display())),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn docker_after_a_daemon_crash_the_container_is_still_counted_for_both_worktrees_until_its_grace_period() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.project.container();
+
+    fixture.procly.kill_daemon();
+
+    let port = fixture.port;
+    let output = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db reused http://localhost:{port} port {port}\n")
+    );
+    assert_eq!(fixture.project.container(), container);
+    let first = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+    assert_success(&first);
+    assert_eq!(stdout(&first), "db released, 1 other Worktree still needs it\n");
+
+    let last = fixture.procly.procly_in(&fixture.other, &["down", "db"]);
+    assert_success(&last);
+    assert_eq!(
+        stdout(&last),
+        "db released, it stops after 1m unless a Worktree needs it again\n"
+    );
+    fixture.procly.advance_clock(Duration::from_secs(61));
+    eventually("the container to stop after the Grace period", || {
+        !fixture.project.is_running()
+    });
+    // Stopped, never removed, and the data stays.
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}
+
+#[test]
+fn docker_a_grace_period_running_when_the_daemon_was_killed_resumes_from_its_deadline() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["down", "db"]));
+    fixture.procly.advance_clock(Duration::from_secs(30));
+
+    fixture.procly.kill_daemon();
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    fixture.procly.advance_clock(Duration::from_secs(29));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(fixture.project.is_running(), "stopped before the recorded deadline");
+    // A Grace period started again by the new Daemon would still have half a minute to run.
+    fixture.procly.advance_clock(Duration::from_secs(2));
+    eventually("the container to stop at its recorded deadline", || {
+        !fixture.project.is_running()
+    });
+}
+
+#[test]
+fn docker_a_grace_period_that_ended_while_no_daemon_ran_stops_the_container_at_reconciliation() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let container = fixture.project.container();
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["down", "db"]));
+    fixture.procly.kill_daemon();
+    fixture.procly.advance_clock(Duration::from_mins(2));
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    // Before `status` answered.
+    assert!(!fixture.project.is_running());
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}
+
+#[test]
+fn docker_a_clean_daemon_exit_leaves_the_container_running_and_counted() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.project.container();
+
+    fixture.procly.stop_daemon();
+
+    assert!(fixture.project.is_running());
+    let output = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+    assert_success(&output);
+    assert_eq!(stdout(&output), "db released, 1 other Worktree still needs it\n");
+    assert!(stdout(&fixture.procly.procly_in(&fixture.other, &["up", "db"])).starts_with("db reused "));
+    assert_eq!(fixture.project.container(), container);
+}
+
+#[test]
+fn docker_a_worktree_removed_without_down_stops_counting() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    git(
+        &fixture.main,
+        &["worktree", "remove", "--force", &fixture.other.to_string_lossy()],
+    );
+
+    let output = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "db released, it stops after 1m unless a Worktree needs it again\n"
+    );
+    fixture.procly.advance_clock(Duration::from_secs(61));
+    eventually("the container to stop after the Grace period", || {
+        !fixture.project.is_running()
+    });
+}
+
+#[test]
+fn docker_a_worktree_removed_while_no_daemon_ran_starts_the_grace_period_at_reconciliation() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    fixture.procly.kill_daemon();
+    git(
+        &fixture.main,
+        &["worktree", "remove", "--force", &fixture.other.to_string_lossy()],
+    );
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(fixture.project.is_running(), "stopped without its Grace period");
+    fixture.procly.advance_clock(Duration::from_secs(61));
+    eventually("the container to stop after the Grace period", || {
+        !fixture.project.is_running()
+    });
+}
+
+#[test]
+fn docker_status_and_eject_see_the_container_of_a_previous_daemon() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1h\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let container = fixture.project.container();
+    fixture.procly.kill_daemon();
+
+    let status = stdout(&fixture.procly.procly_in(&fixture.main, &["status"]));
+    assert!(!status.contains("foreign container"), "{status}");
+
+    let output = fixture.procly.procly_in(&fixture.main, &["eject"]);
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("stopped db (Compose service, its volumes are kept)"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!fixture.project.is_running());
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}
+
+#[test]
+fn docker_a_recorded_container_that_no_longer_runs_is_forgotten_and_never_stopped() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    fixture.procly.kill_daemon();
+    fixture.project.docker(&["stop", "db"]);
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    // Started again outside Procly, after the new Daemon forgot it.
+    fixture.project.docker(&["start", "db"]);
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["down", "db"]));
+    fixture.procly.advance_clock(Duration::from_mins(2));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        fixture.project.is_running(),
+        "Procly stopped a container it no longer owns"
+    );
+    assert!(
+        fixture
+            .procly
+            .daemon_log()
+            .contains("no longer runs with the labels of its compose service"),
+        "{}",
+        fixture.procly.daemon_log()
+    );
+}
