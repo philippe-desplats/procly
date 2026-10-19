@@ -19,7 +19,7 @@ $ procly worktree init
 nothing to do
 ```
 
-With `--json`, stdout holds one document with a `result` of `ready` and the lists `copied`, `missing` and `ran`. A setup command that fails gives a `result` of `setup_failed` instead, with the same lists up to it, the `command`, how it ended in `end` and the end of its `output`, and the exit code stays the one of the command. See [JSON output](json.md).
+With `--json`, stdout holds 1 document with a `result` of `ready` and the lists `copied`, `missing` and `ran`. A setup command that fails gives a `result` of `setup_failed` instead, with the same lists up to it, the `command`, how it ended in `end` and the end of its `output`, and the exit code stays the one of the command. See [JSON output](json.md).
 
 ```console
 $ procly worktree init --json

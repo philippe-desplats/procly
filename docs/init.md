@@ -21,7 +21,7 @@ procly: wrote /home/me/code/acme/procly.toml
 
 The proposal is printed on stdout and written to `procly.toml` at the root of the Worktree you run it in, whatever the directory you run it from. The status goes to stderr.
 
-With `--json`, stdout holds one document with the `file`, the `toml` proposed and whether it was `written`, which is `false` when a `procly.toml` existed. See [JSON output](json.md).
+With `--json`, stdout holds 1 document with the `file`, the `toml` proposed and whether it was `written`, which is `false` when a `procly.toml` existed. See [JSON output](json.md).
 
 ```console
 $ procly init --json

@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use anyhow::Context as _;
 use serde::{Serialize, Serializer};
 
 use crate::protocol::{
@@ -11,7 +12,7 @@ use crate::protocol::{
 
 /// The version of the `--json` schema of every command, bumped on any incompatible change, independently of the
 /// socket protocol.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 1;
 
 /// Renders `document` as one line of JSON that starts with the `schema_version`, newline included.
 pub(crate) fn render<T: Serialize>(document: &T) -> Result<String, serde_json::Error> {
@@ -31,8 +32,6 @@ pub(crate) fn render<T: Serialize>(document: &T) -> Result<String, serde_json::E
 
 /// Prints `document` on stdout.
 pub(crate) fn print<T: Serialize>(document: &T) -> anyhow::Result<()> {
-    use anyhow::Context as _;
-
     crate::print(&render(document).context("cannot render the JSON output")?)
 }
 
@@ -94,6 +93,7 @@ pub(crate) struct Reached<'a> {
 }
 
 impl<'a> Reached<'a> {
+    /// The Service `up` reached, with the Service that needs it when `up` was asked for that one instead.
     pub(crate) fn new(up: &'a UpService, needed_by: Option<&'a str>) -> Self {
         Self {
             service: &up.service,
@@ -193,7 +193,11 @@ pub(crate) struct UnitRemoved<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::StatusReport;
+    use crate::protocol::{BlockOutcome, Held, Occupant, StatusReport, Written};
+
+    fn json<T: Serialize>(value: &T) -> String {
+        serde_json::to_string(value).expect("a protocol type serializes")
+    }
 
     #[test]
     fn a_document_is_one_line_that_starts_with_the_schema_version() {
@@ -208,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn the_status_document_is_what_it_was_before_the_schema_version_moved_here() {
+    fn the_status_document_starts_with_the_schema_version_then_lists_repositories_and_jobs() {
         assert_eq!(
             render(&StatusReport::default()).unwrap(),
             "{\"schema_version\":1,\"repositories\":[],\"jobs_outside_repositories\":[]}\n"
@@ -225,5 +229,74 @@ mod tests {
             serde_json::to_string(&Variables(&variables)).unwrap(),
             r#"{"PORT":"3000","A_FIRST":"x"}"#
         );
+    }
+
+    /// The documents embed these protocol types as they are, so their JSON is pinned here: a change to one is a
+    /// change to the schema that bumps `SCHEMA_VERSION`, whatever the protocol does.
+    #[test]
+    fn the_protocol_types_a_document_embeds_serialize_as_documented() {
+        assert_eq!(json(&JobEnd::Exited { code: 3 }), r#"{"kind":"exited","code":3}"#);
+        assert_eq!(
+            json(&JobEnd::Signaled { signal: 15 }),
+            r#"{"kind":"signaled","signal":15}"#
+        );
+        assert_eq!(
+            json(&JobEnd::TimedOut { timeout_ms: 1000 }),
+            r#"{"kind":"timed_out","timeout_ms":1000}"#
+        );
+        for (end, expected) in [
+            (ServiceEnd::Stopped, r#"{"kind":"stopped"}"#),
+            (ServiceEnd::Lost, r#"{"kind":"lost"}"#),
+            (ServiceEnd::Idle { timeout_ms: 5 }, r#"{"kind":"idle","timeout_ms":5}"#),
+            (ServiceEnd::Failed { restarts: 2 }, r#"{"kind":"failed","restarts":2}"#),
+            (
+                ServiceEnd::HealthTimeout { timeout_ms: 5 },
+                r#"{"kind":"health_timeout","timeout_ms":5}"#,
+            ),
+            (
+                ServiceEnd::PortMismatch { leased: 1, actual: 2 },
+                r#"{"kind":"port_mismatch","leased":1,"actual":2}"#,
+            ),
+            (
+                ServiceEnd::Orphaned { pgid: 7, port: None },
+                r#"{"kind":"orphaned","pgid":7,"port":null}"#,
+            ),
+            (
+                ServiceEnd::NotListening { port: 9 },
+                r#"{"kind":"not_listening","port":9}"#,
+            ),
+            (ServiceEnd::Exited { code: 1 }, r#"{"kind":"exited","code":1}"#),
+            (ServiceEnd::Signaled { signal: 9 }, r#"{"kind":"signaled","signal":9}"#),
+        ] {
+            assert_eq!(json(&end), expected);
+        }
+        assert_eq!(json(&Held::Port { port: 5432 }), r#"{"kind":"port","port":5432}"#);
+        assert_eq!(
+            json(&Held::ContainerName { name: "db".to_owned() }),
+            r#"{"kind":"container_name","name":"db"}"#
+        );
+        assert_eq!(
+            json(&Held::Service {
+                ports: vec![1],
+                leased: vec![2]
+            }),
+            r#"{"kind":"service","ports":[1],"leased":[2]}"#
+        );
+        assert_eq!(
+            json(&Occupant::Process {
+                pid: 4,
+                command: "node".to_owned()
+            }),
+            r#"{"kind":"process","pid":4,"command":"node"}"#
+        );
+        assert_eq!(
+            json(&Occupant::Unknown {
+                find: "lsof".to_owned()
+            }),
+            r#"{"kind":"unknown","find":"lsof"}"#
+        );
+        assert_eq!(json(&Written::EnvFile), r#""env_file""#);
+        assert_eq!(json(&BlockOutcome::Edited), r#""edited""#);
+        assert_eq!(json(&StartOutcome::Reused), r#""reused""#);
     }
 }
