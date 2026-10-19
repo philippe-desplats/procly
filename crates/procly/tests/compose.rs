@@ -984,3 +984,47 @@ fn docker_a_recorded_container_that_no_longer_runs_is_forgotten_and_never_stoppe
         fixture.procly.daemon_log()
     );
 }
+
+#[test]
+fn docker_a_recorded_container_replaced_by_one_without_matching_labels_is_forgotten_and_never_stopped() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    let port = fixture.port;
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    fixture.procly.kill_daemon();
+    // The same name and the same port, started by plain `docker run`, so without the labels of compose.
+    assert_success(&fixture.project.docker(&["rm", "--stop", "--force", "db"]));
+    let foreign = Foreign::run(&format!("{}-db-1", fixture.project.name), Some(port));
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    assert!(
+        fixture
+            .procly
+            .daemon_log()
+            .contains("no longer runs with the labels of its compose service"),
+        "{}",
+        fixture.procly.daemon_log()
+    );
+    // No longer counted as the container of db, so there is nothing to let go of.
+    let down = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+    assert_success(&down);
+    assert_eq!(stdout(&down), "db not running\n");
+    fixture.procly.advance_clock(Duration::from_mins(2));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(foreign.is_running(), "Procly stopped a container it no longer owns");
+    // Neither its own container nor reused, it is what keeps db from starting.
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!(
+            "container name {} is held by a container compose did not create for this service",
+            foreign.name
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert!(foreign.is_running(), "Procly stopped a container it does not own");
+}
