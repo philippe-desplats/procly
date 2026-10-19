@@ -19,7 +19,7 @@ use tokio::process::Command;
 use tokio::task::JoinSet;
 
 use super::clock::Clock;
-use super::container_record::{ContainerRecord, ContainerRecords};
+use super::container_record::{ContainerRecord, ContainerRecords, Key as ContainerKey};
 use super::foreign::{self, Container as ListedContainer};
 use super::health::HealthCheck;
 use super::job::{Fingerprint, JobSpec, Jobs};
@@ -188,7 +188,7 @@ pub(crate) struct Brought {
 }
 
 /// A Compose service is shared by the Worktrees of one Repository, so it is keyed by the Repository and its name.
-pub(crate) type ComposeKey = (PathBuf, String);
+pub(crate) type ComposeKey = ContainerKey;
 
 /// Every container Procly started from a compose file.
 #[derive(Debug)]
@@ -276,7 +276,7 @@ impl Composes {
         let mut expiring = Vec::new();
         let mut recorded = Vec::new();
         for record in kept {
-            let key = (record.repository.clone(), record.service.clone());
+            let key = record.key();
             let container = Arc::new(Container::reattached(record, now));
             recorded.extend(container.record(&key));
             if let Some(deadline) = container.state().deadline {
@@ -704,6 +704,7 @@ fn recorded_env(env: &[(String, String)], injected: &[String]) -> Vec<(String, S
         .collect()
 }
 
+/// A duration in milliseconds, as the records and the answers carry it.
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

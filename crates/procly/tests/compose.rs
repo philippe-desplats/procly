@@ -645,13 +645,13 @@ fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
 }
 
 #[test]
-fn an_unreadable_container_document_fails_up_down_and_status_with_125_naming_it() {
+fn an_unreadable_container_document_fails_up_down_status_and_eject_with_125_naming_it() {
     let fixture = fixture("");
     std::fs::create_dir_all(fixture.procly.state_dir()).unwrap();
     let document = fixture.procly.state_dir().join("containers.json");
     std::fs::write(&document, "{ not json").unwrap();
 
-    for args in [&["up", "db"][..], &["down"], &["status"]] {
+    for args in [&["up", "db"][..], &["down"], &["status"], &["eject"]] {
         let output = fixture.procly.procly_in(&fixture.main, args);
 
         assert_eq!(output.status.code(), Some(125), "{args:?}");

@@ -40,9 +40,16 @@ pub(crate) struct ContainerRecord {
     pub(crate) deadline_ms: Option<u64>,
 }
 
+impl ContainerRecord {
+    /// The Repository and the name of the Service the container runs for.
+    pub(crate) fn key(&self) -> Key {
+        (self.repository.clone(), self.service.clone())
+    }
+}
+
 /// A container is shared by the Worktrees of one Repository, so it is keyed by the Repository and the name of its
 /// Service.
-type Key = (PathBuf, String);
+pub(crate) type Key = (PathBuf, String);
 
 /// The document holding every record.
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,10 +83,7 @@ impl ContainerRecords {
     /// Replaces every record by `records`, and the document with them. Blocking.
     pub(crate) fn replace(&self, records: Vec<ContainerRecord>) {
         let mut table = self.table();
-        *table = records
-            .into_iter()
-            .map(|record| ((record.repository.clone(), record.service.clone()), record))
-            .collect();
+        *table = records.into_iter().map(|record| (record.key(), record)).collect();
         self.write(&table);
     }
 

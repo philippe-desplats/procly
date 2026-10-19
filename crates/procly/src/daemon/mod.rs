@@ -186,7 +186,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         let registry = Arc::clone(&registry);
         async move {
             if let Err(message) = registry.reconciled().await {
-                eprintln!("cannot reconcile the services of the previous daemon: {message}");
+                eprintln!("cannot reconcile the services and containers of the previous daemon: {message}");
             }
         }
     });
