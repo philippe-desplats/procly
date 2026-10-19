@@ -105,8 +105,14 @@ enum Command {
     Down { service: Option<String> },
     /// Wait for a Job to end, print its output and exit with its exit code (124 on timeout).
     Wait { job: String },
-    /// Print the recent output of a running or ended Job.
-    Logs { job: String },
+    /// Print the recent output of a running or ended Job, or of a Service of the current Worktree.
+    #[command(
+        after_help = "A Job identifier printed by `procly run` names that Job, any other name a Service of the current \
+                      Worktree, whose output is kept across a restart of the Daemon. Exit codes: 0 on success, 125 \
+                      when Procly itself fails, such as for a name that is neither a Job nor a Service. See \
+                      docs/exit-codes.md."
+    )]
+    Logs { job_or_service: String },
     /// Print the Repository, the current Worktree and its Jobs.
     Status {
         /// Report every Worktree of every Repository the Daemon knows, not only the current one.
@@ -303,13 +309,22 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             other => unexpected(other),
         },
-        Command::Logs { job } => match client::send(&state, &Request::Logs { job })? {
-            Response::Logs { output } => {
-                print(&output)?;
-                Ok(ExitCode::SUCCESS)
+        Command::Logs { job_or_service } => {
+            let cwd = std::env::current_dir().context("cannot read the current directory")?;
+            match client::send(
+                &state,
+                &Request::Logs {
+                    name: job_or_service,
+                    cwd,
+                },
+            )? {
+                Response::Logs { output } => {
+                    print(&output)?;
+                    Ok(ExitCode::SUCCESS)
+                }
+                other => unexpected(other),
             }
-            other => unexpected(other),
-        },
+        }
         Command::Status { all, json } => {
             let cwd = std::env::current_dir().context("cannot read the current directory")?;
             match client::send(&state, &Request::Status { cwd, all })? {

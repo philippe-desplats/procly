@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 13;
+pub(crate) const PROTOCOL_VERSION: u32 = 14;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -23,12 +23,9 @@ pub(crate) enum Request {
         timeout_ms: u64,
     },
     /// Answers once the Job has ended.
-    Wait {
-        job: String,
-    },
-    Logs {
-        job: String,
-    },
+    Wait { job: String },
+    /// Answers the recent output of the Job `name`, or else of the Service `name` of the Worktree holding `cwd`.
+    Logs { name: String, cwd: PathBuf },
     /// Starts a declared Service of the Worktree holding `cwd`, or finds it running, and answers once it is healthy.
     /// Without `service`, starts every declared Service that no Group covers.
     Up {
@@ -41,21 +38,12 @@ pub(crate) enum Request {
         gitignore: bool,
     },
     /// The variables Procly injects into the Service `service` of the Worktree holding `cwd`, without starting it.
-    Env {
-        service: String,
-        cwd: PathBuf,
-    },
+    Env { service: String, cwd: PathBuf },
     /// Stops a Service of the Worktree holding `cwd`, or every Service of it without `service`, and answers once
     /// their trees are gone.
-    Down {
-        service: Option<String>,
-        cwd: PathBuf,
-    },
+    Down { service: Option<String>, cwd: PathBuf },
     /// The Topology and the Jobs of the Worktree holding `cwd`, or of every Worktree with `all`.
-    Status {
-        cwd: PathBuf,
-        all: bool,
-    },
+    Status { cwd: PathBuf, all: bool },
     /// Prepares the Worktree holding `path`: copies the listed files from the Main worktree, then runs the setup
     /// commands it has not run yet, and answers once they have ended.
     WorktreeInit {
@@ -71,23 +59,14 @@ pub(crate) enum Request {
         file: Option<PathBuf>,
     },
     /// Makes the Guards and Rules blocks of the Repository holding `cwd` stand aside, or stand again with `off` unset.
-    Switch {
-        cwd: PathBuf,
-        off: bool,
-    },
+    Switch { cwd: PathBuf, off: bool },
     /// Asks whether the Guard of the Repository holding `cwd` stands, once it met a command it knows.
-    Guard {
-        cwd: PathBuf,
-    },
+    Guard { cwd: PathBuf },
     /// Stops the Services of the Repository holding `cwd` and removes what Procly wrote into it, apart from the
     /// Managed blocks that were edited.
-    Eject {
-        cwd: PathBuf,
-    },
+    Eject { cwd: PathBuf },
     /// Proposes a `procly.toml` for the Worktree holding `cwd`, and writes it unless the Worktree has one.
-    Init {
-        cwd: PathBuf,
-    },
+    Init { cwd: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -575,7 +554,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":13,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":14,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

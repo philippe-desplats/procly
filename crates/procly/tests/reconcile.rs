@@ -74,6 +74,76 @@ fn a_service_that_keeps_printing_after_the_daemon_was_killed_stays_alive_and_is_
     assert_eq!(lines(&starts), ["start"]);
 }
 
+/// The highest tick `logs web` prints, 0 before the first one.
+fn last_tick(procly: &Procly, main: &Path) -> u64 {
+    let output = procly.procly_in(main, &["logs", "web"]);
+    assert_success(&output);
+    stdout(&output)
+        .lines()
+        .filter_map(|line| line.strip_prefix("tick ")?.parse().ok())
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn logs_of_a_reattached_service_show_its_output_from_before_and_after_the_daemon_restart() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &chatty_web_on(free_port(), &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    common::eventually("a few ticks", || last_tick(&procly, &main) >= 3);
+    let before = last_tick(&procly, &main);
+
+    procly.kill_daemon();
+    std::thread::sleep(Duration::from_millis(300));
+
+    common::eventually("ticks printed after the restart", || {
+        last_tick(&procly, &main) >= before + 10
+    });
+    let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+    assert!(logs.lines().any(|line| line == "tick 1"), "{logs}");
+}
+
+/// The output files the Daemon holds in the state directory.
+fn output_files(procly: &Procly) -> usize {
+    std::fs::read_dir(procly.state_dir().join("output")).map_or(0, Iterator::count)
+}
+
+#[test]
+fn the_output_file_of_a_reattached_service_is_removed_once_it_is_stopped() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &chatty_web_on(free_port(), &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    procly.kill_daemon();
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_eq!(output_files(&procly), 1);
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    assert_eq!(output_files(&procly), 0);
+}
+
+#[test]
+fn the_output_file_of_a_service_that_ended_while_no_daemon_ran_is_removed_by_the_next_one() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &web_on(free_port(), &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let server = read_pid(&pid);
+    procly.kill_daemon();
+    kill(server, Signal::SIGKILL).expect("kill the server while no Daemon runs");
+    common::wait_until_gone(server);
+    assert_eq!(output_files(&procly), 1);
+
+    assert_success(&procly.procly_in(&main, &["status"]));
+
+    assert_eq!(output_files(&procly), 0);
+}
+
 #[test]
 fn a_service_running_when_the_daemon_was_killed_is_reattached_and_reused_not_started_twice() {
     let procly = Procly::new();

@@ -498,3 +498,73 @@ fn up_exits_3_when_the_service_is_killed_by_a_signal_or_stopped_before_it_is_hea
         common::stderr(&output)
     );
 }
+
+#[test]
+fn logs_prints_the_recent_output_of_a_service_of_the_current_worktree() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    write(&main, "procly.toml", &web_on(port));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    common::eventually("the output of web", || {
+        stdout(&procly.procly_in(&main, &["logs", "web"])) == format!("listening on {port}\n")
+    });
+    let unknown = procly.procly_in(&main, &["logs", "api"]);
+    assert_eq!(unknown.status.code(), Some(125));
+    assert!(
+        common::stderr(&unknown).contains("no job or service api"),
+        "{}",
+        common::stderr(&unknown)
+    );
+}
+
+/// The size of every output file the Daemon holds in the state directory.
+fn output_files(procly: &Procly) -> Vec<u64> {
+    std::fs::read_dir(procly.state_dir().join("output")).map_or_else(
+        |_| Vec::new(),
+        |entries| {
+            entries
+                .map(|entry| {
+                    entry
+                        .expect("read the output directory")
+                        .metadata()
+                        .expect("stat")
+                        .len()
+                })
+                .collect()
+        },
+    )
+}
+
+#[test]
+fn the_output_file_of_a_flooding_service_stays_bounded_and_is_removed_once_it_is_stopped() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    // 256 KiB printed every few milliseconds, tens of megabytes a second, far past the limit within the second watched.
+    let chunk = procly.scratch().join("chunk");
+    std::fs::write(&chunk, "procly-flood\n".repeat(256 * 1024 / 13)).expect("write the chunk");
+    let run = format!(
+        "{} --port {port} & while true; do cat {}; sleep 0.005; done",
+        test_server().display(),
+        chunk.display()
+    );
+    write(
+        &main,
+        "procly.toml",
+        &format!("[services.web]\nrun = '{run}'\nports = {{ http = {port} }}\n"),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(1) {
+        let sizes = output_files(&procly);
+        assert_eq!(sizes.len(), 1, "one output file per running Service");
+        assert!(sizes[0] < 8 * 1024 * 1024, "the output file grew to {} bytes", sizes[0]);
+    }
+    assert!(stdout(&procly.procly_in(&main, &["logs", "web"])).ends_with("procly-flood\n"));
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    assert_eq!(output_files(&procly), Vec::<u64>::new());
+}

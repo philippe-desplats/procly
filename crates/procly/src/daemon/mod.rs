@@ -277,9 +277,9 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
             }
             None => unknown_job(&id),
         },
-        Request::Logs { job: id } => match jobs.get(&id) {
+        Request::Logs { name, cwd } => match jobs.get(&name) {
             Some(job) => Response::Logs { output: job.output() },
-            None => unknown_job(&id),
+            None => service_logs(registry, name, cwd).await,
         },
         Request::Up {
             service,
@@ -910,6 +910,25 @@ async fn start(
                 }));
             }
         }
+    }
+}
+
+/// The recent output of the Service `name` of the Worktree holding `cwd`, once the Services of the previous Daemon
+/// are reconciled, so that a re-attached Service shows its output from before the restart.
+async fn service_logs(registry: &Registry, name: String, cwd: PathBuf) -> Response {
+    if let Err(message) = registry.reconciled().await {
+        return Response::Error { message };
+    }
+    // Outside a git Repository there is no Service, and the name is simply unknown.
+    let worktree = tokio::task::spawn_blocking(move || worktree_of(&cwd))
+        .await
+        .ok()
+        .and_then(Result::ok);
+    match worktree.and_then(|worktree| registry.services.output_of(&worktree, &name)) {
+        Some(output) => Response::Logs { output },
+        None => Response::Error {
+            message: format!("no job or service {name}"),
+        },
     }
 }
 

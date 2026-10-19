@@ -230,6 +230,14 @@ impl Services {
         })
     }
 
+    /// The recent output of the Service `name` of `worktree`, running or ended, `None` when the Daemon knows no such
+    /// Service.
+    pub(crate) fn output_of(&self, worktree: &Path, name: &str) -> Option<String> {
+        self.table()
+            .get(&(worktree.to_owned(), name.to_owned()))
+            .map(|service| service.output())
+    }
+
     /// Whether the Service `name` of `worktree` runs.
     pub(crate) fn runs(&self, worktree: &Path, name: &str) -> bool {
         self.table()
@@ -517,6 +525,12 @@ fn record_run(records: &ServiceRecords, mut record: ServiceRecord, pgid: Pid) {
     records.put(record);
 }
 
+/// Records the run `process` of a restarted Service, on a blocking thread as writing the document syncs it to disk.
+async fn record_restart(records: &Arc<ServiceRecords>, spec: &ServiceSpec, process: &Process) {
+    let (records, record, pgid) = (Arc::clone(records), record_of(spec, process.tail.path()), process.pgid);
+    let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid)).await;
+}
+
 /// Ends the Service with `end`, once it is no longer recorded, so that a Daemon starting right after never finds a
 /// Service that ended.
 async fn finish(service: &Service, records: &Arc<ServiceRecords>, topology: &Topology, name: &str, end: ServiceEnd) {
@@ -680,12 +694,7 @@ async fn supervise(
             }
             match launch(&spec, &service.output, &outputs) {
                 Ok(process) => {
-                    let (records, record, pgid) = (
-                        Arc::clone(&records),
-                        record_of(&spec, process.tail.path()),
-                        process.pgid,
-                    );
-                    let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid)).await;
+                    record_restart(&records, &spec, &process).await;
                     break process;
                 }
                 Err(error) => {

@@ -167,11 +167,12 @@ fn catch_up(file: &mut File, chunk: &mut [u8], output: &Mutex<OutputBuffer>) -> 
             file.seek(SeekFrom::Start(start))?;
             let mut rest = Vec::new();
             (&mut *file).take(len.saturating_sub(start)).read_to_end(&mut rest)?;
-            output::lock(output).push(&rest);
             // The process appends at the end of the file, wherever it is, so it carries on from the start. What it
-            // appended since the length was read is lost, at worst one read of output.
+            // appended since the length was read is lost, at worst one read of output, so the file is emptied before
+            // the buffer takes its share of time.
             file.set_len(0)?;
             file.rewind()?;
+            output::lock(output).push(&rest);
             continue;
         }
         let read = file.read(chunk)?;
