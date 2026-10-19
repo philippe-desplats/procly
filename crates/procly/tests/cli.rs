@@ -131,3 +131,20 @@ fn the_help_of_eject_lists_its_exit_codes_and_the_agents_it_can_hand_the_prompt_
         "{help}"
     );
 }
+
+#[test]
+fn the_help_of_init_tells_it_never_overwrites_and_lists_its_exit_codes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .args(["init", "--help"])
+        .output()
+        .expect("the procly binary runs");
+
+    assert!(output.status.success(), "exit status: {}", output.status);
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("never overwritten")
+            && help.contains("0 when the proposal is printed")
+            && help.contains("125 when Procly itself fails"),
+        "{help}"
+    );
+}

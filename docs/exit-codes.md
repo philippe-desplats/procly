@@ -18,4 +18,6 @@ Every `procly` command exits with one of these codes. They are stable: an agent 
 
 `eject` exits with 0, also when it left Managed blocks because you edited them, and with 125 when Procly itself fails: a container that cannot be stopped, a state document that is unreadable, a directory that is not in a git Repository, or, with `--agent`, an agent CLI that is missing or exits with another code than 0, in which case what eject removed stays removed. See [Removing Procly from a Repository](eject.md).
 
+`init` exits with 0 when it printed the proposal, also when it left an existing `procly.toml` as it is, and with 125 when Procly itself fails: a Worktree with no `dev` script and no compose file, a `package.json`, a `pnpm-workspace.yaml` or a compose file that cannot be read, a compose file with no `services`, or a directory that is not in a git Repository. See [Proposing a configuration](init.md).
+
 `wait` otherwise exits with the Job's own exit code, and with 128 + N for a Job killed by signal N, as a shell does. Those codes can collide with the ones above, so read them as the Job's when `wait` reports no Procly error on stderr.

@@ -440,3 +440,7 @@ What `procly worktree init` does in a fresh Worktree, see [Preparing a Worktree]
 | --- | --- | --- |
 | `copy` | none | Untracked files and directories to copy from the Main worktree when the Worktree lacks them, such as env files and local certificates. Paths are relative to the root of the Worktree, an absolute path or one climbing out with `..` is an error. |
 | `setup` | none | Commands run once, in order, by `/bin/sh -c` at the root of the Worktree, with the environment of the `procly worktree init` that ran them. |
+
+## Starting from a proposal
+
+`procly init` proposes a `procly.toml` for a Repository that has none, from its `dev` scripts and its compose file, see [Proposing a configuration](init.md).
