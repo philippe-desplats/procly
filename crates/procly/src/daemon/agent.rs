@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::hook::{self, HookError};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use super::store::StoreError;
-use super::{Registry, read_config};
+use super::{Registry, blocking, read_config};
 use crate::protocol::{BlockOutcome, BlockReport, InstallReport, Request, Response, SwitchReport};
 use crate::topology::{self, Topology, TopologyError};
 
@@ -61,15 +61,9 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
         Request::Guard { cwd } => guard(&registry, &cwd).map(|(off, services)| Response::Guard { off, services }),
         other => unreachable!("only agent requests are handed to the agent module, not {other:?}"),
     };
-    match tokio::task::spawn_blocking(work).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => Response::Error {
-            message: format!("{:#}", anyhow::Error::from(error)),
-        },
-        Err(error) => Response::Error {
-            message: format!("the agent request could not be answered: {error}"),
-        },
-    }
+    blocking("the agent request could not be answered", move || Ok(work()?))
+        .await
+        .unwrap_or_else(|message| Response::Error { message })
 }
 
 /// The Rules block, one line per element. When the Repository is Off it says so, and tells agents to leave Procly be.

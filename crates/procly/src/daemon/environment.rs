@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use super::Registry;
 use super::atomic_file::{self, Mode};
 use super::foreign;
-use super::health::{HealthCheck, HttpCheck};
+use super::health::HealthCheck;
 use super::index::{IndexError, IndexRequest};
 use super::lease::{Claimed, LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
@@ -61,6 +61,25 @@ pub(super) const EXCLUDE_FILE: &str = "info/exclude";
 /// The file `up --gitignore` writes to instead, relative to the root of the Worktree.
 pub(super) const GITIGNORE_FILE: &str = ".gitignore";
 
+/// A Service declared in a Worktree, with what working out its environment takes.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DeclaredService<'a> {
+    pub(super) registry: &'a Registry,
+    pub(super) topology: &'a Topology,
+    pub(super) config: &'a Config,
+    pub(super) name: &'a str,
+    pub(super) declared: &'a ServiceConfig,
+}
+
+/// Whether the Leases of a Service may move when its environment is worked out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Leasing {
+    /// The Service is about to start, which lets the Main worktree take its declared port back.
+    Starting,
+    /// A Lease already granted stays as it is, the Service may run on it.
+    AsGranted,
+}
+
 /// What a Service receives on top of the environment of its caller.
 #[derive(Debug)]
 pub(super) struct Injected {
@@ -85,24 +104,21 @@ pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Optio
     Ok(health_port_name)
 }
 
-/// The variables Procly injects into the Service `name`, granting the Leases it and its templates need.
-///
-/// `starting` tells whether the Service is about to start, which lets the Main worktree take its declared port back.
-/// Otherwise a Lease already granted stays as it is, the Service may run on it.
-pub(super) fn injected(
-    registry: &Registry,
-    topology: &Topology,
-    config: &Config,
-    name: &str,
-    declared: &ServiceConfig,
-    starting: bool,
-) -> Result<Injected, EnvironmentError> {
+/// The variables Procly injects into the Service, granting the Leases it and its templates need.
+pub(super) fn injected(service: &DeclaredService<'_>, leasing: Leasing) -> Result<Injected, EnvironmentError> {
+    let DeclaredService {
+        registry,
+        topology,
+        config,
+        name,
+        declared,
+    } = *service;
     let health_port_name = check(name, declared)?;
     let derived = Derived::from_config(&config.services)?;
     let branch = pinned_branch(topology, config)?;
 
     let mut table = grant_referenced(registry, topology, config, branch, &derived)?;
-    let leases = grant(registry, topology, config, branch, name, &declared.ports, !starting)?;
+    let leases = grant(registry, topology, config, branch, name, &declared.ports, leasing)?;
     table.insert(name.to_owned(), leases.clone());
     let health_port = health_port_name.map(|port_name| {
         *leases
@@ -135,19 +151,23 @@ pub(super) struct InjectedGroup {
     pub(super) checks: Vec<HealthCheck>,
 }
 
-/// The variables Procly injects into the Group `name`, granting the Leases of the Services it covers.
+/// The variables Procly injects into the Group `group`, granting the Leases of the Services it covers.
 ///
 /// Each covered Service has `PORT` and `PORT_<NAME>` of its own, which would collide in one environment, so the
 /// Group gets `PORT_<SERVICE>_<NAME>` instead, such as `PORT_WEB_HTTP`. Their Derived variables are injected as they
-/// are, they are named apart already. `starting` is as for [`injected`].
+/// are, they are named apart already.
 pub(super) fn injected_group(
-    registry: &Registry,
-    topology: &Topology,
-    config: &Config,
-    name: &str,
+    group: &DeclaredService<'_>,
     covers: &[String],
-    starting: bool,
+    leasing: Leasing,
 ) -> Result<InjectedGroup, EnvironmentError> {
+    let DeclaredService {
+        registry,
+        topology,
+        config,
+        name,
+        ..
+    } = *group;
     let derived = Derived::from_config(&config.services)?;
     let branch = pinned_branch(topology, config)?;
     let mut table = grant_referenced(registry, topology, config, branch, &derived)?;
@@ -160,7 +180,7 @@ pub(super) fn injected_group(
             .get(service)
             .expect("the configuration was validated, so a covered Service is declared");
         let health_port_name = check(service, declared)?;
-        let leases = grant(registry, topology, config, branch, service, &declared.ports, !starting)?;
+        let leases = grant(registry, topology, config, branch, service, &declared.ports, leasing)?;
         for (port_name, port) in &leases {
             variables.push((
                 format!("PORT_{}_{}", identifier(service), port_name.to_ascii_uppercase()),
@@ -168,11 +188,10 @@ pub(super) fn injected_group(
             ));
             lease_ports.push(*port);
         }
-        checks.push(HealthCheck {
-            port: health_port_name.and_then(|port_name| leases.get(port_name).copied()),
-            http: declared.health.http().map(|(path, status)| HttpCheck { path, status }),
-            covered: Vec::new(),
-        });
+        checks.push(HealthCheck::declared(
+            health_port_name.and_then(|port_name| leases.get(port_name).copied()),
+            &declared.health,
+        ));
         table.insert(service.clone(), leases);
     }
     let resources = referenced_resources(registry, topology, config, &derived, &table)?;
@@ -269,8 +288,14 @@ fn referenced_resources(
         let service_leases = leases
             .get(service)
             .expect("the Leases of every Service a template refers to are granted before its resources");
-        if let Some((_, resources)) = logical_resources(registry, topology, config, service, declared, service_leases)?
-        {
+        let referenced = DeclaredService {
+            registry,
+            topology,
+            config,
+            name: service,
+            declared,
+        };
+        if let Some((_, resources)) = logical_resources(&referenced, service_leases)? {
             table.insert(service.to_owned(), resources);
         }
     }
@@ -280,18 +305,21 @@ fn referenced_resources(
 /// A Driver and the Logical resources it creates for a Worktree, by key.
 pub(super) type DriverResources = (Driver, BTreeMap<String, Resource>);
 
-/// The Driver of the Compose service `name` and its Logical resources in the Worktree, `None` when it has no Driver.
+/// The Driver of the Compose service and its Logical resources in the Worktree, `None` when it has no Driver.
 ///
 /// A Service that is Shared gives every Worktree the resources of the Main worktree. A Driver that numbers its
 /// resources has its indexes handed out here, and stored, since the URL of a resource holds one.
 pub(super) fn logical_resources(
-    registry: &Registry,
-    topology: &Topology,
-    config: &Config,
-    name: &str,
-    declared: &ServiceConfig,
+    service: &DeclaredService<'_>,
     leases: &BTreeMap<String, u16>,
 ) -> Result<Option<DriverResources>, EnvironmentError> {
+    let DeclaredService {
+        registry,
+        topology,
+        config,
+        name,
+        declared,
+    } = *service;
     let Some(driver) = &declared.driver else {
         return Ok(None);
     };
@@ -401,7 +429,15 @@ fn grant_referenced(
             .expect("Derived::from_config checked that every referenced Service is declared");
         table.insert(
             service.to_owned(),
-            grant(registry, topology, config, branch, service, &declared.ports, true)?,
+            grant(
+                registry,
+                topology,
+                config,
+                branch,
+                service,
+                &declared.ports,
+                Leasing::AsGranted,
+            )?,
         );
     }
     Ok(table)
@@ -416,7 +452,7 @@ fn grant(
     branch: Option<&str>,
     service: &str,
     ports: &BTreeMap<String, PortConfig>,
-    keep: bool,
+    leasing: Leasing,
 ) -> Result<BTreeMap<String, u16>, EnvironmentError> {
     let shared;
     let compose = config
@@ -447,7 +483,7 @@ fn grant(
         pinned,
         expiry: config.settings.lease_expiry,
         running: &registry.running(),
-        keep,
+        keep: leasing == Leasing::AsGranted,
         claimed: compose.map(|_| Claimed(&held_by_container)),
     })?)
 }

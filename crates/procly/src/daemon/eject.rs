@@ -16,7 +16,7 @@ use super::compose::ComposeError;
 use super::environment::{ENV_BLOCK, ENV_FILE, EXCLUDE_FILE, EXCLUSIONS, GITIGNORE_FILE, exclusion_lines};
 use super::hook::{self, HookError};
 use super::managed::{self, ManagedBlocks, ManagedError, Removal};
-use super::{Registry, requester};
+use super::{Registry, failure, requester};
 use crate::config;
 use crate::envfile;
 use crate::protocol::{EjectReport, Left, Removed, Response, Stopped, Written};
@@ -51,12 +51,7 @@ enum EjectError {
 /// Answers an `Eject` request for the Repository holding `cwd`. Services are stopped first, so that nothing writes an
 /// Env file again once it is removed. Stopping fails before any file is touched, and asking again finishes the job.
 pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, peer: Option<i32>) -> Response {
-    match eject(registry, cwd, peer).await {
-        Ok(report) => Response::Eject(report),
-        Err(error) => Response::Error {
-            message: format!("{:#}", anyhow::Error::from(error)),
-        },
-    }
+    eject(registry, cwd, peer).await.map_or_else(failure, Response::Eject)
 }
 
 async fn eject(registry: &Arc<Registry>, cwd: PathBuf, peer: Option<i32>) -> Result<EjectReport, EjectError> {

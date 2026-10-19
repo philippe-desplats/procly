@@ -5,6 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 
+use crate::config::HealthConfig;
+
 /// A dev server may listen on IPv4, on IPv6 only (Vite on macOS binds `::1`), or on both.
 const LOOPBACKS: [IpAddr; 2] = [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
 
@@ -26,6 +28,15 @@ pub(crate) struct HttpCheck {
 }
 
 impl HealthCheck {
+    /// The check a Service declares, probing `port`, the Lease of its health Port name.
+    pub(crate) fn declared(port: Option<u16>, health: &HealthConfig) -> Self {
+        Self {
+            port,
+            http: health.http().map(|(path, status)| HttpCheck { path, status }),
+            covered: Vec::new(),
+        }
+    }
+
     /// The port of every Lease this check probes, the covered Services' included.
     pub(crate) fn ports(&self) -> Vec<u16> {
         self.port
