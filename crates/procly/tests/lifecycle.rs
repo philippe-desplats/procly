@@ -262,18 +262,70 @@ fn server_on(name: &str, port: u16, extra: &str) -> String {
     )
 }
 
-/// Gives the Daemon time to take its first look at the Services that just became healthy, which it does as soon
-/// as they are, so that the clock moves after it.
+/// Gives the Daemon time to look at its Services once the clock moved, before a test checks that one is still
+/// running. Only a check that nothing happened waits a fixed time, as there is no state to wait on: it may pass too
+/// early, never fail too early.
 fn let_the_daemon_look(duration_ms: u64) {
     std::thread::sleep(Duration::from_millis(duration_ms));
 }
 
-/// How long an idle test lets real time pass after the first look before it moves the clock. Idleness averages the
-/// CPU time of a Service over the real time since that look, and `ps` counts CPU time in hundredths of a second on
-/// macOS: a last tick of the startup of the Service, landing a fraction of a second after the look, reads as over 1%
-/// of a CPU, makes it busy at the very reading of the clock the test then holds still, and it never stops. Over
-/// 2.5 s, even 2 ticks stay under 1%.
-const FIRST_LOOK_MS: u64 = 2500;
+/// The output of `service` the Daemon holds.
+fn logs(procly: &Procly, worktree: &Path, service: &str) -> String {
+    stdout(&procly.procly_in(worktree, &["logs", service]))
+}
+
+/// Waits until the Daemon holds the first line the test server of `service` prints. Output counts from the reading of
+/// the clock when the Daemon read it, so the clock moves only once this line is in.
+fn wait_for_first_line(procly: &Procly, worktree: &Path, service: &str, port: u16) {
+    let line = format!("listening on {port}");
+    common::eventually(&format!("the first line of {service}"), || {
+        logs(procly, worktree, service).contains(&line)
+    });
+}
+
+/// Waits until the status shows `service` ended after `timeout` idle, which is once its process tree is gone. Shows
+/// the Daemon log when it never does, as the log tells what the Daemon made of the Service.
+fn wait_for_idle_stop(procly: &Procly, worktree: &Path, service: &str, timeout: &str) {
+    let ended = format!("service {service} ended: stopped after {timeout} idle");
+    let start = std::time::Instant::now();
+    loop {
+        let status = stdout(&procly.procly_in(worktree, &["status"]));
+        if status.contains(&ended) {
+            return;
+        }
+        assert!(
+            start.elapsed() < common::DEADLINE,
+            "timed out waiting for {service} to stop after {timeout} idle\nstatus:\n{status}\ndaemon log:\n{}",
+            procly.daemon_log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The CPU time the live members of the process group `pgid` have used, as `ps` counts it.
+fn group_cpu(pgid: i32) -> Duration {
+    let output = std::process::Command::new("ps")
+        .args(["-A", "-o", "pgid=,time="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (group, time) = line.trim().split_once(char::is_whitespace)?;
+            (group.parse::<i32>().ok()? == pgid).then(|| ps_time(time.trim()))
+        })
+        .sum()
+}
+
+/// Reads a `ps` CPU time, `[HH:]MM:SS` on Linux and `MM:SS.hh` on macOS. No test runs long enough to count days.
+fn ps_time(text: &str) -> Duration {
+    let seconds = text
+        .rsplit(':')
+        .zip([1.0, 60.0, 3600.0])
+        .map(|(field, unit)| field.parse::<f64>().expect("a ps time") * unit)
+        .sum();
+    Duration::from_secs_f64(seconds)
+}
 
 #[test]
 fn an_idle_service_stops_after_its_timeout_says_why_and_is_not_restarted() {
@@ -289,19 +341,21 @@ fn an_idle_service_stops_after_its_timeout_says_why_and_is_not_restarted() {
     );
     write(&main, "procly.toml", &config);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
-    let_the_daemon_look(FIRST_LOOK_MS);
+    wait_for_first_line(&procly, &main, "web", port);
 
     procly.advance_clock(Duration::from_mins(9));
     let_the_daemon_look(300);
     assert!(listens(port), "stopped before the 10 minutes of idleness");
     procly.advance_clock(Duration::from_secs(60));
 
-    common::eventually("the idle service to stop", || !listens(port));
-    common::eventually("the daemon to say why", || {
+    wait_for_idle_stop(&procly, &main, "web", "10m");
+    assert!(!listens(port), "the process tree of the idle service still runs");
+    assert!(
         procly
             .daemon_log()
-            .contains("stopped after 10m idle: it printed nothing and used under 1% of a CPU")
-    });
+            .contains("stopped after 10m idle: it printed nothing and used under 1% of a CPU"),
+        "the daemon did not say why"
+    );
     let output = procly.procly_in(&main, &["down", "web"]);
     assert_eq!(stdout(&output), "web not running\n");
     // An idle stop is no crash.
@@ -325,7 +379,7 @@ fn a_service_that_prints_or_uses_cpu_is_not_idle_while_a_silent_one_stops() {
     let config = format!(
         "[services.chatty]\nrun = 'while :; do echo tick; sleep 0.1; done & exec {server} --port {chatty}'\n\
          ports = {{ http = {chatty} }}\n{}\
-         [services.busy]\nrun = 'echo $$ > {busy_pid}; while :; do :; done'\n{}{}",
+         [services.busy]\nrun = 'echo $$ > {busy_pid}; while :; do :; done & while :; do :; done'\n{}{}",
         idle.replace("NAME", "chatty"),
         idle.replace("NAME", "busy"),
         server_on("quiet", quiet, &idle.replace("NAME", "quiet")),
@@ -337,12 +391,22 @@ fn a_service_that_prints_or_uses_cpu_is_not_idle_while_a_silent_one_stops() {
         assert_success(&procly.procly_in(&main, &["up", service]));
     }
     let busy = common::read_pid(&busy_pid);
-    // The busy loop must have used a measurable share of CPU, which `ps` counts in whole seconds on Linux.
-    let_the_daemon_look(2500);
+    wait_for_first_line(&procly, &main, "quiet", quiet);
+    // The busy loops must have used more than one step of the CPU clock of `ps`, a whole second on Linux, since the
+    // first look of the Daemon, taken as the Service turned healthy, whatever share of a CPU the machine gives them.
+    common::eventually("the busy service to use 3 s of CPU", || {
+        group_cpu(busy.as_raw()) >= Duration::from_secs(3)
+    });
 
-    procly.advance_clock(Duration::from_mins(10));
+    procly.advance_clock(Duration::from_mins(5));
+    // A Service that prints is busy from the reading of the clock when it printed, so it prints after this one.
+    let printed = logs(&procly, &main, "chatty").lines().count();
+    common::eventually("the chatty service to print once the clock moved", || {
+        logs(&procly, &main, "chatty").lines().count() > printed
+    });
+    procly.advance_clock(Duration::from_mins(5));
 
-    common::eventually("the silent service to stop", || !listens(quiet));
+    wait_for_idle_stop(&procly, &main, "quiet", "10m");
     let_the_daemon_look(500);
     assert!(listens(chatty), "a service that prints was stopped");
     assert!(common::is_alive(busy), "a service that uses CPU was stopped");
@@ -367,11 +431,11 @@ fn idle_stop_is_set_in_the_settings_and_can_be_disabled_per_service() {
     for service in ["kept", "dropped"] {
         assert_success(&procly.procly_in(&main, &["up", service]));
     }
-    let_the_daemon_look(FIRST_LOOK_MS);
+    wait_for_first_line(&procly, &main, "dropped", dropped);
 
     procly.advance_clock(Duration::from_mins(5));
 
-    common::eventually("the service on the settings timeout to stop", || !listens(dropped));
+    wait_for_idle_stop(&procly, &main, "dropped", "5m");
     let_the_daemon_look(500);
     assert!(listens(kept), "a service with idle stop disabled was stopped");
 }

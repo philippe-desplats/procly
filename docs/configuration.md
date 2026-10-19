@@ -430,7 +430,7 @@ A Service that dies before it was ever healthy is not restarted, `procly up` tel
 
 ## `[services.<name>.idle]`
 
-A Service that printed nothing and used under 1% of a CPU (averaged since it last did) for the idle timeout is stopped, with its whole process tree. This stops the dev servers that agents forgot. The stop is not followed by a restart, and the Daemon log says why. The next `procly up` starts the Service again.
+A Service that printed nothing and used under 1% of a CPU (averaged since it last did) for the idle timeout is stopped, with its whole process tree. This stops the dev servers that agents forgot. Procly reads CPU time with `ps`, which counts it in steps, a hundredth of a second on macOS and a whole second on Linux, so a single step is not taken for use. The stop is not followed by a restart, and the Daemon log says why. The next `procly up` starts the Service again.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

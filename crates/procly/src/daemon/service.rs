@@ -336,7 +336,7 @@ impl Services {
     /// file is followed from its start, so its output from before the restart is kept. Must run inside the Tokio
     /// runtime.
     pub(crate) fn reattach(&self, record: ServiceRecord) {
-        let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
+        let output = Arc::new(Mutex::new(OutputBuffer::dated(output::CAPACITY, self.clock.clone())));
         // A Service recorded before output files existed wrote to a pipe, its output is lost.
         let tail = record.output.as_ref().and_then(|path| match output_file::open(path) {
             // The writer of a Service re-attached after a restart belongs to no Daemon.
@@ -489,7 +489,7 @@ fn spawn(
     records: Arc<ServiceRecords>,
     outputs: OutputFiles,
 ) -> Result<Arc<Service>, ServiceError> {
-    let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
+    let output = Arc::new(Mutex::new(OutputBuffer::dated(output::CAPACITY, clock.clone())));
     let process = launch(&spec, &output, &outputs)?;
     // Recorded before anyone hears of the Service, so that a crash of the Daemon from now on leaves a trace of it.
     record_run(&records, record_of(&spec, process.tail.path()), process.pgid);
@@ -926,7 +926,7 @@ async fn stop_when_idle(service: &Service, label: &str, pgid: Pid, timeout: Dura
     }
 }
 
-/// One look at the Service: what it printed and the CPU time of its tree.
+/// One look at the Service: when it last printed and the CPU time of its tree.
 async fn look(service: &Service, pgid: Pid, clock: &Clock, origin: std::time::Instant) -> io::Result<Sample> {
     let cpu = tokio::task::spawn_blocking(move || group_cpu(pgid))
         .await
@@ -934,7 +934,7 @@ async fn look(service: &Service, pgid: Pid, clock: &Clock, origin: std::time::In
     Ok(Sample {
         now: clock.now(),
         real: origin.elapsed(),
-        written: output::lock(&service.output).written(),
+        printed_at: output::lock(&service.output).printed_at(),
         cpu,
     })
 }

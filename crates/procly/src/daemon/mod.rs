@@ -2,7 +2,7 @@
 
 mod agent;
 mod atomic_file;
-mod clock;
+pub(crate) mod clock;
 mod compose;
 mod container_record;
 mod cpu;
