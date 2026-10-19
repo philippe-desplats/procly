@@ -225,6 +225,31 @@ fn docker_an_up_during_the_grace_period_keeps_the_container_running() {
 }
 
 #[test]
+fn docker_the_lease_of_a_running_container_does_not_expire() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+
+    // Past the 30 days a Lease no Service uses is kept, while the container runs all along.
+    fixture.procly.advance_clock(Duration::from_hours(31 * 24));
+    // The declared port moves, so that a Lease that had expired would be granted again on the new one.
+    std::fs::write(fixture.main.join("procly.toml"), config(free_port(), "")).expect("write the config");
+    let output = fixture.procly.procly_in(&fixture.main, &["env", "db"]);
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains(&format!("export DB_PORT='{port}'\n")),
+        "{}",
+        stdout(&output)
+    );
+    assert!(fixture.project.is_running());
+    assert!(listens(port));
+}
+
+#[test]
 fn docker_a_process_service_starts_the_compose_service_it_needs_first() {
     if !require_docker() {
         return;
