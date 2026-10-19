@@ -767,9 +767,10 @@ async fn supervise_reattached(
     let label = format!("service {} of {}", record.service, record.worktree.path.display());
     let idle = record.idle_ms.map(|idle_ms| {
         let (service, label, clock) = (Arc::clone(&service), label.clone(), clock.clone());
-        tokio::spawn(
-            async move { stop_when_idle(&service, &label, pgid, Duration::from_millis(idle_ms), &clock).await },
-        )
+        let started = clock.now();
+        tokio::spawn(async move {
+            stop_when_idle(&service, &label, pgid, Duration::from_millis(idle_ms), &clock, started).await;
+        })
     });
     let mut stop = service.stop.subscribe();
     let stopped = loop {
@@ -824,55 +825,59 @@ struct Watch {
 
 /// Watches one run of the process: its health first, then its idleness.
 async fn monitor(service: Arc<Service>, watch: Watch, clock: Clock) {
-    if !check_health(
+    let Some(healthy_at) = check_health(
         &service,
         &watch.health,
         &watch.lease_ports,
         watch.pgid,
         watch.health_timeout,
+        &clock,
     )
     .await
-    {
+    else {
         return;
-    }
+    };
     if let Some(timeout) = watch.idle {
-        stop_when_idle(&service, &watch.label, watch.pgid, timeout, &clock).await;
+        stop_when_idle(&service, &watch.label, watch.pgid, timeout, &clock, healthy_at).await;
     }
 }
 
 /// Marks the Service healthy once its health check passes and its process group listens on the Lease the check
-/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. Returns whether the
-/// Service turned healthy.
+/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. Returns the reading of
+/// `clock` taken as the Service turned healthy, before anyone could hear of it, or `None` when it did not.
 async fn check_health(
     service: &Service,
     check: &HealthCheck,
     lease_ports: &[u16],
     pgid: Pid,
     timeout: Duration,
-) -> bool {
+    clock: &Clock,
+) -> Option<Duration> {
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if *state.borrow_and_update() != ServiceState::Starting {
-            return false;
+            return None;
         }
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
             match ownership_all(pgid, check, lease_ports).await {
                 Ownership::Listening => {
+                    let healthy_at = clock.now();
                     // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
-                    return service.state.send_if_modified(|state| {
+                    let healthy = service.state.send_if_modified(|state| {
                         let healthy = *state == ServiceState::Starting && !service.is_stopping();
                         if healthy {
                             *state = ServiceState::Healthy;
                         }
                         healthy
                     });
+                    return healthy.then_some(healthy_at);
                 }
                 Ownership::Elsewhere(mismatch) => {
                     service.request_stop(mismatch);
-                    return false;
+                    return None;
                 }
                 Ownership::Pending => {}
             }
@@ -886,7 +891,7 @@ async fn check_health(
                 },
             };
             service.request_stop(end);
-            return false;
+            return None;
         }
         tokio::select! {
             () = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + HEALTH_INTERVAL)) => {}
@@ -895,15 +900,26 @@ async fn check_health(
     }
 }
 
-/// Stops the Service once it has printed nothing and used almost no CPU for `timeout`.
-async fn stop_when_idle(service: &Service, label: &str, pgid: Pid, timeout: Duration, clock: &Clock) {
+/// Stops the Service once it has printed nothing and used almost no CPU for `timeout`, counted from the reading
+/// `started` of `clock`. Each look is dated when it begins, and the next one is due [`IDLE_INTERVAL`] later on the
+/// clock, so that a clock that moves while `ps` answers brings the next look at once rather than putting it off.
+async fn stop_when_idle(
+    service: &Service,
+    label: &str,
+    pgid: Pid,
+    timeout: Duration,
+    clock: &Clock,
+    started: Duration,
+) {
     let origin = std::time::Instant::now();
     let mut tracker = None;
     let mut failed = false;
     loop {
-        match look(service, pgid, clock, origin).await {
+        let now = clock.now();
+        match look(service, pgid, now, origin).await {
             Ok(sample) => {
-                let tracker = tracker.get_or_insert_with(|| IdleTracker::new(timeout, sample));
+                let tracker = tracker.get_or_insert_with(|| IdleTracker::new(timeout, started, sample));
+                // The first look too, which may come once the clock has passed the whole timeout.
                 if tracker.is_idle(sample) {
                     eprintln!(
                         "{label} stopped after {} idle: it printed nothing and used under 1% of a CPU",
@@ -922,17 +938,18 @@ async fn stop_when_idle(service: &Service, label: &str, pgid: Pid, timeout: Dura
             }
             Err(_) => {}
         }
-        clock.sleep(IDLE_INTERVAL).await;
+        clock.sleep_until(now.saturating_add(IDLE_INTERVAL)).await;
     }
 }
 
-/// One look at the Service: when it last printed and the CPU time of its tree.
-async fn look(service: &Service, pgid: Pid, clock: &Clock, origin: std::time::Instant) -> io::Result<Sample> {
+/// One look at the Service, begun at the reading `now` of the clock: when it last printed and the CPU time of its
+/// tree.
+async fn look(service: &Service, pgid: Pid, now: Duration, origin: std::time::Instant) -> io::Result<Sample> {
     let cpu = tokio::task::spawn_blocking(move || group_cpu(pgid))
         .await
         .map_err(io::Error::other)??;
     Ok(Sample {
-        now: clock.now(),
+        now,
         real: origin.elapsed(),
         printed_at: output::lock(&service.output).printed_at(),
         cpu,

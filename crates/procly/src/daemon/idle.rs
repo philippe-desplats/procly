@@ -29,8 +29,13 @@ pub(super) struct IdleTracker {
 }
 
 impl IdleTracker {
-    pub(super) fn new(timeout: Duration, first: Sample) -> Self {
-        Self { timeout, busy: first }
+    /// Counts idleness from the reading `started` of the clock, with `first` as the first measure of the CPU time,
+    /// however later than `started` it was taken.
+    pub(super) fn new(timeout: Duration, started: Duration, first: Sample) -> Self {
+        Self {
+            timeout,
+            busy: Sample { now: started, ..first },
+        }
     }
 
     /// Takes a new look, and returns whether the Service has been idle for the whole timeout.
@@ -81,30 +86,37 @@ mod tests {
 
     #[test]
     fn a_silent_service_with_no_cpu_is_idle_once_the_timeout_has_passed() {
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, Some(0), 50));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, Some(0), 50));
         assert!(!tracker.is_idle(sample(599, 599_000, Some(0), 50)));
         assert!(tracker.is_idle(sample(600, 600_000, Some(0), 50)));
     }
 
     #[test]
     fn anything_printed_restarts_the_count_from_when_it_was_printed() {
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, None, 50));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, None, 50));
         assert!(!tracker.is_idle(sample(500, 500_000, Some(450), 50)));
         assert!(!tracker.is_idle(sample(1000, 1_000_000, Some(450), 50)));
         assert!(tracker.is_idle(sample(1050, 1_050_000, Some(450), 50)));
     }
 
     #[test]
+    fn idleness_counts_from_the_start_even_when_the_first_measure_comes_after_the_clock_moved() {
+        // The Service turned healthy at 0, and ps answered the first look once the clock read 10 minutes.
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(600, 300, None, 0));
+        assert!(tracker.is_idle(sample(600, 400, None, 0)));
+    }
+
+    #[test]
     fn output_printed_before_the_clock_moved_does_not_count_as_printed_after() {
         // The first line of the Service reached the Daemon after its first look, while the clock read 0, and the
         // clock then moved by the whole timeout before the next look.
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, None, 0));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, None, 0));
         assert!(tracker.is_idle(sample(600, 300, Some(0), 0)));
     }
 
     #[test]
     fn using_more_than_one_percent_of_a_cpu_restarts_the_count() {
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, None, 0));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, None, 0));
         // 2 s of CPU in 100 s, 2%.
         assert!(!tracker.is_idle(sample(700, 100_000, None, 2000)));
         // 0.5 s of CPU in 100 s since then, 0.5%, which is below the line.
@@ -114,7 +126,7 @@ mod tests {
 
     #[test]
     fn cpu_is_measured_against_real_time_whatever_the_clock_says() {
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, None, 0));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, None, 0));
         // The clock jumped 10 minutes while a busy loop spent 300 ms of CPU in 300 ms of real time.
         assert!(!tracker.is_idle(sample(600, 300, None, 300)));
     }
@@ -123,9 +135,9 @@ mod tests {
     fn one_step_of_the_cpu_clock_is_not_taken_for_use() {
         // The last tick of the startup of the Service, read a fraction of a second after the first look, is not 3%
         // of a CPU, it may be any amount of CPU up to a hundredth of a second.
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, None, 0));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, None, 0));
         assert!(tracker.is_idle(sample(600, 300, None, 10)));
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, None, 0));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, None, 0));
         assert!(!tracker.is_idle(sample(600, 300, None, 20)));
     }
 
@@ -138,15 +150,15 @@ mod tests {
             },
             ..sample(now_s, real_ms, None, 0)
         };
-        let mut tracker = IdleTracker::new(TIMEOUT, linux(0, 0, 0));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, linux(0, 0, 0));
         assert!(tracker.is_idle(linux(600, 2500, 1)));
-        let mut tracker = IdleTracker::new(TIMEOUT, linux(0, 0, 0));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, linux(0, 0, 0));
         assert!(!tracker.is_idle(linux(600, 2500, 2)));
     }
 
     #[test]
     fn a_drop_of_the_cpu_time_counts_as_activity() {
-        let mut tracker = IdleTracker::new(TIMEOUT, sample(0, 0, None, 5000));
+        let mut tracker = IdleTracker::new(TIMEOUT, Duration::ZERO, sample(0, 0, None, 5000));
         assert!(!tracker.is_idle(sample(700, 700_000, None, 100)));
     }
 }
