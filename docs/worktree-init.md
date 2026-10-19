@@ -19,6 +19,15 @@ $ procly worktree init
 nothing to do
 ```
 
+With `--json`, stdout holds 1 document with a `result` of `ready` and the lists `copied`, `missing` and `ran`. A setup command that fails gives a `result` of `setup_failed` instead, with the same lists up to it, the `command`, how it ended in `end` and the end of its `output`, and the exit code stays the one of the command. See [JSON output](json.md).
+
+```console
+$ procly worktree init --json
+{"schema_version":1,"result":"ready","copied":[".env"],"missing":[],"ran":["echo ready"]}
+$ procly worktree init --json
+{"schema_version":1,"result":"setup_failed","copied":[],"missing":[],"ran":[],"command":"echo boom; exit 7","end":{"kind":"exited","code":7},"output":"boom\n"}
+```
+
 ## What it does
 
 1. It copies each `copy` entry from the Main worktree to the same path in the Worktree. A directory is copied file by file, and whatever the Worktree already holds is left alone, so a file you edited is never overwritten. An entry the Main worktree does not hold is reported on stderr and skipped.

@@ -534,6 +534,40 @@ fn docker_a_container_holding_the_lease_without_matching_labels_is_a_conflict_pr
 }
 
 #[test]
+fn docker_up_json_of_a_conflict_carries_the_conflicts_and_exits_5_as_the_text_does() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["env", "db"]));
+    let foreign = Foreign::run(&format!("{}-occupant", fixture.project.name), Some(port));
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "--json", "db"]);
+
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("started outside Procly"),
+        "{}",
+        stderr(&output)
+    );
+    let document = common::json_document(&output);
+    assert_eq!(document["schema_version"], common::json_schema_version(&fixture.procly));
+    assert_eq!(document["result"], serde_json::json!("conflict"));
+    assert_eq!(document["service"], serde_json::json!("db"));
+    assert_eq!(document["needed_by"], serde_json::json!(null));
+    assert_eq!(
+        document["conflicts"],
+        serde_json::json!([{
+            "held": { "kind": "port", "port": port },
+            "occupant": { "kind": "container", "name": foreign.name, "project": null, "service": null },
+            "stop": format!("docker stop {}", foreign.name),
+        }])
+    );
+    assert!(foreign.is_running(), "Procly stopped a container it does not own");
+}
+
+#[test]
 fn docker_a_container_holding_the_container_name_without_matching_labels_is_a_conflict() {
     if !require_docker() {
         return;

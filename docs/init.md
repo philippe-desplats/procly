@@ -21,6 +21,13 @@ procly: wrote /home/me/code/acme/procly.toml
 
 The proposal is printed on stdout and written to `procly.toml` at the root of the Worktree you run it in, whatever the directory you run it from. The status goes to stderr.
 
+With `--json`, stdout holds 1 document with the `file`, the `toml` proposed and whether it was `written`, which is `false` when a `procly.toml` existed. See [JSON output](json.md).
+
+```console
+$ procly init --json
+{"schema_version":1,"file":"/home/me/code/acme/procly.toml","toml":"# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.\n\n[services.app]\nrun = \"npm run dev\"\n","written":true}
+```
+
 A `procly.toml` that exists is never overwritten. The proposal is still printed, stderr says that the file was left as it is, and the command exits with 0. The file is created exclusively, so even one that appears while the proposal is made is kept. A Worktree with no `dev` script and no compose file gets nothing written and exits with 125, see [exit codes](exit-codes.md).
 
 The proposal declares what the Worktree states and leaves out what it would have to invent. Read it, then run `procly up`. Procly reads nothing else, so a Repository that starts its servers through a `Procfile` or a `Makefile` gets no proposal for them.

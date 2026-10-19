@@ -20,6 +20,15 @@ Procly was ejected from the git repository whose common git directory is /home/m
 
 Stdout holds the summary, then a blank line and the prompt when something was left. The note about it goes to stderr.
 
+With `--json`, stdout holds 1 document instead, with the Services `stopped`, the files `removed` and `left`, and the `prompt` when something was left, or `null`. With `--agent`, the prompt is handed to the CLI named in `agent` and `prompt` is `null`, and what the agent prints on its standard output goes to stderr. See [JSON output](json.md).
+
+```console
+$ procly eject --json
+{"schema_version":1,"stopped":[],"removed":[{"kind":"rules","file":"/home/me/app/AGENTS.md","deleted":true},{"kind":"guard","file":"/home/me/app/.claude/settings.json","deleted":true}],"left":[],"prompt":null,"agent":null}
+```
+
+A `kind` is `rules`, `guard`, `exclusions` or `env_file`. The fixed lines about what eject never touches are not in the document.
+
 ## What it does
 
 It acts on the whole Repository, whatever Worktree it runs in.

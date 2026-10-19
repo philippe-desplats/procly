@@ -4,31 +4,14 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Serialize;
-
 use crate::duration;
 use crate::protocol::{
     ForeignProcess, JobEnd, JobState, JobStatus, ServiceEnd, ServiceState, ServiceStatus, StatusReport,
 };
 
-/// The version of the `--json` schema, bumped on any incompatible change, independently of the socket protocol.
-pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
-
 pub(crate) fn json(report: &StatusReport) -> String {
-    #[derive(Serialize)]
-    struct Versioned<'a> {
-        schema_version: u32,
-        #[serde(flatten)]
-        report: &'a StatusReport,
-    }
-    let versioned = Versioned {
-        schema_version: JSON_SCHEMA_VERSION,
-        report,
-    };
-    let mut json = serde_json::to_string(&versioned)
-        .expect("a status report decoded from JSON holds only UTF-8 paths, so it serializes back");
-    json.push('\n');
-    json
+    crate::json::render(report)
+        .expect("a status report decoded from JSON holds only UTF-8 paths, so it serializes back")
 }
 
 /// One line per Repository, Worktree, Service and Job, indented by nesting.

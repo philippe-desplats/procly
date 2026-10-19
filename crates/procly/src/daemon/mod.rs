@@ -28,7 +28,7 @@ mod status;
 mod store;
 mod worktree_init;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, Permissions, TryLockError};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -667,6 +667,18 @@ fn plan_resources(
     }))
 }
 
+/// The Leases of the Service `name` of the Worktree holding `cwd`, by Port name, as `env` exports them. A Group has
+/// none of its own, the Services it covers have.
+fn service_leases(registry: &Registry, name: &str, cwd: &Path) -> anyhow::Result<BTreeMap<String, u16>> {
+    let topology = topology_of(cwd)?;
+    let config = read_config(&topology.worktree.path)?;
+    let declared = declared(&config, &topology.worktree.path, name)?;
+    match declared.kind(name)? {
+        config::ServiceKind::Group { .. } => Ok(BTreeMap::new()),
+        _ => Ok(environment::injected(registry, &topology, &config, name, declared, false)?.leases),
+    }
+}
+
 /// The variables Procly injects into the Service `name` of the Worktree holding `cwd`.
 fn service_environment(registry: &Registry, name: &str, cwd: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let topology = topology_of(cwd)?;
@@ -830,12 +842,31 @@ async fn up(
                 needed_by: name.as_ref().filter(|target| *target != current).cloned(),
             };
         }
+        let ports = {
+            let (registry, current, cwd) = (Arc::clone(registry), current.clone(), cwd.clone());
+            // Resolving the Topology runs git, and reading the configuration and the Leases are blocking.
+            tokio::task::spawn_blocking(move || service_leases(&registry, &current, &cwd)).await
+        };
+        let ports = match ports {
+            Ok(Ok(ports)) => ports,
+            Ok(Err(error)) => {
+                return Response::Error {
+                    message: format!("{error:#}"),
+                };
+            }
+            Err(error) => {
+                return Response::Error {
+                    message: format!("the service could not be started: {error}"),
+                };
+            }
+        };
         reached.push(UpService {
             service: current.clone(),
             outcome,
             via,
             port,
             url: port.map(|port| format!("http://localhost:{port}")),
+            ports,
         });
     }
     // The Service that was asked for comes last, after everything it needs.
@@ -846,6 +877,7 @@ async fn up(
             via: target.via,
             port: target.port,
             url: target.url,
+            ports: target.ports,
             needs: reached,
         },
         (None, Some(last)) => {

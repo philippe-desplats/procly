@@ -15,6 +15,17 @@ rules /home/me/app/AGENTS.md unchanged
 guard /home/me/app/.claude/settings.json unchanged
 ```
 
+With `--json`, `agent install`, `off` and `on` print what became of each Managed block instead, with an `outcome` of `written`, `unchanged` or `edited` for a block you edited and Procly left as it is. See [JSON output](json.md).
+
+```console
+$ procly agent install --json
+{"schema_version":1,"rules":{"file":"/home/me/app/AGENTS.md","outcome":"written"},"guard":{"file":"/home/me/app/.claude/settings.json","outcome":"written"},"off":false}
+$ procly off --json
+{"schema_version":1,"off":true,"rules":[{"file":"/home/me/app/AGENTS.md","outcome":"written"}]}
+$ procly on --json
+{"schema_version":1,"off":false,"rules":[{"file":"/home/me/app/AGENTS.md","outcome":"written"}]}
+```
+
 ## `procly agent install`
 
 It runs in the Worktree holding the current directory and writes 2 things, both inside that Worktree. Commit them like any other file, so that every Worktree of the Repository gets them.

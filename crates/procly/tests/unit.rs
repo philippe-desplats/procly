@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use common::{Procly, assert_success, stdout};
+use common::{Procly, assert_success, json_schema_version, json_succeeded, stdout};
 
 /// A fake `launchctl` or `systemctl` that logs its arguments and remembers whether the unit is loaded, so that no
 /// test ever reaches the session manager of the developer.
@@ -43,10 +43,15 @@ impl Session {
     }
 
     fn unit(&self, procly: &Procly, verb: &str) -> Output {
+        self.unit_with(procly, &[verb])
+    }
+
+    fn unit_with(&self, procly: &Procly, args: &[&str]) -> Output {
         let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default());
         procly
             .command()
-            .args(["unit", verb])
+            .arg("unit")
+            .args(args)
             .env("HOME", &self.home)
             .env_remove("XDG_CONFIG_HOME")
             .env("PATH", path)
@@ -165,4 +170,37 @@ fn a_failing_session_manager_fails_install_with_125_and_its_error() {
         "{}",
         common::stderr(&output)
     );
+}
+
+#[test]
+fn unit_json_carries_the_path_and_what_the_session_manager_says() {
+    let procly = Procly::new();
+    let session = Session::new(&procly);
+    let path = unit_path(&session.home);
+
+    let before = json_succeeded(&session.unit_with(&procly, &["inspect", "--json"]));
+    let installed = json_succeeded(&session.unit_with(&procly, &["install", "--json"]));
+    let after = json_succeeded(&session.unit_with(&procly, &["inspect", "--json"]));
+    let removed = json_succeeded(&session.unit_with(&procly, &["remove", "--json"]));
+    let again = json_succeeded(&session.unit_with(&procly, &["remove", "--json"]));
+
+    assert_eq!(before["schema_version"], json_schema_version(&procly));
+    assert_eq!(
+        before,
+        serde_json::json!({
+            "schema_version": before["schema_version"],
+            "path": path,
+            "installed": false,
+            "starts_with_session": false,
+            "daemon_running": false,
+        })
+    );
+    assert_eq!(installed["path"], serde_json::json!(path));
+    assert_eq!(installed["installed"], serde_json::json!(true));
+    assert_eq!(after["installed"], serde_json::json!(true));
+    assert_eq!(after["starts_with_session"], serde_json::json!(true));
+    assert_eq!(after["daemon_running"], serde_json::json!(true));
+    assert_eq!(removed["removed"], serde_json::json!(true));
+    assert_eq!(again["removed"], serde_json::json!(false));
+    assert_eq!(again["path"], serde_json::json!(path));
 }

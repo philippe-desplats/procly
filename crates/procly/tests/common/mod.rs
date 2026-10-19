@@ -382,3 +382,27 @@ pub fn require_docker() -> bool {
     }
     available
 }
+
+/// The one JSON document `output` holds on stdout, which must end with a newline and carry nothing else.
+pub fn json_document(output: &Output) -> serde_json::Value {
+    let text = stdout(output);
+    assert!(text.ends_with('\n'), "no newline after the document in {text:?}");
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("stdout is not one JSON document ({error}): {text:?}"))
+}
+
+/// The document of a command that succeeded with `--json`. Stderr stays empty, since the document carries what the
+/// text told there.
+pub fn json_succeeded(output: &Output) -> serde_json::Value {
+    assert_success(output);
+    assert_eq!(
+        stderr(output),
+        "",
+        "a successful command prints nothing on stderr with --json"
+    );
+    json_document(output)
+}
+
+/// The `schema_version` that `procly status --json` prints, which every other document must repeat.
+pub fn json_schema_version(procly: &Procly) -> serde_json::Value {
+    json_succeeded(&procly.procly(&["status", "--json"]))["schema_version"].clone()
+}
