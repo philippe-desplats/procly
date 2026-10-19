@@ -124,8 +124,10 @@ pub(crate) enum ComposeError {
         container: String,
         timeout: String,
     },
-    #[error(transparent)]
-    Prepare(#[from] anyhow::Error),
+    #[error("the service could not be started")]
+    Prepare(#[source] tokio::task::JoinError),
+    #[error("the resources could not be worked out")]
+    Plan(#[source] tokio::task::JoinError),
 }
 
 /// What it takes to start the container of one Compose service.
@@ -301,18 +303,20 @@ impl Composes {
     ///
     /// A container that Procly started and that still runs is a Reuse, whatever the Worktree. Otherwise `prepare`
     /// builds what it takes to start it, on a blocking thread. Either way, `plan` builds the Logical resources
-    /// of the Worktree, which are created in the container when it lacks them.
-    pub(crate) async fn up<P, R>(
+    /// of the Worktree, which are created in the container when it lacks them. A failure of `prepare` or `plan`
+    /// is returned as it is, so that the caller keeps its own error type.
+    pub(crate) async fn up<E, P, R>(
         &self,
         key: ComposeKey,
         worktree: PathBuf,
         grace: Duration,
         prepare: P,
         plan: R,
-    ) -> Result<Brought, ComposeError>
+    ) -> Result<Brought, E>
     where
-        P: FnOnce() -> anyhow::Result<ComposeSpec> + Send + 'static,
-        R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
+        E: From<ComposeError> + Send + 'static,
+        P: FnOnce() -> Result<ComposeSpec, E> + Send + 'static,
+        R: FnOnce() -> Result<Option<ResourcePlan>, E> + Send + 'static,
     {
         let container = self.container(&key);
         let _commands = container.commands.lock().await;
@@ -336,7 +340,7 @@ impl Composes {
 
         let spec = tokio::task::spawn_blocking(prepare)
             .await
-            .map_err(|error| anyhow::anyhow!("the service could not be started: {error}"))??;
+            .map_err(ComposeError::Prepare)??;
         let port = spec.health.port;
         let began = Instant::now();
         let (docker, found) = start(&spec).await?;
@@ -349,7 +353,8 @@ impl Composes {
                         service: spec.name.clone(),
                         container: adopted.name,
                         timeout: duration::format(spec.health_timeout),
-                    });
+                    }
+                    .into());
                 }
                 docker.create_resources(planned(plan).await?.as_ref()).await?;
                 eprintln!(
@@ -373,7 +378,7 @@ impl Composes {
         };
         if health.is_ok() {
             let created = match planned(plan).await {
-                Ok(planned) => docker.create_resources(planned.as_ref()).await,
+                Ok(planned) => docker.create_resources(planned.as_ref()).await.map_err(E::from),
                 Err(error) => Err(error),
             };
             if let Err(error) = created {
@@ -710,13 +715,12 @@ fn millis(duration: Duration) -> u64 {
 }
 
 /// What the Worktree needs in the container, built on a blocking thread.
-async fn planned<R>(plan: R) -> Result<Option<ResourcePlan>, ComposeError>
+async fn planned<E, R>(plan: R) -> Result<Option<ResourcePlan>, E>
 where
-    R: FnOnce() -> anyhow::Result<Option<ResourcePlan>> + Send + 'static,
+    E: From<ComposeError> + Send + 'static,
+    R: FnOnce() -> Result<Option<ResourcePlan>, E> + Send + 'static,
 {
-    Ok(tokio::task::spawn_blocking(plan)
-        .await
-        .map_err(|error| anyhow::anyhow!("the resources could not be worked out: {error}"))??)
+    tokio::task::spawn_blocking(plan).await.map_err(ComposeError::Plan)?
 }
 
 /// Stops the container of the Service `key` once the clock reaches `deadline`, unless a Worktree needed it again in

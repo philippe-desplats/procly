@@ -558,20 +558,29 @@ async fn up_compose(
         let (registry, name) = (Arc::clone(registry), name.to_owned());
         move || plan_resources(&registry, &name, &topology, env)
     };
-    match registry.composes.up(key, worktree, grace, prepare, plan).await {
+    match registry
+        .composes
+        .up::<anyhow::Error, _, _>(key, worktree, grace, prepare, plan)
+        .await
+    {
         Ok(brought) => Ok(Running::Compose {
             outcome: brought.outcome,
             port: brought.port,
             health: brought.health,
         }),
-        Err(ComposeError::Conflict { service, conflicts }) => Err(Box::new(Response::Conflict {
-            service,
-            conflicts,
-            needed_by: None,
-        })),
-        Err(error) => Err(Box::new(Response::Error {
-            message: format!("{error:#}"),
-        })),
+        Err(error) => match error.downcast::<ComposeError>() {
+            Ok(ComposeError::Conflict { service, conflicts }) => Err(Box::new(Response::Conflict {
+                service,
+                conflicts,
+                needed_by: None,
+            })),
+            Ok(error) => Err(Box::new(Response::Error {
+                message: format!("{:#}", anyhow::Error::from(error)),
+            })),
+            Err(error) => Err(Box::new(Response::Error {
+                message: format!("{error:#}"),
+            })),
+        },
     }
 }
 
