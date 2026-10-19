@@ -619,7 +619,18 @@ fn the_output_file_of_a_flooding_service_stays_bounded_and_is_removed_once_it_is
             "the output files grew to {sizes:?} bytes"
         );
     }
-    assert!(stdout(&procly.procly_in(&main, &["logs", "web"])).ends_with("procly-flood\n"));
+    // The Service is still writing, so the last line may be cut where its write had got to. Every line before it is
+    // whole: the buffer dropped its oldest lines, and emptying the file lost nothing in between.
+    let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+    let (lines, last) = logs.rsplit_once('\n').expect("the logs hold whole lines");
+    let cut: Vec<(usize, &str)> = lines
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| *line != "procly-flood")
+        .take(3)
+        .collect();
+    assert!(cut.is_empty(), "lines cut in the logs, by their index: {cut:?}");
+    assert!("procly-flood".starts_with(last), "the logs end with {last:?}");
 
     assert_success(&procly.procly_in(&main, &["down", "web"]));
     assert_eq!(output_files(&procly), Vec::<u64>::new());

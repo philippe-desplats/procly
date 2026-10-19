@@ -181,8 +181,16 @@ pub(crate) fn write(mut input: impl Read, path: &Path) -> io::Result<()> {
     }
 }
 
-/// Appends `bytes` to the output file at `path`, then empties it once it reaches [`WRITER_LIMIT`].
+/// Appends `bytes` to the output file at `path`, then empties it once it reaches [`WRITER_LIMIT`], holding the lock of
+/// the file so that the Daemon never empties it in the middle.
 fn append(appending: &mut File, reader: &mut File, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    reader.lock()?;
+    let appended = append_locked(appending, reader, path, bytes);
+    reader.unlock()?;
+    appended
+}
+
+fn append_locked(appending: &mut File, reader: &mut File, path: &Path, bytes: &[u8]) -> io::Result<()> {
     appending.write_all(bytes)?;
     let len = reader.metadata()?.len();
     if len >= WRITER_LIMIT {
@@ -193,7 +201,9 @@ fn append(appending: &mut File, reader: &mut File, path: &Path, bytes: &[u8]) ->
 
 /// Empties the output file at `path`, `len` bytes long and open as `file`, keeping its last buffer in the previous
 /// file for the next Daemon, and returns that buffer with the offset it started at. Whoever appends to the file
-/// carries on from its start, what was appended since `len` was read is lost, at worst one read of output.
+/// carries on from its start. The caller holds the lock of the file, which the writer takes for each write, so that
+/// nothing is appended between reading `len` and emptying the file. A Service that appends to the file itself, when
+/// its writer could not be started, takes no lock, and what it appends meanwhile is lost, at worst one write.
 fn empty(file: &mut File, path: &Path, len: u64) -> io::Result<(u64, Vec<u8>)> {
     let start = len.saturating_sub(output::CAPACITY as u64);
     file.seek(SeekFrom::Start(start))?;
@@ -307,7 +317,11 @@ fn catch_up(file: &mut File, path: &Path, chunk: &mut [u8], output: &Mutex<Outpu
             // buffer again. What comes before it would be dropped by the buffer at once, and is not even read. The
             // file is emptied before the buffer takes its share of time.
             let read = file.stream_position()?;
-            let (start, last) = empty(file, path, len)?;
+            // Under the lock, the length is read again: the writer may have appended since.
+            file.lock()?;
+            let emptied = file.metadata().and_then(|locked| empty(file, path, locked.len()));
+            file.unlock()?;
+            let (start, last) = emptied?;
             let unread = usize::try_from(read.saturating_sub(start)).map_or(last.len(), |read| read.min(last.len()));
             output::lock(output).push(&last[unread..]);
             continue;
