@@ -77,7 +77,17 @@ impl Clock {
             Source::Real(_) => tokio::time::sleep(duration).await,
             Source::File(path) => {
                 let until = read_blocking(path).await.saturating_add(duration);
-                while read_blocking(path).await < until {
+                self.sleep_until(until).await;
+            }
+        }
+    }
+
+    /// Waits until this clock reads `reading`, at once when it already does.
+    pub(crate) async fn sleep_until(&self, reading: Duration) {
+        match &self.source {
+            Source::Real(start) => tokio::time::sleep(reading.saturating_sub(start.elapsed())).await,
+            Source::File(path) => {
+                while read_blocking(path).await < reading {
                     tokio::time::sleep(TEST_POLL).await;
                 }
             }
@@ -136,5 +146,16 @@ mod tests {
             .await
             .expect("the wait ends once a minute has passed")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_wait_until_a_reading_the_clock_already_passed_ends_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clock");
+        std::fs::write(&path, "300000").unwrap();
+        let clock = Clock::file(path);
+        tokio::time::timeout(Duration::from_secs(5), clock.sleep_until(Duration::from_secs(10)))
+            .await
+            .expect("the clock already read past 10 s");
     }
 }
