@@ -1,0 +1,17 @@
+# The Logical resources of a Postgres container: one database each, created with the tools of the image.
+#
+# The credentials of the URL are the ones most development stacks use. A Repository whose container uses others
+# copies this file to .procly/drivers/postgres.toml and edits the URL.
+
+url = "postgresql://postgres:postgres@localhost:{port}/{resource}"
+
+# A database name is cut short by Postgres past 63 bytes, which would make 2 Worktrees share one.
+max_length = 63
+
+# Over TCP, because the server that initializes the data directory only listens on its socket and then restarts.
+ready = 'pg_isready --quiet --host 127.0.0.1 --username "${POSTGRES_USER:-postgres}"'
+
+check = '''psql --username "${POSTGRES_USER:-postgres}" --dbname postgres --tuples-only --no-align --command "SELECT 1 FROM pg_database WHERE datname = '{resource}'" | grep -q 1'''
+create = 'createdb --username "${POSTGRES_USER:-postgres}" {resource}'
+copy = 'createdb --username "${POSTGRES_USER:-postgres}" --template {template} {resource}'
+drop = 'dropdb --username "${POSTGRES_USER:-postgres}" --if-exists {resource}'

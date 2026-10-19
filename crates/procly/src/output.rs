@@ -2,6 +2,9 @@
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
+
+use crate::daemon::clock::Clock;
 
 /// The recent output kept per Job or Service.
 pub(crate) const CAPACITY: usize = 1024 * 1024;
@@ -11,6 +14,10 @@ pub(crate) const CAPACITY: usize = 1024 * 1024;
 pub(crate) struct OutputBuffer {
     bytes: VecDeque<u8>,
     capacity: usize,
+    /// The clock that dates the output, when its time matters.
+    clock: Option<Clock>,
+    /// The reading of `clock` when the last bytes were pushed.
+    printed_at: Option<Duration>,
 }
 
 impl OutputBuffer {
@@ -18,10 +25,25 @@ impl OutputBuffer {
         Self {
             bytes: VecDeque::new(),
             capacity,
+            clock: None,
+            printed_at: None,
+        }
+    }
+
+    /// A buffer that also tells when output last arrived, read on `clock` as it arrives, so that idleness is counted
+    /// from when the Service printed rather than from when the Daemon next looked.
+    pub(crate) fn dated(capacity: usize, clock: Clock) -> Self {
+        Self {
+            clock: Some(clock),
+            ..Self::new(capacity)
         }
     }
 
     pub(crate) fn push(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.printed_at = self.clock.as_ref().map(Clock::now);
         self.bytes.extend(chunk);
         if self.bytes.len() <= self.capacity {
             return;
@@ -31,6 +53,11 @@ impl OutputBuffer {
         if let Some(newline) = self.bytes.iter().position(|&byte| byte == b'\n') {
             self.bytes.drain(..=newline);
         }
+    }
+
+    /// The reading of the clock of a [`dated`](Self::dated) buffer when output last arrived, `None` before any did.
+    pub(crate) fn printed_at(&self) -> Option<Duration> {
+        self.printed_at
     }
 
     /// The buffered output as text, with the terminal's `\r\n` line endings turned back into `\n`.
@@ -71,6 +98,22 @@ mod tests {
         let mut buffer = OutputBuffer::new(4);
         buffer.push(b"abcdefgh");
         assert_eq!(buffer.text(), "efgh");
+    }
+
+    #[test]
+    fn a_dated_buffer_tells_when_output_last_arrived_on_its_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clock");
+        std::fs::write(&path, "1000").unwrap();
+        let mut buffer = OutputBuffer::dated(4, Clock::file(path.clone()));
+        assert_eq!(buffer.printed_at(), None);
+        buffer.push(b"abcdefgh");
+        std::fs::write(&path, "5000").unwrap();
+        assert_eq!(buffer.printed_at(), Some(Duration::from_secs(1)));
+        buffer.push(b"");
+        assert_eq!(buffer.printed_at(), Some(Duration::from_secs(1)), "nothing was printed");
+        buffer.push(b"ij");
+        assert_eq!(buffer.printed_at(), Some(Duration::from_secs(5)));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! The per-user state directory holding the Daemon socket, its lock, pid file and log.
+//! The per-user state directory holding the Daemon socket, its lock, pid file and log, and its persistent state.
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
@@ -61,6 +61,10 @@ impl StateDir {
             })
     }
 
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     pub(crate) fn socket(&self) -> PathBuf {
         self.path.join("procly.sock")
     }
@@ -75,6 +79,42 @@ impl StateDir {
 
     pub(crate) fn log(&self) -> PathBuf {
         self.path.join("daemon.log")
+    }
+
+    /// The document holding every Lease.
+    pub(crate) fn leases(&self) -> PathBuf {
+        self.path.join("leases.json")
+    }
+
+    /// The document holding the index of every Logical resource a Driver numbers.
+    pub(crate) fn indexes(&self) -> PathBuf {
+        self.path.join("indexes.json")
+    }
+
+    /// The document recording every running Service, which the next Daemon reconciles after a crash.
+    pub(crate) fn services(&self) -> PathBuf {
+        self.path.join("services.json")
+    }
+
+    /// The document recording every container Procly started or adopted, with the Worktrees that need it, which the
+    /// next Daemon reconciles after a crash or a restart.
+    pub(crate) fn containers(&self) -> PathBuf {
+        self.path.join("containers.json")
+    }
+
+    /// The directory holding the output file of every running Service, which outlives a crash of the Daemon.
+    pub(crate) fn outputs(&self) -> PathBuf {
+        self.path.join("output")
+    }
+
+    /// The document listing the Repositories that are Off.
+    pub(crate) fn off(&self) -> PathBuf {
+        self.path.join("off.json")
+    }
+
+    /// The document holding the fingerprint of every Managed block Procly wrote.
+    pub(crate) fn managed_blocks(&self) -> PathBuf {
+        self.path.join("managed-blocks.json")
     }
 }
 

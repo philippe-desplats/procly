@@ -289,6 +289,54 @@ fn an_http_health_check_expects_200_by_default_and_never_passes_on_another_statu
 }
 
 #[test]
+fn an_http_health_check_given_a_url_sends_its_path_and_host_to_the_lease() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let health = "[services.web.health]\npath = 'http://app.localhost:3000/host/app.localhost:3000'\ntimeout = '5s'\n";
+    write(&main, "procly.toml", &format!("{}{health}", web_on(port)));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("web started http://localhost:{port} port {port}\n")
+    );
+}
+
+#[test]
+fn an_http_health_check_given_a_url_of_another_host_never_passes() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let health = "[services.web.health]\npath = 'http://other.localhost/host/app.localhost'\ntimeout = '1s'\n";
+    write(&main, "procly.toml", &format!("{}{health}", web_on(port)));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(output.status.code(), Some(124), "stderr: {}", common::stderr(&output));
+}
+
+#[test]
+fn a_health_url_that_is_not_http_is_refused_before_anything_starts() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let health = "[services.web.health]\npath = 'https://app.localhost/health'\n";
+    write(&main, "procly.toml", &format!("{}{health}", web_on(port)));
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(output.status.code(), Some(125));
+    let stderr = common::stderr(&output);
+    assert!(
+        stderr.contains("https://app.localhost/health") && stderr.contains("http://"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn down_stops_the_whole_process_group_of_the_service_and_the_daemon_logs_who_asked() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
@@ -336,23 +384,24 @@ fn down_stops_the_whole_process_group_of_the_service_and_the_daemon_logs_who_ask
 #[test]
 fn down_without_a_service_stops_every_service_of_the_worktree_only() {
     let procly = Procly::new();
+    procly.narrow_range();
     let main = git_repository(procly.scratch(), "app");
     let other = common::git_worktree_add(&main, "app-other");
-    let (web, api, elsewhere) = (free_port(), free_port(), free_port());
-    let server = test_server();
-    let config = |web: u16, api: u16| {
-        format!(
-            "[services.web]\nrun = '{server} --port {web}'\nports = {{ http = {web} }}\n\
-             [services.api]\nrun = '{server} --port {api}'\nports = {{ http = {api} }}\n",
-            server = server.display()
-        )
-    };
-    write(&main, "procly.toml", &config(web, api));
-    write(&other, "procly.toml", &config(elsewhere, free_port()));
+    let (web, api) = (free_port(), free_port());
+    let config = format!(
+        "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\n\
+         [services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n",
+        server = test_server().display()
+    );
+    write(&main, "procly.toml", &config);
+    write(&other, "procly.toml", &config);
     for service in ["web", "api"] {
         assert_success(&procly.procly_in(&main, &["up", service]));
     }
-    assert_success(&procly.procly_in(&other, &["up", "web"]));
+    let output = procly.procly_in(&other, &["up", "web"]);
+    assert_success(&output);
+    let elsewhere = stdout(&output);
+    let elsewhere = elsewhere.trim_end().rsplit(' ').next().expect("a port");
 
     let output = procly.procly_in(&main, &["down"]);
 
@@ -496,4 +545,93 @@ fn up_exits_3_when_the_service_is_killed_by_a_signal_or_stopped_before_it_is_hea
         "{}",
         common::stderr(&output)
     );
+}
+
+#[test]
+fn logs_prints_the_recent_output_of_a_service_of_the_current_worktree() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    write(&main, "procly.toml", &web_on(port));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    common::eventually("the output of web", || {
+        stdout(&procly.procly_in(&main, &["logs", "web"])) == format!("listening on {port}\n")
+    });
+    let unknown = procly.procly_in(&main, &["logs", "api"]);
+    assert_eq!(unknown.status.code(), Some(125));
+    assert!(
+        common::stderr(&unknown).contains("no job or service api"),
+        "{}",
+        common::stderr(&unknown)
+    );
+}
+
+/// The size of every output file the Daemon holds in the state directory.
+fn output_files(procly: &Procly) -> Vec<u64> {
+    std::fs::read_dir(procly.state_dir().join("output")).map_or_else(
+        |_| Vec::new(),
+        |entries| {
+            entries
+                .map(|entry| {
+                    entry
+                        .expect("read the output directory")
+                        .metadata()
+                        .expect("stat")
+                        .len()
+                })
+                .collect()
+        },
+    )
+}
+
+#[test]
+fn the_output_file_of_a_flooding_service_stays_bounded_and_is_removed_once_it_is_stopped() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    // 256 KiB printed every few milliseconds, tens of megabytes a second, far past the limit within the second watched.
+    let chunk = procly.scratch().join("chunk");
+    std::fs::write(&chunk, "procly-flood\n".repeat(256 * 1024 / 13)).expect("write the chunk");
+    let run = format!(
+        "{} --port {port} & while true; do cat {}; sleep 0.005; done",
+        test_server().display(),
+        chunk.display()
+    );
+    write(
+        &main,
+        "procly.toml",
+        &format!("[services.web]\nrun = '{run}'\nports = {{ http = {port} }}\n"),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(1) {
+        // The output file, and the previous one keeping the last buffer read before the Daemon emptied it.
+        let sizes = output_files(&procly);
+        assert!(
+            (1..=2).contains(&sizes.len()),
+            "{} output files for one Service",
+            sizes.len()
+        );
+        assert!(
+            sizes.iter().all(|size| *size < 8 * 1024 * 1024),
+            "the output files grew to {sizes:?} bytes"
+        );
+    }
+    // The Service is still writing, so the last line may be cut where its write had got to. Every line before it is
+    // whole: the buffer dropped its oldest lines, and emptying the file lost nothing in between.
+    let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+    let (lines, last) = logs.rsplit_once('\n').expect("the logs hold whole lines");
+    let cut: Vec<(usize, &str)> = lines
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| *line != "procly-flood")
+        .take(3)
+        .collect();
+    assert!(cut.is_empty(), "lines cut in the logs, by their index: {cut:?}");
+    assert!("procly-flood".starts_with(last), "the logs end with {last:?}");
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    assert_eq!(output_files(&procly), Vec::<u64>::new());
 }

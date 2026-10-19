@@ -1,0 +1,16 @@
+# The Logical resources of a Redis container: one database index each, from 0 to 15 with the databases Redis starts
+# with.
+#
+# Procly hands the indexes out, one per resource and Worktree, so `{resource}` is a number. An index exists from the
+# start of the server, so there is nothing to create and a Seed never runs. A Repository whose server runs with more
+# databases copies this file to .procly/drivers/redis.toml and raises `capacity` with it.
+
+url = "redis://localhost:{port}/{resource}"
+index = true
+capacity = 16
+
+ready = 'redis-cli ping | grep -q PONG'
+
+check = 'true'
+create = 'true'
+drop = 'redis-cli -n {resource} flushdb'

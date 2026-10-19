@@ -7,6 +7,7 @@
 )]
 
 use std::io::{Read as _, Write as _};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use tempfile::TempDir;
+use tokio::net::TcpSocket;
 
 /// How long a test waits for an asynchronous effect before failing.
 pub const DEADLINE: Duration = Duration::from_secs(10);
@@ -27,6 +29,8 @@ pub struct Procly {
     state_dir: TempDir,
     config_dir: TempDir,
     scratch: TempDir,
+    /// The file the Daemon reads its clock from, set by [`Procly::with_clock`].
+    clock: Option<PathBuf>,
 }
 
 impl Procly {
@@ -48,7 +52,33 @@ impl Procly {
             state_dir,
             config_dir,
             scratch,
+            clock: None,
         }
+    }
+
+    /// Like [`Procly::new`], with a Daemon whose clock stands still until [`Procly::advance_clock`] moves it, so
+    /// that backoff and idle stop are tested without waiting.
+    pub fn with_clock() -> Self {
+        let mut procly = Self::new();
+        let clock = procly.state_dir().join("test-clock");
+        procly.clock = Some(clock);
+        procly.advance_clock(Duration::ZERO);
+        procly
+    }
+
+    /// Moves the clock of the Daemon forward by `by`. The file is replaced, so the Daemon never reads half of it.
+    pub fn advance_clock(&self, by: Duration) {
+        let clock = self.clock.as_ref().expect("the test was built with Procly::with_clock");
+        let now: u64 = std::fs::read_to_string(clock).map_or(0, |text| text.trim().parse().unwrap_or(0));
+        let next = now + u64::try_from(by.as_millis()).expect("a duration in milliseconds fits in u64");
+        let pending = clock.with_extension("next");
+        std::fs::write(&pending, next.to_string()).expect("write the next clock reading");
+        std::fs::rename(&pending, clock).expect("replace the clock reading");
+    }
+
+    /// What the Daemon logged so far.
+    pub fn daemon_log(&self) -> String {
+        std::fs::read_to_string(self.state_dir().join("daemon.log")).unwrap_or_default()
     }
 
     pub fn state_dir(&self) -> &Path {
@@ -72,6 +102,10 @@ impl Procly {
             .env("PROCLY_STATE_DIR", self.state_dir())
             .env("PROCLY_CONFIG_DIR", self.config_dir())
             .current_dir(self.scratch());
+        if let Some(clock) = &self.clock {
+            // Set on every command: the Daemon takes the environment of the one that starts it.
+            command.env("PROCLY_TEST_CLOCK", clock);
+        }
         command
     }
 
@@ -215,13 +249,39 @@ pub fn test_server() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_procly-test-server"))
 }
 
-/// A port nothing listens on right now.
+/// A port nothing listens on right now, and that the Daemon will accept as a Lease when a test declares it.
+///
+/// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, which the standard library
+/// sets. A port in `TIME_WAIT` passes the standard bind and fails the Daemon's, and the ephemeral ports this hands out
+/// are the ones the suite's own connections use as source ports and leave in `TIME_WAIT` when they close first. Under
+/// load that sent the Lease of a test to the Range, away from the port it declared.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind an ephemeral port")
-        .local_addr()
-        .expect("read the ephemeral port")
-        .port()
+    loop {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .expect("bind an ephemeral port")
+            .local_addr()
+            .expect("read the ephemeral port")
+            .port();
+        if accepted_by_the_daemon(port) {
+            return port;
+        }
+    }
+}
+
+/// Whether the bind the Daemon checks a Lease with succeeds on `port`, IPv4 and IPv6.
+fn accepted_by_the_daemon(port: u16) -> bool {
+    let v4 = TcpSocket::new_v4().and_then(|socket| socket.bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))));
+    if v4.is_err() {
+        return false;
+    }
+    match TcpSocket::new_v6().and_then(|socket| socket.bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))) {
+        Ok(()) => true,
+        // A host without IPv6 has nothing listening on it.
+        Err(error) => matches!(
+            error.raw_os_error(),
+            Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
+        ),
+    }
 }
 
 /// Sends `GET <path>` to the test server on `port`, retrying until it accepts connections, and returns the body.
@@ -248,4 +308,101 @@ pub fn http_response(port: u16, path: &str) -> String {
         true
     });
     response.expect("the response was read")
+}
+
+impl Procly {
+    /// Gives the Daemon a narrow Range of its own in the user settings, so that tests running in parallel, each with
+    /// its own Daemon, never draw the same ports. Returns its bounds.
+    ///
+    /// The Ranges sit below the ephemeral ports of Linux and macOS, so that [`free_port`] never returns one of them,
+    /// and each test of a binary gets the next one, offset by the pid against other test runs on the same machine.
+    pub fn narrow_range(&self) -> (u16, u16) {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let slot = (std::process::id() * 7 + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 600;
+        let start = 20_000 + u16::try_from(slot * 20).expect("600 slots of 20 ports fit below 32768");
+        let end = start + 19;
+        std::fs::write(
+            self.config_dir().join("config.toml"),
+            format!("[settings]\nport_range = \"{start}-{end}\"\n"),
+        )
+        .expect("write the user settings");
+        (start, end)
+    }
+
+    /// Stops the Daemon and waits until it has exited, the next command starts a new one.
+    pub fn stop_daemon(&self) {
+        let pid = self.daemon_pid().expect("a Daemon runs");
+        kill(pid, Signal::SIGTERM).expect("signal the Daemon");
+        wait_until_gone(pid);
+    }
+}
+
+impl Procly {
+    /// Kills the Daemon with `SIGKILL`, as a crash would, and waits until it has exited. It cleans nothing up, so its
+    /// socket, its pid file and the processes it supervised are left behind for the next Daemon to find.
+    pub fn kill_daemon(&self) {
+        let pid = self.daemon_pid().expect("a Daemon runs");
+        kill(pid, Signal::SIGKILL).expect("kill the Daemon");
+        wait_until_gone(pid);
+    }
+}
+
+/// Like [`git`], and returns what the command printed on stdout.
+pub fn git_output(dir: &Path, args: &[&str]) -> String {
+    let mut command = Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert_success(&output);
+    stdout(&output)
+}
+
+/// Whether `docker compose` v2 and a running Docker engine are available, printing why a Docker test is skipped
+/// otherwise. A Docker test starts with `if !require_docker() { return; }`.
+pub fn require_docker() -> bool {
+    let works = |args: &[&str]| {
+        Command::new("docker")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|output| output.status.success())
+    };
+    let available = works(&["compose", "version"]) && works(&["info"]);
+    if !available {
+        eprintln!("skipped: docker compose v2 and a running Docker engine are required");
+    }
+    available
+}
+
+/// The one JSON document `output` holds on stdout, which must end with a newline and carry nothing else.
+pub fn json_document(output: &Output) -> serde_json::Value {
+    let text = stdout(output);
+    assert!(text.ends_with('\n'), "no newline after the document in {text:?}");
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("stdout is not one JSON document ({error}): {text:?}"))
+}
+
+/// The document of a command that succeeded with `--json`. Stderr stays empty, since the document carries what the
+/// text told there.
+pub fn json_succeeded(output: &Output) -> serde_json::Value {
+    assert_success(output);
+    assert_eq!(
+        stderr(output),
+        "",
+        "a successful command prints nothing on stderr with --json"
+    );
+    json_document(output)
+}
+
+/// The `schema_version` that `procly status --json` prints, which every other document must repeat.
+pub fn json_schema_version(procly: &Procly) -> serde_json::Value {
+    json_succeeded(&procly.procly(&["status", "--json"]))["schema_version"].clone()
 }

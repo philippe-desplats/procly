@@ -1,0 +1,536 @@
+//! `up`: the Services a request brings up, in the order their needs give, and what each one is started with.
+//!
+//! The configuration of the Worktree is read once per request into a [`Scope`], so that every step of one `up` sees
+//! the same declarations.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::compose::{ComposeError, ComposeSpec, PlannedResource, PublishedLease, ResourcePlan};
+use super::environment::{self, DeclaredService, Leasing};
+use super::health::HealthCheck;
+use super::service::{Relation, Service, ServiceSpec, Start};
+use super::{Registry, blocking, message, read_config, topology_of};
+use crate::config::{Config, ServiceConfig, ServiceKind};
+use crate::ports;
+use crate::protocol::{Response, ServiceEnd, StartOutcome, UpService};
+use crate::topology::Topology;
+
+/// What `failed` says when a blocking step of `up` could not run to its end.
+const START_FAILED: &str = "the service could not be started";
+
+/// The Worktree a request is about and its configuration, read once for the whole request.
+#[derive(Debug, Clone)]
+pub(super) struct Scope {
+    topology: Topology,
+    config: Arc<Config>,
+}
+
+impl Scope {
+    /// The Worktree holding `cwd` and its configuration. Blocking, it runs git and reads the configuration.
+    pub(super) fn of(cwd: &Path) -> anyhow::Result<Self> {
+        let topology = topology_of(cwd)?;
+        let config = Arc::new(read_config(&topology.worktree.path)?);
+        Ok(Self { topology, config })
+    }
+
+    fn worktree(&self) -> &Path {
+        &self.topology.worktree.path
+    }
+
+    /// The declaration of the Service `name`, which must be declared.
+    fn declared(&self, name: &str) -> anyhow::Result<&ServiceConfig> {
+        super::declared(&self.config, self.worktree(), name)
+    }
+
+    /// The Service `name`, as its environment is worked out from.
+    fn service<'a>(&'a self, registry: &'a Registry, name: &'a str) -> anyhow::Result<DeclaredService<'a>> {
+        Ok(DeclaredService {
+            registry,
+            topology: &self.topology,
+            config: &self.config,
+            name,
+            declared: self.declared(name)?,
+        })
+    }
+
+    /// The Services to bring up for `name`, needs first, or for every Service no Group covers without `name`.
+    fn start_order(&self, name: Option<&str>) -> anyhow::Result<Vec<String>> {
+        match name {
+            Some(name) => {
+                self.declared(name)?;
+                Ok(self.config.start_order(name)?)
+            }
+            None => Ok(self.config.start_order_all()?),
+        }
+    }
+}
+
+/// Brings up the Services `name` needs, each one healthy before the next starts, then `name`, and answers with
+/// where to reach it. Without `name`, brings up every Service no Group covers. Stops at the first Service that does
+/// not become healthy.
+pub(super) async fn up(
+    registry: &Arc<Registry>,
+    name: Option<String>,
+    cwd: PathBuf,
+    env: Vec<(String, String)>,
+    gitignore: bool,
+) -> Response {
+    let planned = {
+        let name = name.clone();
+        // Resolving the Topology runs git, and reading the configuration is blocking.
+        blocking(START_FAILED, move || {
+            let scope = Scope::of(&cwd)?;
+            let order = scope.start_order(name.as_deref())?;
+            Ok((scope, order))
+        })
+        .await
+    };
+    let (scope, order) = match planned {
+        Ok(planned) => planned,
+        Err(message) => return Response::Error { message },
+    };
+    let mut reached = Vec::new();
+    for current in &order {
+        let (outcome, via, port, health) = match start(registry, &scope, current, &env, gitignore).await {
+            Ok(Running::Process { service, outcome }) => {
+                let health = service.healthy().await.map_err(|end| (end, service.output()));
+                (outcome, None, service.port(), health)
+            }
+            Ok(Running::Covered { group, name, port }) => {
+                let health = group.healthy().await.map_err(|end| (end, group.output()));
+                (StartOutcome::Reused, Some(name), port, health)
+            }
+            Ok(Running::Compose { outcome, port, health }) => (outcome, None, port, health),
+            Err(response) => {
+                return match *response {
+                    Response::Conflict { service, conflicts, .. } => Response::Conflict {
+                        service,
+                        conflicts,
+                        needed_by: name.as_ref().filter(|target| *target != current).cloned(),
+                    },
+                    other => other,
+                };
+            }
+        };
+        if let Err((end, output)) = health {
+            return Response::Unhealthy {
+                service: current.clone(),
+                outcome,
+                end,
+                output,
+                needed_by: name.as_ref().filter(|target| *target != current).cloned(),
+            };
+        }
+        let ports = {
+            let (registry, scope, current) = (Arc::clone(registry), scope.clone(), current.clone());
+            // Reading the Leases is blocking.
+            blocking(START_FAILED, move || service_leases(&registry, &scope, &current)).await
+        };
+        let ports = match ports {
+            Ok(ports) => ports,
+            Err(message) => return Response::Error { message },
+        };
+        reached.push(UpService {
+            service: current.clone(),
+            outcome,
+            via,
+            port,
+            url: port.map(|port| format!("http://localhost:{port}")),
+            ports,
+        });
+    }
+    // The Service that was asked for comes last, after everything it needs.
+    match (name, reached.pop()) {
+        (Some(_), Some(target)) => Response::Up {
+            service: target.service,
+            outcome: target.outcome,
+            via: target.via,
+            port: target.port,
+            url: target.url,
+            ports: target.ports,
+            needs: reached,
+        },
+        (None, Some(last)) => {
+            reached.push(last);
+            Response::UpAll { services: reached }
+        }
+        (name, None) => Response::Error {
+            message: format!("no service {} to start", name.unwrap_or_default()),
+        },
+    }
+}
+
+/// The variables Procly injects into the Service `name` of the Worktree holding `cwd`. Blocking.
+pub(super) fn service_environment(
+    registry: &Registry,
+    name: &str,
+    cwd: &Path,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let scope = Scope::of(cwd)?;
+    let service = scope.service(registry, name)?;
+    let mut variables = match service.declared.kind(name)? {
+        ServiceKind::Group { covers, .. } => {
+            environment::check(name, service.declared)?;
+            environment::injected_group(&service, covers, Leasing::AsGranted)?.variables
+        }
+        ServiceKind::Process { .. } | ServiceKind::Compose { .. } => {
+            environment::injected(&service, Leasing::AsGranted)?.variables
+        }
+    };
+    variables.sort();
+    Ok(variables)
+}
+
+/// A Service that was started or found running.
+enum Running {
+    /// A Process service, whose health is still to be waited for.
+    Process {
+        service: Arc<Service>,
+        outcome: StartOutcome,
+    },
+    /// A Service covered by a Group that runs, whose health is the Group's, still to be waited for.
+    Covered {
+        group: Arc<Service>,
+        /// The name of the Group.
+        name: String,
+        /// The Lease its health check probes.
+        port: Option<u16>,
+    },
+    /// A Compose service, already waited for: `health` tells whether its container answered in time, and if not,
+    /// how it ended and its recent logs.
+    Compose {
+        outcome: StartOutcome,
+        port: Option<u16>,
+        health: Result<(), (ServiceEnd, String)>,
+    },
+}
+
+/// Starts the Service `name`, or finds it running. A Service being stopped still holds its port, so this waits
+/// for its tree to be gone and asks again.
+async fn start(
+    registry: &Arc<Registry>,
+    scope: &Scope,
+    name: &str,
+    env: &[(String, String)],
+    gitignore: bool,
+) -> Result<Running, Box<Response>> {
+    loop {
+        let started = {
+            let (registry, scope, name, env) = (Arc::clone(registry), scope.clone(), name.to_owned(), env.to_owned());
+            // Writing the generated files, granting the Leases and forking are blocking.
+            blocking(START_FAILED, move || {
+                start_service(&registry, &scope, &name, env, gitignore)
+            })
+            .await
+        };
+        match started.map_err(|message| Box::new(Response::Error { message }))? {
+            Started::Process(Start::Ready { service, outcome, .. }) => {
+                return Ok(Running::Process { service, outcome });
+            }
+            Started::Covered { group, name, port } => return Ok(Running::Covered { group, name, port }),
+            Started::Process(Start::Stopping(service)) => service.ended().await,
+            Started::Compose { grace } => return up_compose(registry, scope, name, grace, env.to_owned()).await,
+        }
+    }
+}
+
+/// What a start request found out about the Service it asked for.
+enum Started {
+    Process(Start),
+    /// A Service covered by a Group that runs, which nothing was started for.
+    Covered {
+        group: Arc<Service>,
+        /// The name of the Group.
+        name: String,
+        /// The Lease its health check probes, since the Group has none of its own.
+        port: Option<u16>,
+    },
+    /// A Compose service, whose container is started by [`up_compose`].
+    Compose {
+        grace: Duration,
+    },
+}
+
+fn start_service(
+    registry: &Arc<Registry>,
+    scope: &Scope,
+    name: &str,
+    env: Vec<(String, String)>,
+    gitignore: bool,
+) -> anyhow::Result<Started> {
+    let worktree = scope.worktree().to_owned();
+    let declared = scope.declared(name)?;
+    // Also on a Reuse, so that `--gitignore` is honored whenever it is asked. A Service whose ports do not check out
+    // fails here, before any file is written or Lease granted.
+    environment::check(name, declared)?;
+    environment::mirror(registry, &scope.topology, &scope.config, gitignore)?;
+    // The Services the Service covers when it is a Group, or the Group covering it.
+    let relation = match declared.kind(name)? {
+        ServiceKind::Compose { .. } => {
+            return Ok(Started::Compose {
+                grace: scope.config.grace_period(declared),
+            });
+        }
+        ServiceKind::Group { covers, .. } => Relation::Group { covers },
+        ServiceKind::Process { .. } => match scope.config.group_of(name) {
+            Some(by) => Relation::Covered { by },
+            None => Relation::Alone,
+        },
+    };
+    // Dated again once it ends, so that a Service which ran longer than the expiry keeps its Leases. A Group holds
+    // the Leases of the Services it covers.
+    let touched = match relation {
+        Relation::Group { covers } => covers.to_vec(),
+        Relation::Covered { .. } | Relation::Alone => vec![name.to_owned()],
+    };
+    let start = registry
+        .services
+        .start::<anyhow::Error>(&worktree, name, relation, || service_spec(registry, scope, name, env))?;
+    match start {
+        Start::Ready {
+            service,
+            outcome: StartOutcome::Reused,
+            via: Some(group),
+        } => {
+            // The Group has no Lease of its own, the covered Service has one the caller wants to hear of.
+            let port = environment::injected(&scope.service(registry, name)?, Leasing::AsGranted)?.health_port;
+            return Ok(Started::Covered {
+                group: service,
+                name: group,
+                port,
+            });
+        }
+        Start::Ready {
+            ref service,
+            outcome: StartOutcome::Started,
+            ..
+        } => {
+            let (registry, service) = (Arc::clone(registry), Arc::clone(service));
+            tokio::spawn(async move {
+                service.ended().await;
+                let touched = tokio::task::spawn_blocking(move || {
+                    touched
+                        .iter()
+                        .try_for_each(|name| registry.leases.touch(&worktree, name))
+                })
+                .await;
+                if let Ok(Err(error)) = touched {
+                    eprintln!("cannot date the Leases of a service that ended: {error:#}");
+                }
+            });
+        }
+        Start::Ready { .. } | Start::Stopping(_) => {}
+    }
+    Ok(Started::Process(start))
+}
+
+/// What the Process service or the Group `name` runs: its command, its environment on top of the one of the caller,
+/// and how it is checked. Run under the start mutex, so that 2 Worktrees starting at once never get the same port.
+fn service_spec(
+    registry: &Registry,
+    scope: &Scope,
+    name: &str,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<ServiceSpec> {
+    let service = scope.service(registry, name)?;
+    let declared = service.declared;
+    let (command, variables, health, lease_ports, covers) = match declared.kind(name)? {
+        ServiceKind::Process { run } => {
+            let injected = environment::injected(&service, Leasing::Starting)?;
+            let health = HealthCheck::declared(injected.health_port, &declared.health);
+            let lease_ports = injected.leases.values().copied().collect();
+            (
+                ports::render(run, &injected.leases),
+                injected.variables,
+                health,
+                lease_ports,
+                Vec::new(),
+            )
+        }
+        ServiceKind::Group { run, covers } => {
+            let injected = environment::injected_group(&service, covers, Leasing::Starting)?;
+            // Healthy once every Service it covers is.
+            let health = HealthCheck {
+                port: None,
+                http: None,
+                covered: injected.checks,
+            };
+            (
+                run.to_owned(),
+                injected.variables,
+                health,
+                injected.lease_ports,
+                covers.to_vec(),
+            )
+        }
+        ServiceKind::Compose { .. } => {
+            unreachable!("a Compose service is brought up by up_compose, start_service never asks for its spec")
+        }
+    };
+    // After the environment of the caller, so that a `PORT` of its own never wins over the Lease.
+    let mut env = env;
+    env.extend(variables);
+    let worktree = scope.worktree().to_owned();
+    Ok(ServiceSpec {
+        command,
+        cwd: worktree.clone(),
+        env,
+        health,
+        lease_ports,
+        covers,
+        health_timeout: scope.config.health_timeout(declared),
+        name: name.to_owned(),
+        worktree,
+        topology: scope.topology.clone(),
+        restart: scope.config.restart_policy(declared),
+        idle: scope.config.idle_timeout(declared),
+    })
+}
+
+/// Starts the container of the Compose service `name`, or finds it running for another Worktree, and waits until it
+/// is healthy.
+async fn up_compose(
+    registry: &Arc<Registry>,
+    scope: &Scope,
+    name: &str,
+    grace: Duration,
+    env: Vec<(String, String)>,
+) -> Result<Running, Box<Response>> {
+    let key = (scope.topology.git_common_dir.clone(), name.to_owned());
+    let worktree = scope.worktree().to_owned();
+    let prepare = {
+        let (registry, scope, name, env) = (Arc::clone(registry), scope.clone(), name.to_owned(), env.clone());
+        move || prepare_compose(&registry, &scope, &name, env)
+    };
+    let plan = {
+        let (registry, scope, name) = (Arc::clone(registry), scope.clone(), name.to_owned());
+        move || plan_resources(&registry, &scope, &name, env)
+    };
+    match registry
+        .composes
+        .up::<anyhow::Error, _, _>(key, worktree, grace, prepare, plan)
+        .await
+    {
+        Ok(brought) => Ok(Running::Compose {
+            outcome: brought.outcome,
+            port: brought.port,
+            health: brought.health,
+        }),
+        Err(error) => match error.downcast::<ComposeError>() {
+            Ok(ComposeError::Conflict { service, conflicts }) => Err(Box::new(Response::Conflict {
+                service,
+                conflicts,
+                needed_by: None,
+            })),
+            Ok(error) => Err(Box::new(Response::Error {
+                message: message(error),
+            })),
+            Err(error) => Err(Box::new(Response::Error {
+                message: message(error),
+            })),
+        },
+    }
+}
+
+/// What it takes to start the container of the Compose service `name`. Run only when the container does not run,
+/// so that the Leases of the Main worktree are granted anew then and never under a container using them.
+fn prepare_compose(
+    registry: &Registry,
+    scope: &Scope,
+    name: &str,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<ComposeSpec> {
+    let service = scope.service(registry, name)?;
+    let declared = service.declared;
+    let compose = match declared.kind(name)? {
+        ServiceKind::Compose { service } => service,
+        ServiceKind::Process { .. } | ServiceKind::Group { .. } => {
+            unreachable!("only a Compose service is brought up by up_compose")
+        }
+    };
+    // Granted under the lock of the container, so that 2 Worktrees starting at once never get different ports.
+    let injected = environment::injected(&service, Leasing::Starting)?;
+    let published = injected
+        .leases
+        .iter()
+        .map(|(port_name, &port)| PublishedLease {
+            port_name: port_name.clone(),
+            port,
+        })
+        .collect();
+    // What the compose file may interpolate a Lease from: `PORT_<NAME>`, and the Derived variables of the Service.
+    let variables = injected
+        .leases
+        .keys()
+        .map(|port_name| format!("PORT_{}", port_name.to_ascii_uppercase()))
+        .chain(declared.env.keys().cloned())
+        .collect();
+    let injected_names = injected.variables.iter().map(|(name, _)| name.clone()).collect();
+    let mut env = env;
+    env.extend(injected.variables);
+    Ok(ComposeSpec {
+        name: name.to_owned(),
+        compose: compose.to_owned(),
+        project_dir: scope.topology.main()?.worktree.path,
+        env,
+        published,
+        variables,
+        injected: injected_names,
+        health: HealthCheck::declared(injected.health_port, &declared.health),
+        health_timeout: scope.config.health_timeout(declared),
+    })
+}
+
+/// The Logical resources the Worktree needs in the container of the Compose service `name`, `None` when the service
+/// has no Driver. Worked out on every `up`, a Reuse included, since each Worktree has resources of its own.
+fn plan_resources(
+    registry: &Arc<Registry>,
+    scope: &Scope,
+    name: &str,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<Option<ResourcePlan>> {
+    let service = scope.service(registry, name)?;
+    let declared = service.declared;
+    if declared.driver.is_none() {
+        return Ok(None);
+    }
+    // The Leases are the ones the container runs on, granted already, so they stay as they are.
+    let injected = environment::injected(&service, Leasing::AsGranted)?;
+    let Some((driver, resources)) = environment::logical_resources(&service, &injected.leases)? else {
+        return Ok(None);
+    };
+    let wanted = resources
+        .into_iter()
+        .map(|(key, resource)| PlannedResource {
+            seed: declared.resources[&key].seed.clone(),
+            key,
+            resource,
+        })
+        .collect();
+    let mut env = env;
+    env.extend(injected.variables);
+    Ok(Some(ResourcePlan {
+        driver,
+        topology: scope.topology.clone(),
+        resources: wanted,
+        env,
+        jobs: Arc::clone(&registry.jobs),
+        ready_timeout: scope.config.health_timeout(declared),
+        command_timeout: scope.config.settings.driver_timeout,
+    }))
+}
+
+/// The Leases of the Service `name`, by Port name, as `env` exports them. A Group has none of its own, the Services
+/// it covers have.
+fn service_leases(registry: &Registry, scope: &Scope, name: &str) -> anyhow::Result<BTreeMap<String, u16>> {
+    let service = scope.service(registry, name)?;
+    match service.declared.kind(name)? {
+        ServiceKind::Group { .. } => Ok(BTreeMap::new()),
+        ServiceKind::Process { .. } | ServiceKind::Compose { .. } => {
+            Ok(environment::injected(&service, Leasing::AsGranted)?.leases)
+        }
+    }
+}

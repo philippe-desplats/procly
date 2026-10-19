@@ -7,15 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use nix::errno::Errno;
-use nix::sys::signal::Signal;
-use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::Pid;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
-use super::process_group::{DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group, signal_group};
+use super::process_group::{self, DRAIN_TIMEOUT, Pid, kill_group};
 use crate::output::{self, OutputBuffer};
 use crate::protocol::{JobEnd, JobState, JobStatus, StartOutcome};
 use crate::topology::Topology;
@@ -145,6 +141,15 @@ impl Jobs {
             .collect()
     }
 
+    /// The process group of every running Job.
+    pub(crate) fn process_groups(&self) -> Vec<i32> {
+        self.table()
+            .values()
+            .filter(|job| job.end.borrow().is_none())
+            .map(|job| job.pid.as_raw())
+            .collect()
+    }
+
     /// Kills the tree of every running Job, for a Daemon about to exit.
     pub(crate) fn kill_all(&self) {
         for job in self.table().values() {
@@ -205,10 +210,10 @@ fn spawn(spec: &JobSpec) -> Result<Arc<Job>, JobError> {
         let _ = reader_done_tx.send(());
     });
     let waiter = tokio::task::spawn_blocking(move || {
-        let status = wait_for_exit(pid);
-        // Reaped by `wait_for_exit`, the handle has nothing left to release.
+        let end = process_group::wait_for_job(pid);
+        // Reaped by `wait_for_job`, the handle has nothing left to release.
         drop(child);
-        status
+        end
     });
 
     let job = Arc::new(Job {
@@ -251,14 +256,14 @@ impl Job {
 async fn supervise(
     job: Arc<Job>,
     master: Box<dyn MasterPty + Send>,
-    mut waiter: JoinHandle<WaitStatus>,
+    mut waiter: JoinHandle<JobEnd>,
     reader_done: oneshot::Receiver<()>,
     timeout: Duration,
 ) {
-    let end = if let Ok(status) = tokio::time::timeout(timeout, &mut waiter).await {
-        end_of(status.expect("the exit waiter panics only when the daemon lost track of its own child"))
+    let end = if let Ok(end) = tokio::time::timeout(timeout, &mut waiter).await {
+        end.expect("the exit waiter panics only when the daemon lost track of its own child")
     } else {
-        kill_tree(job.pid, waiter).await;
+        process_group::stop_job_tree(job.pid, waiter).await;
         JobEnd::TimedOut {
             timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
         }
@@ -269,34 +274,6 @@ async fn supervise(
     let _ = tokio::time::timeout(DRAIN_TIMEOUT, reader_done).await;
     drop(master);
     job.end.send_replace(Some(end));
-}
-
-/// Stops the leader of the process group: `SIGTERM` to the whole group, then `SIGKILL` after the stop timeout.
-async fn kill_tree(pgid: Pid, mut waiter: JoinHandle<WaitStatus>) {
-    signal_group(pgid, Signal::SIGTERM);
-    if tokio::time::timeout(STOP_TIMEOUT, &mut waiter).await.is_err() {
-        signal_group(pgid, Signal::SIGKILL);
-        let _ = waiter.await;
-    }
-}
-
-/// Reaps the Job's leader with `waitpid`, which tells an exit code from a signal, unlike `portable_pty::Child`.
-fn wait_for_exit(pid: Pid) -> WaitStatus {
-    loop {
-        match waitpid(pid, None) {
-            Ok(status @ (WaitStatus::Exited(..) | WaitStatus::Signaled(..))) => return status,
-            Ok(_) | Err(Errno::EINTR) => {}
-            Err(error) => panic!("cannot wait for job process {pid}, which only the daemon reaps: {error}"),
-        }
-    }
-}
-
-fn end_of(status: WaitStatus) -> JobEnd {
-    match status {
-        WaitStatus::Signaled(_, signal, _) => JobEnd::Signaled { signal: signal as i32 },
-        WaitStatus::Exited(_, code) => JobEnd::Exited { code },
-        other => unreachable!("wait_for_exit returns only exits and signals, got {other:?}"),
-    }
 }
 
 fn pump(mut reader: Box<dyn Read + Send>, output: &Mutex<OutputBuffer>) {

@@ -25,6 +25,8 @@ pub(crate) enum TopologyError {
     UnexpectedOutput { dir: PathBuf, args: String, output: String },
     #[error("{dir} is not in a git repository")]
     NotARepository { dir: PathBuf },
+    #[error("{dir} has no Main worktree, and a Compose service in Shared mode runs from it")]
+    NoMainWorktree { dir: PathBuf },
     #[error("cannot resolve {path}")]
     Canonicalize {
         path: PathBuf,
@@ -47,6 +49,25 @@ pub(crate) struct Worktree {
     pub(crate) slug: String,
     /// Whether this is the Main worktree, the first entry of `git worktree list`.
     pub(crate) main: bool,
+}
+
+impl Topology {
+    /// The Topology of the Main worktree of the Repository, where a Shared container runs from and holds its Leases.
+    pub(crate) fn main(&self) -> Result<Self, TopologyError> {
+        if self.worktree.main {
+            return Ok(self.clone());
+        }
+        let worktree = worktrees(&self.git_common_dir)?
+            .into_iter()
+            .find(|worktree| worktree.main)
+            .ok_or_else(|| TopologyError::NoMainWorktree {
+                dir: self.git_common_dir.clone(),
+            })?;
+        Ok(Self {
+            git_common_dir: self.git_common_dir.clone(),
+            worktree,
+        })
+    }
 }
 
 /// The Topology of a directory, or `None` when it is not inside a git Repository.
@@ -87,6 +108,19 @@ pub(crate) fn resolve(dir: &Path) -> Result<Option<Topology>, TopologyError> {
         git_common_dir,
         worktree,
     }))
+}
+
+/// The git directory private to the Worktree rooted at `worktree`: `.git/worktrees/<name>` for a linked Worktree,
+/// removed by git with the Worktree, and the `.git` directory itself for the Main worktree.
+pub(crate) fn git_dir(worktree: &Path) -> Result<PathBuf, TopologyError> {
+    let output = git(worktree, &["rev-parse", "--path-format=absolute", "--git-dir"])?;
+    canonicalize(Path::new(OsStr::from_bytes(&output)))
+}
+
+/// The branch checked out in the Worktree rooted at `worktree`, `None` on a detached `HEAD`.
+pub(crate) fn branch(worktree: &Path) -> Result<Option<String>, TopologyError> {
+    let output = git(worktree, &["branch", "--show-current"])?;
+    Ok((!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned()))
 }
 
 /// Every Worktree of a Repository, in the order of `git worktree list`.
