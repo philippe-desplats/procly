@@ -118,10 +118,18 @@ pub(crate) fn open(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).write(true).open(path)
 }
 
-/// Starts the writer of the output file at `path`, `procly output-file`, and returns the 2 ends of the pipe the Service
-/// writes its stdout and its stderr into. The writer leads a process group of its own and ends once every end is
-/// closed, whether a Daemon still runs or not.
-pub(crate) fn start_writer(path: &Path) -> io::Result<(PipeWriter, PipeWriter)> {
+/// The writer of an output file, and the 2 ends of the pipe the Service writes its stdout and its stderr into.
+#[derive(Debug)]
+pub(crate) struct Writer {
+    pub(crate) stdout: PipeWriter,
+    pub(crate) stderr: PipeWriter,
+    /// Waited for once the Service is gone, so that the last lines it piped are in the file before it is read.
+    pub(crate) process: tokio::process::Child,
+}
+
+/// Starts the writer of the output file at `path`, `procly output-file`. It leads a process group of its own and ends
+/// once every end of its pipe is closed, whether a Daemon still runs or not.
+pub(crate) fn start_writer(path: &Path) -> io::Result<Writer> {
     let (reader, stdout) = io::pipe()?;
     let stderr = stdout.try_clone()?;
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
@@ -134,31 +142,53 @@ pub(crate) fn start_writer(path: &Path) -> io::Result<(PipeWriter, PipeWriter)> 
         // Into the log of the Daemon that started it, which it keeps after the Daemon is gone.
         .stderr(Stdio::inherit());
     process_group::detach(&mut command);
-    // Dropped right away: the runtime reaps it once it ends, and the read end this Daemon held is closed with it.
-    command.spawn()?;
-    Ok((stdout, stderr))
+    let process = command.spawn()?;
+    // The read end this Daemon held is closed with the command, so that the writer ends with the Service.
+    drop(command);
+    Ok(Writer {
+        stdout,
+        stderr,
+        process,
+    })
 }
 
 /// Appends what `input` carries to the output file at `path` until `input` ends, emptying the file once it reaches
 /// [`WRITER_LIMIT`]: the writer side of an output file, which `procly output-file <path>` runs with the output of the
-/// Service piped into it. Blocking.
+/// Service piped into it. A file that can no longer be written, a full disk say, is given up on, but `input` is still
+/// read to its end, so that the Service never dies of writing into a pipe nobody reads. Blocking.
 pub(crate) fn write(mut input: impl Read, path: &Path) -> io::Result<()> {
-    let mut appending = OpenOptions::new().append(true).open(path)?;
-    let mut file = open(path)?;
     let mut chunk = vec![0; CHUNK];
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path)
+        .and_then(|appending| Ok((appending, open(path)?)));
     loop {
         let read = match input.read(&mut chunk) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return file.map(|_| ()),
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         };
-        appending.write_all(&chunk[..read])?;
-        let len = file.metadata()?.len();
-        if len >= WRITER_LIMIT {
-            empty(&mut file, path, len)?;
+        if let Ok((appending, reader)) = &mut file
+            && let Err(error) = append(appending, reader, path, &chunk[..read])
+        {
+            eprintln!(
+                "cannot write the output file {}, its output is dropped from now on: {error}",
+                path.display()
+            );
+            file = Err(error);
         }
     }
+}
+
+/// Appends `bytes` to the output file at `path`, then empties it once it reaches [`WRITER_LIMIT`].
+fn append(appending: &mut File, reader: &mut File, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    appending.write_all(bytes)?;
+    let len = reader.metadata()?.len();
+    if len >= WRITER_LIMIT {
+        empty(reader, path, len)?;
+    }
+    Ok(())
 }
 
 /// Empties the output file at `path`, `len` bytes long and open as `file`, keeping its last buffer in the previous
@@ -179,15 +209,22 @@ fn empty(file: &mut File, path: &Path, len: u64) -> io::Result<(u64, Vec<u8>)> {
 #[derive(Debug)]
 pub(crate) struct Tail {
     path: PathBuf,
+    /// The writer of the file, when this Daemon started it.
+    writer: Option<tokio::process::Child>,
     reader: JoinHandle<()>,
     /// Dropped to tell the thread to read what is left and return.
     done: mpsc::Sender<()>,
 }
 
 impl Tail {
-    /// Follows the output file at `path`, read through `reader` from its current position, into `output`. Must run
-    /// inside the Tokio runtime.
-    pub(crate) fn follow(path: PathBuf, reader: File, output: Arc<Mutex<OutputBuffer>>) -> Self {
+    /// Follows the output file at `path`, read through `reader` from its current position, into `output`, `writer`
+    /// being its writer when this Daemon started it. Must run inside the Tokio runtime.
+    pub(crate) fn follow(
+        path: PathBuf,
+        reader: File,
+        output: Arc<Mutex<OutputBuffer>>,
+        writer: Option<tokio::process::Child>,
+    ) -> Self {
         let (done, finished) = mpsc::channel();
         let followed = path.clone();
         let reader = tokio::task::spawn_blocking(move || {
@@ -195,15 +232,24 @@ impl Tail {
                 eprintln!("cannot read the output file {}: {error}", followed.display());
             }
         });
-        Self { path, reader, done }
+        Self {
+            path,
+            writer,
+            reader,
+            done,
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Reads what is left of the file once its process is gone, for at most the drain timeout, then removes it.
+    /// Reads what is left of the file once its process is gone, for at most the drain timeout, then removes it. The
+    /// writer gets the drain timeout too, to put into the file what the Service piped last.
     pub(crate) async fn finish(self) {
+        if let Some(mut writer) = self.writer {
+            let _ = tokio::time::timeout(DRAIN_TIMEOUT, writer.wait()).await;
+        }
         drop(self.done);
         let _ = tokio::time::timeout(DRAIN_TIMEOUT, self.reader).await;
         let path = self.path;
@@ -355,6 +401,16 @@ mod tests {
         let kept = fs::read(previous(&new.path)).unwrap();
         assert_eq!(kept.len(), output::CAPACITY);
         assert!(fs::read_to_string(&new.path).unwrap().ends_with("x\nlast\n"));
+    }
+
+    #[test]
+    fn a_writer_that_cannot_write_its_file_still_reads_its_input_to_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut input = io::Cursor::new(vec![b'x'; CHUNK * 3]);
+
+        assert!(write(&mut input, &dir.path().join("missing").join("out.log")).is_err());
+
+        assert_eq!(input.position(), u64::try_from(CHUNK * 3).unwrap());
     }
 
     #[test]

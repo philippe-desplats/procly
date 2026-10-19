@@ -339,7 +339,8 @@ impl Services {
         let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
         // A Service recorded before output files existed wrote to a pipe, its output is lost.
         let tail = record.output.as_ref().and_then(|path| match output_file::open(path) {
-            Ok(reader) => Some(Tail::follow(path.clone(), reader, Arc::clone(&output))),
+            // The writer of a Service re-attached after a restart belongs to no Daemon.
+            Ok(reader) => Some(Tail::follow(path.clone(), reader, Arc::clone(&output), None)),
             Err(error) => {
                 eprintln!("cannot read the output file {}: {error}", path.display());
                 None
@@ -561,8 +562,12 @@ fn launch(
     })?;
     let path = file.path;
     // Never a pipe of the Daemon, which would die with it and take the Service down at its next write.
-    let (stdout, stderr) = match output_file::start_writer(&path) {
-        Ok((stdout, stderr)) => (Stdio::from(stdout), Stdio::from(stderr)),
+    let (stdout, stderr, writer) = match output_file::start_writer(&path) {
+        Ok(writer) => (
+            Stdio::from(writer.stdout),
+            Stdio::from(writer.stderr),
+            Some(writer.process),
+        ),
         Err(error) => {
             eprintln!(
                 "cannot start the writer of the output file {}, service {} appends to it directly, unbounded while no \
@@ -570,7 +575,7 @@ fn launch(
                 path.display(),
                 spec.name
             );
-            (Stdio::from(file.stdout), Stdio::from(file.stderr))
+            (Stdio::from(file.stdout), Stdio::from(file.stderr), None)
         }
     };
     let mut command = CommandWrap::with_new("/bin/sh", |command| {
@@ -608,7 +613,7 @@ fn launch(
             service: spec.name.clone(),
         });
     };
-    let tail = Tail::follow(path, file.reader, Arc::clone(output));
+    let tail = Tail::follow(path, file.reader, Arc::clone(output), writer);
     Ok(Process { child, pgid, tail })
 }
 
