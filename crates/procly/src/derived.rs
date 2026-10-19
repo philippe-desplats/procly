@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::ServiceConfig;
+use crate::placeholder::{Piece, pieces};
 
 /// What opens a placeholder of ours, which makes the rest of its braces ours to judge.
 const PLACEHOLDER_ROOTS: [&str; 3] = ["worktree", "services", "ports"];
@@ -115,28 +116,23 @@ impl Template {
     pub(crate) fn parse(text: &str) -> Result<Self, UnknownPlaceholder> {
         let mut parts = Vec::new();
         let mut literal = String::new();
-        let mut rest = text;
-        while let Some(open) = rest.find('{') {
-            literal.push_str(&rest[..open]);
-            rest = &rest[open..];
-            // A brace holding another brace opens nothing, the inner one is judged on its own.
-            let named = rest[1..]
-                .split_once('}')
-                .map(|(name, _)| name)
-                .filter(|name| !name.contains('{'));
-            let Some(name) = named.filter(|name| is_ours(name)) else {
-                literal.push('{');
-                rest = &rest[1..];
-                continue;
-            };
-            let part = placeholder(name).ok_or_else(|| UnknownPlaceholder(name.to_owned()))?;
-            if !literal.is_empty() {
-                parts.push(Part::Text(std::mem::take(&mut literal)));
+        for piece in pieces(text) {
+            match piece {
+                Piece::Braced(name) if is_ours(name) => {
+                    let part = placeholder(name).ok_or_else(|| UnknownPlaceholder(name.to_owned()))?;
+                    if !literal.is_empty() {
+                        parts.push(Part::Text(std::mem::take(&mut literal)));
+                    }
+                    parts.push(part);
+                }
+                Piece::Braced(name) => {
+                    literal.push('{');
+                    literal.push_str(name);
+                    literal.push('}');
+                }
+                Piece::Text(text) => literal.push_str(text),
             }
-            parts.push(part);
-            rest = &rest[name.len() + 2..];
         }
-        literal.push_str(rest);
         if !literal.is_empty() {
             parts.push(Part::Text(literal));
         }

@@ -1,11 +1,14 @@
 //! Port names, the Range Leases are drawn from, and Leases as a Service sees them: the placeholders of its command.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
 
-/// What opens a placeholder for a Port name of the Service itself, such as `{ports.http}`.
-const PLACEHOLDER_PREFIX: &str = "{ports.";
+use crate::placeholder::{self, Piece};
+
+/// What a placeholder for a Port name of the Service itself starts with, such as `{ports.http}`.
+const PLACEHOLDER_PREFIX: &str = "ports.";
 
 /// The span of port numbers Leases are drawn from outside the Main worktree, bounds included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +87,8 @@ pub(crate) fn check<'a>(
             name: (*name).clone(),
         });
     }
-    match placeholders(command).find(|(_, name)| !port_names.iter().any(|port_name| port_name == name)) {
-        Some((_, name)) => Err(PortsError::UnknownPlaceholder {
+    match placeholders(command).find(|name| !port_names.iter().any(|port_name| port_name == name)) {
+        Some(name) => Err(PortsError::UnknownPlaceholder {
             service: service.to_owned(),
             name: name.to_owned(),
         }),
@@ -107,29 +110,28 @@ pub(crate) fn environment(leases: &BTreeMap<String, u16>, health_port: Option<u1
 ///
 /// Every other brace is left alone, a shell command is full of them (`${VAR}`, `awk '{ print }'`, `find -exec {}`).
 pub(crate) fn render(command: &str, leases: &BTreeMap<String, u16>) -> String {
-    let mut rendered = String::with_capacity(command.len());
-    let mut copied = 0;
-    for (span, name) in placeholders(command) {
-        if let Some(port) = leases.get(name) {
-            rendered.push_str(&command[copied..span.start]);
-            rendered.push_str(&port.to_string());
-            copied = span.end;
-        }
-    }
-    rendered.push_str(&command[copied..]);
+    let Ok(rendered) = placeholder::render(command, |braced| {
+        Ok::<_, Infallible>(port_name(braced).and_then(|name| leases.get(name)).map(u16::to_string))
+    });
     rendered
 }
 
-/// Each `{ports.<name>}` of `command`, with its span and its Port name, skipping what only looks like one, such as
-/// `{ports.}` or `{ports.a b}`.
-fn placeholders(command: &str) -> impl Iterator<Item = (std::ops::Range<usize>, &str)> {
-    command.match_indices(PLACEHOLDER_PREFIX).filter_map(|(start, _)| {
-        let name_start = start + PLACEHOLDER_PREFIX.len();
-        let after = &command[name_start..];
-        let name_len = after.find(|c: char| !is_port_name_char(c)).unwrap_or(after.len());
-        (name_len > 0 && after[name_len..].starts_with('}'))
-            .then(|| (start..name_start + name_len + 1, &after[..name_len]))
-    })
+/// The Port name of each `{ports.<name>}` of `command`, skipping what only looks like one, such as `{ports.}` or
+/// `{ports.a b}`.
+fn placeholders(command: &str) -> impl Iterator<Item = &str> {
+    placeholder::pieces(command)
+        .into_iter()
+        .filter_map(|piece| match piece {
+            Piece::Braced(braced) => port_name(braced),
+            Piece::Text(_) => None,
+        })
+}
+
+/// The Port name a braced name places, `http` for `ports.http`.
+fn port_name(braced: &str) -> Option<&str> {
+    braced
+        .strip_prefix(PLACEHOLDER_PREFIX)
+        .filter(|name| !name.is_empty() && name.chars().all(is_port_name_char))
 }
 
 /// The characters a placeholder may name, the Port name itself is checked by [`check`].
