@@ -443,6 +443,30 @@ fn docker_a_seed_that_never_ends_is_killed_at_its_timeout_and_drops_its_resource
 }
 
 #[test]
+fn docker_a_driver_command_running_past_the_driver_timeout_fails_up() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = logical_fixture(
+        alpine_compose,
+        "slow",
+        "[services.db.resources.dev]\nname = 'app'\n[settings]\ndriver_timeout = '1s'\n",
+    );
+    write_driver_file(
+        &fixture.main.join(".procly/drivers"),
+        "slow",
+        &DIRECTORY_DRIVER.replace("create = 'mkdir -p /data/res/{resource}'", "create = 'sleep 30'"),
+    );
+    let fixture = commit_and_add_worktree(fixture);
+
+    let failed = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(failed.status.code(), Some(125));
+    let message = stderr(&failed);
+    assert!(message.contains("did not end within 1s"), "{message}");
+}
+
+#[test]
 fn docker_a_template_seed_needs_a_driver_with_a_copy_command_and_an_existing_template() {
     if !require_docker() {
         return;

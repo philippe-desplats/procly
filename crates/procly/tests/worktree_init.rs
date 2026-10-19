@@ -348,3 +348,20 @@ fn the_record_is_a_versioned_document_and_a_newer_one_is_refused() {
     );
     assert_eq!(fs::read_to_string(worktree.join("log")).unwrap(), "ran\n");
 }
+
+#[test]
+fn a_setup_command_running_past_the_setup_timeout_is_killed_and_exits_124() {
+    let procly = Procly::new();
+    let config = "[settings]\nsetup_timeout = '1s'\n[worktree]\nsetup = ['sleep 30']\n";
+    let (_, worktree) = repository_with_worktree(&procly, config);
+
+    let started = std::time::Instant::now();
+    let output = procly.procly_in(&worktree, &["worktree", "init"]);
+
+    assert_eq!(output.status.code(), Some(124), "{}", stderr(&output));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+}

@@ -519,6 +519,7 @@ fn plan_resources(
         env,
         jobs: Arc::clone(&registry.jobs),
         ready_timeout: scope.config.health_timeout(declared),
+        command_timeout: scope.config.settings.driver_timeout,
     }))
 }
 

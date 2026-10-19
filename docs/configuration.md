@@ -74,6 +74,8 @@ web = { http = 3200 }
 | `lease_expiry` | `"30d"` | How long a Lease that no Service used is kept. Past it, the Lease is dropped and its port returns to the Range. Leases of Pinned branches never expire. |
 | `grace_period` | `"10m"` | How long the container of a Compose service keeps running once no Worktree needs it, see [Compose services](#compose-services). |
 | `isolation` | none | The Isolation mode of every Compose service that sets a `driver` and no `isolation` of its own, `"shared"` or `"logical"`, see [Isolation mode](#isolation-mode). Logical when unset. |
+| `setup_timeout` | `"30m"` | How long each setup command of `procly worktree init` may run before its whole process tree is killed and `worktree init` exits with 124, long enough for a cold install. See [Worktree init](worktree-init.md). |
+| `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125. |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
@@ -288,7 +290,7 @@ A Driver is a TOML file named after the technology. Postgres ships with Procly a
 | `index` | no | `true` when the resources are the numbers 0 to `capacity` minus 1, which Procly hands out one per resource and Worktree, so `{resource}` is a number. It needs a `capacity` and has no `max_length`. |
 | `capacity` | with `index` | How many resources the container holds. With `index`, Procly allocates at most that many and fails with a clear error past it, see [Numbered resources](#numbered-resources). Without it, the value is read and not enforced. |
 
-Commands run in the container of the Compose service with `docker compose exec`, by `sh -c`. `{resource}` and `{template}` are replaced by the names, which hold only lowercase letters, digits and underscores, and every other brace is left alone, so `${POSTGRES_USER}` reaches the shell of the container. A command that runs past 5 minutes is stopped. An unknown key in a Driver file is an error, and so is a Driver that no place holds, which names the places searched.
+Commands run in the container of the Compose service with `docker compose exec`, by `sh -c`. `{resource}` and `{template}` are replaced by the names, which hold only lowercase letters, digits and underscores, and every other brace is left alone, so `${POSTGRES_USER}` reaches the shell of the container. A command that runs past `settings.driver_timeout`, 5 minutes by default, is stopped. An unknown key in a Driver file is an error, and so is a Driver that no place holds, which names the places searched.
 
 The bundled Postgres Driver creates one database per resource with `createdb`, as the user `${POSTGRES_USER:-postgres}` of the container, and builds `postgresql://postgres:postgres@localhost:{port}/{resource}`. A Repository whose container uses other credentials copies the file to `.procly/drivers/postgres.toml` and edits the URL.
 

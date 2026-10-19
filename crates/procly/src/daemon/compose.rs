@@ -38,8 +38,6 @@ const INSTALL_URL: &str = "https://docs.docker.com/compose/install/";
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
 /// How many lines of the logs of a container that never became healthy `up` shows.
 const LOG_LINES: &str = "20";
-/// How long a command of a Driver may run in the container.
-const DRIVER_COMMAND_TIMEOUT: Duration = Duration::from_mins(5);
 /// How long the Driver waits between 2 probes of a container that is not ready to create resources.
 const READY_INTERVAL: Duration = Duration::from_millis(250);
 /// How many characters of the output of a failed command an error shows, its end being where the cause is.
@@ -163,6 +161,8 @@ pub(crate) struct ResourcePlan {
     pub(crate) jobs: Arc<Jobs>,
     /// How long the container may take to accept the commands of the Driver.
     pub(crate) ready_timeout: Duration,
+    /// How long one command of the Driver may run in the container.
+    pub(crate) command_timeout: Duration,
 }
 
 /// A Logical resource a Worktree needs.
@@ -1067,7 +1067,7 @@ impl Docker {
             let script = |command: &str| Driver::command(command, name, template);
             // A check that cannot run says nothing about the resource: creating on its word could hit one that exists,
             // and a failed Seed would then drop it.
-            match self.exec(&script(&plan.driver.check)).await {
+            match self.exec(plan, &script(&plan.driver.check)).await {
                 Ok(output) if output.status.success() => continue,
                 Ok(_) => {}
                 Err(error) => {
@@ -1130,7 +1130,7 @@ impl Docker {
     async fn wait_ready(&self, plan: &ResourcePlan, ready: &str) -> Result<(), ComposeError> {
         let deadline = Instant::now() + plan.ready_timeout;
         loop {
-            let reason = match self.exec(ready).await {
+            let reason = match self.exec(plan, ready).await {
                 Ok(output) if output.status.success() => return Ok(()),
                 Ok(output) => failure(&output),
                 Err(error) => error.to_string(),
@@ -1154,7 +1154,7 @@ impl Docker {
         name: &str,
         script: &str,
     ) -> Result<(), ComposeError> {
-        let reason = match self.exec(script).await {
+        let reason = match self.exec(plan, script).await {
             Ok(output) if output.status.success() => return Ok(()),
             Ok(output) => failure(&output),
             Err(error) => error.to_string(),
@@ -1168,14 +1168,14 @@ impl Docker {
         })
     }
 
-    /// Runs a shell script in the container of the service, which must run.
-    async fn exec(&self, script: &str) -> std::io::Result<Output> {
+    /// Runs a shell script of the Driver of `plan` in the container of the service, which must run.
+    async fn exec(&self, plan: &ResourcePlan, script: &str) -> std::io::Result<Output> {
         let args = ["exec", "-T", &self.compose, "sh", "-c", script];
-        match tokio::time::timeout(DRIVER_COMMAND_TIMEOUT, self.project_output(&args)).await {
+        match tokio::time::timeout(plan.command_timeout, self.project_output(&args)).await {
             Ok(output) => output,
             Err(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("it did not end within {}", duration::format(DRIVER_COMMAND_TIMEOUT)),
+                format!("it did not end within {}", duration::format(plan.command_timeout)),
             )),
         }
     }

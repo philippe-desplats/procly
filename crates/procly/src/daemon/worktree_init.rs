@@ -20,8 +20,6 @@ use super::store;
 use crate::protocol::{InitReport, JobEnd, Response};
 use crate::topology::{self, Topology};
 
-/// How long a setup command may run before its whole process tree is killed, long enough for a cold install.
-const SETUP_TIMEOUT: Duration = Duration::from_mins(30);
 /// The record of the setup commands that succeeded, in the git directory of the Worktree.
 const RECORD_FILE: &str = "procly-worktree-init.json";
 /// The version of the format of the record, a state document like the ones of the state directory (ADR 0012).
@@ -56,6 +54,8 @@ struct Record {
 struct Prepared {
     report: InitReport,
     setup: Vec<String>,
+    /// How long each setup command may run before its whole process tree is killed.
+    setup_timeout: Duration,
     record_path: PathBuf,
     record: Record,
 }
@@ -87,6 +87,7 @@ pub(super) async fn run(
     let Prepared {
         mut report,
         setup,
+        setup_timeout,
         record_path,
         mut record,
     } = tokio::task::spawn_blocking(move || prepare(&prepared_topology))
@@ -103,7 +104,7 @@ pub(super) async fn run(
                 command: command.clone(),
             },
             env: env.clone(),
-            timeout: SETUP_TIMEOUT,
+            timeout: setup_timeout,
         };
         let jobs = Arc::clone(&registry);
         // Opening a terminal and forking are blocking system calls.
@@ -167,6 +168,7 @@ fn prepare(topology: &Topology) -> anyhow::Result<Prepared> {
     Ok(Prepared {
         report,
         setup: config.worktree.setup,
+        setup_timeout: config.settings.setup_timeout,
         record_path,
         record,
     })

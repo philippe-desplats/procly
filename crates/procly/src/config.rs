@@ -173,6 +173,12 @@ pub(crate) struct Settings {
     /// unset.
     #[serde(default)]
     pub(crate) isolation: Option<IsolationMode>,
+    /// How long a setup command of `worktree init` may run before its whole process tree is killed.
+    #[serde(default = "default_setup_timeout", deserialize_with = "duration")]
+    pub(crate) setup_timeout: Duration,
+    /// How long one command of a Driver may run in the container.
+    #[serde(default = "default_driver_timeout", deserialize_with = "duration")]
+    pub(crate) driver_timeout: Duration,
 }
 
 impl Default for Settings {
@@ -187,6 +193,8 @@ impl Default for Settings {
             lease_expiry: default_lease_expiry(),
             grace_period: default_grace_period(),
             isolation: None,
+            setup_timeout: default_setup_timeout(),
+            driver_timeout: default_driver_timeout(),
         }
     }
 }
@@ -958,6 +966,15 @@ fn default_port_range() -> Range {
 /// Long enough for an agent coming back from a short break to find the container warm.
 fn default_grace_period() -> Duration {
     Duration::from_mins(10)
+}
+
+/// Long enough for a cold install.
+fn default_setup_timeout() -> Duration {
+    Duration::from_mins(30)
+}
+
+fn default_driver_timeout() -> Duration {
+    Duration::from_mins(5)
 }
 
 /// Long enough to cover a branch left aside during a holiday.
