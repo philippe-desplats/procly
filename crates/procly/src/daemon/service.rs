@@ -10,16 +10,15 @@ use std::time::Duration;
 
 use nix::unistd::Pid;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, ProcessGroup};
-use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use super::clock::Clock;
 use super::cpu::group_cpu;
 use super::health::HealthCheck;
 use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
-use super::process_group::{self, DRAIN_TIMEOUT, STOP_TIMEOUT, kill_group};
+use super::output_file::{self, OutputFiles, Tail};
+use super::process_group::{self, STOP_TIMEOUT, kill_group};
 use super::record::{ServiceRecord, ServiceRecords};
 use crate::config::RestartPolicy;
 use crate::output::{self, OutputBuffer};
@@ -43,6 +42,13 @@ pub(crate) enum ServiceError {
         service: String,
         command: String,
         cwd: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot create the output file of service {service} in {dir}")]
+    Output {
+        service: String,
+        dir: PathBuf,
         #[source]
         source: io::Error,
     },
@@ -97,6 +103,7 @@ type ServiceKey = (PathBuf, String);
 pub(crate) struct Services {
     clock: Clock,
     records: Arc<ServiceRecords>,
+    outputs: OutputFiles,
     table: Mutex<HashMap<ServiceKey, Arc<Service>>>,
     /// Held from the lookup to the insert, so that 2 concurrent requests never both start the Service.
     starting: Mutex<()>,
@@ -141,10 +148,11 @@ enum ServiceState {
 }
 
 impl Services {
-    pub(crate) fn new(clock: Clock, records: ServiceRecords) -> Self {
+    pub(crate) fn new(clock: Clock, records: ServiceRecords, outputs: OutputFiles) -> Self {
         Self {
             clock,
             records: Arc::new(records),
+            outputs,
             table: Mutex::default(),
             starting: Mutex::default(),
         }
@@ -208,7 +216,12 @@ impl Services {
                 .into());
             }
         }
-        let service = spawn(spec()?, self.clock.clone(), Arc::clone(&self.records))?;
+        let service = spawn(
+            spec()?,
+            self.clock.clone(),
+            Arc::clone(&self.records),
+            self.outputs.clone(),
+        )?;
         self.table().insert(key, Arc::clone(&service));
         Ok(Start::Ready {
             service,
@@ -298,16 +311,31 @@ impl Services {
         Arc::clone(&self.records)
     }
 
+    /// The output files of the running Services.
+    pub(crate) fn outputs(&self) -> &OutputFiles {
+        &self.outputs
+    }
+
     /// Takes over the Service of `record`, which a previous Daemon started and which still runs and listens on its
     /// Lease: it is healthy, and supervised through its process group, as it is no child of this Daemon. Its output
-    /// went to the previous Daemon and is lost. Must run inside the Tokio runtime.
+    /// file is followed from its start, so its output from before the restart is kept. Must run inside the Tokio
+    /// runtime.
     pub(crate) fn reattach(&self, record: ServiceRecord) {
+        let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
+        // A Service recorded before output files existed wrote to a pipe, its output is lost.
+        let tail = record.output.as_ref().and_then(|path| match output_file::open(path) {
+            Ok(reader) => Some(Tail::follow(path.clone(), reader, Arc::clone(&output))),
+            Err(error) => {
+                eprintln!("cannot read the output file {}: {error}", path.display());
+                None
+            }
+        });
         let service = Arc::new(Service {
             port: record.port,
             topology: record.topology(),
             covers: record.covers.clone(),
             reattached: true,
-            output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
+            output,
             state: watch::Sender::new(ServiceState::Healthy),
             stop: watch::Sender::new(None),
         });
@@ -318,6 +346,7 @@ impl Services {
         tokio::spawn(supervise_reattached(
             service,
             record,
+            tail,
             self.clock.clone(),
             Arc::clone(&self.records),
         ));
@@ -434,14 +463,20 @@ struct Process {
     child: Box<dyn ChildWrapper>,
     /// The leader of the process group holding the tree, so its pid is also the group id.
     pgid: Pid,
-    pumps: Vec<JoinHandle<()>>,
+    /// Follows the output file the run appends to.
+    tail: Tail,
 }
 
-fn spawn(spec: ServiceSpec, clock: Clock, records: Arc<ServiceRecords>) -> Result<Arc<Service>, ServiceError> {
+fn spawn(
+    spec: ServiceSpec,
+    clock: Clock,
+    records: Arc<ServiceRecords>,
+    outputs: OutputFiles,
+) -> Result<Arc<Service>, ServiceError> {
     let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
-    let process = launch(&spec, &output)?;
+    let process = launch(&spec, &output, &outputs)?;
     // Recorded before anyone hears of the Service, so that a crash of the Daemon from now on leaves a trace of it.
-    record_run(&records, record_of(&spec), process.pgid);
+    record_run(&records, record_of(&spec, process.tail.path()), process.pgid);
     let service = Arc::new(Service {
         port: spec.health.port,
         topology: spec.topology.clone(),
@@ -451,12 +486,12 @@ fn spawn(spec: ServiceSpec, clock: Clock, records: Arc<ServiceRecords>) -> Resul
         state: watch::Sender::new(ServiceState::Starting),
         stop: watch::Sender::new(None),
     });
-    tokio::spawn(supervise(Arc::clone(&service), spec, clock, records, process));
+    tokio::spawn(supervise(Arc::clone(&service), spec, clock, records, outputs, process));
     Ok(service)
 }
 
-/// The record of a Service, waiting for the process group of its current run.
-fn record_of(spec: &ServiceSpec) -> ServiceRecord {
+/// The record of a Service whose current run appends to the output file `output`, waiting for its process group.
+fn record_of(spec: &ServiceSpec, output: &Path) -> ServiceRecord {
     ServiceRecord {
         repository: spec.topology.git_common_dir.clone(),
         worktree: spec.topology.worktree.clone(),
@@ -470,6 +505,7 @@ fn record_of(spec: &ServiceSpec) -> ServiceRecord {
         idle_ms: spec
             .idle
             .map(|idle| u64::try_from(idle.as_millis()).unwrap_or(u64::MAX)),
+        output: Some(output.to_owned()),
     }
 }
 
@@ -490,8 +526,19 @@ async fn finish(service: &Service, records: &Arc<ServiceRecords>, topology: &Top
     service.state.send_replace(ServiceState::Ended(end));
 }
 
-/// Starts the process of the Service, writing its output into `output`.
-fn launch(spec: &ServiceSpec, output: &Arc<Mutex<OutputBuffer>>) -> Result<Process, ServiceError> {
+/// Starts the process of the Service, appending its output to a new output file of `outputs`, which is followed into
+/// `output`.
+fn launch(
+    spec: &ServiceSpec,
+    output: &Arc<Mutex<OutputBuffer>>,
+    outputs: &OutputFiles,
+) -> Result<Process, ServiceError> {
+    let file = outputs.create().map_err(|source| ServiceError::Output {
+        service: spec.name.clone(),
+        dir: outputs.dir().to_owned(),
+        source,
+    })?;
+    let path = file.path;
     let mut command = CommandWrap::with_new("/bin/sh", |command| {
         command
             .arg("-c")
@@ -500,33 +547,36 @@ fn launch(spec: &ServiceSpec, output: &Arc<Mutex<OutputBuffer>>) -> Result<Proce
             .env_clear()
             .envs(spec.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            // Not pipes, which would die with this Daemon and take the Service down at its next write.
+            .stdout(Stdio::from(file.stdout))
+            .stderr(Stdio::from(file.stderr));
     });
     command.wrap(ProcessGroup::leader());
-    let mut child = command.spawn().map_err(|source| ServiceError::Spawn {
-        service: spec.name.clone(),
-        command: spec.command.clone(),
-        cwd: spec.cwd.clone(),
-        source,
-    })?;
+    let spawned = command.spawn();
+    // The handles the process writes with are its own now, the Daemon keeps none.
+    drop(command);
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(source) => {
+            let _ = std::fs::remove_file(&path);
+            return Err(ServiceError::Spawn {
+                service: spec.name.clone(),
+                command: spec.command.clone(),
+                cwd: spec.cwd.clone(),
+                source,
+            });
+        }
+    };
     let Some(pgid) = child.id().and_then(|pid| i32::try_from(pid).ok()).map(Pid::from_raw) else {
         // Unreachable on Unix, where every spawned child has a pid, but never leave a child unreaped.
         tokio::spawn(async move { Box::into_pin(child.kill()).await });
+        let _ = std::fs::remove_file(&path);
         return Err(ServiceError::NoPid {
             service: spec.name.clone(),
         });
     };
-
-    // Both pipes are drained continuously, a full pipe would block a chatty Service.
-    let mut pumps = Vec::new();
-    if let Some(stdout) = child.stdout().take() {
-        pumps.push(tokio::spawn(pump(stdout, Arc::clone(output))));
-    }
-    if let Some(stderr) = child.stderr().take() {
-        pumps.push(tokio::spawn(pump(stderr, Arc::clone(output))));
-    }
-    Ok(Process { child, pgid, pumps })
+    let tail = Tail::follow(path, file.reader, Arc::clone(output));
+    Ok(Process { child, pgid, tail })
 }
 
 /// Watches the process of the Service until it ends for good: stopped, never healthy, or crashed more often than
@@ -540,6 +590,7 @@ async fn supervise(
     spec: ServiceSpec,
     clock: Clock,
     records: Arc<ServiceRecords>,
+    outputs: OutputFiles,
     first: Process,
 ) {
     let mut stop = service.stop.subscribe();
@@ -580,7 +631,7 @@ async fn supervise(
         let pgid = process.pgid;
         let _ = tokio::task::spawn_blocking(move || kill_group(pgid)).await;
         // The last lines tell why a Service died, they must be read before anyone is told it ended.
-        let _ = tokio::time::timeout(DRAIN_TIMEOUT, join_all(process.pumps)).await;
+        process.tail.finish().await;
 
         let crashed = exited_by_itself && !service.is_stopping();
         if !(crashed && ever_healthy && spec.restart.attempts > 0) {
@@ -627,9 +678,13 @@ async fn supervise(
                 finish(&service, &records, &spec.topology, &spec.name, end).await;
                 return;
             }
-            match launch(&spec, &service.output) {
+            match launch(&spec, &service.output, &outputs) {
                 Ok(process) => {
-                    let (records, record, pgid) = (Arc::clone(&records), record_of(&spec), process.pgid);
+                    let (records, record, pgid) = (
+                        Arc::clone(&records),
+                        record_of(&spec, process.tail.path()),
+                        process.pgid,
+                    );
                     let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid)).await;
                     break process;
                 }
@@ -684,6 +739,7 @@ async fn stop_tree(child: &mut dyn ChildWrapper) {
 async fn supervise_reattached(
     service: Arc<Service>,
     record: ServiceRecord,
+    tail: Option<Tail>,
     clock: Clock,
     records: Arc<ServiceRecords>,
 ) {
@@ -717,6 +773,9 @@ async fn supervise_reattached(
         eprintln!("{label} ended, its exit code is unknown, a previous Daemon started it");
         ServiceEnd::Lost
     };
+    if let Some(tail) = tail {
+        tail.finish().await;
+    }
     finish(&service, &records, &record.topology(), &record.service, end).await;
 }
 
@@ -915,20 +974,6 @@ fn end_of(status: ExitStatus) -> ServiceEnd {
         None => ServiceEnd::Exited {
             code: status.code().expect("an exit status without a signal carries a code"),
         },
-    }
-}
-
-async fn join_all(pumps: Vec<JoinHandle<()>>) {
-    for pump in pumps {
-        let _ = pump.await;
-    }
-}
-
-async fn pump(mut reader: impl AsyncRead + Unpin, output: Arc<Mutex<OutputBuffer>>) {
-    let mut chunk = [0; 8192];
-    // An error reading a pipe means the Service closed it, which is the end of its output.
-    while let Ok(read @ 1..) = reader.read(&mut chunk).await {
-        output::lock(&output).push(&chunk[..read]);
     }
 }
 

@@ -1,6 +1,7 @@
 mod common;
 
 use std::path::Path;
+use std::time::Duration;
 
 use nix::sys::signal::{Signal, kill};
 
@@ -28,6 +29,49 @@ fn web_on(port: u16, starts: &Path, pid: &Path) -> String {
         pid = pid.display(),
         server = test_server().display()
     )
+}
+
+/// Like [`web_on`], for a `web` whose leader, the shell, prints a numbered tick every 50 ms for as long as it runs.
+fn chatty_web_on(port: u16, starts: &Path, pid: &Path) -> String {
+    format!(
+        "[services.web]\nrun = 'echo start >> {starts}; echo $$ > {pid}; {server} & i=0; while true; do i=$((i+1)); \
+         echo tick $i; sleep 0.05; done'\nports = {{ http = {port} }}\n",
+        starts = starts.display(),
+        pid = pid.display(),
+        server = test_server().display()
+    )
+}
+
+#[test]
+fn a_service_that_keeps_printing_after_the_daemon_was_killed_stays_alive_and_is_reused() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    write(&main, "procly.toml", &chatty_web_on(port, &starts, &pid));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let leader = read_pid(&pid);
+
+    procly.kill_daemon();
+    // Long enough for several ticks to be printed while no Daemon runs.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        common::is_alive(leader),
+        "the service died printing after the daemon crashed"
+    );
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("web reused http://localhost:{port} port {port}\n")
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        common::is_alive(leader),
+        "the re-attached service died at its next write"
+    );
+    assert_eq!(lines(&starts), ["start"]);
 }
 
 #[test]

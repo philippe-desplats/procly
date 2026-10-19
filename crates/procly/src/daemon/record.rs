@@ -38,6 +38,10 @@ pub(crate) struct ServiceRecord {
     pub(crate) covered_ports: Vec<u16>,
     /// How long the Service may be idle before it is stopped.
     pub(crate) idle_ms: Option<u64>,
+    /// The output file the current run appends to, which the next Daemon follows when it re-attaches the Service.
+    /// Absent from a document written before output files existed, whose Services wrote to a pipe.
+    #[serde(default)]
+    pub(crate) output: Option<PathBuf>,
 }
 
 impl ServiceRecord {

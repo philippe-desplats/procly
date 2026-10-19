@@ -16,6 +16,7 @@ mod lease;
 mod listeners;
 mod managed;
 mod off;
+mod output_file;
 mod process_group;
 mod propose;
 mod reconcile;
@@ -47,6 +48,7 @@ use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
 use self::managed::ManagedBlocks;
 use self::off::Offs;
+use self::output_file::OutputFiles;
 use self::record::ServiceRecords;
 use self::service::{Relation, Service, ServiceSpec, Services, Start};
 use crate::config;
@@ -152,7 +154,11 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     let leases = Arc::new(Leases::new(state.leases(), clock.clone()));
     let registry = Arc::new(Registry {
         jobs: Arc::default(),
-        services: Services::new(clock.clone(), ServiceRecords::new(state.services())),
+        services: Services::new(
+            clock.clone(),
+            ServiceRecords::new(state.services()),
+            OutputFiles::new(state.outputs()),
+        ),
         composes: Composes::new(clock.clone(), Arc::clone(&leases)),
         leases,
         indexes: Indexes::new(state.indexes()),

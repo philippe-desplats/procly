@@ -96,6 +96,11 @@ impl StateDir {
         self.path.join("services.json")
     }
 
+    /// The directory holding the output file of every running Service, which outlives a crash of the Daemon.
+    pub(crate) fn outputs(&self) -> PathBuf {
+        self.path.join("output")
+    }
+
     /// The document listing the Repositories that are Off.
     pub(crate) fn off(&self) -> PathBuf {
         self.path.join("off.json")

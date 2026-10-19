@@ -41,6 +41,14 @@ pub(super) async fn run(services: &Services) -> Result<(), StoreError> {
     let (records, recorded) = (services.records(), kept.clone());
     // Before any of them is supervised, so that one ending at once is not recorded again.
     let _ = tokio::task::spawn_blocking(move || records.replace(recorded)).await;
+    // The output file of a Service that ended while no Daemon ran is no one's, and no Service starts before this.
+    let (outputs, followed) = (
+        services.outputs().clone(),
+        kept.iter()
+            .filter_map(|record| record.output.clone())
+            .collect::<Vec<_>>(),
+    );
+    let _ = tokio::task::spawn_blocking(move || outputs.sweep(&followed)).await;
     for record in kept {
         services.reattach(record);
     }
