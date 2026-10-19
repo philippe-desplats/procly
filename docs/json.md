@@ -54,7 +54,7 @@ $ procly logs --json 3f9a1c2e
 {"schema_version":1,"name":"3f9a1c2e","output":"hi\n"}
 ```
 
-`name` is the Job or the Service asked for.
+`name` is the Job or the Service asked for. The `output` of a Compose service is the last 1000 lines of its container, as `docker compose logs` prints them.
 
 ## `up`
 

@@ -38,6 +38,8 @@ const INSTALL_URL: &str = "https://docs.docker.com/compose/install/";
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
 /// How many lines of the logs of a container that never became healthy `up` shows.
 const LOG_LINES: &str = "20";
+/// How many lines of the logs of a container `procly logs` shows, its recent output as for a Process service.
+const RECENT_LOG_LINES: &str = "1000";
 /// How long the Driver waits between 2 probes of a container that is not ready to create resources.
 const READY_INTERVAL: Duration = Duration::from_millis(250);
 /// How many characters of the output of a failed command an error shows, its end being where the cause is.
@@ -397,7 +399,7 @@ impl Composes {
             }
         }
         if let Err(end) = health {
-            let logs = docker.logs().await;
+            let logs = docker.logs(LOG_LINES).await;
             // Stopped, never removed: the data stays, and the next `up` starts it again.
             let _ = docker.stop().await;
             return Ok(Brought {
@@ -413,6 +415,29 @@ impl Composes {
             port,
             health: Ok(()),
         })
+    }
+
+    /// The recent output of the container of the Compose service `name`, the service `compose` of the compose file
+    /// of `project_dir`, the Main worktree, whether it runs or not. Read with `docker compose logs` in `env`, so that
+    /// the compose file interpolates as it does for `up`.
+    pub(crate) async fn logs(
+        &self,
+        name: &str,
+        compose: &str,
+        project_dir: PathBuf,
+        env: Vec<(String, String)>,
+    ) -> Result<String, ComposeError> {
+        let mut docker = Docker {
+            service: name.to_owned(),
+            compose: compose.to_owned(),
+            project_dir,
+            project: String::new(),
+            env,
+            recorded_env: Vec::new(),
+        };
+        docker.check_available().await?;
+        docker.project = docker.config().await?.name;
+        Ok(docker.logs(RECENT_LOG_LINES).await)
     }
 
     /// Lets `worktree` go of the containers of the Repository `repository`, of the Compose service `name` only when
@@ -1038,8 +1063,8 @@ impl Docker {
     }
 
     /// The recent logs of the container.
-    async fn logs(&self) -> String {
-        let logs = ["logs", "--no-color", "--tail", LOG_LINES, &self.compose];
+    async fn logs(&self, lines: &str) -> String {
+        let logs = ["logs", "--no-color", "--tail", lines, &self.compose];
         match self.project_output(&logs).await {
             Ok(output) => {
                 let mut text = String::from_utf8_lossy(&output.stdout).into_owned();

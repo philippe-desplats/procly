@@ -1028,3 +1028,33 @@ fn docker_a_recorded_container_replaced_by_one_without_matching_labels_is_forgot
     );
     assert!(foreign.is_running(), "Procly stopped a container it does not own");
 }
+
+#[test]
+fn docker_logs_of_a_compose_service_prints_the_recent_output_of_its_container() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let talking = compose_file(&fixture.project.name).replace(
+        "command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]",
+        "command: [\"sh\", \"-c\", \"echo procly-logs-marker; exec nc -lk -p 80 -e /bin/cat\"]",
+    );
+    std::fs::write(fixture.main.join("compose.yaml"), talking).expect("write the compose file");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+
+    // From the other Worktree too, since the container serves every Worktree of the Repository.
+    let text = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    let json = fixture.procly.procly_in(&fixture.main, &["logs", "db", "--json"]);
+
+    assert_success(&text);
+    assert!(stdout(&text).contains("procly-logs-marker"), "{}", stdout(&text));
+    assert_success(&json);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&json)).expect("logs --json prints one document");
+    assert_eq!(document["name"], "db", "{document}");
+    assert!(
+        document["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("procly-logs-marker")),
+        "{document}"
+    );
+}

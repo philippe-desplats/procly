@@ -284,9 +284,9 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
             }
             None => unknown_job(&id),
         },
-        Request::Logs { name, cwd } => match jobs.get(&name) {
+        Request::Logs { name, cwd, env } => match jobs.get(&name) {
             Some(job) => Response::Logs { output: job.output() },
-            None => service_logs(registry, name, cwd).await,
+            None => service_logs(registry, name, cwd, env).await,
         },
         Request::Up {
             service,
@@ -411,11 +411,6 @@ async fn down(
     Ok((stopped, released))
 }
 
-/// The root of the Worktree holding `cwd`, where its Services are declared.
-fn worktree_of(cwd: &Path) -> anyhow::Result<PathBuf> {
-    Ok(topology_of(cwd)?.worktree.path)
-}
-
 /// The Repository and the Worktree holding `cwd`, which must be in a git Repository.
 fn topology_of(cwd: &Path) -> anyhow::Result<topology::Topology> {
     let cwd = topology::canonicalize(cwd)?;
@@ -442,21 +437,49 @@ fn declared<'a>(config: &'a config::Config, worktree: &Path, name: &str) -> anyh
 }
 
 /// The recent output of the Service `name` of the Worktree holding `cwd`, once the Services of the previous Daemon
-/// are reconciled, so that a re-attached Service shows its output from before the restart.
-async fn service_logs(registry: &Registry, name: String, cwd: PathBuf) -> Response {
+/// are reconciled, so that a re-attached Service shows its output from before the restart. The output of a Compose
+/// service is the one of its container, which `docker compose logs` reads in `env`.
+async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<(String, String)>) -> Response {
     if let Err(message) = registry.reconciled().await {
         return Response::Error { message };
     }
+    let unknown = || Response::Error {
+        message: format!("no job or service {name}"),
+    };
     // Outside a git Repository there is no Service, and the name is simply unknown.
-    let worktree = tokio::task::spawn_blocking(move || worktree_of(&cwd))
+    let Ok(Ok(topology)) = tokio::task::spawn_blocking(move || topology_of(&cwd)).await else {
+        return unknown();
+    };
+    if let Some(output) = registry.services.output_of(&topology.worktree.path, &name) {
+        return Response::Logs { output };
+    }
+    let compose = {
+        let name = name.clone();
+        // Reading the configuration is blocking, and finding the Main worktree runs git.
+        blocking("the logs could not be read", move || {
+            let config = read_config(&topology.worktree.path)?;
+            match config
+                .services
+                .get(&name)
+                .map(|declared| declared.kind(&name))
+                .transpose()?
+            {
+                Some(config::ServiceKind::Compose { service }) => {
+                    Ok(Some((service.to_owned(), topology.main()?.worktree.path)))
+                }
+                Some(config::ServiceKind::Process { .. } | config::ServiceKind::Group { .. }) | None => Ok(None),
+            }
+        })
         .await
-        .ok()
-        .and_then(Result::ok);
-    match worktree.and_then(|worktree| registry.services.output_of(&worktree, &name)) {
-        Some(output) => Response::Logs { output },
-        None => Response::Error {
-            message: format!("no job or service {name}"),
-        },
+    };
+    match compose {
+        Ok(Some((compose, project_dir))) => registry
+            .composes
+            .logs(&name, &compose, project_dir, env)
+            .await
+            .map_or_else(failure, |output| Response::Logs { output }),
+        Ok(None) => unknown(),
+        Err(message) => Response::Error { message },
     }
 }
 

@@ -136,9 +136,10 @@ enum Command {
     /// Print the recent output of a running or ended Job, or of a Service of the current Worktree.
     #[command(
         after_help = "A Job identifier printed by `procly run` names that Job, any other name a Service of the current \
-                      Worktree, whose output is kept across a restart of the Daemon. Exit codes: 0 on success, 125 \
-                      when Procly itself fails, such as for a name that is neither a Job nor a Service. See \
-                      docs/exit-codes.md."
+                      Worktree, whose output is kept across a restart of the Daemon. The output of a Compose service \
+                      is the last 1000 lines of its container, read with `docker compose logs`. Exit codes: 0 on \
+                      success, 125 when Procly itself fails, such as for a name that is neither a Job nor a Service. \
+                      See docs/exit-codes.md."
     )]
     Logs {
         #[command(flatten)]
@@ -385,6 +386,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             let request = Request::Logs {
                 name: job_or_service.clone(),
                 cwd,
+                env: caller_env(),
             };
             match client::send(&state, &request)? {
                 Response::Logs { output } => {
