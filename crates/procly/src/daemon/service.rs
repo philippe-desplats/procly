@@ -230,11 +230,20 @@ impl Services {
         })
     }
 
-    /// The recent output of the Service `name` of `worktree`, running or ended, `None` when the Daemon knows no such
-    /// Service.
+    /// The recent output of the Service `name` of `worktree`, running or ended, or else of the running Group covering
+    /// it, whose process prints for it. `None` when the Daemon knows no such Service.
     pub(crate) fn output_of(&self, worktree: &Path, name: &str) -> Option<String> {
-        self.table()
+        let table = self.table();
+        table
             .get(&(worktree.to_owned(), name.to_owned()))
+            .or_else(|| {
+                table
+                    .iter()
+                    .find(|((path, _), service)| {
+                        path == worktree && service.is_running() && service.covers.iter().any(|covered| covered == name)
+                    })
+                    .map(|(_, group)| group)
+            })
             .map(|service| service.output())
     }
 

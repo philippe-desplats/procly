@@ -559,9 +559,17 @@ fn the_output_file_of_a_flooding_service_stays_bounded_and_is_removed_once_it_is
 
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_secs(1) {
+        // The output file, and the previous one keeping the last buffer read before the Daemon emptied it.
         let sizes = output_files(&procly);
-        assert_eq!(sizes.len(), 1, "one output file per running Service");
-        assert!(sizes[0] < 8 * 1024 * 1024, "the output file grew to {} bytes", sizes[0]);
+        assert!(
+            (1..=2).contains(&sizes.len()),
+            "{} output files for one Service",
+            sizes.len()
+        );
+        assert!(
+            sizes.iter().all(|size| *size < 8 * 1024 * 1024),
+            "the output files grew to {sizes:?} bytes"
+        );
     }
     assert!(stdout(&procly.procly_in(&main, &["logs", "web"])).ends_with("procly-flood\n"));
 

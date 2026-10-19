@@ -34,8 +34,16 @@ fn web_on(port: u16, starts: &Path, pid: &Path) -> String {
 /// Like [`web_on`], for a `web` whose leader, the shell, prints a numbered tick every 50 ms for as long as it runs.
 fn chatty_web_on(port: u16, starts: &Path, pid: &Path) -> String {
     format!(
-        "[services.web]\nrun = 'echo start >> {starts}; echo $$ > {pid}; {server} & i=0; while true; do i=$((i+1)); \
-         echo tick $i; sleep 0.05; done'\nports = {{ http = {port} }}\n",
+        "[services.web]\nrun = '{}'\nports = {{ http = {port} }}\n",
+        chatty_run(starts, pid)
+    )
+}
+
+/// The command of the `web` of [`chatty_web_on`].
+fn chatty_run(starts: &Path, pid: &Path) -> String {
+    format!(
+        "echo start >> {starts}; echo $$ > {pid}; {server} & i=0; while true; do i=$((i+1)); echo tick $i; sleep 0.05; \
+         done",
         starts = starts.display(),
         pid = pid.display(),
         server = test_server().display()
@@ -103,6 +111,36 @@ fn logs_of_a_reattached_service_show_its_output_from_before_and_after_the_daemon
     });
     let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
     assert!(logs.lines().any(|line| line == "tick 1"), "{logs}");
+}
+
+#[test]
+fn logs_of_a_reattached_service_keep_the_output_from_before_the_daemon_last_emptied_its_output_file() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+    // A burst of a megabyte and a half, which the Daemon empties once it has read it, with a marker in its last
+    // megabyte, the part the Daemon keeps.
+    let filler = procly.scratch().join("filler");
+    std::fs::write(&filler, "procly-filler\n".repeat(512 * 1024 / 14)).expect("write the filler");
+    let run = format!(
+        "cat {filler}; cat {filler}; echo procly-marker; cat {filler}; {}",
+        chatty_run(&starts, &pid),
+        filler = filler.display()
+    );
+    write(
+        &main,
+        "procly.toml",
+        &format!("[services.web]\nrun = '{run}'\nports = {{ http = {port} }}\n"),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    common::eventually("a few ticks", || last_tick(&procly, &main) >= 3);
+
+    procly.kill_daemon();
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+    assert!(logs.contains("procly-marker\n"), "the marker was lost with the restart");
 }
 
 /// The output files the Daemon holds in the state directory.

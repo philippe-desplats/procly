@@ -418,3 +418,26 @@ fn a_group_that_no_longer_listens_on_the_lease_of_a_covered_service_is_not_reatt
     );
     assert!(listens(api));
 }
+
+#[test]
+fn logs_of_a_service_covered_by_a_running_group_print_the_output_of_the_group() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(
+        &main,
+        "procly.toml",
+        &monorepo(free_port(), free_port(), &starts, &seen),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    let (web, api) = (lease_of(&procly, &main, "web"), lease_of(&procly, &main, "api"));
+
+    eventually("the output of both servers of the group", || {
+        let logs = stdout(&procly.procly_in(&main, &["logs", "dev"]));
+        logs.contains(&format!("listening on {web}\n")) && logs.contains(&format!("listening on {api}\n"))
+    });
+    let logs = procly.procly_in(&main, &["logs", "web"]);
+
+    assert_success(&logs);
+    assert_eq!(stdout(&logs), stdout(&procly.procly_in(&main, &["logs", "dev"])));
+}
