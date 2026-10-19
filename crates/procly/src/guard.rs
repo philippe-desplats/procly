@@ -24,8 +24,8 @@ pub(crate) struct Recognized {
     pub(crate) kind: Kind,
     /// The command that matched, as typed, without the `cd` or the variables around it.
     pub(crate) command: String,
-    /// Whether a `cd` or a `pushd` before it moved away from the directory the command line was run in.
-    pub(crate) moved: bool,
+    /// Where the last `cd` or `pushd` before it moved, `None` when the command runs where the command line was run.
+    pub(crate) moved_to: Option<String>,
 }
 
 /// The Bash tool call a `PreToolUse` hook receives on its standard input.
@@ -91,23 +91,26 @@ fn equivalent(recognized: &Recognized, services: &[GuardService], at_root: bool)
     let blocked = strip_launchers(&blocked);
     match recognized.kind {
         Kind::DevServer => {
-            let declared = services
+            // Run from the same directory, so that `cd apps/api && pnpm dev` is never the `pnpm dev` of `apps/web`.
+            let matches: Vec<(usize, &GuardService)> = services
                 .iter()
                 .filter_map(|service| {
-                    let run = words_of_dev_command(service.run.as_deref()?);
-                    let matched = same_start(blocked, strip_launchers(&run))?;
+                    let run = recognize(service.run.as_deref()?)?;
+                    if run.moved_to != recognized.moved_to {
+                        return None;
+                    }
+                    let matched = same_start(blocked, strip_launchers(&words_of(&run.command)))?;
                     Some((matched, service))
                 })
-                // The longest match wins, the first declared one among equals.
-                .fold(None::<(usize, &GuardService)>, |best, (matched, service)| match best {
-                    Some((longest, _)) if longest >= matched => best,
-                    _ => Some((matched, service)),
-                });
-            match declared {
-                Some((_, service)) => Some(format!("procly up {}", service.name)),
-                None => {
-                    (at_root && !recognized.moved && runs_the_whole_repository(blocked)).then(|| "procly up".to_owned())
-                }
+                .collect();
+            // The longest match wins. Services matching as long as each other leave the agent to pick.
+            let longest = matches.iter().map(|(matched, _)| *matched).max();
+            let mut best = matches.iter().filter(|(matched, _)| Some(*matched) == longest);
+            match (best.next(), best.next()) {
+                (Some((_, service)), None) => Some(format!("procly up {}", service.name)),
+                (Some(_), Some(_)) => None,
+                (None, _) => (at_root && recognized.moved_to.is_none() && runs_the_whole_repository(blocked))
+                    .then(|| "procly up".to_owned()),
             }
         }
         Kind::Compose => {
@@ -134,11 +137,6 @@ fn words_of(command: &str) -> Vec<String> {
         .next()
         .map(|segment| segment.words)
         .unwrap_or_default()
-}
-
-/// The words of the command of a Service that starts its dev server, the first one when none does.
-fn words_of_dev_command(run: &str) -> Vec<String> {
-    words_of(&recognize(run).map_or_else(|| run.to_owned(), |recognized| recognized.command))
 }
 
 /// How many words `blocked` and `run` share from their start, when one of them is the start of the other, a
@@ -199,11 +197,12 @@ fn compose_services(words: &[String]) -> Vec<&str> {
 
 /// The first command of `command_line` that starts a dev server or containers, `None` when none does.
 pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
-    let mut moved = false;
+    let mut moved_to: Option<String> = None;
     segments(command_line).into_iter().find_map(|segment| {
         let words = strip_launchers(&segment.words);
         if matches!(words.first().map(|word| basename(word)), Some("cd" | "pushd")) {
-            moved = true;
+            let to = words.get(1).map_or("~", String::as_str);
+            moved_to = Some(to.trim_start_matches("./").trim_end_matches('/').to_owned());
             return None;
         }
         // A shell given a command line to run: `bash -c 'npm run dev'`.
@@ -214,14 +213,14 @@ pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
             && flag.contains('c')
         {
             return recognize(inner).map(|recognized| Recognized {
-                moved: moved || recognized.moved,
+                moved_to: recognized.moved_to.or_else(|| moved_to.clone()),
                 ..recognized
             });
         }
         classify(words).map(|kind| Recognized {
             kind,
             command: segment.text.clone(),
-            moved,
+            moved_to: moved_to.clone(),
         })
     })
 }
@@ -721,9 +720,32 @@ mod tests {
             equivalent("pnpm --filter web dev --port 3000", false).as_deref(),
             Some("procly up web")
         );
-        assert_eq!(equivalent("astro dev --host", true).as_deref(), Some("procly up docs"));
+        assert_eq!(
+            equivalent("cd docs && astro dev --host", true).as_deref(),
+            Some("procly up docs")
+        );
+        assert_eq!(equivalent("astro dev --host", true), None);
         assert_eq!(equivalent("pnpm dev", true).as_deref(), Some("procly up dev"));
         assert_eq!(equivalent("pnpm --filter api dev", true), None);
+    }
+
+    #[test]
+    fn the_equivalent_runs_from_the_same_directory_and_is_never_a_guess_between_equals() {
+        let services = [
+            process("api", "cd apps/api && pnpm dev"),
+            process("web", "cd apps/web/ && pnpm dev"),
+            process("admin", "pnpm dev --filter admin"),
+            process("shop", "pnpm dev --filter shop"),
+        ];
+        let equivalent = |command: &str| equivalent(&recognize(command).unwrap(), &services, true);
+        assert_eq!(equivalent("cd apps/api && pnpm dev").as_deref(), Some("procly up api"));
+        assert_eq!(
+            equivalent("cd ./apps/web && pnpm dev").as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(equivalent("cd apps/docs && pnpm dev"), None);
+        // `pnpm dev` starts both admin and shop as far as words go, neither is a better match.
+        assert_eq!(equivalent("pnpm dev"), None);
     }
 
     #[test]

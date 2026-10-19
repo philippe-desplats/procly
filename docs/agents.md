@@ -61,7 +61,7 @@ Claude Code runs `procly guard` before every Bash command of the agent, with the
 
 The Procly command in the answer is the equivalent of the blocked one, found in this order:
 
-1. The declared Process service or Group whose `run` starts the same way as the blocked command, one being the start of the other word by word, a `{ports.<name>}` standing for any port: `npm run dev -- --host` against `run = "npm run dev"` answers `procly up web`. The longest match wins.
+1. The declared Process service or Group whose `run` starts the same way as the blocked command, one being the start of the other word by word, a `{ports.<name>}` standing for any port: `npm run dev -- --host` against `run = "npm run dev"` answers `procly up web`. Both must run from the same directory, so `cd apps/api && pnpm dev` only matches a `run` that changes to `apps/api` too. The longest match wins, and 2 Services matching as long as each other give no equivalent.
 2. For `docker compose up`, the Compose services whose `compose` it names, or all of them when it names none: `procly up cache && procly up db`.
 3. For the dev script of a whole Repository, `npm start`, `pnpm dev` or `turbo run dev` with no option narrowing it to one package, run at the root of the Worktree with no `cd` before it, `procly up`, which starts every Service no Group covers.
 4. Otherwise `procly up <service>`, the agent picking among the declared Services the answer lists.
