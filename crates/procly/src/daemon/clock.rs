@@ -76,8 +76,8 @@ impl Clock {
         match &self.source {
             Source::Real(_) => tokio::time::sleep(duration).await,
             Source::File(path) => {
-                let until = read(path).saturating_add(duration);
-                while read(path) < until {
+                let until = read_blocking(path).await.saturating_add(duration);
+                while read_blocking(path).await < until {
                     tokio::time::sleep(TEST_POLL).await;
                 }
             }
@@ -91,6 +91,15 @@ fn read(path: &Path) -> Duration {
         .ok()
         .and_then(|text| text.trim().parse().ok())
         .map_or(Duration::ZERO, Duration::from_millis)
+}
+
+/// [`read`] on a blocking thread, so that a wait never parks a runtime worker on the file system.
+async fn read_blocking(path: &Path) -> Duration {
+    let path = path.to_owned();
+    // A read that panicked has no reading to give, like a missing file.
+    tokio::task::spawn_blocking(move || read(&path))
+        .await
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
