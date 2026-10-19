@@ -533,6 +533,62 @@ fn docker_a_container_holding_the_lease_without_matching_labels_is_a_conflict_pr
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
 }
 
+/// A test server started by the test itself, outside Procly, killed when the test ends, passed or failed.
+struct Outside(std::process::Child);
+
+impl Outside {
+    fn listen(port: u16) -> Self {
+        let child = Command::new(test_server())
+            .args(["--port", &port.to_string()])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("the test server starts");
+        let outside = Self(child);
+        eventually("the test server to listen", || listens(port));
+        outside
+    }
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn docker_a_process_holding_the_lease_is_a_conflict_naming_the_kill_command_procly_never_runs() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    // Granted first, so that the Lease is the port the process takes.
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["env", "db"]));
+    let outside = Outside::listen(port);
+    let pid = outside.0.id();
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(output.status.code(), Some(5), "stderr: {}", stderr(&output));
+    let error = stderr(&output);
+    assert!(
+        error.contains(&format!(
+            "port {port} of its Lease is held by process {pid} procly-test-server started outside Procly, stop it \
+             with `kill {pid}`"
+        )),
+        "{error}"
+    );
+    assert!(listens(port), "Procly stopped a process it did not start");
+    assert!(
+        fixture.project.container().is_empty(),
+        "Procly created the container anyway"
+    );
+
+    run_stop_command(&error);
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+}
+
 #[test]
 fn docker_up_json_of_a_conflict_carries_the_conflicts_and_exits_5_as_the_text_does() {
     if !require_docker() {
