@@ -43,7 +43,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 
 use self::clock::Clock;
-use self::compose::{ComposeError, ComposeSpec, Composes, PlannedResource, Published, ResourcePlan};
+use self::compose::{ComposeError, ComposeSpec, Composes, PlannedResource, PublishedLease, ResourcePlan};
 use self::container_record::ContainerRecords;
 use self::health::{HealthCheck, HttpCheck};
 use self::index::Indexes;
@@ -604,7 +604,7 @@ fn prepare_compose(
     let published = injected
         .leases
         .iter()
-        .map(|(port_name, &port)| Published {
+        .map(|(port_name, &port)| PublishedLease {
             port_name: port_name.clone(),
             port,
         })

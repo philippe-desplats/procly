@@ -142,7 +142,7 @@ pub(crate) struct ComposeSpec {
     /// The environment of the caller, then the Leases and the variables the compose file interpolates.
     pub(crate) env: Vec<(String, String)>,
     /// The Leases of the Service, which the compose file must publish.
-    pub(crate) published: Vec<Published>,
+    pub(crate) published: Vec<PublishedLease>,
     /// The names of the variables the compose file may interpolate the Leases from.
     pub(crate) variables: Vec<String>,
     /// The names of the variables Procly injected into `env`, which the record of the container keeps.
@@ -175,7 +175,7 @@ pub(crate) struct PlannedResource {
 
 /// A Lease the compose file must publish on the host.
 #[derive(Debug)]
-pub(crate) struct Published {
+pub(crate) struct PublishedLease {
     pub(crate) port_name: String,
     pub(crate) port: u16,
 }
@@ -895,9 +895,9 @@ async fn run_seed(plan: &ResourcePlan, wanted: &PlannedResource, run: &str, time
 
 /// How a command that failed ended, with the end of what it printed.
 fn failure(output: &Output) -> String {
-    let mut printed = text(&output.stderr);
+    let mut printed = trimmed_output(&output.stderr);
     if printed.is_empty() {
-        printed = text(&output.stdout);
+        printed = trimmed_output(&output.stdout);
     }
     format!("{}: {}", output.status, tail(&printed))
 }
@@ -942,9 +942,9 @@ impl Docker {
             Err(error) => return Err(unavailable(format!("cannot run docker: {error}"))),
         };
         if !output.status.success() {
-            return Err(unavailable(text(&output.stderr)));
+            return Err(unavailable(trimmed_output(&output.stderr)));
         }
-        let version = text(&output.stdout);
+        let version = trimmed_output(&output.stdout);
         match major(&version) {
             Some(major) if major < 2 => Err(unavailable(format!("found docker compose {version}"))),
             _ => Ok(()),
@@ -965,7 +965,10 @@ impl Docker {
         let services = ["ps", "--status", "running", "--services"];
         match self.project_output(&services).await {
             Ok(output) => {
-                output.status.success() && text(&output.stdout).lines().any(|service| service == self.compose)
+                output.status.success()
+                    && trimmed_output(&output.stdout)
+                        .lines()
+                        .any(|service| service == self.compose)
             }
             Err(_) => false,
         }
@@ -1209,7 +1212,7 @@ impl Docker {
         Err(ComposeError::Command {
             service: self.service.clone(),
             args: args.join(" "),
-            stderr: text(&output.stderr),
+            stderr: trimmed_output(&output.stderr),
         })
     }
 
@@ -1292,7 +1295,8 @@ fn major(version: &str) -> Option<u32> {
     version.trim_start_matches('v').split('.').next()?.parse().ok()
 }
 
-fn text(bytes: &[u8]) -> String {
+/// The output of a command as trimmed text, an invalid UTF-8 sequence read as a replacement character.
+fn trimmed_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_owned()
 }
 
