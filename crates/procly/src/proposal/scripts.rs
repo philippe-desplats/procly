@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::cover::{self, Member};
 use super::group::{self, Narrowed};
 use super::{Proposal, ProposalError, ServiceEntry, service_name};
 
@@ -65,6 +66,8 @@ struct Package {
     /// Where the package sits, relative to the root of the Worktree. Empty for the root itself.
     dir: PathBuf,
     name: String,
+    /// The `name` of its `package.json`, the directory name when it has none, which a filter selects the package by.
+    manifest_name: String,
     /// The `dev` script of the package.
     script: String,
 }
@@ -84,6 +87,7 @@ impl Package {
         let name = package.get("name").and_then(Value::as_str).unwrap_or(&fallback);
         Ok(Some(Self {
             name: service_name(name, &service_name(&fallback, "service")),
+            manifest_name: name.to_owned(),
             script: script.to_owned(),
             dir,
         }))
@@ -330,17 +334,35 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
         }
         return Ok(());
     }
-    let mut covers: Vec<String> = packages
+    let members: Vec<Member> = packages
         .iter()
-        .map(|package| proposal.add(&package.name, package.service(manager)))
+        .map(|package| Member {
+            service: proposal.add(&package.name, package.service(manager)),
+            dir: package.dir.clone(),
+            package: package.manifest_name.clone(),
+        })
         .collect();
     if let Some(root_package) = root_package {
+        let mut covers: Vec<String> = members.iter().map(|member| member.service.clone()).collect();
         covers.sort();
-        // The Group runs the root script as it is, unless it lists commands that were not recognised as dev servers. The
-        // Services it covers get their ports from their own Leases.
+        // The Group runs the root script as it is, unless it lists commands that were not recognised as dev servers.
+        // Then it runs the ones that were, and covers the Services they start. The Services it covers get their ports
+        // from their own Leases.
         let run = match group::narrow(&root_package.script) {
             Narrowed::Whole => manager.run("dev"),
-            Narrowed::Kept { run, notes } => {
+            Narrowed::Kept {
+                run,
+                commands,
+                mut notes,
+            } => {
+                match cover::covered(&commands, &members) {
+                    Ok(started) => covers = started,
+                    Err(untied) => {
+                        notes.extend(untied);
+                        proposal.notes.extend(notes);
+                        return Ok(());
+                    }
+                }
                 proposal.notes.extend(notes);
                 run
             }
@@ -418,6 +440,7 @@ mod tests {
         let package = |dir: &str| Package {
             dir: PathBuf::from(dir),
             name: "x".to_owned(),
+            manifest_name: "x".to_owned(),
             script: String::new(),
         };
         assert_eq!(package("").bins(), "export PATH=\"$PWD/node_modules/.bin:$PATH\"");

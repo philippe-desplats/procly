@@ -15,10 +15,22 @@ use crate::guard::{self, Kind, Segment};
 pub(super) enum Narrowed {
     /// The script is one command, or every command of it is recognised: the Group runs the script as it is.
     Whole,
-    /// The Group runs `run`, and `notes` name the commands it left out.
-    Kept { run: String, notes: Vec<String> },
+    /// The Group runs `run`, which starts `commands`, and `notes` name the commands it left out.
+    Kept {
+        run: String,
+        commands: Vec<Command>,
+        notes: Vec<String>,
+    },
     /// No command is recognised, so there is no Group to propose.
     Nothing { notes: Vec<String> },
+}
+
+/// A command the Group runs that starts a dev server, with the directories the script changed to before it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Command {
+    pub(super) text: String,
+    /// The arguments of the `cd` commands that ran before it, in order.
+    pub(super) directories: Vec<String>,
 }
 
 /// The options of `concurrently` that are followed by their value.
@@ -128,12 +140,19 @@ fn starts_a_dev_server(command: &str) -> bool {
 }
 
 /// Whether `segment` only sets the scene for the commands after it: `cd apps/web`, `export NODE_ENV=development`.
-fn sets_the_scene(segment: &Segment) -> bool {
+pub(super) fn sets_the_scene(segment: &Segment) -> bool {
     let words = &segment.words;
     words.iter().all(|word| guard::is_assignment(word))
         || words
             .first()
             .is_some_and(|word| matches!(guard::basename(word), "cd" | "pushd" | "export"))
+}
+
+/// The directory a `cd` or `pushd` command changes to, `None` for any other command. A `cd` with no argument goes home.
+pub(super) fn changes_to(segment: &Segment) -> Option<String> {
+    let words = &segment.words;
+    matches!(guard::basename(words.first()?), "cd" | "pushd")
+        .then(|| words.get(1).map_or("~", String::as_str).to_owned())
 }
 
 /// The command an argument of `concurrently` runs, `npm:dev:web` standing for `npm run dev:web`.
@@ -412,7 +431,39 @@ pub(super) fn narrow(script: &str) -> Narrowed {
         run.push_str(&written(script, &steps[at]));
         previous = at;
     }
-    Narrowed::Kept { run, notes }
+    Narrowed::Kept {
+        run,
+        commands: commands(&steps, &runs),
+        notes,
+    }
+}
+
+/// The commands the Group runs that start a dev server, each with the directories the script changed to before it.
+fn commands(steps: &[Step], runs: &[bool]) -> Vec<Command> {
+    let mut directories = Vec::new();
+    let mut commands = Vec::new();
+    for (step, runs) in steps.iter().zip(runs) {
+        if !runs {
+            continue;
+        }
+        let mut command = |text: String| {
+            commands.push(Command {
+                text,
+                directories: directories.clone(),
+            });
+        };
+        match &step.role {
+            Role::Context => directories.extend(changes_to(step.segment)),
+            Role::DevServer | Role::Opaque => command(step.segment.text.clone()),
+            Role::Concurrently(children) => {
+                for child in children.iter().filter(|child| child.recognised) {
+                    command(expand_shorthand(&child.text));
+                }
+            }
+            Role::Wait | Role::Other => {}
+        }
+    }
+    commands
 }
 
 /// The command that waited for the one at `at` to end, and still runs.

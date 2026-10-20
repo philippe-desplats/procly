@@ -935,3 +935,83 @@ fn a_root_dev_script_of_recognised_commands_only_keeps_the_package_manager_and_p
     assert_eq!(run, "npm run dev");
     assert!(!stderr(&output).contains("left out"), "{}", stderr(&output));
 }
+
+/// The `covers` of the Group `dev` of `proposal`, as the lines of TOML it is written with.
+fn covers(proposal: &str) -> String {
+    proposal
+        .lines()
+        .find(|line| line.starts_with("covers"))
+        .unwrap_or_else(|| panic!("no Group covers anything\n{proposal}"))
+        .to_owned()
+}
+
+#[test]
+fn a_group_narrowed_to_one_package_covers_only_its_service() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(
+        &procly,
+        r#"concurrently "pnpm --filter web dev" "stripe listen --forward-to localhost:3000/api/webhooks" "node worker.js""#,
+    );
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, r#"concurrently "pnpm --filter web dev""#, "{proposal}");
+    assert_eq!(covers(&proposal), r#"covers = ["web"]"#, "{proposal}");
+    assert!(
+        proposal.contains("[services.api]"),
+        "the Service the Group does not start stays declared\n{proposal}"
+    );
+    assert!(stderr(&output).contains("`stripe listen"), "{}", stderr(&output));
+    assert_loads(&procly, &main, "dev");
+    assert_loads(&procly, &main, "api");
+}
+
+#[test]
+fn a_prep_step_left_out_does_not_widen_what_the_narrowed_group_covers() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "pnpm build && pnpm --filter web dev");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, "pnpm --filter web dev", "{proposal}");
+    assert_eq!(covers(&proposal), r#"covers = ["web"]"#, "{proposal}");
+    assert_loads(&procly, &main, "dev");
+}
+
+#[test]
+fn a_command_run_from_the_directory_of_a_package_covers_that_service() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "cd apps/api && node ace serve & stripe listen");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, "cd apps/api && node ace serve", "{proposal}");
+    assert_eq!(covers(&proposal), r#"covers = ["api"]"#, "{proposal}");
+}
+
+#[test]
+fn a_kept_command_that_names_no_package_gets_no_group_and_stderr_says_so() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "next dev & stripe listen");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    assert!(!proposal.contains("covers"), "{proposal}");
+    assert!(
+        proposal.contains("[services.web]") && proposal.contains("[services.api]"),
+        "{proposal}"
+    );
+    let notes = stderr(&output);
+    assert!(
+        notes.contains("`next dev` cannot be tied to one Service") && notes.contains("No Group is proposed"),
+        "{notes}"
+    );
+    assert_loads(&procly, &main, "web");
+}

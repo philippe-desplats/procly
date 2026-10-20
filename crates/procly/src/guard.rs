@@ -312,7 +312,7 @@ const PACKAGE_OPTIONS: [&str; 8] = [
 
 /// Whether `words` run the dev script of a whole Repository: `pnpm dev`, `npm start`, `turbo run dev`, with no
 /// option narrowing it to one package and a plain script name.
-fn runs_the_whole_repository(words: &[String]) -> bool {
+pub(crate) fn runs_the_whole_repository(words: &[String]) -> bool {
     let Some((program, rest)) = words.split_first() else {
         return false;
     };
