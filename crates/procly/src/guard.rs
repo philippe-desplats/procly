@@ -239,9 +239,12 @@ fn resolve(base: &Path, path: &str) -> Option<PathBuf> {
 }
 
 /// The absolute `path`, with its `.` and `..` resolved, relative to `root` when it is inside it. A path outside `root`
-/// stays absolute, so that it matches nothing inside.
+/// stays absolute, so that it matches nothing inside. `path` must start with `/`, a relative one is returned as written.
 fn within(root: &Path, path: &str) -> PathBuf {
-    let absolute = shell::resolve(Path::new(""), path).into_path();
+    let Resolved::Absolute(absolute) = shell::resolve(Path::new(""), path) else {
+        debug_assert!(false, "within takes an absolute path, got {path:?}");
+        return PathBuf::from(path);
+    };
     absolute.strip_prefix(root).map_or(absolute.clone(), Path::to_owned)
 }
 

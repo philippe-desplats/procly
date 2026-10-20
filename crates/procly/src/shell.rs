@@ -63,7 +63,7 @@ pub(crate) fn segments(command_line: &str) -> Vec<Segment> {
 
     let mut reading = Reading::default();
     let mut quote: Option<char> = None;
-    let mut chars = command_line.char_indices().peekable();
+    let mut chars = command_line.char_indices();
     while let Some((at, c)) = chars.next() {
         match (quote, c) {
             (Some(open), c) if c == open => quote = None,
@@ -162,15 +162,6 @@ pub(crate) enum Resolved {
     Above(PathBuf),
     /// A path that starts at `/`, which says nothing about where the base is. A `..` at the root stays at the root.
     Absolute(PathBuf),
-}
-
-impl Resolved {
-    /// The path, whatever the place it ends up in.
-    pub(crate) fn into_path(self) -> PathBuf {
-        match self {
-            Self::Inside(path) | Self::Above(path) | Self::Absolute(path) => path,
-        }
-    }
 }
 
 /// `path` as written from `base`, with its `.` and `..` resolved without looking at the filesystem. `base` is a
@@ -342,12 +333,5 @@ mod tests {
                 "{base} + {path}"
             );
         }
-    }
-
-    #[test]
-    fn the_path_of_a_resolution_is_the_same_whatever_the_place_it_ends_up_in() {
-        assert_eq!(resolve(Path::new("a"), "b").into_path(), PathBuf::from("a/b"));
-        assert_eq!(resolve(Path::new("a"), "../..").into_path(), PathBuf::from(".."));
-        assert_eq!(resolve(Path::new("a"), "/b").into_path(), PathBuf::from("/b"));
     }
 }
