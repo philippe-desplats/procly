@@ -46,7 +46,13 @@ A `dev` script that names one port, with `--port 3001`, `--port=3001`, `-p 3001`
 
 A port below 1024, a script that names several different ports, and any other way of writing a port are not taken, the Service then runs through the package manager and declares no port. Add `ports = { http = <port> }` and the placeholder where the script reads its port, so that parallel Worktrees do not share it.
 
-A Group runs the `dev` script of the root as it is. The Services it covers get their Leases in `PORT_<SERVICE>_<NAME>`, but a script that writes its port still binds that port in a Worktree other than the Main one, which `up` then reports as a Port mismatch. Point the root command at the Leases, or start the Services one by one.
+### The root script of a monorepo
+
+The Group runs the `dev` script of the root through the package manager, and a script that is one command (`turbo dev`, `pnpm -r --parallel dev`) is never judged. A script that lists commands, joined by `&`, `&&`, a semicolon or line breaks, or given as the arguments of `concurrently` (`npm:dev:web` is read as `npm run dev:web`), is read command by command. A command is recognised when it starts a dev server, the same commands the [Guard](agents.md) blocks. The Group then runs the recognised commands only, written as the script wrote them, and `concurrently` keeps its options and the entries of `--names` and `--prefix-colors` of the commands that stay. A `cd`, an `export`, a variable assignment and `wait` only set the scene, so they stay while a command after them does.
+
+Every command left out is named on stderr, with the reason, so that you add it on purpose if Procly should start it. When a command that a kept one waited for through `&&` is left out (`pnpm build && next dev`), stderr says so, since the kept command now starts at once. Commands that sit in another shape (`||`, pipes, parentheses, redirections) are not read, and the Group runs the script as it is. When no command is recognised, no Group is proposed, stderr says so, and the Services are started one by one.
+
+A Group that runs the script as it is runs it with the Leases of the Services it covers. The Services it covers get their Leases in `PORT_<SERVICE>_<NAME>`, but a script that writes its port still binds that port in a Worktree other than the Main one, which `up` then reports as a Port mismatch. Point the root command at the Leases, or start the Services one by one.
 
 ## The compose file
 

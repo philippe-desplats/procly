@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::group::{self, Narrowed};
 use super::{Proposal, ProposalError, ServiceEntry, service_name};
 
 /// The JavaScript package manager a Worktree installs with, which runs its scripts.
@@ -186,7 +187,7 @@ fn port_in(at: usize, text: &str) -> Option<(Range<usize>, u16)> {
 }
 
 /// `text` as one word of a shell command.
-fn shell_word(text: &str) -> String {
+pub(super) fn shell_word(text: &str) -> String {
     if !text.is_empty()
         && text
             .chars()
@@ -333,14 +334,26 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
         .iter()
         .map(|package| proposal.add(&package.name, package.service(manager)))
         .collect();
-    if root_package.is_some() {
+    if let Some(root_package) = root_package {
         covers.sort();
-        // The Group runs the root script as it is: the Services it covers get their ports from their own Leases.
+        // The Group runs the root script as it is, unless it lists commands that were not recognised as Services. The
+        // Services it covers get their ports from their own Leases.
+        let run = match group::narrow(&root_package.script) {
+            Narrowed::Whole => manager.run("dev"),
+            Narrowed::Kept { run, notes } => {
+                proposal.notes.extend(notes);
+                run
+            }
+            Narrowed::Nothing { notes } => {
+                proposal.notes.extend(notes);
+                return Ok(());
+            }
+        };
         proposal.add(
             "dev",
             ServiceEntry {
                 covers: Some(covers),
-                ..ServiceEntry::process(manager.run("dev"))
+                ..ServiceEntry::process(run)
             },
         );
     }

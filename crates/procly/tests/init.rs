@@ -815,3 +815,123 @@ fn init_in_a_fresh_state_directory_leaves_no_daemon_running() {
         "init needs no Daemon, yet the state directory holds {left:?}"
     );
 }
+
+/// A monorepo of 2 apps whose root `dev` script is `script`.
+fn monorepo_with_root_script(procly: &Procly, script: &str) -> PathBuf {
+    let root = serde_json::json!({
+        "name": "acme",
+        "workspaces": ["apps/*"],
+        "scripts": { "dev": script },
+    });
+    repository(
+        procly,
+        &[
+            ("package.json", &root.to_string()),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "next dev"}}"#,
+            ),
+            (
+                "apps/api/package.json",
+                r#"{"name": "api", "scripts": {"dev": "node ace serve"}}"#,
+            ),
+        ],
+    )
+}
+
+#[test]
+fn a_root_dev_script_that_starts_commands_init_did_not_map_yields_a_group_without_them() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(
+        &procly,
+        "turbo dev & stripe listen --forward-to localhost:3000/api/webhooks & node worker.js",
+    );
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, "turbo dev", "{proposal}");
+    assert!(proposal.contains(r#"covers = ["api", "web"]"#), "{proposal}");
+    let notes = stderr(&output);
+    for left_out in [
+        "stripe listen --forward-to localhost:3000/api/webhooks",
+        "node worker.js",
+    ] {
+        let note = notes
+            .lines()
+            .find(|line| line.contains(left_out))
+            .unwrap_or_else(|| panic!("stderr names {left_out}\n{notes}"));
+        assert!(note.contains("not recognised as a dev server"), "{note}");
+    }
+    assert_loads(&procly, &main, "dev");
+}
+
+#[test]
+fn a_root_dev_script_with_no_recognised_command_gets_no_group_and_stderr_says_so() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "stripe listen && node worker.js");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    assert!(!proposal.contains("covers"), "{proposal}");
+    assert!(
+        proposal.contains("[services.web]") && proposal.contains("[services.api]"),
+        "{proposal}"
+    );
+    let notes = stderr(&output);
+    assert!(
+        notes.contains("`stripe listen`") && notes.contains("`node worker.js`"),
+        "{notes}"
+    );
+    assert!(notes.contains("No Group is proposed"), "{notes}");
+    assert_loads(&procly, &main, "web");
+}
+
+#[test]
+fn the_commands_concurrently_runs_are_left_out_one_by_one_with_their_names() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(
+        &procly,
+        r#"concurrently -n web,hooks,api "pnpm --filter web dev" "stripe listen" "pnpm --filter api dev""#,
+    );
+
+    let output = init(&procly, &main);
+
+    let (run, _) = run_and_port(&stdout(&output), "dev");
+    assert_eq!(
+        run,
+        r#"concurrently -n web,api "pnpm --filter web dev" "pnpm --filter api dev""#
+    );
+    assert!(stderr(&output).contains("`stripe listen`"), "{}", stderr(&output));
+    assert_loads(&procly, &main, "dev");
+}
+
+#[test]
+fn a_prep_step_left_out_says_the_server_after_it_no_longer_waits() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "pnpm build && turbo dev");
+
+    let output = init(&procly, &main);
+
+    let (run, _) = run_and_port(&stdout(&output), "dev");
+    assert_eq!(run, "turbo dev");
+    let notes = stderr(&output);
+    assert!(
+        notes.contains("`pnpm build`") && notes.contains("`turbo dev` used to run after it"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn a_root_dev_script_of_recognised_commands_only_keeps_the_package_manager_and_prints_no_note() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "next dev & vite");
+
+    let output = init(&procly, &main);
+
+    let (run, _) = run_and_port(&stdout(&output), "dev");
+    assert_eq!(run, "npm run dev");
+    assert!(!stderr(&output).contains("left out"), "{}", stderr(&output));
+}
