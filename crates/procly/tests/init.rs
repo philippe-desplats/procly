@@ -707,10 +707,12 @@ fn init_in_a_fresh_state_directory_leaves_no_daemon_running() {
     assert_success(&procly.procly_in(&main, &["init", "--json"]));
     assert_eq!(procly.procly_in(&outside, &["init"]).status.code(), Some(125));
 
-    for file in ["procly.sock", "daemon.pid"] {
-        assert!(
-            !procly.state_dir().join(file).exists(),
-            "init needs no Daemon, yet {file} is in the state directory"
-        );
-    }
+    let left: Vec<_> = fs::read_dir(procly.state_dir())
+        .expect("read the state directory")
+        .map(|entry| entry.expect("read an entry of the state directory").file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "init needs no Daemon, yet the state directory holds {left:?}"
+    );
 }

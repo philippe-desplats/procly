@@ -12,7 +12,7 @@ use crate::proposal::{self, ProposalError};
 use crate::topology::{self, TopologyError};
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ProposeError {
+pub(crate) enum InitError {
     #[error(transparent)]
     Topology(#[from] TopologyError),
     #[error("{} is not in a git repository, and Services are declared per Repository", .0.display())]
@@ -40,10 +40,10 @@ pub(crate) struct ProposalReport {
 
 /// Proposes a `procly.toml` for the Worktree holding `cwd`, and writes it at the root of that Worktree unless it has
 /// one.
-pub(crate) fn propose(cwd: &Path) -> Result<ProposalReport, ProposeError> {
+pub(crate) fn propose(cwd: &Path) -> Result<ProposalReport, InitError> {
     let cwd = topology::canonicalize(cwd)?;
     let Some(topology) = topology::resolve(&cwd)? else {
-        return Err(ProposeError::NotInRepository(cwd));
+        return Err(InitError::NotInRepository(cwd));
     };
     let worktree = topology.worktree.path;
     let file = worktree.join(VERSIONED_FILE);
@@ -54,8 +54,8 @@ pub(crate) fn propose(cwd: &Path) -> Result<ProposalReport, ProposeError> {
 
 /// Writes `text` to `file` unless it exists, and tells whether it did. The file is created exclusively, so that an
 /// existing one is never overwritten, not even by a `procly.toml` that appeared since the proposal was made.
-fn write_new(file: &Path, text: &str) -> Result<bool, ProposeError> {
-    let write = |source| ProposeError::Write {
+fn write_new(file: &Path, text: &str) -> Result<bool, InitError> {
+    let write = |source| InitError::Write {
         path: file.to_owned(),
         source,
     };
