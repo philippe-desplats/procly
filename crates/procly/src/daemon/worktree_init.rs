@@ -28,6 +28,8 @@ use crate::topology::{self, Topology};
 const RECORD_FILE: &str = "procly-worktree-init.json";
 /// The version of the format of the record, a state document like the ones of the state directory (ADR 0012).
 const RECORD_VERSION: u32 = 1;
+/// The shortest interval between 2 progress reports, the elapsed time they print being in whole seconds.
+const MIN_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 enum InitError {
@@ -119,26 +121,23 @@ pub(super) async fn run(
             );
         }
         let log = log.as_ref().expect("the setup log was created above");
-        let spec = JobSpec {
-            fingerprint: Fingerprint {
-                topology: Some(topology.clone()),
-                cwd: topology.worktree.path.clone(),
-                command: command.clone(),
-            },
-            env: env.clone(),
-            timeout: setup_timeout,
-            log: Some(log.file.try_clone().context("the setup log could not be shared")?),
-        };
         let jobs = Arc::clone(&registry);
-        let (heading, started) = (
-            command.clone(),
-            log.file.try_clone().context("the setup log could not be shared")?,
-        );
-        // Opening a terminal and forking are blocking system calls.
+        let (topology, env, file, heading) = (topology.clone(), env.clone(), Arc::clone(&log.file), command.clone());
+        // Opening a terminal and forking are blocking system calls, and so is sharing the log with the Job.
         let (id, _) = tokio::task::spawn_blocking(move || {
             // Best effort, the log is a courtesy to whoever waits.
-            let _ = writeln!(&started, "$ {heading}");
-            jobs.jobs.start(&spec)
+            let _ = writeln!(&*file, "$ {heading}");
+            let spec = JobSpec {
+                fingerprint: Fingerprint {
+                    cwd: topology.worktree.path.clone(),
+                    topology: Some(topology),
+                    command: heading,
+                },
+                env,
+                timeout: setup_timeout,
+                log: Some(file.try_clone().context("the setup log could not be shared")?),
+            };
+            anyhow::Ok(jobs.jobs.start(&spec)?)
         })
         .await
         .context("the setup command could not be started")?
@@ -165,7 +164,7 @@ pub(super) async fn run(
     }
     if let Some(log) = log {
         // Every command succeeded, nothing is left to tell.
-        let _ = fs::remove_file(&log.path);
+        let _ = tokio::task::spawn_blocking(move || fs::remove_file(&log.path)).await;
     }
     Ok(Response::WorktreeInit(report))
 }
@@ -174,7 +173,7 @@ pub(super) async fn run(
 struct SetupLog {
     path: PathBuf,
     /// Shared with the Jobs writing to it, so that the output of the commands follows each other.
-    file: File,
+    file: Arc<File>,
 }
 
 impl SetupLog {
@@ -197,7 +196,10 @@ impl SetupLog {
             .mode(0o600)
             .open(&path)
             .with_context(|| format!("cannot create the setup log {}", path.display()))?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file: Arc::new(file),
+        })
     }
 }
 
@@ -211,7 +213,7 @@ async fn wait_reporting(
 ) -> JobEnd {
     let started = Instant::now();
     let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
-    // A slow reader of the progress never makes it catch up with a burst of reports.
+    // A tick missed because the loop was late is not made up for, so that reports never come in a burst.
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let ended = job.ended();
     tokio::pin!(ended);
@@ -264,7 +266,7 @@ fn prepare(topology: &Topology) -> anyhow::Result<Prepared> {
         report,
         setup: config.worktree.setup,
         setup_timeout: config.settings.setup_timeout,
-        progress_interval: config.settings.setup_progress_interval,
+        progress_interval: config.settings.setup_progress_interval.max(MIN_PROGRESS_INTERVAL),
         record_path,
         record,
     })

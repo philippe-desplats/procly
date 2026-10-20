@@ -8,7 +8,7 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 
 - Stdout holds 1 line of JSON, which starts with `schema_version` and ends with a newline. Without `--json` the text output is what it always was.
 - The exit code is the same with and without `--json`, see [exit codes](exit-codes.md). A conflict, a Port mismatch or a Service that did not become healthy still exits with its own code, and its document says why.
-- A command that fails still reports on stderr, as without `--json`: the Daemon that cannot be reached, a Service that is not declared, the diagnostic of an `up` that ends unhealthy or in conflict. A failure of Procly itself prints no document at all.
+- A command that fails still reports on stderr, as without `--json`: the Daemon that cannot be reached, a Service that is not declared, the diagnostic of an `up` that ends unhealthy or in conflict. A failure of Procly itself prints no document at all. The progress of a long setup command of `worktree init` is written to stderr too, and stdout keeps its single document.
 - The lines of stderr that only tell what the document carries are not printed, such as `started` and `reused` after `run`, the `(needed by …)` lines of `up`, `wrote …` after `init`, and the notes about a Managed block left as it is.
 - The document carries what the text says, and `up` adds every Lease of a Service under `ports`, which the text leaves to `procly env`. Paths are absolute, durations are in milliseconds, and output is the text the process printed.
 

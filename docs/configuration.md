@@ -75,7 +75,7 @@ web = { http = 3200 }
 | `grace_period` | `"10m"` | How long the container of a Compose service keeps running once no Worktree needs it, see [Compose services](#compose-services). |
 | `isolation` | none | The Isolation mode of every Compose service that sets a `driver` and no `isolation` of its own, `"shared"` or `"logical"`, see [Isolation mode](#isolation-mode). Logical when unset. |
 | `setup_timeout` | `"30m"` | How long each setup command of `procly worktree init` may run before its whole process tree is killed and `worktree init` exits with 124, long enough for a cold install. See [Worktree init](worktree-init.md). |
-| `setup_progress_interval` | `"1m"` | How often a setup command of `procly worktree init` that is still running prints its elapsed time and the path of its log on stderr. See [Worktree init](worktree-init.md#a-long-setup). |
+| `setup_progress_interval` | `"1m"` | How often a setup command of `procly worktree init` that is still running prints its elapsed time and the path of its log on stderr, at most once per second. See [Worktree init](worktree-init.md#a-long-setup). |
 | `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125. |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.

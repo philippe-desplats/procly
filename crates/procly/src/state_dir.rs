@@ -107,7 +107,8 @@ impl StateDir {
         self.path.join("output")
     }
 
-    /// The directory holding the log of the setup commands of each Worktree, while `worktree init` runs them.
+    /// The directory holding the log of the setup commands of each Worktree, which `worktree init` removes once they all
+    /// succeeded.
     pub(crate) fn setup_logs(&self) -> PathBuf {
         self.path.join("setup")
     }
