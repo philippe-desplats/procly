@@ -148,19 +148,20 @@ jobs:
         with:
           name: checksums
           path: dist
-      # The token needs write access to the tap only, see docs/releasing.md.
+      # A deploy key with write access to the tap only, see docs/releasing.md.
       - name: Check the tap credentials
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
-          if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
-            echo "::error::the secret HOMEBREW_TAP_TOKEN is not set, the GitHub release is published but the tap is not updated, see docs/releasing.md"
+          if [ -z "${HOMEBREW_TAP_DEPLOY_KEY}" ]; then
+            echo "::error::the secret HOMEBREW_TAP_DEPLOY_KEY is not set, the GitHub release is published but the tap is not updated, see docs/releasing.md"
             exit 1
           fi
+      # With an SSH key, the checkout keeps it configured for the push below.
       - uses: actions/checkout@v7
         with:
           repository: ${{ env.TAP_REPOSITORY }}
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           path: tap
       - name: Render the formula
         run: |

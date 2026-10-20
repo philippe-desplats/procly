@@ -32,8 +32,17 @@ A failed `build` publishes nothing. A failed `homebrew` leaves the GitHub releas
 The tap is the repository `philippe-desplats/homebrew-procly`, with the formula at `Formula/procly.rb`. Homebrew resolves `brew install philippe-desplats/procly/procly` to it by name.
 
 1. Create the repository, public and initialised with a README, since the workflow cannot check out a repository that has no commit.
-2. Create a fine-grained personal access token limited to that repository, with the `Contents` permission set to read and write.
-3. Store it as the secret `HOMEBREW_TAP_TOKEN` in the settings of the Procly repository.
+2. Generate an SSH key pair without a passphrase, and add the public key to the tap as a deploy key with write access. A deploy key reaches that one repository only and does not expire.
+3. Store the private key as the secret `HOMEBREW_TAP_DEPLOY_KEY` of the Procly repository, then delete the local copy.
+
+   ```console
+   $ ssh-keygen -t ed25519 -N "" -C "procly release" -f tap-key
+   $ gh repo deploy-key add tap-key.pub --repo philippe-desplats/homebrew-procly --allow-write --title "procly release"
+   $ gh secret set HOMEBREW_TAP_DEPLOY_KEY --repo philippe-desplats/procly < tap-key
+   $ rm tap-key tap-key.pub
+   ```
+
+To rotate the key, run the same commands and delete the old deploy key from the settings of the tap.
 
 Until the secret exists, the `homebrew` job fails with a message saying so, and the rest of the release is unaffected.
 
