@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use common::{
-    Procly, assert_success, eventually, free_port, git, git_repository, git_worktree_add, require_docker, stderr,
-    stdout, test_server,
+    Procly, assert_success, eventually, free_port, git, git_repository, git_worktree_add, json_succeeded,
+    require_docker, stderr, stdout, test_server,
 };
 
 /// A compose file running a TCP listener in `alpine`, which is small and carries a `nc` that serves many clients.
@@ -648,6 +648,10 @@ fn docker_a_service_with_an_smtp_and_an_http_port_prints_an_http_url_for_the_htt
         "      - \"${DB_PORT:-1}:80\"\n",
         "      - \"${DB_PORT:-1}:80\"\n      - \"${PORT_HTTP:-1}:81\"\n",
     );
+    assert!(
+        compose.contains("PORT_HTTP"),
+        "the compose file publishes the http port"
+    );
     std::fs::write(fixture.main.join("compose.yaml"), compose).unwrap();
     std::fs::write(
         fixture.main.join("procly.toml"),
@@ -664,6 +668,13 @@ fn docker_a_service_with_an_smtp_and_an_http_port_prints_an_http_url_for_the_htt
     assert_eq!(
         stdout(&output),
         format!("mail started smtp://localhost:{smtp} port {smtp}, http://localhost:{http} port {http}\n")
+    );
+    let document = json_succeeded(&fixture.procly.procly_in(&fixture.main, &["up", "--json", "mail"]));
+    let service = &document["services"][0];
+    assert_eq!(service["url"], serde_json::json!(format!("smtp://localhost:{smtp}")));
+    assert_eq!(
+        service["urls"],
+        serde_json::json!({ "http": format!("http://localhost:{http}"), "smtp": format!("smtp://localhost:{smtp}") })
     );
 }
 

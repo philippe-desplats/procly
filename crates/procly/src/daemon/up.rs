@@ -560,9 +560,9 @@ fn service_leases(
 
 /// Where to reach each of the `leases` of the Service `name`, by Port name, for the Leases whose scheme is known.
 ///
-/// The scheme is the one of the URL of its `driver` for the Lease that URL reaches, `http` for the Lease the health
-/// check of a Process service probes or the Lease of an HTTP health check, and the Port name itself when it is one
-/// of [`SCHEMES`]. Any other Lease has no URL, rather than an `http` URL for a port that may not speak HTTP.
+/// The scheme is the one of the URL of its `driver` for the Lease that URL reaches, else the Port name itself when it
+/// is one of [`SCHEMES`], else `http` for the Lease the health check of a Process service probes or the Lease of an
+/// HTTP health check. Any other Lease has no URL, rather than an `http` URL for a port that may not speak HTTP.
 fn lease_urls(
     name: &str,
     declared: &ServiceConfig,
@@ -580,8 +580,8 @@ fn lease_urls(
             let health = health_port_name == Some(port_name.as_str());
             let scheme = driver
                 .and_then(|driver| driver.scheme_of(port_name, health))
-                .or((health && health_is_http).then_some("http"))
-                .or_else(|| SCHEMES.iter().copied().find(|scheme| scheme == port_name))?;
+                .or_else(|| SCHEMES.iter().copied().find(|scheme| scheme == port_name))
+                .or((health && health_is_http).then_some("http"))?;
             Some((port_name.clone(), format!("{scheme}://localhost:{port}")))
         })
         .collect())
@@ -629,6 +629,15 @@ mod tests {
         assert_eq!(
             lease_urls("multi", &multi, None, &leases(&[("http", 24000), ("admin", 24001)])).unwrap(),
             urls(&[("http", "http://localhost:24000")])
+        );
+    }
+
+    #[test]
+    fn a_port_name_that_is_a_scheme_wins_over_the_http_of_a_health_port() {
+        let secure = declared("run = 'x'\nports = { https = 8443 }\n");
+        assert_eq!(
+            lease_urls("secure", &secure, None, &leases(&[("https", 24000)])).unwrap(),
+            urls(&[("https", "https://localhost:24000")])
         );
     }
 
