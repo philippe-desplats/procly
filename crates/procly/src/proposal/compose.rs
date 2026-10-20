@@ -11,15 +11,8 @@ use std::path::{Path, PathBuf};
 use serde_yaml_ng::Value;
 
 use super::{HealthEntry, Proposal, ProposalError, ResourceEntry, ServiceEntry, service_name};
+use crate::guard::COMPOSE_FILES;
 use crate::topology::SLUG_MAX_LEN;
-
-/// The compose files Docker looks for, in the order it prefers them.
-const COMPOSE_FILES: [&str; 4] = [
-    "compose.yaml",
-    "compose.yml",
-    "docker-compose.yaml",
-    "docker-compose.yml",
-];
 
 /// The databases a Postgres server keeps for itself, which a Logical resource is never pointed at.
 const MAINTENANCE_DATABASES: [&str; 3] = ["postgres", "template0", "template1"];

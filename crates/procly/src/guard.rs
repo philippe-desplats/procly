@@ -210,8 +210,9 @@ fn unmanaged_compose_file(recognized: &Recognized, directory: Option<&Path>, roo
         .map(str::to_owned)
 }
 
-/// The names Docker Compose looks for, which Procly drives when the Worktree has one.
-const COMPOSE_FILES: [&str; 4] = [
+/// The compose files Docker Compose looks for, in the order it prefers them, which Procly drives when the Worktree has
+/// one.
+pub(crate) const COMPOSE_FILES: [&str; 4] = [
     "compose.yaml",
     "compose.yml",
     "docker-compose.yaml",
@@ -265,10 +266,10 @@ fn within(root: &Path, path: &str) -> PathBuf {
 /// `words` without the `run` of a package manager, which `bun run dev` and `bun dev` both run the script `dev` with.
 fn without_run(words: &[String]) -> Vec<String> {
     let mut words = words.to_vec();
-    if matches!(
-        words.first().map(|program| basename(program)),
-        Some("npm" | "pnpm" | "yarn" | "bun")
-    ) && words.get(1).is_some_and(|word| word == "run")
+    if words
+        .first()
+        .is_some_and(|program| PACKAGE_MANAGERS.contains(&basename(program)))
+        && words.get(1).is_some_and(|word| word == "run")
     {
         words.remove(1);
     }
@@ -295,11 +296,16 @@ fn same_start(blocked: &[String], run: &[String]) -> Option<usize> {
     (same && shared > 0).then_some(shared)
 }
 
-/// The package managers whose dev script, run at the root of a Repository, runs the dev servers of all of it.
-const ROOT_RUNNERS: [&str; 5] = ["npm", "pnpm", "yarn", "bun", "turbo"];
+/// The package managers whose options select a package, and whose dev script, run at the root of a Repository, runs the
+/// dev servers of all of it.
+pub(crate) const RUNNERS: [&str; 5] = ["npm", "pnpm", "yarn", "bun", "turbo"];
+
+/// The package managers that run a script of a package, `npm run dev` and `bun dev`, which `concurrently` writes
+/// `npm:dev`.
+pub(crate) const PACKAGE_MANAGERS: [&str; 4] = ["npm", "pnpm", "yarn", "bun"];
 
 /// The options of a package manager that narrow a command to one package of a monorepo.
-const PACKAGE_OPTIONS: [&str; 8] = [
+pub(crate) const PACKAGE_OPTIONS: [&str; 8] = [
     "--workspace",
     "-w",
     "--prefix",
@@ -316,7 +322,7 @@ pub(crate) fn runs_the_whole_repository(words: &[String]) -> bool {
     let Some((program, rest)) = words.split_first() else {
         return false;
     };
-    if !ROOT_RUNNERS.contains(&basename(program)) || rest.iter().any(|word| PACKAGE_OPTIONS.contains(&word.as_str())) {
+    if !RUNNERS.contains(&basename(program)) || rest.iter().any(|word| PACKAGE_OPTIONS.contains(&word.as_str())) {
         return false;
     }
     let positional = positional(rest, &[]);

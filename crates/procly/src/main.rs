@@ -87,7 +87,8 @@ enum Command {
         command: String,
     },
     /// Start a declared Service of the current Worktree, or find it running, wait until it is healthy and print
-    /// its name, `started` or `reused`, its URL and its port on one line. A Service covered by a Group that runs is
+    /// its name, `started` or `reused`, then each of its Leases, by its URL when its scheme is known and by its Port
+    /// name otherwise, on one line. A Service covered by a Group that runs is
     /// `reused (via <group>)`. Without a Service, start every declared Service no Group covers, one line each.
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
