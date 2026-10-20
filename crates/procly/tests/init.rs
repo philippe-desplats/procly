@@ -689,3 +689,30 @@ services:
     assert!(proposal.contains("[services.plain.resources.dev]"), "{proposal}");
     assert_eq!(proposal.matches("driver").count(), 1, "{proposal}");
 }
+
+#[test]
+fn init_in_a_fresh_state_directory_leaves_no_daemon_running() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "package.json",
+            r#"{"name": "shop", "scripts": {"dev": "node server.js"}}"#,
+        )],
+    );
+    let outside = procly.scratch().join("not-a-repository");
+    fs::create_dir(&outside).unwrap();
+
+    init(&procly, &main);
+    assert_success(&procly.procly_in(&main, &["init", "--json"]));
+    assert_eq!(procly.procly_in(&outside, &["init"]).status.code(), Some(125));
+
+    let left: Vec<_> = fs::read_dir(procly.state_dir())
+        .expect("read the state directory")
+        .map(|entry| entry.expect("read an entry of the state directory").file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "init needs no Daemon, yet the state directory holds {left:?}"
+    );
+}
