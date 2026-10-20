@@ -50,11 +50,14 @@ fn repository(procly: &Procly, driver: &str) -> (PathBuf, PathBuf, u16) {
     (main, other, port)
 }
 
-/// The port `procly up` printed at the end of its line.
+/// The port of the health check `procly up` printed, at the end of the first Lease of its line.
 fn port_of(output: &std::process::Output) -> u16 {
     assert_success(output);
     let line = stdout(output);
     line.trim_end()
+        .split(", ")
+        .next()
+        .unwrap_or_default()
         .rsplit(' ')
         .next()
         .and_then(|port| port.parse().ok())
@@ -308,7 +311,7 @@ fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver
     let port = port_of(&first);
     assert_eq!(
         stdout(&first),
-        format!("db started http://localhost:{port} port {port}\n")
+        format!("db started dir://localhost:{port} port {port}\n")
     );
     // Several Logical resources per Service, under the names of the configuration in the Main worktree.
     assert_eq!(resources(&fixture.project), ["app", "app_test"]);
@@ -319,7 +322,7 @@ fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver
     assert_success(&second);
     assert_eq!(
         stdout(&second),
-        format!("db reused http://localhost:{port} port {port}\n")
+        format!("db reused dir://localhost:{port} port {port}\n")
     );
     assert_eq!(
         resources(&fixture.project),

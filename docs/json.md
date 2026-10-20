@@ -58,14 +58,16 @@ $ procly logs --json 3f9a1c2e
 
 ## `up`
 
-A healthy `up` lists the Services it reached in the order they came up, the Services the one you asked for needs first. `needed_by` names the Service that needs it, and is `null` for a Service you asked for. `port` is the Lease the Service listens on and `url` where to reach it, both `null` for a Service without a port. `ports` holds every Lease of the Service by Port name, such as `{"admin":4102,"http":4101}` for a Service declaring `http` and `admin`, and is empty for a Service without a port. `port` is always one of them, the one health check probes. `via` is the Group that runs a covered Service, or `null`.
+A healthy `up` lists the Services it reached in the order they came up, the Services the one you asked for needs first. `needed_by` names the Service that needs it, and is `null` for a Service you asked for. `port` is the Lease the Service listens on and `url` the URL of that Lease, both `null` for a Service without a port. `url` is also `null` when Procly does not know the scheme of that port, see [What `procly up` prints](configuration.md#what-procly-up-prints). `ports` holds every Lease of the Service by Port name, such as `{"admin":4102,"http":4101}` for a Service declaring `http` and `admin`, and is empty for a Service without a port. `port` is always one of them, the one health check probes. `urls` holds the URL of each Lease whose scheme Procly knows, by Port name, such as `{"http":"http://localhost:8025","smtp":"smtp://localhost:1025"}` for a Mailpit, and leaves the others out. `via` is the Group that runs a covered Service, or `null`.
 
 ```console
 $ procly up --json web
-{"schema_version":1,"result":"healthy","services":[{"service":"api","outcome":"started","via":null,"port":4100,"url":"http://localhost:4100","ports":{"http":4100},"needed_by":"web"},{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"needed_by":null}]}
+{"schema_version":1,"result":"healthy","services":[{"service":"api","outcome":"started","via":null,"port":4100,"url":"http://localhost:4100","ports":{"http":4100},"urls":{"http":"http://localhost:4100"},"needed_by":"web"},{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"urls":{"http":"http://localhost:4101"},"needed_by":null}]}
 ```
 
 `procly up --json` without a Service lists every Service it brought up, all with a `needed_by` of `null`.
+
+Up to v0.1, `url` was an `http` URL of the Lease the health check probes, whatever that port spoke, so a Mailpit whose health check probes its SMTP port had an `http` URL for it. Since v0.2 `url` has the scheme of that port, or is `null` when Procly does not know it. The key keeps its meaning, where to reach the Service, and only a value that did not say it changed, so the schema version stays 1. `urls` is a new key.
 
 A Service that is not healthy has a `result` of `unhealthy`. The exit code says which kind it is (3, 4 or 124), and `end` tells why, with a `kind` of `exited` (`code`), `signaled` (`signal`), `health_timeout` (`timeout_ms`), `stopped`, `idle` (`timeout_ms`), `failed` (`restarts`), `port_mismatch` (`leased`, `actual`), `lost`, `orphaned` (`pgid`, `port`) or `not_listening` (`port`). `output` is the end of its output, the last 20 lines the text prints on stderr.
 

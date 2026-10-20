@@ -95,7 +95,7 @@ A Process service (`run`) or a Compose service (`compose`). The name is the one 
 
 ### `needs`
 
-`procly up web` starts what `web` needs before `web`, each one only once the Service before it is healthy, and then waits for `web` itself. A need that already runs is reused, and a need of a need is started too. Stdout holds the line of the Service you asked for alone, and stderr holds one line for each of its needs, such as `db started http://localhost:5432 port 5432 (needed by web)`.
+`procly up web` starts what `web` needs before `web`, each one only once the Service before it is healthy, and then waits for `web` itself. A need that already runs is reused, and a need of a need is started too. Stdout holds the line of the Service you asked for alone, and stderr holds one line for each of its needs, such as `api started http://localhost:4100 port 4100 (needed by web)`.
 
 If a need does not become healthy, `up` stops there and exits with the code of that failure (3, 4 or 124). The Service you asked for is not started. A need that is not declared, or needs that loop back to each other, make `up` fail with 125 before anything starts.
 
@@ -138,7 +138,7 @@ A Group and the Services it covers never run side by side in one Worktree:
 
 ## `procly up` without arguments
 
-`procly up` starts every declared Service that no Group covers, each one after the Services it needs, and waits for each to be healthy before the next one starts. A Group stands for the Services it covers. It replaces the monorepo-wide dev command, with the Leases and the environment of each Service. Stdout holds one line per Service, in the order they came up, `started` or `reused`, with the URL and the port when the Service has one. A Service that does not become healthy stops the sequence and `up` exits with its code (3, 4 or 124), as for a single Service. An empty configuration makes it fail with 125. With `--json`, the document lists the same Services in the same order under `services`, see [JSON output](json.md#up).
+`procly up` starts every declared Service that no Group covers, each one after the Services it needs, and waits for each to be healthy before the next one starts. A Group stands for the Services it covers. It replaces the monorepo-wide dev command, with the Leases and the environment of each Service. Stdout holds one line per Service, in the order they came up, `started` or `reused`, with each of its Leases, see [What `procly up` prints](#what-procly-up-prints). A Service that does not become healthy stops the sequence and `up` exits with its code (3, 4 or 124), as for a single Service. An empty configuration makes it fail with 125. With `--json`, the document lists the same Services in the same order under `services`, see [JSON output](json.md#up).
 
 ## Compose services
 
@@ -346,6 +346,30 @@ The Service receives its Leases in its environment, after the environment of the
 Procly also sets `PROCLY=1` and `PROCLY_SERVICE`, the name of the Service, so that a script can tell it is supervised and by which entry. Both are set last, after the Derived variables.
 
 Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process group of the Service listens on. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
+
+### What `procly up` prints
+
+`procly up` names every Lease of the Service it reached, the one its health check probes first, then the others by Port name. A Lease prints as `<url> port <n>` when Procly knows the scheme of its port, and as `<port name> port <n>` otherwise, never as an `http` URL for a port that may not speak HTTP.
+
+```console
+$ procly up web
+web started http://localhost:3000 port 3000
+$ procly up mailpit
+mailpit started smtp://localhost:1025 port 1025, http://localhost:8025 port 8025
+$ procly up db
+db started postgresql://localhost:5432 port 5432
+$ procly up mysql
+mysql started db port 3306
+```
+
+The scheme of a Lease is the first of these that applies:
+
+- The scheme of the URL of the Driver of the Service, for the Lease that URL reads, such as `postgresql` for the bundled `postgres` Driver and `redis` for `redis`.
+- For a Compose service without a `driver`, the scheme of the URL of the Driver that ships with Procly for its image, read from the compose file of the Main worktree as written, so that a Postgres is reached as `postgresql` whether or not `procly init` gave it a Driver. The images are the ones `procly init` recognizes, `postgres:17` or `ghcr.io/acme/postgis:16` for Postgres, and an image the compose file interpolates, such as `${DB_IMAGE}`, is not recognized.
+- The Port name itself when it is `amqp`, `http`, `https`, `redis` or `smtp`, such as the `smtp` and `http` ports `procly init` declares for a Mailpit.
+- `http` for the Lease the health check of a Process service probes, and for the Lease of an HTTP health check, one that sets `health.path` or `health.status`.
+
+Up to v0.1, `procly up` printed an `http` URL and the port of the health check alone, whatever that port spoke. Since v0.2 the line names every Lease. Since the CLI output is public interface (ADR 0009), the change is recorded here: a Process service with a single Port name prints the same line as before, a Service with several Port names gets one more `, <lease>` for each of the others, and a Compose service whose port has no known scheme, such as a MySQL, prints `mysql started db port 3306` where it printed `mysql started http://localhost:3306 port 3306`. A script that reads the port of the health check reads the number before the first comma. With `--json`, `url` and `urls` carry the same URLs, see [JSON output](json.md#up).
 
 ## Derived variables
 

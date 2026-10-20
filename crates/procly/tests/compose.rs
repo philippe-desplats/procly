@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use common::{
-    Procly, assert_success, eventually, free_port, git, git_repository, git_worktree_add, require_docker, stderr,
-    stdout, test_server,
+    Procly, assert_success, eventually, free_port, git, git_repository, git_worktree_add, json_succeeded,
+    require_docker, stderr, stdout, test_server,
 };
 
 /// A compose file running a TCP listener in `alpine`, which is small and carries a `nc` that serves many clients.
@@ -128,10 +128,7 @@ fn docker_up_starts_the_service_through_the_unmodified_compose_file_on_its_lease
 
     assert_success(&output);
     let port = fixture.port;
-    assert_eq!(
-        stdout(&output),
-        format!("db started http://localhost:{port} port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db started db port {port}\n"));
     // The compose file read `DB_PORT`, so the container is reachable on the Lease and nowhere else.
     assert!(listens(port), "nothing listens on {port}");
     assert_eq!(
@@ -158,10 +155,7 @@ fn docker_2_worktrees_share_one_container_on_one_port() {
 
     assert_success(&output);
     let port = fixture.port;
-    assert_eq!(
-        stdout(&output),
-        format!("db reused http://localhost:{port} port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db reused db port {port}\n"));
     // The same container, not one recreated under the first Worktree.
     assert_eq!(fixture.project.container(), container);
     assert!(fixture.project.is_running());
@@ -273,10 +267,7 @@ fn docker_a_process_service_starts_the_compose_service_it_needs_first() {
         format!("web started http://localhost:{web_port} port {web_port}\n")
     );
     let port = fixture.port;
-    assert_eq!(
-        stderr(&output),
-        format!("db started http://localhost:{port} port {port} (needed by web)\n")
-    );
+    assert_eq!(stderr(&output), format!("db started db port {port} (needed by web)\n"));
     assert!(fixture.project.is_running());
 }
 
@@ -515,10 +506,7 @@ fn docker_a_container_started_by_plain_docker_compose_with_matching_labels_is_ad
     let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
 
     assert_success(&output);
-    assert_eq!(
-        stdout(&output),
-        format!("db reused http://localhost:{port} port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db reused db port {port}\n"));
     // The very container started outside Procly, neither recreated nor restarted.
     assert_eq!(fixture.project.container(), container);
     assert!(fixture.project.is_running());
@@ -646,6 +634,86 @@ fn docker_up_json_of_a_conflict_carries_the_conflicts_and_exits_5_as_the_text_do
         }])
     );
     assert!(foreign.is_running(), "Procly stopped a container it does not own");
+}
+
+#[test]
+fn docker_a_service_with_an_smtp_and_an_http_port_prints_an_http_url_for_the_http_port_only() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let (smtp, http) = (fixture.port, free_port());
+    // Shaped as `procly init` proposes a Mailpit: an `smtp` port its health check probes, and an `http` port.
+    let compose = compose_file(&fixture.project.name).replace(
+        "      - \"${DB_PORT:-1}:80\"\n",
+        "      - \"${DB_PORT:-1}:80\"\n      - \"${PORT_HTTP:-1}:81\"\n",
+    );
+    assert!(
+        compose.contains("PORT_HTTP"),
+        "the compose file publishes the http port"
+    );
+    std::fs::write(fixture.main.join("compose.yaml"), compose).unwrap();
+    std::fs::write(
+        fixture.main.join("procly.toml"),
+        format!(
+            "[services.mail]\ncompose = \"db\"\nports = {{ http = {http}, smtp = {smtp} }}\nhealth = {{ port = \"smtp\" }}\n\
+             env = {{ DB_PORT = \"{{services.mail.ports.smtp}}\" }}\n"
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "mail"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("mail started smtp://localhost:{smtp} port {smtp}, http://localhost:{http} port {http}\n")
+    );
+    let document = json_succeeded(&fixture.procly.procly_in(&fixture.main, &["up", "--json", "mail"]));
+    let service = &document["services"][0];
+    assert_eq!(service["url"], serde_json::json!(format!("smtp://localhost:{smtp}")));
+    assert_eq!(
+        service["urls"],
+        serde_json::json!({ "http": format!("http://localhost:{http}"), "smtp": format!("smtp://localhost:{smtp}") })
+    );
+}
+
+#[test]
+fn docker_a_postgres_as_procly_init_proposes_it_without_a_driver_prints_a_postgresql_url() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    // Credentials the bundled Driver does not know, so that `procly init` gives the service no Driver.
+    let compose = format!(
+        "name: {}\nservices:\n  db:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_PASSWORD: secret\n    \
+         ports:\n      - \"${{DB_PORT:-{port}}}:5432\"\n",
+        fixture.project.name
+    );
+    std::fs::write(fixture.main.join("compose.yaml"), compose).unwrap();
+    std::fs::remove_file(fixture.main.join("procly.toml")).unwrap();
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["init"]));
+    let proposed = std::fs::read_to_string(fixture.main.join("procly.toml")).unwrap();
+    assert!(!proposed.contains("driver"), "{proposed}");
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db started postgresql://localhost:{port} port {port}\n")
+    );
+    let document = json_succeeded(&fixture.procly.procly_in(&fixture.main, &["up", "--json", "db"]));
+    let service = &document["services"][0];
+    assert_eq!(
+        service["url"],
+        serde_json::json!(format!("postgresql://localhost:{port}"))
+    );
+    assert_eq!(
+        service["urls"],
+        serde_json::json!({ "db": format!("postgresql://localhost:{port}") })
+    );
 }
 
 #[test]
@@ -793,10 +861,7 @@ fn docker_after_a_daemon_crash_the_container_is_still_counted_for_both_worktrees
     let port = fixture.port;
     let output = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
     assert_success(&output);
-    assert_eq!(
-        stdout(&output),
-        format!("db reused http://localhost:{port} port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db reused db port {port}\n"));
     assert_eq!(fixture.project.container(), container);
     let first = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
     assert_success(&first);
