@@ -1015,3 +1015,24 @@ fn a_kept_command_that_names_no_package_gets_no_group_and_stderr_says_so() {
     );
     assert_loads(&procly, &main, "web");
 }
+
+#[test]
+fn a_command_run_after_a_cd_home_is_said_to_run_outside_the_worktree() {
+    for script in [
+        "cd && next dev & stripe listen",
+        "cd ~/tools && next dev & stripe listen",
+    ] {
+        let procly = Procly::new();
+        let main = monorepo_with_root_script(&procly, script);
+
+        let output = init(&procly, &main);
+
+        let proposal = stdout(&output);
+        assert!(!proposal.contains("covers"), "{script}: {proposal}");
+        let notes = stderr(&output);
+        assert!(
+            notes.contains("it runs from a directory outside the Worktree") && !notes.contains("holds no Service"),
+            "{script}: {notes}"
+        );
+    }
+}
