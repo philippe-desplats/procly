@@ -6,6 +6,7 @@ mod driver;
 mod duration;
 mod envfile;
 mod guard;
+mod init;
 mod json;
 mod output;
 mod placeholder;
@@ -344,6 +345,10 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         daemon::write_output(path)?;
         return Ok(ExitCode::SUCCESS);
     }
+    // Init reads the Worktree only, so it never starts the Daemon and needs nothing from the state directory.
+    if let Command::Init { json } = &command {
+        return init(json.json);
+    }
     let state = StateDir::resolve()?;
     match command {
         Command::Run { timeout, json, command } => {
@@ -414,7 +419,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Off { json } => switch(&state, true, json.json),
         Command::On { json } => switch(&state, false, json.json),
         Command::Eject { agent, json } => eject(&state, agent, json.json),
-        Command::Init { json } => init(&state, json.json),
+        Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
         Command::Daemon => {
@@ -875,27 +880,23 @@ fn switch(state: &StateDir, off: bool, json: bool) -> anyhow::Result<ExitCode> {
 }
 
 /// Runs `init`, printing the proposal on stdout and on stderr whether it was written.
-fn init(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
+fn init(json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    match client::send(state, &Request::Init { cwd })? {
-        Response::Init(report) if json => {
-            json::print(&report)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Response::Init(report) => {
-            print(&report.toml)?;
-            if report.written {
-                eprintln!("procly: wrote {}", report.file.display());
-            } else {
-                eprintln!(
-                    "procly: {} exists already, left as it is, the proposal above is not written",
-                    report.file.display()
-                );
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        other => unexpected(other),
+    let report = init::propose(&cwd)?;
+    if json {
+        json::print(&report)?;
+        return Ok(ExitCode::SUCCESS);
     }
+    print(&report.toml)?;
+    if report.written {
+        eprintln!("procly: wrote {}", report.file.display());
+    } else {
+        eprintln!(
+            "procly: {} exists already, left as it is, the proposal above is not written",
+            report.file.display()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands
@@ -1060,7 +1061,7 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
         path,
         env: caller_env(),
     };
-    match client::send(state, &request)? {
+    match client::send_with_progress(state, &request, print_setup_progress)? {
         Response::WorktreeInit(report) if json => {
             json::print(&json::WorktreeInit::Ready { report: &report })?;
             Ok(ExitCode::SUCCESS)
@@ -1115,6 +1116,23 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
             Ok(ExitCode::from(code))
         }
         other => unexpected(other),
+    }
+}
+
+/// One line on stderr for a setup command still running, so that a long setup shows it is alive. Stdout, and with it the
+/// JSON document, stays as it is.
+fn print_setup_progress(progress: &Response) {
+    if let Response::SetupProgress {
+        command,
+        elapsed_ms,
+        log,
+    } = progress
+    {
+        let elapsed = duration::format(Duration::from_secs(elapsed_ms / 1000));
+        eprintln!(
+            "procly: setup command `{command}` still running after {elapsed}, log: {}",
+            log.display()
+        );
     }
 }
 
