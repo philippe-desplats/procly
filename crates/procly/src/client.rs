@@ -53,6 +53,16 @@ pub(crate) enum ClientError {
 
 /// Sends one request to the Daemon, starting it first if it is not running.
 pub(crate) fn send(state: &StateDir, request: &Request) -> Result<Response, ClientError> {
+    send_with_progress(state, request, |_| ())
+}
+
+/// Sends one request to the Daemon, handing each [`Response::SetupProgress`] it sends ahead of its answer to
+/// `on_progress`, and returns the answer.
+pub(crate) fn send_with_progress(
+    state: &StateDir,
+    request: &Request,
+    mut on_progress: impl FnMut(&Response),
+) -> Result<Response, ClientError> {
     let request = protocol::encode(request).map_err(ClientError::Encode)?;
     let stream = connect_or_start(state)?;
     let connection_error = |source| ClientError::Connection {
@@ -61,12 +71,20 @@ pub(crate) fn send(state: &StateDir, request: &Request) -> Result<Response, Clie
     };
 
     (&stream).write_all(request.as_bytes()).map_err(connection_error)?;
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).map_err(connection_error)?;
-    if line.is_empty() {
-        return Err(ClientError::NoResponse);
+    let mut reader = BufReader::new(&stream);
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).map_err(connection_error)?;
+        if line.is_empty() {
+            return Err(ClientError::NoResponse);
+        }
+        let response = protocol::decode(&line)?;
+        if matches!(response, Response::SetupProgress { .. }) {
+            on_progress(&response);
+        } else {
+            return Ok(response);
+        }
     }
-    Ok(protocol::decode(&line)?)
 }
 
 fn connect_or_start(state: &StateDir) -> Result<UnixStream, ClientError> {

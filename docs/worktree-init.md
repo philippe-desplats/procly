@@ -39,6 +39,21 @@ The record of the commands that succeeded lives in the git directory of the Work
 
 Run in the Main worktree, `worktree init` has nothing to copy and only runs the setup commands.
 
+## A long setup
+
+A setup command that is still running after `settings.setup_progress_interval`, 1 minute by default, prints a line on stderr, then another one each interval until it ends, so that a setup waiting on a slow package registry shows it is alive and where to look:
+
+```console
+$ procly worktree init
+procly: setup command `pnpm install` still running after 1m, log: /home/me/.local/state/procly/setup/5c2e0d6b8a41f7e3.log
+procly: setup command `pnpm install` still running after 2m, log: /home/me/.local/state/procly/setup/5c2e0d6b8a41f7e3.log
+ran pnpm install
+```
+
+The log holds the output of the setup commands of that Worktree, each one after a `$ command` line, and `tail -f` follows it while they run. It is emptied by the next `worktree init` of the Worktree, removed once every setup command succeeded, and kept when one failed or ran past `settings.setup_timeout`, so that the path of the last line stays valid to tell why. The exit code and the message of a setup command that ran past its time limit are the same with or without these lines.
+
+With `--json`, these lines are still on stderr and stdout holds its single document.
+
 ## Naming the Worktree
 
 `procly worktree init` prepares the Worktree holding the current directory. Pass a path to prepare another one, or any directory inside it:

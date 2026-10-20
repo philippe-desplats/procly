@@ -1,8 +1,9 @@
 //! Jobs: ad hoc commands run in a PTY, in a process group of their own, with a timeout.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::hash::BuildHasher as _;
-use std::io::{self, Read};
+use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -43,6 +44,8 @@ pub(crate) struct JobSpec {
     pub(crate) fingerprint: Fingerprint,
     pub(crate) env: Vec<(String, String)>,
     pub(crate) timeout: Duration,
+    /// A file the output of the Job is also appended to, for a Job whose output outlives its buffer.
+    pub(crate) log: Option<File>,
 }
 
 /// The identity of a Job: its Worktree, working directory and command.
@@ -205,8 +208,9 @@ fn spawn(spec: &JobSpec) -> Result<Arc<Job>, JobError> {
     let output = Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY)));
     let (reader_done_tx, reader_done) = oneshot::channel();
     let pump_output = Arc::clone(&output);
+    let log = spec.log.as_ref().and_then(|log| log.try_clone().ok());
     tokio::task::spawn_blocking(move || {
-        pump(reader, &pump_output);
+        pump(reader, &pump_output, log);
         let _ = reader_done_tx.send(());
     });
     let waiter = tokio::task::spawn_blocking(move || {
@@ -276,12 +280,21 @@ async fn supervise(
     job.end.send_replace(Some(end));
 }
 
-fn pump(mut reader: Box<dyn Read + Send>, output: &Mutex<OutputBuffer>) {
+/// Reads the terminal of the Job into `output`, and into `log` until a write to it fails: the log is a courtesy that
+/// never stops the Job.
+fn pump(mut reader: Box<dyn Read + Send>, output: &Mutex<OutputBuffer>, mut log: Option<File>) {
     let mut chunk = [0; 8192];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => return,
-            Ok(read) => output::lock(output).push(&chunk[..read]),
+            Ok(read) => {
+                output::lock(output).push(&chunk[..read]);
+                if let Some(file) = &mut log
+                    && file.write_all(&chunk[..read]).is_err()
+                {
+                    log = None;
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             // Linux reports EIO once the last slave handle closes, which is the end of the output.
             Err(_) => return,

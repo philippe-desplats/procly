@@ -40,8 +40,10 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use self::clock::Clock;
 use self::compose::Composes;
@@ -75,6 +77,8 @@ struct Registry {
     mirroring: Mutex<()>,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    /// The directory holding the log of the setup commands `worktree init` runs.
+    setup_logs: PathBuf,
     /// Set once the Services recorded by the previous Daemon are reconciled. Left unset when their document cannot
     /// be read, so that the request after it is fixed or removed reconciles again.
     reconciled: tokio::sync::OnceCell<()>,
@@ -183,6 +187,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         agent: Mutex::default(),
         mirroring: Mutex::default(),
         initializing: Mutex::default(),
+        setup_logs: state.setup_logs(),
         reconciled: tokio::sync::OnceCell::new(),
         containers_reconciled: tokio::sync::OnceCell::new(),
     });
@@ -231,9 +236,20 @@ async fn handle(stream: UnixStream, registry: Arc<Registry>) {
     let peer = stream.peer_cred().ok().and_then(|credentials| credentials.pid());
     let (reader, mut writer) = stream.into_split();
     let mut line = String::new();
+    let (progress, mut progressing) = mpsc::unbounded_channel();
     let response = match BufReader::new(reader).read_line(&mut line).await {
         Ok(_) => match protocol::decode::<Request>(&line) {
-            Ok(request) => dispatch(request, &registry, peer).await,
+            Ok(request) => {
+                let dispatching = dispatch(request, &registry, peer, &progress);
+                tokio::pin!(dispatching);
+                // The progress of a long request goes out ahead of its answer, one line each.
+                loop {
+                    tokio::select! {
+                        response = &mut dispatching => break response,
+                        Some(update) = progressing.recv() => send(&mut writer, update).await,
+                    }
+                }
+            }
             Err(error) => Response::Error {
                 message: error.to_string(),
             },
@@ -243,6 +259,15 @@ async fn handle(stream: UnixStream, registry: Arc<Registry>) {
             return;
         }
     };
+    // What a request sent just before it answered goes out ahead of the answer.
+    while let Ok(update) = progressing.try_recv() {
+        send(&mut writer, update).await;
+    }
+    send(&mut writer, response).await;
+}
+
+/// Writes one line to the client.
+async fn send(writer: &mut OwnedWriteHalf, response: Response) {
     // The client may be gone, as when an agent interrupts `procly wait`, nobody is left to tell.
     let line = protocol::encode(response).unwrap_or_else(|error| {
         protocol::encode(Response::Error {
@@ -254,7 +279,12 @@ async fn handle(stream: UnixStream, registry: Arc<Registry>) {
 }
 
 /// Answers one request. `peer` is the pid of the requesting command, when the kernel tells it.
-async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>) -> Response {
+async fn dispatch(
+    request: Request,
+    registry: &Arc<Registry>,
+    peer: Option<i32>,
+    progress: &UnboundedSender<Response>,
+) -> Response {
     let jobs = &registry.jobs;
     if matches!(
         request,
@@ -325,7 +355,7 @@ async fn dispatch(request: Request, registry: &Arc<Registry>, peer: Option<i32>)
                 Response::Status,
             )
         }
-        Request::WorktreeInit { path, env } => worktree_init::run(Arc::clone(registry), path, env)
+        Request::WorktreeInit { path, env } => worktree_init::run(Arc::clone(registry), path, env, progress)
             .await
             .unwrap_or_else(failure),
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
@@ -355,6 +385,7 @@ fn start_job(
         fingerprint: Fingerprint { topology, cwd, command },
         env,
         timeout,
+        log: None,
     };
     Ok(jobs.start(&spec)?)
 }
