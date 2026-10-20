@@ -4,6 +4,8 @@
 //! leaves out what it would have to invent, such as the port of a dev server that names none.
 
 mod compose;
+mod cover;
+mod group;
 mod scripts;
 
 pub(crate) use compose::bundled_driver;

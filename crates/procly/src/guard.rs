@@ -5,6 +5,7 @@
 //! agent and a command the Guard does not know must neither wait for the Daemon nor start it. Only a command it
 //! knows asks the Daemon whether the Repository is Off.
 
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -311,7 +312,7 @@ const PACKAGE_OPTIONS: [&str; 8] = [
 
 /// Whether `words` run the dev script of a whole Repository: `pnpm dev`, `npm start`, `turbo run dev`, with no
 /// option narrowing it to one package and a plain script name.
-fn runs_the_whole_repository(words: &[String]) -> bool {
+pub(crate) fn runs_the_whole_repository(words: &[String]) -> bool {
     let Some((program, rest)) = words.split_first() else {
         return false;
     };
@@ -373,40 +374,55 @@ pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
     })
 }
 
-/// A simple command of a command line: its text as typed, and its words with quotes and escapes resolved.
+/// A simple command of a command line: its text as typed, where that text sits in the command line, and its words with
+/// quotes and escapes resolved, each with where it sits too.
 #[derive(Debug)]
-struct Segment {
-    text: String,
-    words: Vec<String>,
+pub(crate) struct Segment {
+    pub(crate) text: String,
+    pub(crate) span: Range<usize>,
+    pub(crate) words: Vec<String>,
+    pub(crate) word_spans: Vec<Range<usize>>,
 }
 
 /// Splits a command line into simple commands at semicolons, `&`, `|`, parentheses, backticks and line breaks, and each
 /// command into words, the way a shell would outside of quotes. A separator inside quotes splits nothing, so
 /// `echo "a && npm run dev"` is one command that starts nothing.
-fn segments(command_line: &str) -> Vec<Segment> {
+pub(crate) fn segments(command_line: &str) -> Vec<Segment> {
     #[derive(Default)]
     struct Reading {
         segments: Vec<Segment>,
         words: Vec<String>,
+        word_spans: Vec<Range<usize>>,
         word: Option<String>,
+        word_start: usize,
         start: usize,
     }
     impl Reading {
-        /// The word being read, started if there is none.
-        fn current(&mut self) -> &mut String {
-            self.word.get_or_insert_with(String::new)
+        /// The word being read, started at `at` if there is none.
+        fn current(&mut self, at: usize) -> &mut String {
+            self.word.get_or_insert_with(|| {
+                self.word_start = at;
+                String::new()
+            })
         }
-        fn end_word(&mut self) {
+        /// Ends the word being read, which stops at `end`.
+        fn end_word(&mut self, end: usize) {
             if let Some(word) = self.word.take() {
                 self.words.push(word);
+                self.word_spans.push(self.word_start..end);
             }
         }
         fn end_segment(&mut self, end: usize, text: &str) {
-            self.end_word();
+            self.end_word(end);
             if !self.words.is_empty() {
+                let raw = &text[self.start..end];
+                let start = self.start + (raw.len() - raw.trim_start().len());
+                let trimmed = raw.trim();
                 self.segments.push(Segment {
-                    text: text[self.start..end].trim().to_owned(),
+                    text: trimmed.to_owned(),
+                    span: start..start + trimmed.len(),
                     words: std::mem::take(&mut self.words),
+                    word_spans: std::mem::take(&mut self.word_spans),
                 });
             }
         }
@@ -420,23 +436,23 @@ fn segments(command_line: &str) -> Vec<Segment> {
             (Some(open), c) if c == open => quote = None,
             (Some('"'), '\\') => {
                 if let Some((_, escaped)) = chars.next() {
-                    reading.current().push(escaped);
+                    reading.current(at).push(escaped);
                 }
             }
             (None, '\'' | '"') => {
                 quote = Some(c);
-                reading.current();
+                reading.current(at);
             }
             (None, '\\') => match chars.next() {
                 Some((_, '\n')) | None => {}
-                Some((_, escaped)) => reading.current().push(escaped),
+                Some((_, escaped)) => reading.current(at).push(escaped),
             },
-            (None, ' ' | '\t') => reading.end_word(),
+            (None, ' ' | '\t') => reading.end_word(at),
             (None, '\n' | ';' | '&' | '|' | '(' | ')' | '`') => {
                 reading.end_segment(at, command_line);
                 reading.start = at + c.len_utf8();
             }
-            (_, c) => reading.current().push(c),
+            (_, c) => reading.current(at).push(c),
         }
     }
     reading.end_segment(command_line.len(), command_line);
@@ -444,12 +460,12 @@ fn segments(command_line: &str) -> Vec<Segment> {
 }
 
 /// The last component of a program path: `./node_modules/.bin/next` is `next`.
-fn basename(program: &str) -> &str {
+pub(crate) fn basename(program: &str) -> &str {
     program.rsplit('/').next().unwrap_or(program)
 }
 
 /// Whether a word is a `NAME=value` assignment, which a shell applies to the command that follows it.
-fn is_assignment(word: &str) -> bool {
+pub(crate) fn is_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         name.chars()
             .next()
@@ -460,7 +476,7 @@ fn is_assignment(word: &str) -> bool {
 
 /// The words of a command without what only launches it: variables set for it, `nohup`, `exec`, `time`, `npx`,
 /// `pnpm exec`, `bundle exec` and the like.
-fn strip_launchers(mut words: &[String]) -> &[String] {
+pub(crate) fn strip_launchers(mut words: &[String]) -> &[String] {
     loop {
         let Some(first) = words.first() else {
             return words;
@@ -491,7 +507,7 @@ fn strip_launchers(mut words: &[String]) -> &[String] {
 }
 
 /// The words after the program that are not options, skipping the value of an option that takes one.
-fn positional<'a>(words: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
+pub(crate) fn positional<'a>(words: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
     let mut positional = Vec::new();
     let mut words = words.iter().map(String::as_str);
     while let Some(word) = words.next() {

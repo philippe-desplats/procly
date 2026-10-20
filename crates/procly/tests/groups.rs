@@ -444,3 +444,43 @@ fn logs_of_a_service_covered_by_a_running_group_print_the_output_of_the_group() 
     assert_success(&logs);
     assert_eq!(stdout(&logs), stdout(&procly.procly_in(&main, &["logs", "dev"])));
 }
+
+#[test]
+fn a_group_that_covers_one_service_is_reached_through_it_and_up_starts_the_others_on_their_own() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let server = test_server();
+    // What `procly init` proposes for a root script that starts only `web` besides a third-party process.
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\n\
+             [services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n\
+             [services.dev]\ncovers = ['web']\nrun = '{server} --port $PORT_WEB_HTTP'\n",
+            server = server.display()
+        ),
+    );
+
+    let output = procly.procly_in(&main, &["up"]);
+
+    assert_success(&output);
+    let (web, api) = (lease_of(&procly, &main, "web"), lease_of(&procly, &main, "api"));
+    // The Group stands for `web`, and `api` starts on its own.
+    assert_eq!(
+        stdout(&output),
+        format!("api started http://localhost:{api} port {api}\ndev started\n")
+    );
+    let through_the_group = procly.procly_in(&main, &["up", "web"]);
+    assert_eq!(
+        stdout(&through_the_group),
+        format!("web reused (via dev) http://localhost:{web} port {web}\n")
+    );
+    let on_its_own = procly.procly_in(&main, &["up", "api"]);
+    assert_eq!(
+        stdout(&on_its_own),
+        format!("api reused http://localhost:{api} port {api}\n")
+    );
+    assert!(listens(web) && listens(api));
+}
