@@ -148,7 +148,7 @@ pub(super) fn switch(registry: &Registry, cwd: &Path, off: bool) -> Result<Switc
     Ok(SwitchReport { off, rules: reports })
 }
 
-/// Whether the Repository holding `cwd` is Off, where `cwd` is below the root of its Worktree, and the Services the
+/// Whether the Repository holding `cwd` is Off, where `cwd` is relative to the root of its Worktree (`None` when it cannot be placed), and the Services the
 /// Worktree declares, which the Guard matches the command it blocks against and names in its answer. A configuration
 /// that cannot be read declares none: the Guard still answers.
 pub(super) fn guard(registry: &Registry, cwd: &Path) -> Result<(bool, Option<PathBuf>, Vec<GuardService>), AgentError> {

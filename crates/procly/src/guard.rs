@@ -69,7 +69,7 @@ pub(crate) fn denial(recognized: &Recognized, services: &[GuardService], directo
         (None, Kind::Compose) if let Some(file) = unmanaged_compose_file(recognized, directory) => {
             format!(
                 "The compose file `{file}` is not managed by Procly, which runs the compose file at the root of the \
-                 Worktree only."
+                 Worktree only, so no Procly command starts it."
             )
         }
         (None, Kind::DevServer) => "Run `procly up <service>` instead.".to_owned(),
@@ -154,6 +154,12 @@ fn compose_files(words: &[String]) -> Vec<&str> {
             files.extend(words.next());
         } else if let Some(file) = word.strip_prefix("--file=") {
             files.push(file);
+        } else if let Some(file) = word
+            .strip_prefix("-f")
+            .filter(|file| !file.is_empty() && !word.starts_with("--"))
+        {
+            // `-fdev.yml` and `-f=dev.yml`, which the option parser of Docker Compose reads as `-f dev.yml`.
+            files.push(file.strip_prefix('=').unwrap_or(file));
         } else if COMPOSE_OPTIONS_WITH_VALUE.contains(&word) {
             words.next();
         } else if !word.starts_with('-') {
@@ -960,6 +966,8 @@ mod tests {
             ("docker compose -f dev.yml up", "", "dev.yml"),
             ("docker compose --file compose.dev.yaml up -d", "", "compose.dev.yaml"),
             ("docker compose --file=infra/compose.yaml up", "", "infra/compose.yaml"),
+            ("docker compose -fdev.yml up", "", "dev.yml"),
+            ("docker compose -f=dev.yml up", "", "dev.yml"),
             (
                 "docker-compose -f compose.yaml -f override.yml up -d",
                 "",
