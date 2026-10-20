@@ -1,6 +1,6 @@
 # Installing Procly
 
-Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). It needs no runtime. The Daemon starts on demand from the first command, see [The Daemon across crashes and sessions](daemon.md).
+Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). It needs no runtime. The Daemon starts on demand, from the first command that needs it, see [The Daemon across crashes and sessions](daemon.md).
 
 ## Homebrew
 
