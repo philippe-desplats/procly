@@ -365,3 +365,78 @@ fn a_setup_command_running_past_the_setup_timeout_is_killed_and_exits_124() {
         started.elapsed()
     );
 }
+
+/// The path a progress line of `worktree init` points to, after `log: `.
+fn progress_log(stderr: &str) -> PathBuf {
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("still running"))
+        .unwrap_or_else(|| panic!("no progress line in {stderr:?}"));
+    PathBuf::from(line.rsplit_once("log: ").expect("the progress line names its log").1)
+}
+
+#[test]
+fn a_setup_command_running_past_the_progress_interval_reports_its_elapsed_time_and_its_log_on_stderr() {
+    let procly = Procly::new();
+    let config = "[settings]\nsetup_progress_interval = '1s'\n[worktree]\nsetup = ['echo installing; sleep 3']\n";
+    let (_, worktree) = repository_with_worktree(&procly, config);
+
+    let output = procly.procly_in(&worktree, &["worktree", "init"]);
+
+    assert_success(&output);
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("procly: setup command `echo installing; sleep 3` still running after 1s, log: "),
+        "{stderr}"
+    );
+    assert!(stderr.contains("still running after 2s"), "{stderr}");
+    assert_eq!(stdout(&output), "ran echo installing; sleep 3\n");
+}
+
+#[test]
+fn the_log_of_a_setup_command_holds_its_output_and_outlives_a_timeout_that_exits_124_as_before() {
+    let procly = Procly::new();
+    let config = "[settings]\nsetup_timeout = '3s'\nsetup_progress_interval = '1s'\n[worktree]\nsetup = ['echo installing; sleep 30']\n";
+    let (_, worktree) = repository_with_worktree(&procly, config);
+
+    let output = procly.procly_in(&worktree, &["worktree", "init"]);
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(124), "{stderr}");
+    assert!(
+        stderr.contains("setup command `echo installing; sleep 30` ran past 3s, its process tree was killed"),
+        "{stderr}"
+    );
+    let log = fs::read_to_string(progress_log(&stderr)).expect("the log outlives the failed setup");
+    assert!(log.contains("installing"), "{log:?}");
+}
+
+#[test]
+fn a_setup_faster_than_the_progress_interval_prints_no_progress() {
+    let procly = Procly::new();
+    let config = "[settings]\nsetup_progress_interval = '1h'\n[worktree]\nsetup = ['echo quick']\n";
+    let (_, worktree) = repository_with_worktree(&procly, config);
+
+    let output = procly.procly_in(&worktree, &["worktree", "init"]);
+
+    assert_success(&output);
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn the_progress_goes_to_stderr_and_leaves_the_json_document_on_stdout_alone() {
+    let procly = Procly::new();
+    let config = "[settings]\nsetup_progress_interval = '1s'\n[worktree]\nsetup = ['sleep 2']\n";
+    let (_, worktree) = repository_with_worktree(&procly, config);
+
+    let output = procly.procly_in(&worktree, &["worktree", "init", "--json"]);
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).contains("still running after 1s"),
+        "{}",
+        stderr(&output)
+    );
+    let document = common::json_document(&output);
+    assert_eq!(document["result"], "ready");
+}

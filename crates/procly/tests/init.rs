@@ -556,6 +556,105 @@ services:
     }
 }
 
+const BARE_POSTGRES: &str = "\
+services:
+  db:
+    image: postgres:17
+    ports: ['5432:5432']
+";
+
+/// The `name` of the `dev` resource of the Postgres service `db` in a proposal.
+fn database_name(proposal: &str) -> String {
+    let document: toml::Table = proposal.parse().expect("the proposal is TOML");
+    document["services"]["db"]["resources"]["dev"]["name"]
+        .as_str()
+        .expect("the resource is named")
+        .to_owned()
+}
+
+#[test]
+fn a_postgres_that_sets_no_database_is_named_after_the_repository_and_stderr_says_so() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "Acme-Shop");
+    write(&main.join("compose.yaml"), BARE_POSTGRES);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(database_name(&stdout(&output)), "acme_shop");
+    let note = stderr(&output);
+    assert!(note.contains("`acme_shop`") && note.contains("POSTGRES_DB"), "{note}");
+    assert_loads(&procly, &main, "db");
+}
+
+#[test]
+fn a_postgres_that_sets_no_database_in_a_secondary_worktree_is_named_after_the_main_worktree() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "acme-shop");
+    write(&main.join("compose.yaml"), BARE_POSTGRES);
+    common::git(&main, &["add", "compose.yaml"]);
+    common::git(&main, &["commit", "--quiet", "--message", "add the compose file"]);
+    let feature = common::git_worktree_add(&main, "feature");
+
+    let output = init(&procly, &feature);
+
+    assert_eq!(database_name(&stdout(&output)), "acme_shop");
+}
+
+#[test]
+fn a_database_is_never_a_maintenance_database_whatever_the_repository_is_called() {
+    for (repository, name) in [
+        ("postgres", "postgres_dev"),
+        ("Template1", "template1_dev"),
+        ("_", "app"),
+        (
+            "a-repository-name-that-is-far-too-long-for-a-database",
+            "a_repository_name_that_is_far",
+        ),
+    ] {
+        let procly = Procly::new();
+        let main = git_repository(procly.scratch(), repository);
+        write(&main.join("compose.yaml"), BARE_POSTGRES);
+
+        let output = init(&procly, &main);
+
+        assert_eq!(database_name(&stdout(&output)), name, "{repository}");
+        assert_loads(&procly, &main, "db");
+    }
+}
+
+#[test]
+fn a_postgres_that_names_a_maintenance_database_is_named_after_the_repository_instead() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "acme-shop");
+    write(
+        &main.join("compose.yaml"),
+        "\
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: template1
+    ports: ['5432:5432']
+",
+    );
+
+    let output = init(&procly, &main);
+
+    assert_eq!(database_name(&stdout(&output)), "acme_shop");
+    assert!(stderr(&output).contains("template1"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_postgres_that_sets_its_database_keeps_that_name_and_stderr_has_no_note() {
+    let procly = Procly::new();
+    let main = repository(&procly, &[("compose.yaml", COMPOSE)]);
+
+    let output = init(&procly, &main);
+
+    assert!(stdout(&output).contains("name = \"shop\""), "{}", stdout(&output));
+    assert_eq!(stderr(&output).lines().count(), 1, "{}", stderr(&output));
+}
+
 #[test]
 fn a_compose_service_named_like_an_app_gets_a_name_of_its_own_and_keeps_its_compose_name() {
     let procly = Procly::new();
@@ -688,4 +787,231 @@ services:
     assert!(!proposal.contains("[services.db.resources"), "{proposal}");
     assert!(proposal.contains("[services.plain.resources.dev]"), "{proposal}");
     assert_eq!(proposal.matches("driver").count(), 1, "{proposal}");
+}
+
+#[test]
+fn init_in_a_fresh_state_directory_leaves_no_daemon_running() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "package.json",
+            r#"{"name": "shop", "scripts": {"dev": "node server.js"}}"#,
+        )],
+    );
+    let outside = procly.scratch().join("not-a-repository");
+    fs::create_dir(&outside).unwrap();
+
+    init(&procly, &main);
+    assert_success(&procly.procly_in(&main, &["init", "--json"]));
+    assert_eq!(procly.procly_in(&outside, &["init"]).status.code(), Some(125));
+
+    let left: Vec<_> = fs::read_dir(procly.state_dir())
+        .expect("read the state directory")
+        .map(|entry| entry.expect("read an entry of the state directory").file_name())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "init needs no Daemon, yet the state directory holds {left:?}"
+    );
+}
+
+/// A monorepo of 2 apps whose root `dev` script is `script`.
+fn monorepo_with_root_script(procly: &Procly, script: &str) -> PathBuf {
+    let root = serde_json::json!({
+        "name": "acme",
+        "workspaces": ["apps/*"],
+        "scripts": { "dev": script },
+    });
+    repository(
+        procly,
+        &[
+            ("package.json", &root.to_string()),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "next dev"}}"#,
+            ),
+            (
+                "apps/api/package.json",
+                r#"{"name": "api", "scripts": {"dev": "node ace serve"}}"#,
+            ),
+        ],
+    )
+}
+
+#[test]
+fn a_root_dev_script_that_starts_commands_init_did_not_map_yields_a_group_without_them() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(
+        &procly,
+        "turbo dev & stripe listen --forward-to localhost:3000/api/webhooks & node worker.js",
+    );
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, "turbo dev", "{proposal}");
+    assert!(proposal.contains(r#"covers = ["api", "web"]"#), "{proposal}");
+    let notes = stderr(&output);
+    for left_out in [
+        "stripe listen --forward-to localhost:3000/api/webhooks",
+        "node worker.js",
+    ] {
+        let note = notes
+            .lines()
+            .find(|line| line.contains(left_out))
+            .unwrap_or_else(|| panic!("stderr names {left_out}\n{notes}"));
+        assert!(note.contains("not recognised as a dev server"), "{note}");
+    }
+    assert_loads(&procly, &main, "dev");
+}
+
+#[test]
+fn a_root_dev_script_with_no_recognised_command_gets_no_group_and_stderr_says_so() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "stripe listen && node worker.js");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    assert!(!proposal.contains("covers"), "{proposal}");
+    assert!(
+        proposal.contains("[services.web]") && proposal.contains("[services.api]"),
+        "{proposal}"
+    );
+    let notes = stderr(&output);
+    assert!(
+        notes.contains("`stripe listen`") && notes.contains("`node worker.js`"),
+        "{notes}"
+    );
+    assert!(notes.contains("No Group is proposed"), "{notes}");
+    assert_loads(&procly, &main, "web");
+}
+
+#[test]
+fn the_commands_concurrently_runs_are_left_out_one_by_one_with_their_names() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(
+        &procly,
+        r#"concurrently -n web,hooks,api "pnpm --filter web dev" "stripe listen" "pnpm --filter api dev""#,
+    );
+
+    let output = init(&procly, &main);
+
+    let (run, _) = run_and_port(&stdout(&output), "dev");
+    assert_eq!(
+        run,
+        r#"concurrently -n web,api "pnpm --filter web dev" "pnpm --filter api dev""#
+    );
+    assert!(stderr(&output).contains("`stripe listen`"), "{}", stderr(&output));
+    assert_loads(&procly, &main, "dev");
+}
+
+#[test]
+fn a_prep_step_left_out_says_the_server_after_it_no_longer_waits() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "pnpm build && turbo dev");
+
+    let output = init(&procly, &main);
+
+    let (run, _) = run_and_port(&stdout(&output), "dev");
+    assert_eq!(run, "turbo dev");
+    let notes = stderr(&output);
+    assert!(
+        notes.contains("`pnpm build`") && notes.contains("`turbo dev` used to run after it"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn a_root_dev_script_of_recognised_commands_only_keeps_the_package_manager_and_prints_no_note() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "next dev & vite");
+
+    let output = init(&procly, &main);
+
+    let (run, _) = run_and_port(&stdout(&output), "dev");
+    assert_eq!(run, "npm run dev");
+    assert!(!stderr(&output).contains("left out"), "{}", stderr(&output));
+}
+
+/// The `covers` of the Group `dev` of `proposal`, as the lines of TOML it is written with.
+fn covers(proposal: &str) -> String {
+    proposal
+        .lines()
+        .find(|line| line.starts_with("covers"))
+        .unwrap_or_else(|| panic!("no Group covers anything\n{proposal}"))
+        .to_owned()
+}
+
+#[test]
+fn a_group_narrowed_to_one_package_covers_only_its_service() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(
+        &procly,
+        r#"concurrently "pnpm --filter web dev" "stripe listen --forward-to localhost:3000/api/webhooks" "node worker.js""#,
+    );
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, r#"concurrently "pnpm --filter web dev""#, "{proposal}");
+    assert_eq!(covers(&proposal), r#"covers = ["web"]"#, "{proposal}");
+    assert!(
+        proposal.contains("[services.api]"),
+        "the Service the Group does not start stays declared\n{proposal}"
+    );
+    assert!(stderr(&output).contains("`stripe listen"), "{}", stderr(&output));
+    assert_loads(&procly, &main, "dev");
+    assert_loads(&procly, &main, "api");
+}
+
+#[test]
+fn a_prep_step_left_out_does_not_widen_what_the_narrowed_group_covers() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "pnpm build && pnpm --filter web dev");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, "pnpm --filter web dev", "{proposal}");
+    assert_eq!(covers(&proposal), r#"covers = ["web"]"#, "{proposal}");
+    assert_loads(&procly, &main, "dev");
+}
+
+#[test]
+fn a_command_run_from_the_directory_of_a_package_covers_that_service() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "cd apps/api && node ace serve & stripe listen");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    let (run, _) = run_and_port(&proposal, "dev");
+    assert_eq!(run, "cd apps/api && node ace serve", "{proposal}");
+    assert_eq!(covers(&proposal), r#"covers = ["api"]"#, "{proposal}");
+}
+
+#[test]
+fn a_kept_command_that_names_no_package_gets_no_group_and_stderr_says_so() {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, "next dev & stripe listen");
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    assert!(!proposal.contains("covers"), "{proposal}");
+    assert!(
+        proposal.contains("[services.web]") && proposal.contains("[services.api]"),
+        "{proposal}"
+    );
+    let notes = stderr(&output);
+    assert!(
+        notes.contains("`next dev` cannot be tied to one Service") && notes.contains("No Group is proposed"),
+        "{notes}"
+    );
+    assert_loads(&procly, &main, "web");
 }

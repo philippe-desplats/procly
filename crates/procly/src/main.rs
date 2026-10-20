@@ -6,6 +6,7 @@ mod driver;
 mod duration;
 mod envfile;
 mod guard;
+mod init;
 mod json;
 mod output;
 mod placeholder;
@@ -86,7 +87,8 @@ enum Command {
         command: String,
     },
     /// Start a declared Service of the current Worktree, or find it running, wait until it is healthy and print
-    /// its name, `started` or `reused`, its URL and its port on one line. A Service covered by a Group that runs is
+    /// its name, `started` or `reused`, then each of its Leases, by its URL when its scheme is known and by its Port
+    /// name otherwise, on one line. A Service covered by a Group that runs is
     /// `reused (via <group>)`. Without a Service, start every declared Service no Group covers, one line each.
     #[command(
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
@@ -344,6 +346,10 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         daemon::write_output(path)?;
         return Ok(ExitCode::SUCCESS);
     }
+    // Init reads the Worktree only, so it never starts the Daemon and needs nothing from the state directory.
+    if let Command::Init { json } = &command {
+        return init(json.json);
+    }
     let state = StateDir::resolve()?;
     match command {
         Command::Run { timeout, json, command } => {
@@ -414,7 +420,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Off { json } => switch(&state, true, json.json),
         Command::On { json } => switch(&state, false, json.json),
         Command::Eject { agent, json } => eject(&state, agent, json.json),
-        Command::Init { json } => init(&state, json.json),
+        Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
         Command::Daemon => {
@@ -483,6 +489,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
             url,
             ports,
             needs,
+            urls,
         } => {
             let requested = UpService {
                 service,
@@ -491,6 +498,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
                 port,
                 url,
                 ports,
+                urls,
             };
             up_reached(&requested, &needs, json)
         }
@@ -706,17 +714,27 @@ fn env(state: &StateDir, service: &str, json: bool) -> anyhow::Result<ExitCode> 
 }
 
 /// Where to reach a Service that is up: its name, `started` or `reused` and the Group it runs in when it is covered
-/// by one, its URL and its port.
+/// by one, then each of its Leases, by its URL when its scheme is known and by its Port name otherwise.
 fn reached_line(up: &UpService) -> String {
     let service = &up.service;
     let outcome = match &up.via {
         Some(group) => format!("{} (via {group})", up.outcome.as_str()),
         None => up.outcome.as_str().to_owned(),
     };
-    match (&up.url, up.port) {
-        (Some(url), Some(port)) => format!("{service} {outcome} {url} port {port}"),
-        _ => format!("{service} {outcome}"),
+    // The Lease the health check probes first, then the others by Port name.
+    let (health, others): (Vec<_>, Vec<_>) = up.ports.iter().partition(|&(_, &port)| Some(port) == up.port);
+    let leases: Vec<String> = health
+        .into_iter()
+        .chain(others)
+        .map(|(port_name, port)| match up.urls.get(port_name) {
+            Some(url) => format!("{url} port {port}"),
+            None => format!("{port_name} port {port}"),
+        })
+        .collect();
+    if leases.is_empty() {
+        return format!("{service} {outcome}");
     }
+    format!("{service} {outcome} {}", leases.join(", "))
 }
 
 /// Runs `down`, printing one line per Service.
@@ -863,27 +881,27 @@ fn switch(state: &StateDir, off: bool, json: bool) -> anyhow::Result<ExitCode> {
 }
 
 /// Runs `init`, printing the proposal on stdout and on stderr whether it was written.
-fn init(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
+fn init(json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    match client::send(state, &Request::Init { cwd })? {
-        Response::Init(report) if json => {
-            json::print(&report)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Response::Init(report) => {
-            print(&report.toml)?;
-            if report.written {
-                eprintln!("procly: wrote {}", report.file.display());
-            } else {
-                eprintln!(
-                    "procly: {} exists already, left as it is, the proposal above is not written",
-                    report.file.display()
-                );
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        other => unexpected(other),
+    let report = init::propose(&cwd)?;
+    // The notes are not in the document, so `--json` keeps them on stderr too.
+    for note in &report.notes {
+        eprintln!("procly: {note}");
     }
+    if json {
+        json::print(&report)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    print(&report.toml)?;
+    if report.written {
+        eprintln!("procly: wrote {}", report.file.display());
+    } else {
+        eprintln!(
+            "procly: {} exists already, left as it is, the proposal above is not written",
+            report.file.display()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands
@@ -1018,9 +1036,10 @@ fn guard_hook() -> ExitCode {
     match asked {
         Ok(Response::Guard {
             off: false,
-            at_root,
+            directory,
+            root,
             services,
-        }) => println!("{}", guard::denial(&recognized, &services, at_root)),
+        }) => println!("{}", guard::denial(&recognized, &services, directory.as_deref(), &root)),
         Ok(Response::Guard { off: true, .. }) => {}
         Ok(Response::Error { message }) => eprintln!("procly guard: {message}, letting the command through"),
         Ok(other) => eprintln!("procly guard: unexpected answer {other:?}, letting the command through"),
@@ -1048,7 +1067,7 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
         path,
         env: caller_env(),
     };
-    match client::send(state, &request)? {
+    match client::send_with_progress(state, &request, print_setup_progress)? {
         Response::WorktreeInit(report) if json => {
             json::print(&json::WorktreeInit::Ready { report: &report })?;
             Ok(ExitCode::SUCCESS)
@@ -1106,6 +1125,23 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
     }
 }
 
+/// One line on stderr for a setup command still running, so that a long setup shows it is alive. Stdout, and with it the
+/// JSON document, stays as it is.
+fn print_setup_progress(progress: &Response) {
+    if let Response::SetupProgress {
+        command,
+        elapsed_ms,
+        log,
+    } = progress
+    {
+        let elapsed = duration::format(Duration::from_secs(elapsed_ms / 1000));
+        eprintln!(
+            "procly: setup command `{command}` still running after {elapsed}, log: {}",
+            log.display()
+        );
+    }
+}
+
 fn print_init(report: &InitReport) {
     for path in &report.missing {
         eprintln!("procly: {path} is not in the Main worktree, nothing to copy");
@@ -1154,6 +1190,7 @@ fn unexpected(response: Response) -> anyhow::Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::StartOutcome;
 
     #[test]
     fn the_tail_keeps_the_last_lines_with_their_newlines() {
@@ -1174,6 +1211,46 @@ mod tests {
         );
         assert_eq!(let_go(&released(1)), "db released, 1 other Worktree still needs it");
         assert_eq!(let_go(&released(2)), "db released, 2 other Worktrees still need it");
+    }
+
+    fn reached(port: Option<u16>, ports: &[(&str, u16)], urls: &[(&str, &str)]) -> UpService {
+        UpService {
+            service: "mailpit".to_owned(),
+            outcome: StartOutcome::Started,
+            via: None,
+            port,
+            url: None,
+            ports: ports.iter().map(|&(name, port)| (name.to_owned(), port)).collect(),
+            urls: urls
+                .iter()
+                .map(|&(name, url)| (name.to_owned(), url.to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_line_of_a_service_reached_gives_each_lease_its_url_or_its_port_name_the_health_port_first() {
+        assert_eq!(
+            reached_line(&reached(
+                Some(1025),
+                &[("http", 8025), ("smtp", 1025)],
+                &[("http", "http://localhost:8025"), ("smtp", "smtp://localhost:1025")],
+            )),
+            "mailpit started smtp://localhost:1025 port 1025, http://localhost:8025 port 8025"
+        );
+        assert_eq!(
+            reached_line(&reached(
+                Some(4101),
+                &[("admin", 4102), ("http", 4101)],
+                &[("http", "http://localhost:4101")]
+            )),
+            "mailpit started http://localhost:4101 port 4101, admin port 4102"
+        );
+        assert_eq!(
+            reached_line(&reached(Some(5433), &[("db", 5433)], &[])),
+            "mailpit started db port 5433"
+        );
+        assert_eq!(reached_line(&reached(None, &[], &[])), "mailpit started");
     }
 
     #[test]

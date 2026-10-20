@@ -11,14 +11,18 @@ use std::path::{Path, PathBuf};
 use serde_yaml_ng::Value;
 
 use super::{HealthEntry, Proposal, ProposalError, ResourceEntry, ServiceEntry, service_name};
+use crate::guard::COMPOSE_FILES;
+use crate::topology::SLUG_MAX_LEN;
 
-/// The compose files Docker looks for, in the order it prefers them.
-const COMPOSE_FILES: [&str; 4] = [
-    "compose.yaml",
-    "compose.yml",
-    "docker-compose.yaml",
-    "docker-compose.yml",
-];
+/// The databases a Postgres server keeps for itself, which a Logical resource is never pointed at.
+const MAINTENANCE_DATABASES: [&str; 3] = ["postgres", "template0", "template1"];
+
+/// The longest database name Procly derives from a Repository, which leaves room for the `__<slug>` the Driver adds in
+/// another Worktree within the 63 bytes of the `max_length` of the bundled `postgres` Driver.
+const DERIVED_NAME_MAX_LEN: usize = 63 - 2 - SLUG_MAX_LEN;
+
+/// The name a derived database has when the Repository has no usable name.
+const FALLBACK_DATABASE: &str = "app";
 
 /// How a technology gives each Worktree resources of its own, through a Driver that ships with Procly.
 #[derive(Debug)]
@@ -114,6 +118,17 @@ impl Technology {
 fn technology(image: &str) -> Option<&'static Technology> {
     let name = image.split('@').next()?.rsplit('/').next()?.split(':').next()?;
     TECHNOLOGIES.iter().find(|technology| technology.images.contains(&name))
+}
+
+/// The Driver that ships with Procly for the technology the service `compose` of the compose file in `dir` runs, as
+/// `postgres` for a `postgres:17` image. The file is read as written, and `None` stands for a file, a service or an
+/// image Procly cannot read or knows no such Driver for.
+pub(crate) fn bundled_driver(dir: &Path, compose: &str) -> Option<&'static str> {
+    let text = fs::read_to_string(find(dir)?).ok()?;
+    let mut file: Value = serde_yaml_ng::from_str(&text).ok()?;
+    file.apply_merge().ok()?;
+    let image = file.get("services")?.get(compose)?.get("image")?.as_str()?;
+    Some(technology(image)?.logical.as_ref()?.driver)
 }
 
 /// A port a compose service publishes on the host.
@@ -258,8 +273,8 @@ fn has_bundled_credentials(service: &Value) -> bool {
 }
 
 /// A name for a Logical resource in the Main worktree: lowercase letters, digits and single underscores, starting
-/// with a letter and not ending in an underscore, which is what a Driver accepts. `postgres` when nothing is left.
-fn resource_name(raw: &str) -> String {
+/// with a letter and not ending in an underscore, which is what a Driver accepts. `None` when nothing is left.
+fn resource_name(raw: &str) -> Option<String> {
     let mut name = String::new();
     for c in raw.to_lowercase().chars() {
         let c = if c.is_ascii_lowercase() || c.is_ascii_digit() {
@@ -273,10 +288,57 @@ fn resource_name(raw: &str) -> String {
     }
     let name = name.trim_end_matches('_');
     match name.chars().next() {
-        None => "postgres".to_owned(),
-        Some(first) if first.is_ascii_digit() => format!("db_{name}"),
-        Some(_) => name.to_owned(),
+        None => None,
+        Some(first) if first.is_ascii_digit() => Some(format!("db_{name}")),
+        Some(_) => Some(name.to_owned()),
     }
+}
+
+/// Whether `name` is a database a Postgres server keeps for itself.
+fn is_maintenance_database(name: &str) -> bool {
+    MAINTENANCE_DATABASES.contains(&name)
+}
+
+/// A database name derived from the name of the Repository, which no maintenance database can be.
+fn derived_database(repository: &str) -> String {
+    let mut name = resource_name(repository).unwrap_or_else(|| FALLBACK_DATABASE.to_owned());
+    name.truncate(DERIVED_NAME_MAX_LEN);
+    let mut name = name.trim_end_matches('_').to_owned();
+    if is_maintenance_database(&name) {
+        name.push_str("_dev");
+    }
+    name
+}
+
+/// The name of the database of the Main worktree for the Postgres `service` called `name`, and the note that tells
+/// where the name comes from when Procly chose it: the one `POSTGRES_DB` sets, unless that is none or a maintenance
+/// database, then one derived from the name of the Repository.
+fn database_name(name: &str, service: &Value, repository: &str) -> (String, Option<String>) {
+    let declared = environment(service, "POSTGRES_DB");
+    let usable = declared
+        .as_deref()
+        .and_then(resource_name)
+        .filter(|name| !is_maintenance_database(name));
+    if let Some(usable) = usable {
+        return (usable, None);
+    }
+    let derived = derived_database(repository);
+    let why = match (
+        declared.filter(|declared| !declared.is_empty()),
+        declared_environment(service, "POSTGRES_DB"),
+    ) {
+        (Some(declared), _) => format!("sets POSTGRES_DB to `{declared}`, which is no database to work in"),
+        (None, Some(_)) => "reads POSTGRES_DB from a variable with no default".to_owned(),
+        (None, None) => "sets no POSTGRES_DB".to_owned(),
+    };
+    let source = if resource_name(repository).is_some() {
+        format!("after the Repository `{repository}`")
+    } else {
+        format!("by default, the Repository name `{repository}` holds nothing a database name can carry")
+    };
+    let note =
+        format!("the compose service `{name}` {why}, so its Logical resource is named `{derived}` {source}, review it");
+    (derived, Some(note))
 }
 
 /// The Port name of a published port: the one a variable Procly sets spells out (`PORT_DB` is `db`), the well-known
@@ -307,7 +369,7 @@ fn find(worktree: &Path) -> Option<PathBuf> {
 }
 
 /// Adds a Compose service for each service of the compose file of the Worktree rooted at `worktree`.
-pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), ProposalError> {
+pub(super) fn propose(worktree: &Path, repository: &str, proposal: &mut Proposal) -> Result<(), ProposalError> {
     let Some(path) = find(worktree) else {
         return Ok(());
     };
@@ -328,18 +390,28 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
     };
     // A variable can carry the Lease of one Service only: the Env file holds one template for it.
     let mut variables = BTreeSet::new();
+    let mut notes = Vec::new();
     for (name, service) in services {
         let Some(name) = name.as_str() else { continue };
         proposal.add_with(&service_name(name, "compose"), |own| {
-            compose_service(name, own, service, &mut variables)
+            compose_service(name, own, service, repository, &mut variables, &mut notes)
         });
     }
+    proposal.notes.extend(notes);
     Ok(())
 }
 
 /// The Compose service `own` for the service `name` of the compose file, whose definition is `service`. `variables`
-/// holds the ones an earlier service already derives.
-fn compose_service(name: &str, own: &str, service: &Value, variables: &mut BTreeSet<String>) -> ServiceEntry {
+/// holds the ones an earlier service already derives, and `notes` collects what the proposal tells the user on the way,
+/// such as a name it chose after `repository`.
+fn compose_service(
+    name: &str,
+    own: &str,
+    service: &Value,
+    repository: &str,
+    variables: &mut BTreeSet<String>,
+    notes: &mut Vec<String>,
+) -> ServiceEntry {
     let ports = published(service);
     let technology = service.get("image").and_then(Value::as_str).and_then(technology);
     let mut entry = ServiceEntry {
@@ -379,12 +451,12 @@ fn compose_service(name: &str, own: &str, service: &Value, variables: &mut BTree
         .filter(|logical| !named.is_empty() && (logical.driver != "postgres" || has_bundled_credentials(service)))
     {
         entry.driver = Some(logical.driver.to_owned());
-        let name = logical
-            .named
-            .then(|| resource_name(&environment(service, "POSTGRES_DB").unwrap_or_default()));
+        let database = logical.named.then(|| database_name(name, service, repository));
+        let (database, note) = database.unzip();
+        notes.extend(note.flatten());
         entry
             .resources
-            .insert(logical.resource.to_owned(), ResourceEntry { name });
+            .insert(logical.resource.to_owned(), ResourceEntry { name: database });
     }
     entry
 }
@@ -443,15 +515,33 @@ mod tests {
     #[test]
     fn a_resource_name_is_one_a_driver_accepts() {
         for (raw, name) in [
-            ("shop", "shop"),
-            ("My-App", "my_app"),
-            ("a--b", "a_b"),
-            ("shop_", "shop"),
-            ("2fast", "db_2fast"),
-            ("", "postgres"),
-            ("---", "postgres"),
+            ("shop", Some("shop")),
+            ("My-App", Some("my_app")),
+            ("a--b", Some("a_b")),
+            ("shop_", Some("shop")),
+            ("2fast", Some("db_2fast")),
+            ("", None),
+            ("---", None),
         ] {
-            assert_eq!(resource_name(raw), name, "{raw}");
+            assert_eq!(resource_name(raw).as_deref(), name, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_database_derived_from_a_repository_is_never_a_maintenance_database() {
+        for (repository, name) in [
+            ("acme-shop", "acme_shop"),
+            ("postgres", "postgres_dev"),
+            ("Template0", "template0_dev"),
+            ("---", "app"),
+            ("2fast", "db_2fast"),
+            (
+                "a-repository-name-that-is-far-too-long-for-a-database",
+                "a_repository_name_that_is_far",
+            ),
+            ("a-repository-name-that-is-fa-r", "a_repository_name_that_is_fa"),
+        ] {
+            assert_eq!(derived_database(repository), name, "{repository}");
         }
     }
 

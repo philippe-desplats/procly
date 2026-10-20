@@ -72,8 +72,6 @@ pub(crate) enum Request {
     /// Stops the Services of the Repository holding `cwd` and removes what Procly wrote into it, apart from the
     /// Managed blocks that were edited.
     Eject { cwd: PathBuf },
-    /// Proposes a `procly.toml` for the Worktree holding `cwd`, and writes it unless the Worktree has one.
-    Init { cwd: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,6 +101,8 @@ pub(crate) enum Response {
         via: Option<String>,
         /// The Services it needs, in the order `up` brought them up.
         needs: Vec<UpService>,
+        /// Where to reach each Lease whose scheme Procly knows, by Port name.
+        urls: BTreeMap<String, String>,
     },
     /// Every Service `up` without a Service brought up or found running, in the order it brought them up.
     UpAll {
@@ -129,6 +129,15 @@ pub(crate) enum Response {
     },
     /// The Worktree is prepared.
     WorktreeInit(InitReport),
+    /// A setup command is still running: sent as often as `settings.setup_progress_interval` while `worktree init`
+    /// waits, before its final answer.
+    SetupProgress {
+        command: String,
+        /// How long the command has run, in milliseconds.
+        elapsed_ms: u64,
+        /// The file the output of the setup commands is appended to, which outlives a failure.
+        log: PathBuf,
+    },
     /// A setup command failed, and the ones after it were not run.
     SetupFailed {
         report: InitReport,
@@ -144,15 +153,15 @@ pub(crate) enum Response {
     /// Whether the Guard stands for the Repository, and the Services it declares for the Worktree.
     Guard {
         off: bool,
-        /// Whether the directory asked about is the root of its Worktree, where a dev command of the whole Repository
-        /// runs.
-        at_root: bool,
+        /// The directory asked about, relative to the root of its Worktree (empty at the root, where a dev command of
+        /// the whole Repository runs), `None` when it cannot be placed.
+        directory: Option<PathBuf>,
+        /// The root of the Worktree, which a compose file given with an absolute path is placed against.
+        root: PathBuf,
         services: Vec<GuardService>,
     },
     /// The Repository is ejected.
     Eject(EjectReport),
-    /// The `procly.toml` proposed for the Worktree.
-    Init(ProposalReport),
     Error {
         message: String,
     },
@@ -251,17 +260,6 @@ pub(crate) struct BlockReport {
     pub(crate) outcome: BlockOutcome,
 }
 
-/// What `init` proposed.
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ProposalReport {
-    /// The `procly.toml` of the Worktree, written there when `written`.
-    pub(crate) file: PathBuf,
-    /// The proposal, the content of `file` when `written`.
-    pub(crate) toml: String,
-    /// Whether the Worktree had no `procly.toml`. One that exists is never overwritten.
-    pub(crate) written: bool,
-}
-
 /// What `agent install` wrote.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct InstallReport {
@@ -348,6 +346,8 @@ pub(crate) struct UpService {
     pub(crate) url: Option<String>,
     /// Every Lease of the Service, by Port name, the one `port` is the health check's among them.
     pub(crate) ports: BTreeMap<String, u16>,
+    /// Where to reach each Lease whose scheme Procly knows, by Port name, the one `url` is among them.
+    pub(crate) urls: BTreeMap<String, String>,
 }
 
 /// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.

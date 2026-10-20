@@ -119,6 +119,7 @@ fn up_json_carries_the_outcome_and_the_lease_of_the_service_it_reached() {
             "port": port,
             "url": format!("http://localhost:{port}"),
             "ports": { "http": port },
+            "urls": { "http": format!("http://localhost:{port}") },
             "needed_by": null,
         }])
     );
@@ -162,12 +163,14 @@ fn up_json_carries_every_lease_of_a_service_declaring_2_port_names() {
         // The existing keys are unchanged: `port` is still the Lease of the health check.
         assert_eq!(service["port"], json!(http));
         assert_eq!(service["url"], json!(format!("http://localhost:{http}")));
+        // The `admin` port has no scheme Procly knows, so no URL.
+        assert_eq!(service["urls"], json!({ "http": format!("http://localhost:{http}") }));
     }
-    // The text prints what it always did.
+    // The text names every Lease, the one of the health check first.
     let text = procly.procly_in(&main, &["up", "multi"]);
     assert_eq!(
         stdout(&text),
-        format!("multi reused http://localhost:{http} port {http}\n")
+        format!("multi reused http://localhost:{http} port {http}, admin port {admin}\n")
     );
 }
 

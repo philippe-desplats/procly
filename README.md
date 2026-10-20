@@ -20,7 +20,7 @@ Agents call `procly up` instead of starting dev servers and containers themselve
 
 Coding agents are good at starting servers and bad at keeping track of them. Each agent sees its own shell, not the dev server another agent left running, nor the worktree next door that declared the same port. Run several agents in parallel worktrees and you get duplicate servers, port collisions, containers started twice and processes nobody stops.
 
-Procly is a single per-user Daemon that owns every Service, port and container across all your Repositories and Worktrees. A Service is declared once in `procly.toml`, and `procly up web` either starts it or answers that it already runs, with its URL. Each Worktree gets its own persistent ports, called Leases, so a second Worktree never fights the first one for port 3000. The agent gets one command, a stable exit code and a line it can read, and the Daemon does the bookkeeping.
+Procly is a single per-user Daemon that owns every Service, port and container across all your Repositories and Worktrees. A Service is declared once in `procly.toml`, and `procly up web` either starts it or answers that it already runs, with where to reach it. Each Worktree gets its own persistent ports, called Leases, so a second Worktree never fights the first one for port 3000. The agent gets one command, a stable exit code and a line it can read, and the Daemon does the bookkeeping.
 
 ## Features
 
@@ -40,7 +40,7 @@ Procly is a single per-user Daemon that owns every Service, port and container a
 
 ## Installation
 
-Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). It needs no runtime, and the Daemon starts on demand from the first command. Windows is not supported.
+Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). It needs no runtime, and the Daemon starts on demand, from the first command that needs it. Windows is not supported.
 
 ### Homebrew
 
@@ -106,7 +106,7 @@ web reused http://localhost:24080 port 24080
 Run from another Worktree of the same Repository, the same command starts its own copy on its own Leases. The daily commands:
 
 ```sh
-procly up web              # start web and what it needs, wait until healthy, print its URL and port
+procly up web              # start web and what it needs, wait until healthy, print where to reach each of its ports
 procly up                  # start every declared Service, each after what it needs
 procly env web             # print the variables Procly injects into web, without starting it
 procly logs web            # the recent output of web
@@ -190,7 +190,7 @@ An unknown key is an error, so a typo never goes unnoticed. [Configuration](docs
 
 ## How it works
 
-- The first `procly` command starts the Daemon, one per user, which listens on a Unix socket in its state directory (`$PROCLY_STATE_DIR`, else `$XDG_STATE_HOME/procly`, else `~/.local/state/procly`) and never on a TCP port. The CLI is a client of that socket.
+- The first `procly` command that needs the Daemon starts it, one per user (`procly init` and the Guard on a command it does not recognize never do), which listens on a Unix socket in its state directory (`$PROCLY_STATE_DIR`, else `$XDG_STATE_HOME/procly`, else `~/.local/state/procly`) and never on a TCP port. The CLI is a client of that socket.
 - `procly up` resolves the Repository and the Worktree from the current directory, grants the Leases, starts the Service by `/bin/sh -c` in a process group of its own with its Leases and Derived variables in the environment, and waits for its health check.
 - Leases, running Services and containers are recorded as atomic JSON documents in the state directory. A Daemon that crashed leaves its Services running, and the next one re-attaches those still listening on their Lease and stops what is left of the others.
 - Stopping a Service sends `SIGTERM` to its whole process group, then `SIGKILL`, so nothing it forked survives it.

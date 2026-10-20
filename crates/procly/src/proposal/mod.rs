@@ -4,7 +4,11 @@
 //! leaves out what it would have to invent, such as the port of a dev server that names none.
 
 mod compose;
+mod cover;
+mod group;
 mod scripts;
+
+pub(crate) use compose::bundled_driver;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -90,6 +94,9 @@ impl ServiceEntry {
 #[derive(Debug, Default, Serialize)]
 struct Proposal {
     services: BTreeMap<String, ServiceEntry>,
+    /// What the proposal tells the user on the way, a choice it made that deserves a second look.
+    #[serde(skip)]
+    notes: Vec<String>,
 }
 
 impl Proposal {
@@ -138,20 +145,32 @@ fn service_name(raw: &str, fallback: &str) -> String {
     }
 }
 
-/// The `procly.toml` proposed for the Worktree rooted at `worktree`.
-pub(crate) fn propose(worktree: &Path) -> Result<String, ProposalError> {
+/// A `procly.toml` proposed, and what the proposal tells the user about it.
+#[derive(Debug)]
+pub(crate) struct Proposed {
+    pub(crate) toml: String,
+    /// The choices the proposal made that deserve a second look, one sentence each.
+    pub(crate) notes: Vec<String>,
+}
+
+/// The `procly.toml` proposed for the Worktree rooted at `worktree`, in the Repository called `repository`, which
+/// names what the Worktree does not.
+pub(crate) fn propose(worktree: &Path, repository: &str) -> Result<Proposed, ProposalError> {
     let mut proposal = Proposal::default();
     scripts::propose(worktree, &mut proposal)?;
-    compose::propose(worktree, &mut proposal)?;
+    compose::propose(worktree, repository, &mut proposal)?;
     if proposal.services.is_empty() {
         return Err(ProposalError::Nothing {
             dir: worktree.to_owned(),
         });
     }
     let body = toml::to_string(&proposal).expect("a proposal holds only strings, numbers and tables, which serialize");
-    Ok(format!(
-        "# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.\n\n{body}"
-    ))
+    Ok(Proposed {
+        toml: format!(
+            "# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.\n\n{body}"
+        ),
+        notes: proposal.notes,
+    })
 }
 
 #[cfg(test)]

@@ -4,18 +4,22 @@
 //! The commands that succeeded are recorded in the git directory private to the Worktree, so the record goes away
 //! with the Worktree and a Worktree recreated at the same path starts afresh.
 
-use std::fs;
-use std::io;
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::io::{self, Write as _};
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::MissedTickBehavior;
 
 use super::Registry;
 use super::atomic_file::{self, Mode};
-use super::job::{Fingerprint, JobSpec};
+use super::job::{Fingerprint, Job, JobSpec};
 use super::store;
 use crate::protocol::{InitReport, JobEnd, Response};
 use crate::topology::{self, Topology};
@@ -24,6 +28,8 @@ use crate::topology::{self, Topology};
 const RECORD_FILE: &str = "procly-worktree-init.json";
 /// The version of the format of the record, a state document like the ones of the state directory (ADR 0012).
 const RECORD_VERSION: u32 = 1;
+/// The shortest interval between 2 progress reports, the elapsed time they print being in whole seconds.
+const MIN_PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 enum InitError {
@@ -56,17 +62,24 @@ struct Prepared {
     setup: Vec<String>,
     /// How long each setup command may run before its whole process tree is killed.
     setup_timeout: Duration,
+    /// How often a setup command still running reports it.
+    progress_interval: Duration,
     record_path: PathBuf,
     record: Record,
 }
 
 /// Prepares the Worktree holding `path`: copies the listed files, then runs the setup commands it has not run, each
 /// as a Job so that its whole process tree is killed on timeout or when the Daemon stops. Stops at the first one that
-/// fails.
+/// fails. A command still running reports its elapsed time and its log through `progress`, once per
+/// `settings.setup_progress_interval`.
+///
+/// The output of the commands is appended to a log in the state directory, one per Worktree and emptied by the next
+/// `worktree init`. It is removed once every command succeeded, and kept when one failed, to tell why.
 pub(super) async fn run(
     registry: Arc<Registry>,
     path: PathBuf,
     env: Vec<(String, String)>,
+    progress: &UnboundedSender<Response>,
 ) -> anyhow::Result<Response> {
     // Resolving the Topology runs git.
     let topology = tokio::task::spawn_blocking(move || locate(&path))
@@ -88,35 +101,52 @@ pub(super) async fn run(
         mut report,
         setup,
         setup_timeout,
+        progress_interval,
         record_path,
         mut record,
     } = tokio::task::spawn_blocking(move || prepare(&prepared_topology))
         .await
         .context("the worktree could not be prepared")??;
+    let mut log: Option<SetupLog> = None;
     for command in setup {
         if record.setup.contains(&command) {
             continue;
         }
-        let spec = JobSpec {
-            fingerprint: Fingerprint {
-                topology: Some(topology.clone()),
-                cwd: topology.worktree.path.clone(),
-                command: command.clone(),
-            },
-            env: env.clone(),
-            timeout: setup_timeout,
-        };
+        if log.is_none() {
+            let (dir, worktree) = (registry.setup_logs.clone(), topology.worktree.path.clone());
+            log = Some(
+                tokio::task::spawn_blocking(move || SetupLog::create(&dir, &worktree))
+                    .await
+                    .context("the setup log could not be created")??,
+            );
+        }
+        let log = log.as_ref().expect("the setup log was created above");
         let jobs = Arc::clone(&registry);
-        // Opening a terminal and forking are blocking system calls.
-        let (id, _) = tokio::task::spawn_blocking(move || jobs.jobs.start(&spec))
-            .await
-            .context("the setup command could not be started")?
-            .with_context(|| format!("cannot run the setup command {command:?}"))?;
+        let (topology, env, file, heading) = (topology.clone(), env.clone(), Arc::clone(&log.file), command.clone());
+        // Opening a terminal and forking are blocking system calls, and so is sharing the log with the Job.
+        let (id, _) = tokio::task::spawn_blocking(move || {
+            // Best effort, the log is a courtesy to whoever waits.
+            let _ = writeln!(&*file, "$ {heading}");
+            let spec = JobSpec {
+                fingerprint: Fingerprint {
+                    cwd: topology.worktree.path.clone(),
+                    topology: Some(topology),
+                    command: heading,
+                },
+                env,
+                timeout: setup_timeout,
+                log: Some(file.try_clone().context("the setup log could not be shared")?),
+            };
+            anyhow::Ok(jobs.jobs.start(&spec)?)
+        })
+        .await
+        .context("the setup command could not be started")?
+        .with_context(|| format!("cannot run the setup command {command:?}"))?;
         let job = registry
             .jobs
             .get(&id)
             .context("the setup command vanished from the job table")?;
-        let end = job.ended().await;
+        let end = wait_reporting(&job, &command, &log.path, progress_interval, progress).await;
         if end != (JobEnd::Exited { code: 0 }) {
             return Ok(Response::SetupFailed {
                 report,
@@ -132,7 +162,74 @@ pub(super) async fn run(
             .context("the record could not be written")??;
         report.ran.push(command);
     }
+    if let Some(log) = log {
+        // Every command succeeded, nothing is left to tell.
+        let _ = tokio::task::spawn_blocking(move || fs::remove_file(&log.path)).await;
+    }
     Ok(Response::WorktreeInit(report))
+}
+
+/// The log the output of the setup commands of a Worktree is appended to.
+struct SetupLog {
+    path: PathBuf,
+    /// Shared with the Jobs writing to it, so that the output of the commands follows each other.
+    file: Arc<File>,
+}
+
+impl SetupLog {
+    /// Creates the log of the Worktree at `worktree` in `dir`, readable by the user only, replacing the one a previous
+    /// `worktree init` left. Blocking.
+    fn create(dir: &Path, worktree: &Path) -> anyhow::Result<Self> {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
+        // One name per Worktree, so that the logs of the Worktrees running their setup at once never mix.
+        let mut hasher = DefaultHasher::new();
+        worktree.hash(&mut hasher);
+        let path = dir.join(format!("{:016x}.log", hasher.finish()));
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("cannot create the setup log {}", path.display()))?;
+        Ok(Self {
+            path,
+            file: Arc::new(file),
+        })
+    }
+}
+
+/// Waits until `job` has ended, reporting through `progress` that the setup command is still running every `interval`.
+async fn wait_reporting(
+    job: &Job,
+    command: &str,
+    log: &Path,
+    interval: Duration,
+    progress: &UnboundedSender<Response>,
+) -> JobEnd {
+    let started = Instant::now();
+    let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    // A tick missed because the loop was late is not made up for, so that reports never come in a burst.
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let ended = job.ended();
+    tokio::pin!(ended);
+    loop {
+        tokio::select! {
+            end = &mut ended => return end,
+            _ = ticks.tick() => {
+                // The client may be gone, the command runs on until it ends or times out.
+                let _ = progress.send(Response::SetupProgress {
+                    command: command.to_owned(),
+                    elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    log: log.to_owned(),
+                });
+            }
+        }
+    }
 }
 
 /// The Topology of the Worktree holding `path`.
@@ -169,6 +266,7 @@ fn prepare(topology: &Topology) -> anyhow::Result<Prepared> {
         report,
         setup: config.worktree.setup,
         setup_timeout: config.settings.setup_timeout,
+        progress_interval: config.settings.setup_progress_interval.max(MIN_PROGRESS_INTERVAL),
         record_path,
         record,
     })

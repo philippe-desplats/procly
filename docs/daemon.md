@@ -1,6 +1,6 @@
 # The Daemon across crashes and sessions
 
-The first `procly` command starts the Daemon on demand, and the Daemon keeps running until it is stopped. This page tells what happens when it crashes, and how to have it start with your session instead.
+The first `procly` command that needs the Daemon starts it on demand, which `procly init` and the Guard on a command it does not recognize do not, and the Daemon keeps running until it is stopped. This page tells what happens when it crashes, and how to have it start with your session instead.
 
 ## After a crash
 

@@ -5,7 +5,8 @@
 //! agent and a command the Guard does not know must neither wait for the Daemon nor start it. Only a command it
 //! knows asks the Daemon whether the Repository is Off.
 
-use std::path::PathBuf;
+use std::ops::Range;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -50,9 +51,15 @@ pub(crate) fn tool_call(input: &str) -> Option<ToolCall> {
 
 /// The answer that makes Claude Code refuse the call and tell the agent why, with the Procly command to run instead:
 /// the one of the declared Service the blocked command starts, `procly up` for a dev command of the whole Repository
-/// run at the root of its Worktree, or else `procly up <service>` for the agent to pick among `services`. `at_root`
-/// tells whether the command line was run at the root of the Worktree.
-pub(crate) fn denial(recognized: &Recognized, services: &[GuardService], at_root: bool) -> String {
+/// run at the root of its Worktree, or else `procly up <service>` for the agent to pick among `services`. `directory`
+/// is where the command line was run, relative to the root of the Worktree, `None` when it is not known, and `root` is
+/// the root of the Worktree itself, which a compose file given with an absolute path is placed against.
+pub(crate) fn denial(
+    recognized: &Recognized,
+    services: &[GuardService],
+    directory: Option<&Path>,
+    root: &Path,
+) -> String {
     let Recognized { kind, command, .. } = recognized;
     let why = match kind {
         Kind::DevServer => {
@@ -64,8 +71,16 @@ pub(crate) fn denial(recognized: &Recognized, services: &[GuardService], at_root
              between its worktrees."
         }
     };
-    let instead = match (equivalent(recognized, services, at_root), kind) {
+    let instead = match (equivalent(recognized, services, directory, root), kind) {
         (Some(equivalent), _) => format!("Run `{equivalent}` instead."),
+        (None, Kind::Compose) if let Some(file) = unmanaged_compose_file(recognized, directory, root) => {
+            // Nothing else to say: the Services of the root compose file would read as a way to start this one.
+            let reason = format!(
+                "The compose file `{file}` is not managed by Procly, which runs the compose file at the root of the \
+                 Worktree only, so no Procly command starts it."
+            );
+            return answer(&format!("`{command}` {why} {reason}"));
+        }
         (None, Kind::DevServer) => "Run `procly up <service>` instead.".to_owned(),
         (None, Kind::Compose) => "Run `procly up <service>` for the Compose service instead.".to_owned(),
     };
@@ -75,31 +90,47 @@ pub(crate) fn denial(recognized: &Recognized, services: &[GuardService], at_root
         let names: Vec<&str> = services.iter().map(|service| service.name.as_str()).collect();
         format!("Declared Services: {}.", names.join(", "))
     };
+    answer(&format!("`{command}` {why} {instead} {declared}"))
+}
+
+/// The answer that makes Claude Code refuse the call, with `reason` for the agent.
+fn answer(reason: &str) -> String {
     json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": format!("`{command}` {why} {instead} {declared}"),
+            "permissionDecisionReason": reason,
         }
     })
     .to_string()
 }
 
-/// The Procly command that does what the blocked command does, `None` when nothing declared tells.
-fn equivalent(recognized: &Recognized, services: &[GuardService], at_root: bool) -> Option<String> {
+/// The Procly command that does what the blocked command does, `None` when nothing declared tells. `directory` is where
+/// the command line was run, relative to the root of the Worktree, and `root` is the root itself.
+fn equivalent(
+    recognized: &Recognized,
+    services: &[GuardService],
+    directory: Option<&Path>,
+    root: &Path,
+) -> Option<String> {
     let blocked = words_of(&recognized.command);
     let blocked = strip_launchers(&blocked);
     match recognized.kind {
         Kind::DevServer => {
-            // Run from the same directory, so that `cd apps/api && pnpm dev` is never the `pnpm dev` of `apps/web`.
+            // Run from the same directory, so that `cd apps/api && pnpm dev` is never the `pnpm dev` of `apps/web`,
+            // and `pnpm dev` run in `apps/web` is the Service that changes to it.
+            let place = place_of(recognized, directory);
             let matches: Vec<(usize, &GuardService)> = services
                 .iter()
                 .filter_map(|service| {
                     let run = recognize(service.run.as_deref()?)?;
-                    if run.moved_to != recognized.moved_to {
+                    if place.is_none() || place != resolve(Path::new(""), run.moved_to.as_deref().unwrap_or(".")) {
                         return None;
                     }
-                    let matched = same_start(blocked, strip_launchers(&words_of(&run.command)))?;
+                    let matched = same_start(
+                        &without_run(blocked),
+                        &without_run(strip_launchers(&words_of(&run.command))),
+                    )?;
                     Some((matched, service))
                 })
                 .collect();
@@ -109,11 +140,14 @@ fn equivalent(recognized: &Recognized, services: &[GuardService], at_root: bool)
             match (best.next(), best.next()) {
                 (Some((_, service)), None) => Some(format!("procly up {}", service.name)),
                 (Some(_), Some(_)) => None,
-                (None, _) => (at_root && recognized.moved_to.is_none() && runs_the_whole_repository(blocked))
+                (None, _) => (place.as_deref() == Some(Path::new("")) && runs_the_whole_repository(blocked))
                     .then(|| "procly up".to_owned()),
             }
         }
         Kind::Compose => {
+            if unmanaged_compose_file(recognized, directory, root).is_some() {
+                return None;
+            }
             let named = compose_services(blocked);
             let started: Vec<String> = services
                 .iter()
@@ -128,6 +162,118 @@ fn equivalent(recognized: &Recognized, services: &[GuardService], at_root: bool)
             (!started.is_empty()).then(|| started.join(" && "))
         }
     }
+}
+
+/// The compose files a compose command is given with `-f` or `--file`, in the order given.
+fn compose_files(words: &[String]) -> Vec<&str> {
+    let mut files = Vec::new();
+    let mut words = after_compose(words).iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        if matches!(word, "-f" | "--file") {
+            files.extend(words.next());
+        } else if let Some(file) = word.strip_prefix("--file=") {
+            files.push(file);
+        } else if let Some(file) = word
+            .strip_prefix("-f")
+            .filter(|file| !file.is_empty() && !word.starts_with("--"))
+        {
+            // `-fdev.yml` and `-f=dev.yml`, which the option parser of Docker Compose reads as `-f dev.yml`.
+            files.push(file.strip_prefix('=').unwrap_or(file));
+        } else if COMPOSE_OPTIONS_WITH_VALUE.contains(&word) {
+            words.next();
+        } else if !word.starts_with('-') {
+            // The subcommand, after which an option is no longer one of compose.
+            break;
+        }
+    }
+    files
+}
+
+/// The compose file a compose command is given that Procly does not manage, as typed, `None` when every file it is
+/// given is the compose file at the root of the Worktree, when it is given none, and when a file cannot be placed
+/// from where it is written. Procly drives that one file only (ADR 0004), so no Service of `procly.toml` is declared on
+/// another. A file given with an absolute path is placed against `root`, the root of the Worktree: the compose file of
+/// the root named that way is managed, any other absolute path, inside the Worktree or not, is not.
+fn unmanaged_compose_file(recognized: &Recognized, directory: Option<&Path>, root: &Path) -> Option<String> {
+    let place = place_of(recognized, directory);
+    let blocked = words_of(&recognized.command);
+    compose_files(strip_launchers(&blocked))
+        .into_iter()
+        .find(|file| {
+            let resolved = if file.starts_with('/') {
+                Some(within(root, file))
+            } else {
+                place.as_deref().and_then(|place| resolve(place, file))
+            };
+            resolved.is_some_and(|resolved| !COMPOSE_FILES.iter().any(|name| resolved == Path::new(name)))
+        })
+        .map(str::to_owned)
+}
+
+/// The compose files Docker Compose looks for, in the order it prefers them, which Procly drives when the Worktree has
+/// one.
+pub(crate) const COMPOSE_FILES: [&str; 4] = [
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+];
+
+/// Where the recognized command runs, relative to the root of the Worktree: `directory` moved by the `cd` before it.
+/// `None` when the directory is not known and when the `cd` leaves it to a place only an absolute path tells.
+fn place_of(recognized: &Recognized, directory: Option<&Path>) -> Option<PathBuf> {
+    resolve(directory?, recognized.moved_to.as_deref().unwrap_or("."))
+}
+
+/// `path` as written from `base`, a directory relative to the root of the Worktree, with its `.` and `..` resolved. A
+/// path that climbs above the root keeps its leading `..`, so that it matches nothing inside. `None` for a path that
+/// starts at `/` or at `~`, which says nothing about where the Worktree is.
+fn resolve(base: &Path, path: &str) -> Option<PathBuf> {
+    if path.starts_with('~') {
+        return None;
+    }
+    let mut resolved = PathBuf::new();
+    for component in base.join(path).components() {
+        match component {
+            Component::Normal(name) => resolved.push(name),
+            Component::CurDir => {}
+            Component::ParentDir if resolved.file_name().is_some_and(|name| name != "..") => {
+                resolved.pop();
+            }
+            Component::ParentDir => resolved.push(".."),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(resolved)
+}
+
+/// The absolute `path`, with its `.` and `..` resolved, relative to `root` when it is inside it. A path outside `root`
+/// stays absolute, so that it matches nothing inside.
+fn within(root: &Path, path: &str) -> PathBuf {
+    let mut absolute = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::ParentDir => {
+                absolute.pop();
+            }
+            Component::CurDir => {}
+            other => absolute.push(other),
+        }
+    }
+    absolute.strip_prefix(root).map_or(absolute.clone(), Path::to_owned)
+}
+
+/// `words` without the `run` of a package manager, which `bun run dev` and `bun dev` both run the script `dev` with.
+fn without_run(words: &[String]) -> Vec<String> {
+    let mut words = words.to_vec();
+    if words
+        .first()
+        .is_some_and(|program| PACKAGE_MANAGERS.contains(&basename(program)))
+        && words.get(1).is_some_and(|word| word == "run")
+    {
+        words.remove(1);
+    }
+    words
 }
 
 /// The words of the first simple command of `command`.
@@ -150,11 +296,16 @@ fn same_start(blocked: &[String], run: &[String]) -> Option<usize> {
     (same && shared > 0).then_some(shared)
 }
 
-/// The package managers whose dev script, run at the root of a Repository, runs the dev servers of all of it.
-const ROOT_RUNNERS: [&str; 5] = ["npm", "pnpm", "yarn", "bun", "turbo"];
+/// The package managers whose options select a package, and whose dev script, run at the root of a Repository, runs the
+/// dev servers of all of it.
+pub(crate) const RUNNERS: [&str; 5] = ["npm", "pnpm", "yarn", "bun", "turbo"];
+
+/// The package managers that run a script of a package, `npm run dev` and `bun dev`, which `concurrently` writes
+/// `npm:dev`.
+pub(crate) const PACKAGE_MANAGERS: [&str; 4] = ["npm", "pnpm", "yarn", "bun"];
 
 /// The options of a package manager that narrow a command to one package of a monorepo.
-const PACKAGE_OPTIONS: [&str; 8] = [
+pub(crate) const PACKAGE_OPTIONS: [&str; 8] = [
     "--workspace",
     "-w",
     "--prefix",
@@ -167,11 +318,11 @@ const PACKAGE_OPTIONS: [&str; 8] = [
 
 /// Whether `words` run the dev script of a whole Repository: `pnpm dev`, `npm start`, `turbo run dev`, with no
 /// option narrowing it to one package and a plain script name.
-fn runs_the_whole_repository(words: &[String]) -> bool {
+pub(crate) fn runs_the_whole_repository(words: &[String]) -> bool {
     let Some((program, rest)) = words.split_first() else {
         return false;
     };
-    if !ROOT_RUNNERS.contains(&basename(program)) || rest.iter().any(|word| PACKAGE_OPTIONS.contains(&word.as_str())) {
+    if !RUNNERS.contains(&basename(program)) || rest.iter().any(|word| PACKAGE_OPTIONS.contains(&word.as_str())) {
         return false;
     }
     let positional = positional(rest, &[]);
@@ -179,16 +330,20 @@ fn runs_the_whole_repository(words: &[String]) -> bool {
     script.is_some_and(|script| matches!(script, "dev" | "start" | "serve" | "develop"))
 }
 
-/// The services of the compose file `docker compose up` names, empty when it names none and starts them all.
-fn compose_services(words: &[String]) -> Vec<&str> {
-    let after = match words.first().map(|program| basename(program)) {
+/// The words of a compose command after `compose`, or after `docker-compose`.
+fn after_compose(words: &[String]) -> &[String] {
+    match words.first().map(|program| basename(program)) {
         Some("docker") => words
             .iter()
             .position(|word| word == "compose")
             .map_or(&[][..], |at| &words[at + 1..]),
         _ => words.get(1..).unwrap_or_default(),
-    };
-    positional(after, &COMPOSE_OPTIONS_WITH_VALUE)
+    }
+}
+
+/// The services of the compose file `docker compose up` names, empty when it names none and starts them all.
+fn compose_services(words: &[String]) -> Vec<&str> {
+    positional(after_compose(words), &COMPOSE_OPTIONS_WITH_VALUE)
         .into_iter()
         .skip_while(|word| !matches!(*word, "up" | "start"))
         .skip(1)
@@ -225,40 +380,55 @@ pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
     })
 }
 
-/// A simple command of a command line: its text as typed, and its words with quotes and escapes resolved.
+/// A simple command of a command line: its text as typed, where that text sits in the command line, and its words with
+/// quotes and escapes resolved, each with where it sits too.
 #[derive(Debug)]
-struct Segment {
-    text: String,
-    words: Vec<String>,
+pub(crate) struct Segment {
+    pub(crate) text: String,
+    pub(crate) span: Range<usize>,
+    pub(crate) words: Vec<String>,
+    pub(crate) word_spans: Vec<Range<usize>>,
 }
 
 /// Splits a command line into simple commands at semicolons, `&`, `|`, parentheses, backticks and line breaks, and each
 /// command into words, the way a shell would outside of quotes. A separator inside quotes splits nothing, so
 /// `echo "a && npm run dev"` is one command that starts nothing.
-fn segments(command_line: &str) -> Vec<Segment> {
+pub(crate) fn segments(command_line: &str) -> Vec<Segment> {
     #[derive(Default)]
     struct Reading {
         segments: Vec<Segment>,
         words: Vec<String>,
+        word_spans: Vec<Range<usize>>,
         word: Option<String>,
+        word_start: usize,
         start: usize,
     }
     impl Reading {
-        /// The word being read, started if there is none.
-        fn current(&mut self) -> &mut String {
-            self.word.get_or_insert_with(String::new)
+        /// The word being read, started at `at` if there is none.
+        fn current(&mut self, at: usize) -> &mut String {
+            self.word.get_or_insert_with(|| {
+                self.word_start = at;
+                String::new()
+            })
         }
-        fn end_word(&mut self) {
+        /// Ends the word being read, which stops at `end`.
+        fn end_word(&mut self, end: usize) {
             if let Some(word) = self.word.take() {
                 self.words.push(word);
+                self.word_spans.push(self.word_start..end);
             }
         }
         fn end_segment(&mut self, end: usize, text: &str) {
-            self.end_word();
+            self.end_word(end);
             if !self.words.is_empty() {
+                let raw = &text[self.start..end];
+                let start = self.start + (raw.len() - raw.trim_start().len());
+                let trimmed = raw.trim();
                 self.segments.push(Segment {
-                    text: text[self.start..end].trim().to_owned(),
+                    text: trimmed.to_owned(),
+                    span: start..start + trimmed.len(),
                     words: std::mem::take(&mut self.words),
+                    word_spans: std::mem::take(&mut self.word_spans),
                 });
             }
         }
@@ -272,23 +442,23 @@ fn segments(command_line: &str) -> Vec<Segment> {
             (Some(open), c) if c == open => quote = None,
             (Some('"'), '\\') => {
                 if let Some((_, escaped)) = chars.next() {
-                    reading.current().push(escaped);
+                    reading.current(at).push(escaped);
                 }
             }
             (None, '\'' | '"') => {
                 quote = Some(c);
-                reading.current();
+                reading.current(at);
             }
             (None, '\\') => match chars.next() {
                 Some((_, '\n')) | None => {}
-                Some((_, escaped)) => reading.current().push(escaped),
+                Some((_, escaped)) => reading.current(at).push(escaped),
             },
-            (None, ' ' | '\t') => reading.end_word(),
+            (None, ' ' | '\t') => reading.end_word(at),
             (None, '\n' | ';' | '&' | '|' | '(' | ')' | '`') => {
                 reading.end_segment(at, command_line);
                 reading.start = at + c.len_utf8();
             }
-            (_, c) => reading.current().push(c),
+            (_, c) => reading.current(at).push(c),
         }
     }
     reading.end_segment(command_line.len(), command_line);
@@ -296,12 +466,12 @@ fn segments(command_line: &str) -> Vec<Segment> {
 }
 
 /// The last component of a program path: `./node_modules/.bin/next` is `next`.
-fn basename(program: &str) -> &str {
+pub(crate) fn basename(program: &str) -> &str {
     program.rsplit('/').next().unwrap_or(program)
 }
 
 /// Whether a word is a `NAME=value` assignment, which a shell applies to the command that follows it.
-fn is_assignment(word: &str) -> bool {
+pub(crate) fn is_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         name.chars()
             .next()
@@ -312,7 +482,7 @@ fn is_assignment(word: &str) -> bool {
 
 /// The words of a command without what only launches it: variables set for it, `nohup`, `exec`, `time`, `npx`,
 /// `pnpm exec`, `bundle exec` and the like.
-fn strip_launchers(mut words: &[String]) -> &[String] {
+pub(crate) fn strip_launchers(mut words: &[String]) -> &[String] {
     loop {
         let Some(first) = words.first() else {
             return words;
@@ -343,7 +513,7 @@ fn strip_launchers(mut words: &[String]) -> &[String] {
 }
 
 /// The words after the program that are not options, skipping the value of an option that takes one.
-fn positional<'a>(words: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
+pub(crate) fn positional<'a>(words: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
     let mut positional = Vec::new();
     let mut words = words.iter().map(String::as_str);
     while let Some(word) = words.next() {
@@ -486,6 +656,11 @@ fn compose(words: &[String]) -> Option<Kind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The root of the Worktree the tests run in.
+    fn root() -> &'static Path {
+        Path::new("/p/work/acme/web")
+    }
 
     fn kind(command: &str) -> Option<Kind> {
         recognize(command).map(|recognized| recognized.kind)
@@ -692,7 +867,7 @@ mod tests {
     fn the_denial_names_the_command_the_services_and_the_procly_command() {
         let recognized = recognize("npm run dev").unwrap();
         let services = [process("api", "node api.js"), process("web", "next dev")];
-        let answer: Value = serde_json::from_str(&denial(&recognized, &services, true)).unwrap();
+        let answer: Value = serde_json::from_str(&denial(&recognized, &services, Some(Path::new("")), root())).unwrap();
         let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap();
@@ -711,22 +886,29 @@ mod tests {
             process("docs", "cd docs && npx astro dev"),
             process("dev", "pnpm dev"),
         ];
-        let equivalent = |command: &str, at_root: bool| equivalent(&recognize(command).unwrap(), &services, at_root);
+        let equivalent = |command: &str, directory: &str| {
+            equivalent(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new(directory)),
+                root(),
+            )
+        };
         assert_eq!(
-            equivalent("pnpm --filter web dev", false).as_deref(),
+            equivalent("pnpm --filter web dev", "").as_deref(),
             Some("procly up web")
         );
         assert_eq!(
-            equivalent("pnpm --filter web dev --port 3000", false).as_deref(),
+            equivalent("pnpm --filter web dev --port 3000", "").as_deref(),
             Some("procly up web")
         );
         assert_eq!(
-            equivalent("cd docs && astro dev --host", true).as_deref(),
+            equivalent("cd docs && astro dev --host", "").as_deref(),
             Some("procly up docs")
         );
-        assert_eq!(equivalent("astro dev --host", true), None);
-        assert_eq!(equivalent("pnpm dev", true).as_deref(), Some("procly up dev"));
-        assert_eq!(equivalent("pnpm --filter api dev", true), None);
+        assert_eq!(equivalent("astro dev --host", ""), None);
+        assert_eq!(equivalent("pnpm dev", "").as_deref(), Some("procly up dev"));
+        assert_eq!(equivalent("pnpm --filter api dev", ""), None);
     }
 
     #[test]
@@ -737,7 +919,8 @@ mod tests {
             process("admin", "pnpm dev --filter admin"),
             process("shop", "pnpm dev --filter shop"),
         ];
-        let equivalent = |command: &str| equivalent(&recognize(command).unwrap(), &services, true);
+        let equivalent =
+            |command: &str| equivalent(&recognize(command).unwrap(), &services, Some(Path::new("")), root());
         assert_eq!(equivalent("cd apps/api && pnpm dev").as_deref(), Some("procly up api"));
         assert_eq!(
             equivalent("cd ./apps/web && pnpm dev").as_deref(),
@@ -751,7 +934,14 @@ mod tests {
     #[test]
     fn a_dev_command_of_the_whole_repository_at_its_root_is_procly_up() {
         let services = [process("web", "node server.js")];
-        let equivalent = |command: &str, at_root: bool| equivalent(&recognize(command).unwrap(), &services, at_root);
+        let equivalent = |command: &str, directory: &str| {
+            equivalent(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new(directory)),
+                root(),
+            )
+        };
         for command in [
             "npm start",
             "pnpm dev",
@@ -759,8 +949,8 @@ mod tests {
             "bun run serve",
             "turbo run dev",
         ] {
-            assert_eq!(equivalent(command, true).as_deref(), Some("procly up"), "{command}");
-            assert_eq!(equivalent(command, false), None, "{command}");
+            assert_eq!(equivalent(command, "").as_deref(), Some("procly up"), "{command}");
+            assert_eq!(equivalent(command, "apps/web"), None, "{command}");
         }
         for command in [
             "cd apps/web && pnpm dev",
@@ -768,7 +958,7 @@ mod tests {
             "npm run dev:web",
             "next dev",
         ] {
-            assert_eq!(equivalent(command, true), None, "{command}");
+            assert_eq!(equivalent(command, ""), None, "{command}");
         }
     }
 
@@ -784,9 +974,10 @@ mod tests {
             compose("db", "postgres"),
             process("web", "next dev"),
         ];
-        let equivalent = |command: &str| equivalent(&recognize(command).unwrap(), &services, true);
+        let equivalent =
+            |command: &str| equivalent(&recognize(command).unwrap(), &services, Some(Path::new("")), root());
         assert_eq!(
-            equivalent("docker compose -f dev.yml up -d postgres").as_deref(),
+            equivalent("docker compose -f compose.yaml up -d postgres").as_deref(),
             Some("procly up db")
         );
         assert_eq!(
@@ -798,5 +989,239 @@ mod tests {
             Some("procly up cache && procly up db")
         );
         assert_eq!(equivalent("docker compose up mailpit"), None);
+    }
+
+    #[test]
+    fn the_equivalent_is_the_service_that_runs_in_the_directory_the_command_runs_in() {
+        let services = [
+            process("web", "cd apps/web && bun run dev"),
+            process("api", "cd apps/api && bun run dev"),
+        ];
+        let equivalent = |command: &str, directory: Option<&Path>| {
+            equivalent(&recognize(command).unwrap(), &services, directory, root())
+        };
+        // Run from the directory of the Service, or moved there by a `cd`, whatever the way it is written.
+        assert_eq!(
+            equivalent("bun dev", Some(Path::new("apps/web"))).as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(
+            equivalent("bun run dev", Some(Path::new("apps/api"))).as_deref(),
+            Some("procly up api")
+        );
+        assert_eq!(
+            equivalent("cd apps/web && bun dev", Some(Path::new(""))).as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(
+            equivalent("cd web && bun dev", Some(Path::new("apps"))).as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(
+            equivalent("cd ../api && bun dev", Some(Path::new("apps/web"))).as_deref(),
+            Some("procly up api")
+        );
+        // A directory no Service runs in, the root when no Service runs the whole Repository there, and one that
+        // is not known, name no Service.
+        assert_eq!(equivalent("bun dev", Some(Path::new("apps/docs"))), None);
+        assert_eq!(equivalent("bun dev", Some(Path::new("apps"))), None);
+        assert_eq!(equivalent("cd apps/web && bun dev", None), None);
+    }
+
+    #[test]
+    fn a_service_of_the_root_is_not_the_service_of_a_directory_below_it() {
+        let services = [process("web", "bun run dev")];
+        let equivalent = |directory: &str| {
+            equivalent(
+                &recognize("bun dev").unwrap(),
+                &services,
+                Some(Path::new(directory)),
+                root(),
+            )
+        };
+        assert_eq!(equivalent("").as_deref(), Some("procly up web"));
+        assert_eq!(equivalent("apps/web"), None);
+    }
+
+    #[test]
+    fn a_compose_command_names_the_compose_files_it_is_given() {
+        let unmanaged = |command: &str, directory: &str| {
+            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root())
+        };
+        for (command, directory, file) in [
+            ("docker compose -f dev.yml up", "", "dev.yml"),
+            ("docker compose --file compose.dev.yaml up -d", "", "compose.dev.yaml"),
+            ("docker compose --file=infra/compose.yaml up", "", "infra/compose.yaml"),
+            ("docker compose -fdev.yml up", "", "dev.yml"),
+            ("docker compose -f=dev.yml up", "", "dev.yml"),
+            (
+                "docker-compose -f compose.yaml -f override.yml up -d",
+                "",
+                "override.yml",
+            ),
+            ("docker compose -f compose.yaml up", "apps/web", "compose.yaml"),
+            (
+                "docker compose -f ../../../compose.yaml up",
+                "apps/web",
+                "../../../compose.yaml",
+            ),
+            ("cd infra && docker compose -f compose.yaml up", "", "compose.yaml"),
+        ] {
+            assert_eq!(unmanaged(command, directory).as_deref(), Some(file), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_compose_file_of_the_root_and_a_command_that_names_none_are_managed() {
+        let unmanaged = |command: &str, directory: &str| {
+            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root())
+        };
+        for (command, directory) in [
+            ("docker compose up", ""),
+            ("docker compose up -f", ""),
+            ("docker compose -f compose.yaml up", ""),
+            ("docker compose -f ./docker-compose.yml up", ""),
+            ("docker compose --file=compose.yml up", ""),
+            ("docker compose -f ../../compose.yaml up", "apps/web"),
+            ("cd .. && docker compose -f compose.yaml up", "apps"),
+            ("docker compose -p x --profile dev up db", ""),
+            // The compose file of the root, named by its absolute path, from wherever the command runs.
+            ("docker compose -f /p/work/acme/web/compose.yaml up", ""),
+            (
+                "docker compose --file=/p/work/acme/web/docker-compose.yml up",
+                "apps/web",
+            ),
+            ("docker compose -f /p/work/acme/web/apps/../compose.yml up", ""),
+            ("docker compose -f /p/work/acme/other/../web/compose.yaml up", ""),
+            (
+                "cd /elsewhere && docker compose -f /p/work/acme/web/compose.yaml up",
+                "",
+            ),
+        ] {
+            assert_eq!(unmanaged(command, directory), None, "{command}");
+        }
+        assert_eq!(
+            unmanaged_compose_file(&recognize("docker compose -f dev.yml up").unwrap(), None, root()),
+            None
+        );
+    }
+
+    #[test]
+    fn an_absolute_compose_file_other_than_the_one_of_the_root_is_not_managed() {
+        let unmanaged = |command: &str, directory: &str| {
+            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root())
+        };
+        for (command, directory, file) in [
+            // Inside the Worktree, a file Procly does not manage.
+            (
+                "docker compose -f /p/work/acme/web/infra/other.yml up -d",
+                "",
+                "/p/work/acme/web/infra/other.yml",
+            ),
+            (
+                "docker compose -f /p/work/acme/web/infra/compose.yaml up -d",
+                "apps/web",
+                "/p/work/acme/web/infra/compose.yaml",
+            ),
+            (
+                "docker compose -f /p/work/acme/web/../web/dev.yml up",
+                "",
+                "/p/work/acme/web/../web/dev.yml",
+            ),
+            // Outside it, even when it is named like the compose file of the root.
+            (
+                "docker compose -f /srv/app/compose.yaml up",
+                "",
+                "/srv/app/compose.yaml",
+            ),
+            (
+                "docker compose -f /p/work/acme/web2/compose.yaml up",
+                "",
+                "/p/work/acme/web2/compose.yaml",
+            ),
+            (
+                "docker compose -f /p/work/acme/web/../compose.yaml up",
+                "",
+                "/p/work/acme/web/../compose.yaml",
+            ),
+            (
+                "docker compose -f /p/work/acme/web/compose.yaml -f /srv/override.yml up",
+                "",
+                "/srv/override.yml",
+            ),
+            // Where the command runs does not matter to an absolute path.
+            (
+                "cd /elsewhere && docker compose -f /srv/app/compose.yaml up",
+                "",
+                "/srv/app/compose.yaml",
+            ),
+        ] {
+            assert_eq!(unmanaged(command, directory).as_deref(), Some(file), "{command}");
+        }
+        // The Daemon could not place the directory, an absolute file does not need it.
+        assert_eq!(
+            unmanaged_compose_file(
+                &recognize("docker compose -f /p/work/acme/web/infra/other.yml up").unwrap(),
+                None,
+                root()
+            )
+            .as_deref(),
+            Some("/p/work/acme/web/infra/other.yml")
+        );
+    }
+
+    #[test]
+    fn the_denial_of_a_compose_file_procly_does_not_manage_says_so_and_names_no_service() {
+        let services = [GuardService {
+            name: "db".to_owned(),
+            run: None,
+            compose: Some("postgres".to_owned()),
+        }];
+        let recognized = recognize("docker compose -f dev.yml up -d").unwrap();
+        let answer: Value = serde_json::from_str(&denial(&recognized, &services, Some(Path::new("")), root())).unwrap();
+        let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.contains("`dev.yml` is not managed by Procly") && !reason.contains("procly up"),
+            "{reason}"
+        );
+        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn the_denial_of_an_absolute_compose_file_procly_does_not_manage_is_not_the_answer_of_the_root() {
+        let services = [GuardService {
+            name: "db".to_owned(),
+            run: None,
+            compose: Some("postgres".to_owned()),
+        }];
+        let reason = |command: &str| {
+            let answer: Value = serde_json::from_str(&denial(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new("")),
+                root(),
+            ))
+            .unwrap();
+            answer["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let other = reason("docker compose -f /p/work/acme/web/infra/other.yml up -d");
+        assert!(
+            other.contains("`/p/work/acme/web/infra/other.yml` is not managed by Procly")
+                && !other.contains("procly up")
+                && !other.contains("Declared Services"),
+            "{other}"
+        );
+        let outside = reason("docker compose -f /srv/app/compose.yaml up -d");
+        assert!(
+            outside.contains("is not managed by Procly") && !outside.contains("procly up"),
+            "{outside}"
+        );
+        let managed = reason("docker compose -f /p/work/acme/web/compose.yaml up -d");
+        assert!(managed.contains("Run `procly up db` instead."), "{managed}");
     }
 }
