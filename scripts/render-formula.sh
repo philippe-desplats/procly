@@ -50,7 +50,6 @@ cat <<FORMULA
 class Procly < Formula
   desc "Supervisor so coding agents never duplicate processes, containers or ports"
   homepage "https://github.com/${repository}"
-  version "${version}"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
