@@ -893,6 +893,7 @@ async fn run_seed(plan: &ResourcePlan, wanted: &PlannedResource, run: &str, time
         },
         env,
         timeout,
+        log: None,
     };
     let jobs = Arc::clone(&plan.jobs);
     // Opening a terminal and forking are blocking system calls.

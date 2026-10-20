@@ -1048,7 +1048,7 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
         path,
         env: caller_env(),
     };
-    match client::send(state, &request)? {
+    match client::send_with_progress(state, &request, print_setup_progress)? {
         Response::WorktreeInit(report) if json => {
             json::print(&json::WorktreeInit::Ready { report: &report })?;
             Ok(ExitCode::SUCCESS)
@@ -1103,6 +1103,23 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
             Ok(ExitCode::from(code))
         }
         other => unexpected(other),
+    }
+}
+
+/// One line on stderr for a setup command still running, so that a long setup shows it is alive. Stdout, and with it the
+/// JSON document, stays as it is.
+fn print_setup_progress(progress: &Response) {
+    if let Response::SetupProgress {
+        command,
+        elapsed_ms,
+        log,
+    } = progress
+    {
+        let elapsed = duration::format(Duration::from_secs(elapsed_ms / 1000));
+        eprintln!(
+            "procly: setup command `{command}` still running after {elapsed}, log: {}",
+            log.display()
+        );
     }
 }
 
