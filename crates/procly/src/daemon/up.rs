@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn a_compose_postgres_as_procly_init_proposes_it_is_reached_with_the_scheme_of_the_bundled_driver() {
         // The bundled credentials get a Driver from `procly init`, other ones none.
-        for password in ["postgres", "secret"] {
+        for (credentials, password, bundled) in [("bundled", "postgres", true), ("custom", "secret", false)] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(
                 dir.path().join("compose.yaml"),
@@ -701,14 +701,14 @@ mod tests {
             .unwrap();
             let config: Config = toml::from_str(&crate::proposal::propose(dir.path(), "acme").unwrap().toml).unwrap();
             let db = &config.services["db"];
-            assert_eq!(db.driver.is_some(), password == "postgres", "{password}");
+            assert_eq!(db.driver.is_some(), bundled, "{credentials} credentials");
 
             let driver = scheme_driver("db", db, dir.path(), None, || Ok(dir.path().to_owned())).unwrap();
 
             assert_eq!(
                 lease_urls("db", db, driver.as_ref(), &leases(&[("db", 24000)])).unwrap(),
                 urls(&[("db", "postgresql://localhost:24000")]),
-                "{password}"
+                "{credentials} credentials"
             );
         }
     }
