@@ -40,7 +40,7 @@ Procly is a single per-user Daemon that owns every Service, port and container a
 
 ## Installation
 
-Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). It needs no runtime, and the Daemon starts on demand from the first command. Windows is not supported.
+Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x86_64 and arm64). It needs no runtime, and the Daemon starts on demand, from the first command that needs it. Windows is not supported.
 
 ### Homebrew
 
@@ -190,7 +190,7 @@ An unknown key is an error, so a typo never goes unnoticed. [Configuration](docs
 
 ## How it works
 
-- The first `procly` command starts the Daemon, one per user, which listens on a Unix socket in its state directory (`$PROCLY_STATE_DIR`, else `$XDG_STATE_HOME/procly`, else `~/.local/state/procly`) and never on a TCP port. The CLI is a client of that socket.
+- The first `procly` command that needs the Daemon starts it, one per user (`procly init` and the Guard on a command it does not recognize never do), which listens on a Unix socket in its state directory (`$PROCLY_STATE_DIR`, else `$XDG_STATE_HOME/procly`, else `~/.local/state/procly`) and never on a TCP port. The CLI is a client of that socket.
 - `procly up` resolves the Repository and the Worktree from the current directory, grants the Leases, starts the Service by `/bin/sh -c` in a process group of its own with its Leases and Derived variables in the environment, and waits for its health check.
 - Leases, running Services and containers are recorded as atomic JSON documents in the state directory. A Daemon that crashed leaves its Services running, and the next one re-attaches those still listening on their Lease and stops what is left of the others.
 - Stopping a Service sends `SIGTERM` to its whole process group, then `SIGKILL`, so nothing it forked survives it.
