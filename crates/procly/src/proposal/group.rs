@@ -1,7 +1,7 @@
 //! The command a Group runs once the commands of the root `dev` script that init did not recognise are left out.
 //!
 //! A root `dev` script that is one command, such as `turbo dev` or `pnpm -r --parallel dev`, is never judged: the
-//! Group runs it through the package manager as it always did. A script that lists commands, with `&`, `&&`, `;` or
+//! Group runs it through the package manager. A script that lists commands, with `&`, `&&`, `;` or
 //! as the arguments of `concurrently`, is read command by command. A command is recognised when the Guard knows it as
 //! a dev server, and the Group runs the recognised ones, written as the script wrote them.
 
@@ -60,9 +60,11 @@ struct Child {
     word: usize,
     /// The command as the argument holds it.
     text: String,
+    /// Whether the Guard knows the command as a dev server.
     recognised: bool,
 }
 
+/// What a command of the script is for the Group.
 #[derive(Debug)]
 enum Role {
     /// A command that only sets the scene for the next ones: `cd apps/web`, `export NODE_ENV=development`, `wait`.
@@ -71,10 +73,15 @@ enum Role {
     DevServer,
     /// A command that starts something else.
     Other,
+    /// A `wait`, which stays as long as a command before it is run.
+    Wait,
     /// `concurrently` and the commands it runs.
     Concurrently(Vec<Child>),
+    /// `concurrently` with options this reading does not know, which the Group runs as it is.
+    Opaque,
 }
 
+/// One command of the script, as the Group sees it.
 #[derive(Debug)]
 struct Step<'a> {
     segment: &'a Segment,
@@ -85,8 +92,8 @@ impl Step<'_> {
     /// Whether the Group runs the step, its context aside.
     fn recognised(&self) -> bool {
         match &self.role {
-            Role::DevServer => true,
-            Role::Context | Role::Other => false,
+            Role::DevServer | Role::Opaque => true,
+            Role::Context | Role::Wait | Role::Other => false,
             Role::Concurrently(children) => children.iter().any(|child| child.recognised),
         }
     }
@@ -96,14 +103,37 @@ impl Step<'_> {
         match &self.role {
             Role::Other => true,
             Role::Concurrently(children) => children.iter().any(|child| !child.recognised),
-            Role::Context | Role::DevServer => false,
+            Role::Context | Role::Wait | Role::DevServer | Role::Opaque => false,
         }
     }
 }
 
-/// Whether the Guard knows `command` as a dev server.
+/// Whether the Guard knows every command of `command` as a dev server, the ones that only set the scene aside. A
+/// command such as `stripe listen & next dev` starts something else too, so it is not.
 fn starts_a_dev_server(command: &str) -> bool {
-    guard::recognize(command).is_some_and(|recognized| recognized.kind == Kind::DevServer)
+    let Some((segments, _)) = split(command) else {
+        return guard::recognize(command).is_some_and(|recognized| recognized.kind == Kind::DevServer);
+    };
+    let mut dev_servers = 0;
+    for segment in segments {
+        if sets_the_scene(&segment) {
+            continue;
+        }
+        if !guard::recognize(&segment.text).is_some_and(|recognized| recognized.kind == Kind::DevServer) {
+            return false;
+        }
+        dev_servers += 1;
+    }
+    dev_servers > 0
+}
+
+/// Whether `segment` only sets the scene for the commands after it: `cd apps/web`, `export NODE_ENV=development`.
+fn sets_the_scene(segment: &Segment) -> bool {
+    let words = &segment.words;
+    words.iter().all(|word| guard::is_assignment(word))
+        || words
+            .first()
+            .is_some_and(|word| matches!(guard::basename(word), "cd" | "pushd" | "export"))
 }
 
 /// The command an argument of `concurrently` runs, `npm:dev:web` standing for `npm run dev:web`.
@@ -114,19 +144,29 @@ fn expand_shorthand(argument: &str) -> String {
     }
 }
 
-/// The commands `concurrently` runs when `words` are its command, `None` for any other command.
-fn concurrent_children(words: &[String]) -> Option<Vec<Child>> {
+/// The index of the first argument of `concurrently` among `words`, `None` when they are another command.
+fn concurrently_arguments(words: &[String]) -> Option<usize> {
     let launched = guard::strip_launchers(words);
     let program = launched.first()?;
-    if !matches!(guard::basename(program), "concurrently" | "conc") {
-        return None;
-    }
+    matches!(guard::basename(program), "concurrently" | "conc").then(|| words.len() - launched.len() + 1)
+}
+
+/// The commands `concurrently` runs, the words of its command being `words` and its arguments starting at `first`.
+/// `None` when it has options that group several letters (`-kc`), which may take a value this reading cannot place.
+fn concurrent_children(words: &[String], first: usize) -> Option<Vec<Child>> {
     let mut children = Vec::new();
-    let mut word = words.len() - launched.len() + 1;
+    let mut word = first;
     while let Some(text) = words.get(word) {
+        if text == "--" {
+            break;
+        }
         if CONCURRENTLY_OPTIONS_WITH_VALUE.contains(&text.as_str()) {
             word += 1;
-        } else if !text.starts_with('-') {
+        } else if text.starts_with('-') {
+            if !text.starts_with("--") && text.len() > 2 {
+                return None;
+            }
+        } else {
             children.push(Child {
                 word,
                 text: text.clone(),
@@ -138,19 +178,22 @@ fn concurrent_children(words: &[String]) -> Option<Vec<Child>> {
     Some(children)
 }
 
+/// The role of the command `segment`.
 fn role(segment: &Segment) -> Role {
     let words = &segment.words;
-    let context = words.iter().all(|word| guard::is_assignment(word))
-        || words
-            .first()
-            .is_some_and(|word| matches!(guard::basename(word), "cd" | "pushd" | "export" | "wait"));
-    if context {
+    if sets_the_scene(segment) {
         return Role::Context;
     }
-    match concurrent_children(words) {
-        Some(children) => Role::Concurrently(children),
-        None if starts_a_dev_server(&segment.text) => Role::DevServer,
-        None => Role::Other,
+    if words.first().is_some_and(|word| guard::basename(word) == "wait") {
+        return Role::Wait;
+    }
+    if let Some(first) = concurrently_arguments(words) {
+        return concurrent_children(words, first).map_or(Role::Opaque, Role::Concurrently);
+    }
+    if starts_a_dev_server(&segment.text) {
+        Role::DevServer
+    } else {
+        Role::Other
     }
 }
 
@@ -176,6 +219,15 @@ impl Join {
         }
     }
 
+    /// The operator that writes the join.
+    fn operator(self) -> &'static str {
+        match self {
+            Self::After => " && ",
+            Self::Then => "; ",
+            Self::Alongside => " & ",
+        }
+    }
+
     /// What joins 2 commands that were apart by `joins`: the loosest of them, since commands that were side by side
     /// stay so, and `&&` between 2 commands that a `&` separated would make the second wait for a server.
     fn loosest(joins: &[Self]) -> &'static str {
@@ -189,21 +241,34 @@ impl Join {
     }
 }
 
-/// The commands of `script` and how they are joined, `None` when the script is one command, or is written with
-/// anything else than `&`, `&&`, `;` and line breaks between its commands.
+/// The commands of `script` and how each is joined to the next, `None` when the script is written with anything else
+/// than `&`, `&&`, `;` and line breaks between its commands.
 fn read(script: &str) -> Option<(Vec<Segment>, Vec<Join>)> {
-    let segments = guard::segments(script);
+    let (segments, joins) = split(script)?;
     let (first, last) = (segments.first()?, segments.last()?);
-    if first.span.start != script.len() - script.trim_start().len() || last.span.end != script.trim_end().len() {
-        return None;
-    }
+    let after_last = script[last.span.end..].trim_matches(|c: char| c.is_whitespace() || c == '&' || c == ';');
+    (first.span.start == script.len() - script.trim_start().len() && after_last.is_empty()).then_some((segments, joins))
+}
+
+/// The commands of `script` and how each is joined to the next, a redirection staying with its command. `None` when
+/// the commands are joined by anything else than `&`, `&&`, `;` and line breaks.
+fn split(script: &str) -> Option<(Vec<Segment>, Vec<Join>)> {
+    let mut segments: Vec<Segment> = Vec::new();
     let mut joins = Vec::new();
-    for pair in segments.windows(2) {
-        // `2>&1` is a redirection, which the splitting took for a `&`.
-        if pair[0].text.ends_with(['>', '<']) || pair[1].text.starts_with(['>', '<']) {
-            return None;
+    for segment in guard::segments(script) {
+        if let Some(previous) = segments.last_mut() {
+            let operator = script[previous.span.end..segment.span.start].trim();
+            // `2>&1` and `&>file` are redirections, which the splitting took for a `&`.
+            if operator == "&" && (previous.text.ends_with(['>', '<']) || segment.text.starts_with(['>', '<'])) {
+                previous.span.end = segment.span.end;
+                script[previous.span.clone()].clone_into(&mut previous.text);
+                previous.words.extend(segment.words);
+                previous.word_spans.extend(segment.word_spans);
+                continue;
+            }
+            joins.push(Join::of(operator)?);
         }
-        joins.push(Join::of(script[pair[0].span.end..pair[1].span.start].trim())?);
+        segments.push(segment);
     }
     Some((segments, joins))
 }
@@ -279,8 +344,17 @@ pub(super) fn narrow(script: &str) -> Narrowed {
         return Narrowed::Whole;
     }
 
-    // A command that sets the scene stays for as long as a command after it is run.
+    // A `wait` stays as long as a command before it is run, and a command that sets the scene as long as a command after
+    // it is.
     let mut runs: Vec<bool> = steps.iter().map(Step::recognised).collect();
+    let mut earlier = false;
+    for (at, step) in steps.iter().enumerate() {
+        match step.role {
+            Role::Wait => runs[at] = earlier,
+            Role::Context => {}
+            _ => earlier |= runs[at],
+        }
+    }
     let mut later = false;
     for (at, step) in steps.iter().enumerate().rev() {
         if matches!(step.role, Role::Context) {
@@ -308,7 +382,7 @@ pub(super) fn narrow(script: &str) -> Narrowed {
                         .map(|child| left_out(&child.text)),
                 );
             }
-            Role::Context | Role::DevServer => {}
+            Role::Context | Role::Wait | Role::DevServer | Role::Opaque => {}
         }
     }
 
@@ -326,8 +400,11 @@ pub(super) fn narrow(script: &str) -> Narrowed {
         if !runs[at] {
             continue;
         }
+        // A command that sets the scene is run by the shell itself, so it keeps the join it had.
         let joiner = if at == previous + 1 {
             script[steps[previous].segment.span.end..steps[at].segment.span.start].to_owned()
+        } else if matches!(steps[previous].role, Role::Context) {
+            joins[previous].operator().to_owned()
         } else {
             Join::loosest(&joins[previous..at]).to_owned()
         };
@@ -338,15 +415,13 @@ pub(super) fn narrow(script: &str) -> Narrowed {
     Narrowed::Kept { run, notes }
 }
 
-/// The command that waited for the one at `at` to end well, and still runs.
+/// The command that waited for the one at `at` to end, and still runs.
 fn waiting_after(at: usize, steps: &[Step], joins: &[Join], runs: &[bool]) -> Option<String> {
     let mut next = at;
-    while joins.get(next) == Some(&Join::After) {
+    while joins.get(next).is_some_and(|join| *join != Join::Alongside) {
         next += 1;
-        match steps[next].role {
-            Role::Context => {}
-            Role::DevServer | Role::Concurrently(_) if runs[next] => return Some(steps[next].segment.text.clone()),
-            _ => return None,
+        if runs[next] && !matches!(steps[next].role, Role::Context | Role::Wait) {
+            return Some(steps[next].segment.text.clone());
         }
     }
     None
@@ -400,7 +475,7 @@ mod tests {
     fn a_command_that_sets_the_scene_stays_for_the_commands_after_it() {
         assert_eq!(
             kept("cd apps/web && next dev & node worker.js & wait"),
-            "cd apps/web && next dev"
+            "cd apps/web && next dev & wait"
         );
         assert_eq!(
             narrow("cd apps/web && node worker.js"),
@@ -416,9 +491,71 @@ mod tests {
     }
 
     #[test]
-    fn a_redirection_is_not_a_list() {
+    fn a_redirection_is_part_of_its_command() {
         assert_eq!(narrow("node worker.js 2>&1"), Narrowed::Whole);
-        assert_eq!(narrow("next dev 2>&1 & node worker.js"), Narrowed::Whole);
+        assert_eq!(
+            kept("next dev > dev.log 2>&1 & node worker.js"),
+            "next dev > dev.log 2>&1"
+        );
+        assert_eq!(kept("next dev &> dev.log & node worker.js"), "next dev &> dev.log");
+    }
+
+    #[test]
+    fn a_trailing_operator_is_dropped_with_what_it_ended() {
+        assert_eq!(kept("next dev & node worker.js &"), "next dev");
+        assert_eq!(kept("node worker.js; next dev;"), "next dev");
+    }
+
+    #[test]
+    fn a_wait_stays_as_long_as_a_command_before_it_does() {
+        assert_eq!(
+            kept("next dev & vite & node worker.js & wait"),
+            "next dev & vite & wait"
+        );
+        assert_eq!(
+            narrow("node worker.js & wait"),
+            Narrowed::Nothing {
+                notes: vec![
+                    left_out("node worker.js"),
+                    "No Group is proposed, since no command of the `dev` script of the root is recognised as a dev \
+                     server. The Services are started one by one."
+                        .to_owned()
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn a_command_that_sets_the_scene_is_never_sent_to_the_background() {
+        assert_eq!(
+            kept("export NODE_ENV=development; stripe listen & next dev"),
+            "export NODE_ENV=development; next dev"
+        );
+        assert_eq!(kept("cd apps/web; stripe listen & next dev"), "cd apps/web; next dev");
+    }
+
+    #[test]
+    fn an_argument_of_concurrently_that_starts_something_else_too_is_left_out() {
+        assert_eq!(
+            kept(r#"concurrently "stripe listen & next dev" vite"#),
+            "concurrently vite"
+        );
+        assert_eq!(
+            kept(r#"concurrently "cd apps/web && next dev" "node worker.js""#),
+            r#"concurrently "cd apps/web && next dev""#
+        );
+    }
+
+    #[test]
+    fn options_of_concurrently_that_cannot_be_placed_leave_the_script_as_it_is() {
+        assert_eq!(
+            narrow(r#"concurrently -kc blue,red "next dev" "node worker.js""#),
+            Narrowed::Whole
+        );
+        assert_eq!(
+            kept(r#"concurrently "next dev" "node worker.js" -- --port 3000"#),
+            r#"concurrently "next dev" -- --port 3000"#
+        );
     }
 
     #[test]
@@ -468,5 +605,18 @@ mod tests {
             "{notes:?}"
         );
         assert!(!notes[1].contains("used to run after it"), "{notes:?}");
+    }
+
+    #[test]
+    fn the_wait_is_noted_for_every_left_out_command_before_the_kept_one_and_for_a_semicolon_too() {
+        let Narrowed::Kept { notes, .. } = narrow("pnpm build && node worker.js; next dev") else {
+            panic!("the script keeps next dev");
+        };
+        assert!(
+            notes
+                .iter()
+                .all(|note| note.contains("`next dev` used to run after it")),
+            "{notes:?}"
+        );
     }
 }

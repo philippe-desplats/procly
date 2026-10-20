@@ -336,7 +336,7 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
         .collect();
     if let Some(root_package) = root_package {
         covers.sort();
-        // The Group runs the root script as it is, unless it lists commands that were not recognised as Services. The
+        // The Group runs the root script as it is, unless it lists commands that were not recognised as dev servers. The
         // Services it covers get their ports from their own Leases.
         let run = match group::narrow(&root_package.script) {
             Narrowed::Whole => manager.run("dev"),
