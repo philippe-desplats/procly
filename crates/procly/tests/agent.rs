@@ -301,7 +301,7 @@ fn the_guard_blocks_a_known_dev_server_command_and_answers_with_the_procly_comma
         ("cd apps/web && npm start", "`procly up <service>`"),
         ("node ace serve --hmr", "`procly up <service>`"),
         ("docker compose up -d", "`procly up <service>`"),
-        ("docker-compose -f compose.dev.yml up db", "`procly up <service>`"),
+        ("docker-compose -f compose.yaml up db", "`procly up <service>`"),
     ] {
         let reason = denial(&guard(&procly, &main, command)).unwrap_or_else(|| panic!("{command} went through"));
         assert!(reason.contains(&format!("Run {instead}")), "{command}: {reason}");
@@ -323,11 +323,82 @@ fn the_guard_answers_a_compose_command_with_the_compose_services_it_starts() {
 
     for (command, instead) in [
         ("docker compose up -d postgres", "`procly up db`"),
-        ("docker-compose -f compose.dev.yml up redis", "`procly up cache`"),
+        ("docker-compose -f compose.yaml up redis", "`procly up cache`"),
         ("docker compose up -d", "`procly up cache && procly up db`"),
         ("docker compose up mailpit", "`procly up <service>`"),
     ] {
         let reason = denial(&guard(&procly, &main, command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(reason.contains(&format!("Run {instead}")), "{command}: {reason}");
+    }
+}
+
+#[test]
+fn the_guard_says_a_compose_file_procly_does_not_manage_is_not_and_names_no_service() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join("procly.toml"),
+        "[services.db]\ncompose = 'postgres'\n[services.cache]\ncompose = 'redis'\n",
+    );
+    let below = main.join("apps/web");
+    std::fs::create_dir_all(&below).unwrap();
+
+    for (dir, command, file) in [
+        (&main, "docker compose -f compose.dev.yml up -d", "compose.dev.yml"),
+        (
+            &main,
+            "docker-compose --file infra/compose.yaml up redis",
+            "infra/compose.yaml",
+        ),
+        (&below, "docker compose -f compose.yaml up -d", "compose.yaml"),
+        (
+            &main,
+            "cd apps/web && docker compose -f compose.yaml up -d",
+            "compose.yaml",
+        ),
+    ] {
+        let reason = denial(&guard(&procly, dir, command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(
+            reason.contains(&format!("The compose file `{file}` is not managed by Procly"))
+                && !reason.contains("procly up"),
+            "{command}: {reason}"
+        );
+    }
+
+    // The compose file of the root, named or not, from the root or from below it, is the one Procly drives.
+    for (dir, command) in [
+        (&main, "docker compose -f ./compose.yaml up -d"),
+        (&below, "docker compose -f ../../compose.yaml up -d"),
+        (&below, "docker compose up -d"),
+    ] {
+        let reason = denial(&guard(&procly, dir, command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(
+            reason.contains("Run `procly up cache && procly up db`"),
+            "{command}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn the_guard_names_the_service_that_runs_in_the_directory_of_a_dev_command() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join("procly.toml"),
+        "[services.web]\nrun = 'cd apps/web && bun run dev'\n[services.api]\nrun = 'cd apps/api && bun run dev'\n",
+    );
+    let web = main.join("apps/web");
+    let docs = main.join("apps/docs");
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::create_dir_all(&docs).unwrap();
+
+    for (dir, command, instead) in [
+        (&web, "bun dev", "`procly up web`"),
+        (&main, "cd apps/api && bun dev", "`procly up api`"),
+        (&web, "cd ../api && bun dev", "`procly up api`"),
+        (&docs, "bun dev", "`procly up <service>`"),
+    ] {
+        let reason = denial(&guard(&procly, dir, command)).unwrap_or_else(|| panic!("{command} went through"));
         assert!(reason.contains(&format!("Run {instead}")), "{command}: {reason}");
     }
 }
