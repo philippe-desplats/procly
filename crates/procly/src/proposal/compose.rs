@@ -25,7 +25,7 @@ const COMPOSE_FILES: [&str; 4] = [
 const MAINTENANCE_DATABASES: [&str; 3] = ["postgres", "template0", "template1"];
 
 /// The longest database name Procly derives from a Repository, which leaves room for the `__<slug>` the Driver adds in
-/// another Worktree within the 63 bytes Postgres accepts.
+/// another Worktree within the 63 bytes of the `max_length` of the bundled `postgres` Driver.
 const DERIVED_NAME_MAX_LEN: usize = 63 - 2 - SLUG_MAX_LEN;
 
 /// The name a derived database has when the Repository has no usable name.
@@ -319,13 +319,21 @@ fn database_name(name: &str, service: &Value, repository: &str) -> (String, Opti
         return (usable, None);
     }
     let derived = derived_database(repository);
-    let why = match declared.filter(|declared| !declared.is_empty()) {
-        Some(declared) => format!("sets POSTGRES_DB to `{declared}`, which is no database to work in"),
-        None => "sets no POSTGRES_DB".to_owned(),
+    let why = match (
+        declared.filter(|declared| !declared.is_empty()),
+        declared_environment(service, "POSTGRES_DB"),
+    ) {
+        (Some(declared), _) => format!("sets POSTGRES_DB to `{declared}`, which is no database to work in"),
+        (None, Some(_)) => "reads POSTGRES_DB from a variable with no default".to_owned(),
+        (None, None) => "sets no POSTGRES_DB".to_owned(),
     };
-    let note = format!(
-        "the compose service `{name}` {why}, so its resource is named `{derived}` after the repository `{repository}`, review it"
-    );
+    let source = if resource_name(repository).is_some() {
+        format!("after the Repository `{repository}`")
+    } else {
+        format!("by default, the Repository name `{repository}` holds nothing a database name can carry")
+    };
+    let note =
+        format!("the compose service `{name}` {why}, so its Logical resource is named `{derived}` {source}, review it");
     (derived, Some(note))
 }
 
