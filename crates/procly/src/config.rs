@@ -176,6 +176,9 @@ pub(crate) struct Settings {
     /// How long a setup command of `worktree init` may run before its whole process tree is killed.
     #[serde(default = "default_setup_timeout", deserialize_with = "duration")]
     pub(crate) setup_timeout: Duration,
+    /// How often a setup command of `worktree init` still running reports its elapsed time and its log.
+    #[serde(default = "default_setup_progress_interval", deserialize_with = "duration")]
+    pub(crate) setup_progress_interval: Duration,
     /// How long one command of a Driver may run in the container.
     #[serde(default = "default_driver_timeout", deserialize_with = "duration")]
     pub(crate) driver_timeout: Duration,
@@ -194,6 +197,7 @@ impl Default for Settings {
             grace_period: default_grace_period(),
             isolation: None,
             setup_timeout: default_setup_timeout(),
+            setup_progress_interval: default_setup_progress_interval(),
             driver_timeout: default_driver_timeout(),
         }
     }
@@ -971,6 +975,10 @@ fn default_grace_period() -> Duration {
 /// Long enough for a cold install.
 fn default_setup_timeout() -> Duration {
     Duration::from_mins(30)
+}
+
+fn default_setup_progress_interval() -> Duration {
+    Duration::from_mins(1)
 }
 
 fn default_driver_timeout() -> Duration {

@@ -127,6 +127,15 @@ pub(crate) enum Response {
     },
     /// The Worktree is prepared.
     WorktreeInit(InitReport),
+    /// A setup command is still running: sent as often as `settings.setup_progress_interval` while `worktree init`
+    /// waits, before its final answer.
+    SetupProgress {
+        command: String,
+        /// How long the command has run, in milliseconds.
+        elapsed_ms: u64,
+        /// The file the output of the setup commands is appended to, which outlives a failure.
+        log: PathBuf,
+    },
     /// A setup command failed, and the ones after it were not run.
     SetupFailed {
         report: InitReport,
