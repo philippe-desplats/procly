@@ -556,6 +556,105 @@ services:
     }
 }
 
+const BARE_POSTGRES: &str = "\
+services:
+  db:
+    image: postgres:17
+    ports: ['5432:5432']
+";
+
+/// The `name` of the `dev` resource of the Postgres service `db` in a proposal.
+fn database_name(proposal: &str) -> String {
+    let document: toml::Table = proposal.parse().expect("the proposal is TOML");
+    document["services"]["db"]["resources"]["dev"]["name"]
+        .as_str()
+        .expect("the resource is named")
+        .to_owned()
+}
+
+#[test]
+fn a_postgres_that_sets_no_database_is_named_after_the_repository_and_stderr_says_so() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "Acme-Shop");
+    write(&main.join("compose.yaml"), BARE_POSTGRES);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(database_name(&stdout(&output)), "acme_shop");
+    let note = stderr(&output);
+    assert!(note.contains("`acme_shop`") && note.contains("POSTGRES_DB"), "{note}");
+    assert_loads(&procly, &main, "db");
+}
+
+#[test]
+fn a_postgres_that_sets_no_database_in_a_secondary_worktree_is_named_after_the_main_worktree() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "acme-shop");
+    write(&main.join("compose.yaml"), BARE_POSTGRES);
+    common::git(&main, &["add", "compose.yaml"]);
+    common::git(&main, &["commit", "--quiet", "--message", "add the compose file"]);
+    let feature = common::git_worktree_add(&main, "feature");
+
+    let output = init(&procly, &feature);
+
+    assert_eq!(database_name(&stdout(&output)), "acme_shop");
+}
+
+#[test]
+fn a_database_is_never_a_maintenance_database_whatever_the_repository_is_called() {
+    for (repository, name) in [
+        ("postgres", "postgres_dev"),
+        ("Template1", "template1_dev"),
+        ("_", "app"),
+        (
+            "a-repository-name-that-is-far-too-long-for-a-database",
+            "a_repository_name_that_is_far",
+        ),
+    ] {
+        let procly = Procly::new();
+        let main = git_repository(procly.scratch(), repository);
+        write(&main.join("compose.yaml"), BARE_POSTGRES);
+
+        let output = init(&procly, &main);
+
+        assert_eq!(database_name(&stdout(&output)), name, "{repository}");
+        assert_loads(&procly, &main, "db");
+    }
+}
+
+#[test]
+fn a_postgres_that_names_a_maintenance_database_is_named_after_the_repository_instead() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "acme-shop");
+    write(
+        &main.join("compose.yaml"),
+        "\
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: template1
+    ports: ['5432:5432']
+",
+    );
+
+    let output = init(&procly, &main);
+
+    assert_eq!(database_name(&stdout(&output)), "acme_shop");
+    assert!(stderr(&output).contains("template1"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_postgres_that_sets_its_database_keeps_that_name_and_stderr_has_no_note() {
+    let procly = Procly::new();
+    let main = repository(&procly, &[("compose.yaml", COMPOSE)]);
+
+    let output = init(&procly, &main);
+
+    assert!(stdout(&output).contains("name = \"shop\""), "{}", stdout(&output));
+    assert_eq!(stderr(&output).lines().count(), 1, "{}", stderr(&output));
+}
+
 #[test]
 fn a_compose_service_named_like_an_app_gets_a_name_of_its_own_and_keeps_its_compose_name() {
     let procly = Procly::new();

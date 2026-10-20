@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::config::VERSIONED_FILE;
 use crate::proposal::{self, ProposalError};
-use crate::topology::{self, TopologyError};
+use crate::topology::{self, Topology, TopologyError};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InitError {
@@ -36,6 +36,9 @@ pub(crate) struct ProposalReport {
     pub(crate) toml: String,
     /// Whether the Worktree had no `procly.toml`. One that exists is never overwritten.
     pub(crate) written: bool,
+    /// The choices the proposal made that deserve a second look. They go to stderr, the document does not carry them.
+    #[serde(skip)]
+    pub(crate) notes: Vec<String>,
 }
 
 /// Proposes a `procly.toml` for the Worktree holding `cwd`, and writes it at the root of that Worktree unless it has
@@ -45,11 +48,28 @@ pub(crate) fn propose(cwd: &Path) -> Result<ProposalReport, InitError> {
     let Some(topology) = topology::resolve(&cwd)? else {
         return Err(InitError::NotInRepository(cwd));
     };
+    let repository = repository_name(&topology)?;
     let worktree = topology.worktree.path;
     let file = worktree.join(VERSIONED_FILE);
-    let toml = proposal::propose(&worktree)?;
-    let written = write_new(&file, &toml)?;
-    Ok(ProposalReport { file, toml, written })
+    let proposed = proposal::propose(&worktree, &repository)?;
+    let written = write_new(&file, &proposed.toml)?;
+    Ok(ProposalReport {
+        file,
+        toml: proposed.toml,
+        written,
+        notes: proposed.notes,
+    })
+}
+
+/// The name of the Repository: the directory of its Main worktree, the same one from every Worktree. A Repository with
+/// no Main worktree is named after the Worktree.
+fn repository_name(topology: &Topology) -> Result<String, TopologyError> {
+    let root = match topology.main() {
+        Ok(main) => main.worktree.path,
+        Err(TopologyError::NoMainWorktree { .. }) => topology.worktree.path.clone(),
+        Err(error) => return Err(error),
+    };
+    Ok(root.file_name().unwrap_or_default().to_string_lossy().into_owned())
 }
 
 /// Writes `text` to `file` unless it exists, and tells whether it did. The file is created exclusively, so that an
