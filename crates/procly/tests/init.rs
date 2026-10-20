@@ -689,3 +689,28 @@ services:
     assert!(proposal.contains("[services.plain.resources.dev]"), "{proposal}");
     assert_eq!(proposal.matches("driver").count(), 1, "{proposal}");
 }
+
+#[test]
+fn init_in_a_fresh_state_directory_leaves_no_daemon_running() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[(
+            "package.json",
+            r#"{"name": "shop", "scripts": {"dev": "node server.js"}}"#,
+        )],
+    );
+    let outside = procly.scratch().join("not-a-repository");
+    fs::create_dir(&outside).unwrap();
+
+    init(&procly, &main);
+    assert_success(&procly.procly_in(&main, &["init", "--json"]));
+    assert_eq!(procly.procly_in(&outside, &["init"]).status.code(), Some(125));
+
+    for file in ["procly.sock", "daemon.pid"] {
+        assert!(
+            !procly.state_dir().join(file).exists(),
+            "init needs no Daemon, yet {file} is in the state directory"
+        );
+    }
+}

@@ -1,16 +1,22 @@
-//! `procly init`: writes the `procly.toml` proposed for a Worktree, unless it has one already.
+//! `procly init`: writes the `procly.toml` proposed for a Worktree, unless it has one already. The proposal reads the
+//! Worktree only, so init runs in the CLI and never starts the Daemon.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use super::topology_of;
+use serde::Serialize;
+
 use crate::config::VERSIONED_FILE;
 use crate::proposal::{self, ProposalError};
-use crate::protocol::{ProposalReport, Response};
+use crate::topology::{self, TopologyError};
 
 #[derive(Debug, thiserror::Error)]
-enum ProposeError {
+pub(crate) enum ProposeError {
+    #[error(transparent)]
+    Topology(#[from] TopologyError),
+    #[error("{} is not in a git repository, and Services are declared per Repository", .0.display())]
+    NotInRepository(PathBuf),
     #[error(transparent)]
     Proposal(#[from] ProposalError),
     #[error("cannot write {path}")]
@@ -21,24 +27,27 @@ enum ProposeError {
     },
 }
 
-/// Answers an `Init` request. Resolving the Topology runs git, and reading the Worktree and writing a file are
-/// blocking, so the work runs on a thread that may block.
-pub(super) async fn run(cwd: PathBuf) -> Response {
-    match tokio::task::spawn_blocking(move || propose(&cwd)).await {
-        Ok(Ok(report)) => Response::Init(report),
-        Ok(Err(error)) => Response::Error {
-            message: format!("{error:#}"),
-        },
-        Err(error) => Response::Error {
-            message: format!("the proposal could not be made: {error}"),
-        },
-    }
+/// What `init` proposed.
+#[derive(Debug, Serialize)]
+pub(crate) struct ProposalReport {
+    /// The `procly.toml` of the Worktree, written there when `written`.
+    pub(crate) file: PathBuf,
+    /// The proposal, the content of `file` when `written`.
+    pub(crate) toml: String,
+    /// Whether the Worktree had no `procly.toml`. One that exists is never overwritten.
+    pub(crate) written: bool,
 }
 
-fn propose(cwd: &Path) -> anyhow::Result<ProposalReport> {
-    let worktree = topology_of(cwd)?.worktree.path;
+/// Proposes a `procly.toml` for the Worktree holding `cwd`, and writes it at the root of that Worktree unless it has
+/// one.
+pub(crate) fn propose(cwd: &Path) -> Result<ProposalReport, ProposeError> {
+    let cwd = topology::canonicalize(cwd)?;
+    let Some(topology) = topology::resolve(&cwd)? else {
+        return Err(ProposeError::NotInRepository(cwd));
+    };
+    let worktree = topology.worktree.path;
     let file = worktree.join(VERSIONED_FILE);
-    let toml = proposal::propose(&worktree).map_err(ProposeError::from)?;
+    let toml = proposal::propose(&worktree)?;
     let written = write_new(&file, &toml)?;
     Ok(ProposalReport { file, toml, written })
 }

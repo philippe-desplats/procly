@@ -72,8 +72,6 @@ pub(crate) enum Request {
     /// Stops the Services of the Repository holding `cwd` and removes what Procly wrote into it, apart from the
     /// Managed blocks that were edited.
     Eject { cwd: PathBuf },
-    /// Proposes a `procly.toml` for the Worktree holding `cwd`, and writes it unless the Worktree has one.
-    Init { cwd: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -151,8 +149,6 @@ pub(crate) enum Response {
     },
     /// The Repository is ejected.
     Eject(EjectReport),
-    /// The `procly.toml` proposed for the Worktree.
-    Init(ProposalReport),
     Error {
         message: String,
     },
@@ -249,17 +245,6 @@ impl BlockOutcome {
 pub(crate) struct BlockReport {
     pub(crate) file: PathBuf,
     pub(crate) outcome: BlockOutcome,
-}
-
-/// What `init` proposed.
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ProposalReport {
-    /// The `procly.toml` of the Worktree, written there when `written`.
-    pub(crate) file: PathBuf,
-    /// The proposal, the content of `file` when `written`.
-    pub(crate) toml: String,
-    /// Whether the Worktree had no `procly.toml`. One that exists is never overwritten.
-    pub(crate) written: bool,
 }
 
 /// What `agent install` wrote.
