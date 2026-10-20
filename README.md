@@ -63,7 +63,7 @@ Each [release](https://github.com/philippe-desplats/procly/releases) carries one
 | Linux, x86_64 | `procly-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 
 ```sh
-version=0.1.0
+version=0.2.0
 target=aarch64-apple-darwin
 base=https://github.com/philippe-desplats/procly/releases/download/v$version
 curl -fsSLO $base/procly-$version-$target.tar.gz
@@ -80,7 +80,7 @@ On Linux, `sha256sum --check` replaces `shasum -a 256 --check`. The Linux archiv
 `cargo install` needs Rust 1.99 or newer, the `rust-version` of the crate, and refuses an older compiler.
 
 ```sh
-cargo install --locked --git https://github.com/philippe-desplats/procly --tag v0.1.0 --bin procly
+cargo install --locked --git https://github.com/philippe-desplats/procly --tag v0.2.0 --bin procly
 ```
 
 Leave out `--tag` to install the head of `main`. From a clone, `rustup` uses the toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml), and `cargo install --locked --path crates/procly --bin procly` does the same. See [Installing Procly](docs/install.md) for the details.
