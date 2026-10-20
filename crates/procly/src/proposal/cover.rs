@@ -139,8 +139,12 @@ fn filtered(value: &str, place: &Path, members: &[Member]) -> Result<usize, Stri
         .ok_or_else(|| format!("`{value}` is not a package with a `dev` script"))
 }
 
-/// `path` as a directory of the Worktree, `base` being where it is read from. `None` outside the Worktree.
+/// `path` as a directory of the Worktree, `base` being where it is read from. `None` outside the Worktree, and for a path
+/// that starts at `~`, which says nothing about where the Worktree is.
 fn resolve(base: &Path, path: &str) -> Option<PathBuf> {
+    if path.starts_with('~') {
+        return None;
+    }
     match shell::resolve(base, path) {
         Resolved::Inside(resolved) => Some(resolved),
         Resolved::Above(_) | Resolved::Absolute(_) => None,
@@ -261,6 +265,26 @@ mod tests {
     }
 
     #[test]
+    fn a_command_run_after_a_cd_home_runs_from_a_directory_outside_the_worktree() {
+        for text in [
+            "cd && next dev",
+            "cd ~ && next dev",
+            "cd ~/tools && next dev",
+            "pushd ~/tools && next dev",
+            "cd tools && cd ~/other && next dev",
+        ] {
+            let Err(notes) = services(text, &[]) else {
+                panic!("{text} was tied");
+            };
+            assert_eq!(
+                notes[0],
+                format!("`{text}` cannot be tied to one Service: it runs from a directory outside the Worktree."),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_path_above_the_root_of_the_worktree_is_no_directory_of_it() {
         assert_eq!(
             resolve(Path::new("apps/web"), "../api"),
@@ -270,6 +294,8 @@ mod tests {
         assert_eq!(resolve(Path::new("apps/web"), "../../.."), None);
         assert_eq!(resolve(Path::new("apps"), "/srv/app"), None);
         assert_eq!(resolve(Path::new("apps"), "/"), None);
+        assert_eq!(resolve(Path::new("apps"), "~"), None);
+        assert_eq!(resolve(Path::new("apps"), "~/tools"), None);
     }
 
     #[test]
