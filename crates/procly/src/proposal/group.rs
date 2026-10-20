@@ -62,14 +62,11 @@ const CONCURRENTLY_OPTIONS_WITH_VALUE: [&str; 22] = [
 /// The options of `concurrently` that give a comma-separated list with one entry per command.
 const CONCURRENTLY_LISTS: [(&str, &str); 2] = [("-n", "--names"), ("-c", "--prefix-colors")];
 
-/// The package managers whose `<manager>:<script>` shorthand `concurrently` expands.
-const SHORTHAND_MANAGERS: [&str; 4] = ["npm", "pnpm", "yarn", "bun"];
-
 /// One command `concurrently` runs, an argument of it.
 #[derive(Debug)]
 struct Child {
     /// The index of the argument among the words of its step.
-    word: usize,
+    index: usize,
     /// The command as the argument holds it.
     text: String,
     /// Whether the Guard knows the command as a dev server.
@@ -79,7 +76,7 @@ struct Child {
 /// What a command of the script is for the Group.
 #[derive(Debug)]
 enum Role {
-    /// A command that only sets the scene for the next ones: `cd apps/web`, `export NODE_ENV=development`, `wait`.
+    /// A command that only sets the scene for the next ones: `cd apps/web`, `export NODE_ENV=development`.
     Context,
     /// A command that starts a dev server.
     DevServer,
@@ -158,7 +155,7 @@ pub(super) fn changes_to(segment: &Segment) -> Option<String> {
 /// The command an argument of `concurrently` runs, `npm:dev:web` standing for `npm run dev:web`.
 fn expand_shorthand(argument: &str) -> String {
     match argument.split_once(':') {
-        Some((manager, script)) if SHORTHAND_MANAGERS.contains(&manager) => format!("{manager} run {script}"),
+        Some((manager, script)) if guard::PACKAGE_MANAGERS.contains(&manager) => format!("{manager} run {script}"),
         _ => argument.to_owned(),
     }
 }
@@ -174,25 +171,25 @@ fn concurrently_arguments(words: &[String]) -> Option<usize> {
 /// `None` when it has options that group several letters (`-kc`), which may take a value this reading cannot place.
 fn concurrent_children(words: &[String], first: usize) -> Option<Vec<Child>> {
     let mut children = Vec::new();
-    let mut word = first;
-    while let Some(text) = words.get(word) {
+    let mut index = first;
+    while let Some(text) = words.get(index) {
         if text == "--" {
             break;
         }
         if CONCURRENTLY_OPTIONS_WITH_VALUE.contains(&text.as_str()) {
-            word += 1;
+            index += 1;
         } else if text.starts_with('-') {
             if !text.starts_with("--") && text.len() > 2 {
                 return None;
             }
         } else {
             children.push(Child {
-                word,
+                index,
                 text: text.clone(),
                 recognised: starts_a_dev_server(&expand_shorthand(text)),
             });
         }
-        word += 1;
+        index += 1;
     }
     Some(children)
 }
@@ -302,7 +299,7 @@ fn written(script: &str, step: &Step) -> String {
     let spans = &segment.word_spans;
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     for child in children.iter().filter(|child| !child.recognised) {
-        edits.push((spans[child.word - 1].end..spans[child.word].end, String::new()));
+        edits.push((spans[child.index - 1].end..spans[child.index].end, String::new()));
     }
     // Names and colors are one entry per command, so the entries of the commands left out go too.
     if !words.iter().any(|word| word.starts_with("--name-separator")) {
@@ -489,6 +486,18 @@ mod tests {
         }
     }
 
+    /// What the script gives when `left` is its only command that starts something and the Guard knows no dev server.
+    fn nothing_recognised(left: &str) -> Narrowed {
+        Narrowed::Nothing {
+            notes: vec![
+                left_out(left),
+                "No Group is proposed, since no command of the `dev` script of the root is recognised as a dev \
+                 server. The Services are started one by one."
+                    .to_owned(),
+            ],
+        }
+    }
+
     #[test]
     fn a_script_that_is_one_command_is_never_judged() {
         for script in [
@@ -530,14 +539,7 @@ mod tests {
         );
         assert_eq!(
             narrow("cd apps/web && node worker.js"),
-            Narrowed::Nothing {
-                notes: vec![
-                    left_out("node worker.js"),
-                    "No Group is proposed, since no command of the `dev` script of the root is recognised as a dev \
-                     server. The Services are started one by one."
-                        .to_owned()
-                ]
-            }
+            nothing_recognised("node worker.js")
         );
     }
 
@@ -563,17 +565,7 @@ mod tests {
             kept("next dev & vite & node worker.js & wait"),
             "next dev & vite & wait"
         );
-        assert_eq!(
-            narrow("node worker.js & wait"),
-            Narrowed::Nothing {
-                notes: vec![
-                    left_out("node worker.js"),
-                    "No Group is proposed, since no command of the `dev` script of the root is recognised as a dev \
-                     server. The Services are started one by one."
-                        .to_owned()
-                ]
-            }
-        );
+        assert_eq!(narrow("node worker.js & wait"), nothing_recognised("node worker.js"));
     }
 
     #[test]

@@ -87,7 +87,7 @@ pub(super) fn rules(off: bool) -> &'static [&'static str] {
             "",
             "Dev servers, queue workers and containers of this repository run under Procly, so that parallel worktrees never start the same process twice or fight over a port.",
             "",
-            "- Start a service with `procly up <service>`. It answers `started` or `reused`, with its URL and port.",
+            "- Start a service with `procly up <service>`. It answers `started` or `reused`, with each of its ports and, when known, its URL.",
             "- Stop one with `procly down <service>`, or all of them with `procly down`. See what runs with `procly status`.",
             "- Run a one-off command with `procly run \"<command>\"`, then read its result with `procly wait <job>`.",
             "- Never start a dev server or `docker compose up` yourself. A hook blocks the known commands and names the Procly command to run instead.",

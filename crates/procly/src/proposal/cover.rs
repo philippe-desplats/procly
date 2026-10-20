@@ -12,12 +12,6 @@ use std::path::{Component, Path, PathBuf};
 use super::group::{self, Command};
 use crate::guard;
 
-/// The package managers whose options select a package.
-const RUNNERS: [&str; 5] = ["npm", "pnpm", "yarn", "bun", "turbo"];
-
-/// The options of a package manager that are followed by their value.
-const OPTIONS_WITH_VALUE: [&str; 6] = ["--workspace", "--prefix", "--filter", "-F", "--dir", "-C"];
-
 /// A workspace package of the Worktree that init proposes a Service for.
 #[derive(Debug)]
 pub(super) struct Member {
@@ -79,7 +73,7 @@ fn tie_segment(words: &[String], place: &Path, members: &[Member]) -> Result<Vec
     let program = guard::basename(program);
     let mut filters = Vec::new();
     let mut directory = None;
-    if RUNNERS.contains(&program) {
+    if guard::RUNNERS.contains(&program) {
         let mut options = args.iter().map(String::as_str);
         while let Some(word) = options.next() {
             match word {
@@ -98,7 +92,8 @@ fn tie_segment(words: &[String], place: &Path, members: &[Member]) -> Result<Vec
                 }
             }
         }
-        if let ("yarn", ["workspace", package, ..]) = (program, guard::positional(args, &OPTIONS_WITH_VALUE).as_slice())
+        if let ("yarn", ["workspace", package, ..]) =
+            (program, guard::positional(args, &guard::PACKAGE_OPTIONS).as_slice())
         {
             filters.push(package);
         }
@@ -200,6 +195,16 @@ mod tests {
             "yarn workspace @acme/web dev",
             "npm run dev --workspace=@acme/web",
             "npm run dev -w @acme/web",
+        ] {
+            assert_eq!(services(text, &[]), Ok(vec!["web".to_owned()]), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_options_that_narrow_a_command_for_the_guard_do_for_yarn_workspace_too() {
+        for text in [
+            "yarn --cwd apps/api workspace @acme/web dev",
+            "yarn -w apps/api workspace @acme/web dev",
         ] {
             assert_eq!(services(text, &[]), Ok(vec!["web".to_owned()]), "{text}");
         }
