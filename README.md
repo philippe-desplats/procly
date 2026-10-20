@@ -63,7 +63,7 @@ Each [release](https://github.com/philippe-desplats/procly/releases) carries one
 | Linux, x86_64 | `procly-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 
 ```sh
-version=0.1.0
+version=0.2.0
 target=aarch64-apple-darwin
 base=https://github.com/philippe-desplats/procly/releases/download/v$version
 curl -fsSLO $base/procly-$version-$target.tar.gz
