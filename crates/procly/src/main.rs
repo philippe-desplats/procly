@@ -883,6 +883,10 @@ fn switch(state: &StateDir, off: bool, json: bool) -> anyhow::Result<ExitCode> {
 fn init(json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let report = init::propose(&cwd)?;
+    // The notes are not in the document, so `--json` keeps them on stderr too.
+    for note in &report.notes {
+        eprintln!("procly: {note}");
+    }
     if json {
         json::print(&report)?;
         return Ok(ExitCode::SUCCESS);
@@ -1031,9 +1035,10 @@ fn guard_hook() -> ExitCode {
     match asked {
         Ok(Response::Guard {
             off: false,
-            at_root,
+            directory,
+            root,
             services,
-        }) => println!("{}", guard::denial(&recognized, &services, at_root)),
+        }) => println!("{}", guard::denial(&recognized, &services, directory.as_deref(), &root)),
         Ok(Response::Guard { off: true, .. }) => {}
         Ok(Response::Error { message }) => eprintln!("procly guard: {message}, letting the command through"),
         Ok(other) => eprintln!("procly guard: unexpected answer {other:?}, letting the command through"),

@@ -9,7 +9,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 /// The longest Worktree slug, leaving room for a prefix and a suffix in a 63-byte Postgres identifier.
-const SLUG_MAX_LEN: usize = 32;
+pub(crate) const SLUG_MAX_LEN: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TopologyError {
