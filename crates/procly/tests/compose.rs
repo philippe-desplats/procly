@@ -130,7 +130,7 @@ fn docker_up_starts_the_service_through_the_unmodified_compose_file_on_its_lease
     let port = fixture.port;
     assert_eq!(
         stdout(&output),
-        format!("db started http://localhost:{port} port {port}\n")
+        format!("db started db port {port}\n")
     );
     // The compose file read `DB_PORT`, so the container is reachable on the Lease and nowhere else.
     assert!(listens(port), "nothing listens on {port}");
@@ -160,7 +160,7 @@ fn docker_2_worktrees_share_one_container_on_one_port() {
     let port = fixture.port;
     assert_eq!(
         stdout(&output),
-        format!("db reused http://localhost:{port} port {port}\n")
+        format!("db reused db port {port}\n")
     );
     // The same container, not one recreated under the first Worktree.
     assert_eq!(fixture.project.container(), container);
@@ -275,7 +275,7 @@ fn docker_a_process_service_starts_the_compose_service_it_needs_first() {
     let port = fixture.port;
     assert_eq!(
         stderr(&output),
-        format!("db started http://localhost:{port} port {port} (needed by web)\n")
+        format!("db started db port {port} (needed by web)\n")
     );
     assert!(fixture.project.is_running());
 }
@@ -517,7 +517,7 @@ fn docker_a_container_started_by_plain_docker_compose_with_matching_labels_is_ad
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        format!("db reused http://localhost:{port} port {port}\n")
+        format!("db reused db port {port}\n")
     );
     // The very container started outside Procly, neither recreated nor restarted.
     assert_eq!(fixture.project.container(), container);
@@ -646,6 +646,37 @@ fn docker_up_json_of_a_conflict_carries_the_conflicts_and_exits_5_as_the_text_do
         }])
     );
     assert!(foreign.is_running(), "Procly stopped a container it does not own");
+}
+
+#[test]
+fn docker_a_service_with_an_smtp_and_an_http_port_prints_an_http_url_for_the_http_port_only() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let (smtp, http) = (fixture.port, free_port());
+    // Shaped as `procly init` proposes a Mailpit: an `smtp` port its health check probes, and an `http` port.
+    let compose = compose_file(&fixture.project.name).replace(
+        "      - \"${DB_PORT:-1}:80\"\n",
+        "      - \"${DB_PORT:-1}:80\"\n      - \"${PORT_HTTP:-1}:81\"\n",
+    );
+    std::fs::write(fixture.main.join("compose.yaml"), compose).unwrap();
+    std::fs::write(
+        fixture.main.join("procly.toml"),
+        format!(
+            "[services.mail]\ncompose = \"db\"\nports = {{ http = {http}, smtp = {smtp} }}\nhealth = {{ port = \"smtp\" }}\n\
+             env = {{ DB_PORT = \"{{services.mail.ports.smtp}}\" }}\n"
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "mail"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("mail started smtp://localhost:{smtp} port {smtp}, http://localhost:{http} port {http}\n")
+    );
 }
 
 #[test]
@@ -795,7 +826,7 @@ fn docker_after_a_daemon_crash_the_container_is_still_counted_for_both_worktrees
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        format!("db reused http://localhost:{port} port {port}\n")
+        format!("db reused db port {port}\n")
     );
     assert_eq!(fixture.project.container(), container);
     let first = fixture.procly.procly_in(&fixture.main, &["down", "db"]);

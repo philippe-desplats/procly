@@ -483,6 +483,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
             url,
             ports,
             needs,
+            urls,
         } => {
             let requested = UpService {
                 service,
@@ -491,6 +492,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
                 port,
                 url,
                 ports,
+                urls,
             };
             up_reached(&requested, &needs, json)
         }
@@ -706,17 +708,27 @@ fn env(state: &StateDir, service: &str, json: bool) -> anyhow::Result<ExitCode> 
 }
 
 /// Where to reach a Service that is up: its name, `started` or `reused` and the Group it runs in when it is covered
-/// by one, its URL and its port.
+/// by one, then each of its Leases, by its URL when its scheme is known and by its Port name otherwise.
 fn reached_line(up: &UpService) -> String {
     let service = &up.service;
     let outcome = match &up.via {
         Some(group) => format!("{} (via {group})", up.outcome.as_str()),
         None => up.outcome.as_str().to_owned(),
     };
-    match (&up.url, up.port) {
-        (Some(url), Some(port)) => format!("{service} {outcome} {url} port {port}"),
-        _ => format!("{service} {outcome}"),
+    // The Lease the health check probes first, then the others by Port name.
+    let (health, others): (Vec<_>, Vec<_>) = up.ports.iter().partition(|&(_, &port)| Some(port) == up.port);
+    let leases: Vec<String> = health
+        .into_iter()
+        .chain(others)
+        .map(|(port_name, port)| match up.urls.get(port_name) {
+            Some(url) => format!("{url} port {port}"),
+            None => format!("{port_name} port {port}"),
+        })
+        .collect();
+    if leases.is_empty() {
+        return format!("{service} {outcome}");
     }
+    format!("{service} {outcome} {}", leases.join(", "))
 }
 
 /// Runs `down`, printing one line per Service.
@@ -1154,6 +1166,7 @@ fn unexpected(response: Response) -> anyhow::Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::StartOutcome;
 
     #[test]
     fn the_tail_keeps_the_last_lines_with_their_newlines() {
@@ -1174,6 +1187,46 @@ mod tests {
         );
         assert_eq!(let_go(&released(1)), "db released, 1 other Worktree still needs it");
         assert_eq!(let_go(&released(2)), "db released, 2 other Worktrees still need it");
+    }
+
+    fn reached(port: Option<u16>, ports: &[(&str, u16)], urls: &[(&str, &str)]) -> UpService {
+        UpService {
+            service: "mailpit".to_owned(),
+            outcome: StartOutcome::Started,
+            via: None,
+            port,
+            url: None,
+            ports: ports.iter().map(|&(name, port)| (name.to_owned(), port)).collect(),
+            urls: urls
+                .iter()
+                .map(|&(name, url)| (name.to_owned(), url.to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_line_of_a_service_reached_gives_each_lease_its_url_or_its_port_name_the_health_port_first() {
+        assert_eq!(
+            reached_line(&reached(
+                Some(1025),
+                &[("http", 8025), ("smtp", 1025)],
+                &[("http", "http://localhost:8025"), ("smtp", "smtp://localhost:1025")],
+            )),
+            "mailpit started smtp://localhost:1025 port 1025, http://localhost:8025 port 8025"
+        );
+        assert_eq!(
+            reached_line(&reached(
+                Some(4101),
+                &[("admin", 4102), ("http", 4101)],
+                &[("http", "http://localhost:4101")]
+            )),
+            "mailpit started http://localhost:4101 port 4101, admin port 4102"
+        );
+        assert_eq!(
+            reached_line(&reached(Some(5433), &[("db", 5433)], &[])),
+            "mailpit started db port 5433"
+        );
+        assert_eq!(reached_line(&reached(None, &[], &[])), "mailpit started");
     }
 
     #[test]

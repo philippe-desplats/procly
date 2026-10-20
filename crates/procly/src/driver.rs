@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::placeholder;
+use crate::placeholder::{self, Piece};
 
 /// Where the Drivers of a Repository live, relative to the root of a Worktree.
 pub(crate) const REPOSITORY_DIR: &str = ".procly/drivers";
@@ -241,6 +241,18 @@ impl Driver {
         })
     }
 
+    /// The scheme of the connection URL when the URL reaches the Lease `port_name`, the one the health check probes
+    /// when `health` is set, such as `postgresql` for the bundled Postgres Driver.
+    pub(crate) fn scheme_of(&self, port_name: &str, health: bool) -> Option<&str> {
+        let reaches = placeholder::pieces(&self.url).iter().any(|piece| match piece {
+            Piece::Braced("port") => health,
+            Piece::Braced(braced) => braced.strip_prefix("ports.") == Some(port_name),
+            Piece::Text(_) => false,
+        });
+        let (scheme, _) = self.url.split_once("://")?;
+        (reaches && !scheme.is_empty()).then_some(scheme)
+    }
+
     /// A command of the Driver with `{resource}` and `{template}` replaced, both already checked to be plain words.
     pub(crate) fn command(command: &str, resource: &str, template: Option<&str>) -> String {
         let Ok(rendered) = placeholder::render(command, |braced| {
@@ -279,6 +291,19 @@ mod tests {
             postgres.url("app", &leases(), Some(24000)).unwrap(),
             "postgresql://postgres:postgres@localhost:24000/app"
         );
+    }
+
+    #[test]
+    fn the_scheme_of_the_url_is_the_one_of_the_lease_the_url_reaches() {
+        let health = driver(MINIMAL);
+        assert_eq!(health.scheme_of("db", true), Some("db"));
+        assert_eq!(health.scheme_of("admin", false), None);
+        let named = driver("url = 'db://localhost:{ports.admin}/{resource}'\ncheck = 'c'\ncreate = 'n'\ndrop = 'd'\n");
+        assert_eq!(named.scheme_of("admin", false), Some("db"));
+        assert_eq!(named.scheme_of("db", true), None);
+        let dir = tempfile::tempdir().unwrap();
+        let postgres = Driver::load("postgres", dir.path(), None).unwrap();
+        assert_eq!(postgres.scheme_of("db", true), Some("postgresql"));
     }
 
     #[test]

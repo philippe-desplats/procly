@@ -103,6 +103,8 @@ pub(crate) enum Response {
         via: Option<String>,
         /// The Services it needs, in the order `up` brought them up.
         needs: Vec<UpService>,
+        /// Where to reach each Lease whose scheme Procly knows, by Port name.
+        urls: BTreeMap<String, String>,
     },
     /// Every Service `up` without a Service brought up or found running, in the order it brought them up.
     UpAll {
@@ -348,6 +350,8 @@ pub(crate) struct UpService {
     pub(crate) url: Option<String>,
     /// Every Lease of the Service, by Port name, the one `port` is the health check's among them.
     pub(crate) ports: BTreeMap<String, u16>,
+    /// Where to reach each Lease whose scheme Procly knows, by Port name, the one `url` is among them.
+    pub(crate) urls: BTreeMap<String, String>,
 }
 
 /// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.
