@@ -50,11 +50,14 @@ fn repository(procly: &Procly, driver: &str) -> (PathBuf, PathBuf, u16) {
     (main, other, port)
 }
 
-/// The port `procly up` printed at the end of its line.
+/// The port of the health check `procly up` printed, at the end of the first Lease of its line.
 fn port_of(output: &std::process::Output) -> u16 {
     assert_success(output);
     let line = stdout(output);
     line.trim_end()
+        .split(", ")
+        .next()
+        .unwrap_or_default()
         .rsplit(' ')
         .next()
         .and_then(|port| port.parse().ok())
