@@ -6,6 +6,8 @@
 mod compose;
 mod scripts;
 
+pub(crate) use compose::bundled_driver;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};

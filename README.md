@@ -20,7 +20,7 @@ Agents call `procly up` instead of starting dev servers and containers themselve
 
 Coding agents are good at starting servers and bad at keeping track of them. Each agent sees its own shell, not the dev server another agent left running, nor the worktree next door that declared the same port. Run several agents in parallel worktrees and you get duplicate servers, port collisions, containers started twice and processes nobody stops.
 
-Procly is a single per-user Daemon that owns every Service, port and container across all your Repositories and Worktrees. A Service is declared once in `procly.toml`, and `procly up web` either starts it or answers that it already runs, with its URL. Each Worktree gets its own persistent ports, called Leases, so a second Worktree never fights the first one for port 3000. The agent gets one command, a stable exit code and a line it can read, and the Daemon does the bookkeeping.
+Procly is a single per-user Daemon that owns every Service, port and container across all your Repositories and Worktrees. A Service is declared once in `procly.toml`, and `procly up web` either starts it or answers that it already runs, with where to reach it. Each Worktree gets its own persistent ports, called Leases, so a second Worktree never fights the first one for port 3000. The agent gets one command, a stable exit code and a line it can read, and the Daemon does the bookkeeping.
 
 ## Features
 
@@ -106,7 +106,7 @@ web reused http://localhost:24080 port 24080
 Run from another Worktree of the same Repository, the same command starts its own copy on its own Leases. The daily commands:
 
 ```sh
-procly up web              # start web and what it needs, wait until healthy, print its URL and port
+procly up web              # start web and what it needs, wait until healthy, print where to reach each of its ports
 procly up                  # start every declared Service, each after what it needs
 procly env web             # print the variables Procly injects into web, without starting it
 procly logs web            # the recent output of web

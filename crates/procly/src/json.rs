@@ -91,6 +91,8 @@ pub(crate) struct Reached<'a> {
     url: Option<&'a str>,
     /// Every Lease of the Service, by Port name.
     ports: &'a BTreeMap<String, u16>,
+    /// Where to reach each Lease whose scheme Procly knows, by Port name.
+    urls: &'a BTreeMap<String, String>,
     /// The Service that needs this one, when `up` was asked for that one instead.
     needed_by: Option<&'a str>,
 }
@@ -105,6 +107,7 @@ impl<'a> Reached<'a> {
             port: up.port,
             url: up.url.as_deref(),
             ports: &up.ports,
+            urls: &up.urls,
             needed_by,
         }
     }

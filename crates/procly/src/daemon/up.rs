@@ -14,12 +14,17 @@ use super::health::HealthCheck;
 use super::service::{Relation, Service, ServiceSpec, Start};
 use super::{Registry, blocking, message, read_config, topology_of};
 use crate::config::{Config, ServiceConfig, ServiceKind};
+use crate::driver::{self, Driver};
 use crate::ports;
 use crate::protocol::{Response, ServiceEnd, StartOutcome, UpService};
 use crate::topology::Topology;
 
 /// What `failed` says when a blocking step of `up` could not run to its end.
 const START_FAILED: &str = "the service could not be started";
+
+/// The Port names that are the scheme of the protocol their port speaks, such as the `smtp` and `http` ports `procly
+/// init` gives a Mailpit.
+const SCHEMES: [&str; 5] = ["amqp", "http", "https", "redis", "smtp"];
 
 /// The Worktree a request is about and its configuration, read once for the whole request.
 #[derive(Debug, Clone)]
@@ -124,22 +129,27 @@ pub(super) async fn up(
                 needed_by: name.as_ref().filter(|target| *target != current).cloned(),
             };
         }
-        let ports = {
+        let reach = {
             let (registry, scope, current) = (Arc::clone(registry), scope.clone(), current.clone());
-            // Reading the Leases is blocking.
+            // Reading the Leases and the Driver is blocking.
             blocking(START_FAILED, move || service_leases(&registry, &scope, &current)).await
         };
-        let ports = match ports {
-            Ok(ports) => ports,
+        let (ports, urls) = match reach {
+            Ok(reach) => reach,
             Err(message) => return Response::Error { message },
         };
+        // The URL of the Lease the health check probes, among the URLs of every Lease.
+        let url = port
+            .and_then(|port| ports.iter().find(|&(_, &lease)| lease == port))
+            .and_then(|(port_name, _)| urls.get(port_name).cloned());
         reached.push(UpService {
             service: current.clone(),
             outcome,
             via,
             port,
-            url: port.map(|port| format!("http://localhost:{port}")),
+            url,
             ports,
+            urls,
         });
     }
     // The Service that was asked for comes last, after everything it needs.
@@ -152,6 +162,7 @@ pub(super) async fn up(
             url: target.url,
             ports: target.ports,
             needs: reached,
+            urls: target.urls,
         },
         (None, Some(last)) => {
             reached.push(last);
@@ -523,14 +534,201 @@ fn plan_resources(
     }))
 }
 
-/// The Leases of the Service `name`, by Port name, as `env` exports them. A Group has none of its own, the Services
-/// it covers have.
-fn service_leases(registry: &Registry, scope: &Scope, name: &str) -> anyhow::Result<BTreeMap<String, u16>> {
+/// The Leases of the Service `name`, by Port name, as `env` exports them, and the URLs of the ones whose scheme is
+/// known. A Group has none of its own, the Services it covers have.
+fn service_leases(
+    registry: &Registry,
+    scope: &Scope,
+    name: &str,
+) -> anyhow::Result<(BTreeMap<String, u16>, BTreeMap<String, String>)> {
     let service = scope.service(registry, name)?;
-    match service.declared.kind(name)? {
-        ServiceKind::Group { .. } => Ok(BTreeMap::new()),
+    let declared = service.declared;
+    let leases = match declared.kind(name)? {
+        ServiceKind::Group { .. } => return Ok((BTreeMap::new(), BTreeMap::new())),
         ServiceKind::Process { .. } | ServiceKind::Compose { .. } => {
-            Ok(environment::injected(&service, Leasing::AsGranted)?.leases)
+            environment::injected(&service, Leasing::AsGranted)?.leases
         }
+    };
+    let driver = scheme_driver(name, declared, scope.worktree(), driver::user_dir().as_deref(), || {
+        Ok(scope.topology.main()?.worktree.path)
+    })?;
+    let urls = lease_urls(name, declared, driver.as_ref(), &leases)?;
+    Ok((leases, urls))
+}
+
+/// The Driver whose URL gives the scheme of the Leases of the Service `name`: the one it declares, else, for a
+/// Compose service, the one that ships with Procly for the image the compose file of the Main worktree `main` gives
+/// it, so that a Postgres is reached as one whether or not `procly init` gave it a Driver. A Driver found from the
+/// image and failing to load leaves the Leases without a scheme rather than failing `up`.
+fn scheme_driver(
+    name: &str,
+    declared: &ServiceConfig,
+    worktree: &Path,
+    user_dir: Option<&Path>,
+    main: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<Option<Driver>> {
+    if let Some(driver) = declared.driver.as_deref() {
+        return Ok(Some(Driver::load(driver, worktree, user_dir)?));
+    }
+    let ServiceKind::Compose { service } = declared.kind(name)? else {
+        return Ok(None);
+    };
+    Ok(crate::proposal::bundled_driver(&main()?, service)
+        .and_then(|driver| Driver::load(driver, worktree, user_dir).ok()))
+}
+
+/// Where to reach each of the `leases` of the Service `name`, by Port name, for the Leases whose scheme is known.
+///
+/// The scheme is the one of the URL of its `driver` for the Lease that URL reaches, else the Port name itself when it
+/// is one of [`SCHEMES`], else `http` for the Lease the health check of a Process service probes or the Lease of an
+/// HTTP health check. Any other Lease has no URL, rather than an `http` URL for a port that may not speak HTTP.
+fn lease_urls(
+    name: &str,
+    declared: &ServiceConfig,
+    driver: Option<&Driver>,
+    leases: &BTreeMap<String, u16>,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let health_port_name = declared.health_port_name(name)?;
+    let health_is_http = match declared.kind(name)? {
+        ServiceKind::Process { .. } => true,
+        ServiceKind::Compose { .. } | ServiceKind::Group { .. } => declared.health.http().is_some(),
+    };
+    Ok(leases
+        .iter()
+        .filter_map(|(port_name, port)| {
+            let health = health_port_name == Some(port_name.as_str());
+            let scheme = driver
+                .and_then(|driver| driver.scheme_of(port_name, health))
+                .or_else(|| SCHEMES.iter().copied().find(|scheme| scheme == port_name))
+                .or((health && health_is_http).then_some("http"))?;
+            Some((port_name.clone(), format!("{scheme}://localhost:{port}")))
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declared(text: &str) -> ServiceConfig {
+        toml::from_str(text).unwrap()
+    }
+
+    fn leases(leases: &[(&str, u16)]) -> BTreeMap<String, u16> {
+        leases
+            .iter()
+            .map(|&(port_name, port)| (port_name.to_owned(), port))
+            .collect()
+    }
+
+    fn urls(urls: &[(&str, &str)]) -> BTreeMap<String, String> {
+        urls.iter()
+            .map(|&(port_name, url)| (port_name.to_owned(), url.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_mailpit_gets_an_http_url_for_its_web_port_and_an_smtp_url_for_its_smtp_port() {
+        let mailpit =
+            declared("compose = 'mailpit'\nhealth = { port = 'smtp' }\nports = { http = 8025, smtp = 1025 }\n");
+        assert_eq!(
+            lease_urls("mailpit", &mailpit, None, &leases(&[("http", 24000), ("smtp", 24001)])).unwrap(),
+            urls(&[("http", "http://localhost:24000"), ("smtp", "smtp://localhost:24001")])
+        );
+    }
+
+    #[test]
+    fn the_health_port_of_a_process_service_is_reached_over_http_and_its_other_ports_by_their_name() {
+        let web = declared("run = 'x'\nports = { web = 3000 }\n");
+        assert_eq!(
+            lease_urls("web", &web, None, &leases(&[("web", 24000)])).unwrap(),
+            urls(&[("web", "http://localhost:24000")])
+        );
+        let multi = declared("run = 'x'\nports = { http = 3000, admin = 3001 }\nhealth = { port = 'http' }\n");
+        assert_eq!(
+            lease_urls("multi", &multi, None, &leases(&[("http", 24000), ("admin", 24001)])).unwrap(),
+            urls(&[("http", "http://localhost:24000")])
+        );
+    }
+
+    #[test]
+    fn a_port_name_that_is_a_scheme_wins_over_the_http_of_a_health_port() {
+        let secure = declared("run = 'x'\nports = { https = 8443 }\n");
+        assert_eq!(
+            lease_urls("secure", &secure, None, &leases(&[("https", 24000)])).unwrap(),
+            urls(&[("https", "https://localhost:24000")])
+        );
+    }
+
+    #[test]
+    fn a_compose_port_is_reached_over_http_only_when_its_health_check_is_http() {
+        let db = declared("compose = 'db'\nports = { db = 5432 }\n");
+        assert_eq!(
+            lease_urls("db", &db, None, &leases(&[("db", 24000)])).unwrap(),
+            urls(&[])
+        );
+        let console = declared("compose = 'minio'\nports = { console = 9001 }\nhealth = { path = '/' }\n");
+        assert_eq!(
+            lease_urls("minio", &console, None, &leases(&[("console", 24000)])).unwrap(),
+            urls(&[("console", "http://localhost:24000")])
+        );
+    }
+
+    #[test]
+    fn a_compose_service_with_a_driver_is_reached_with_the_scheme_of_the_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        let postgres = Driver::load("postgres", dir.path(), None).unwrap();
+        let db =
+            declared("compose = 'db'\ndriver = 'postgres'\nports = { db = 5432 }\nresources.dev = { name = 'shop' }\n");
+        assert_eq!(
+            lease_urls("db", &db, Some(&postgres), &leases(&[("db", 24000)])).unwrap(),
+            urls(&[("db", "postgresql://localhost:24000")])
+        );
+    }
+
+    #[test]
+    fn a_compose_postgres_as_procly_init_proposes_it_is_reached_with_the_scheme_of_the_bundled_driver() {
+        // The bundled credentials get a Driver from `procly init`, other ones none.
+        for password in ["postgres", "secret"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("compose.yaml"),
+                format!(
+                    "services:\n  db:\n    image: postgres:17\n    environment:\n      POSTGRES_PASSWORD: {password}\n    \
+                     ports:\n      - \"5432:5432\"\n"
+                ),
+            )
+            .unwrap();
+            let config: Config = toml::from_str(&crate::proposal::propose(dir.path(), "acme").unwrap().toml).unwrap();
+            let db = &config.services["db"];
+            assert_eq!(db.driver.is_some(), password == "postgres", "{password}");
+
+            let driver = scheme_driver("db", db, dir.path(), None, || Ok(dir.path().to_owned())).unwrap();
+
+            assert_eq!(
+                lease_urls("db", db, driver.as_ref(), &leases(&[("db", 24000)])).unwrap(),
+                urls(&[("db", "postgresql://localhost:24000")]),
+                "{password}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_service_of_an_image_without_a_bundled_driver_has_no_scheme_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("compose.yaml"),
+            "services:\n  db:\n    image: mysql:8\n    ports:\n      - \"3306:3306\"\n",
+        )
+        .unwrap();
+        let db = declared("compose = 'db'\nports = { db = 3306 }\n");
+
+        let driver = scheme_driver("db", &db, dir.path(), None, || Ok(dir.path().to_owned())).unwrap();
+
+        assert!(driver.is_none());
+        assert_eq!(
+            lease_urls("db", &db, driver.as_ref(), &leases(&[("db", 24000)])).unwrap(),
+            urls(&[])
+        );
     }
 }
