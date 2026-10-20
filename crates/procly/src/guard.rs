@@ -5,12 +5,12 @@
 //! agent and a command the Guard does not know must neither wait for the Daemon nor start it. Only a command it
 //! knows asks the Daemon whether the Repository is Off.
 
-use std::ops::Range;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::protocol::GuardService;
+use crate::shell::{self, Resolved, basename, positional, segments, strip_launchers};
 
 /// What a recognized command starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,34 +232,19 @@ fn resolve(base: &Path, path: &str) -> Option<PathBuf> {
     if path.starts_with('~') {
         return None;
     }
-    let mut resolved = PathBuf::new();
-    for component in base.join(path).components() {
-        match component {
-            Component::Normal(name) => resolved.push(name),
-            Component::CurDir => {}
-            Component::ParentDir if resolved.file_name().is_some_and(|name| name != "..") => {
-                resolved.pop();
-            }
-            Component::ParentDir => resolved.push(".."),
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
+    match shell::resolve(base, path) {
+        Resolved::Inside(resolved) | Resolved::Above(resolved) => Some(resolved),
+        Resolved::Absolute(_) => None,
     }
-    Some(resolved)
 }
 
 /// The absolute `path`, with its `.` and `..` resolved, relative to `root` when it is inside it. A path outside `root`
-/// stays absolute, so that it matches nothing inside.
+/// stays absolute, so that it matches nothing inside. `path` must start with `/`, a relative one is returned as written.
 fn within(root: &Path, path: &str) -> PathBuf {
-    let mut absolute = PathBuf::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::ParentDir => {
-                absolute.pop();
-            }
-            Component::CurDir => {}
-            other => absolute.push(other),
-        }
-    }
+    let Resolved::Absolute(absolute) = shell::resolve(Path::new(""), path) else {
+        debug_assert!(false, "within takes an absolute path, got {path:?}");
+        return PathBuf::from(path);
+    };
     absolute.strip_prefix(root).map_or(absolute.clone(), Path::to_owned)
 }
 
@@ -378,152 +363,6 @@ pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
             moved_to: moved_to.clone(),
         })
     })
-}
-
-/// A simple command of a command line: its text as typed, where that text sits in the command line, and its words with
-/// quotes and escapes resolved, each with where it sits too.
-#[derive(Debug)]
-pub(crate) struct Segment {
-    pub(crate) text: String,
-    pub(crate) span: Range<usize>,
-    pub(crate) words: Vec<String>,
-    pub(crate) word_spans: Vec<Range<usize>>,
-}
-
-/// Splits a command line into simple commands at semicolons, `&`, `|`, parentheses, backticks and line breaks, and each
-/// command into words, the way a shell would outside of quotes. A separator inside quotes splits nothing, so
-/// `echo "a && npm run dev"` is one command that starts nothing.
-pub(crate) fn segments(command_line: &str) -> Vec<Segment> {
-    #[derive(Default)]
-    struct Reading {
-        segments: Vec<Segment>,
-        words: Vec<String>,
-        word_spans: Vec<Range<usize>>,
-        word: Option<String>,
-        word_start: usize,
-        start: usize,
-    }
-    impl Reading {
-        /// The word being read, started at `at` if there is none.
-        fn current(&mut self, at: usize) -> &mut String {
-            self.word.get_or_insert_with(|| {
-                self.word_start = at;
-                String::new()
-            })
-        }
-        /// Ends the word being read, which stops at `end`.
-        fn end_word(&mut self, end: usize) {
-            if let Some(word) = self.word.take() {
-                self.words.push(word);
-                self.word_spans.push(self.word_start..end);
-            }
-        }
-        fn end_segment(&mut self, end: usize, text: &str) {
-            self.end_word(end);
-            if !self.words.is_empty() {
-                let raw = &text[self.start..end];
-                let start = self.start + (raw.len() - raw.trim_start().len());
-                let trimmed = raw.trim();
-                self.segments.push(Segment {
-                    text: trimmed.to_owned(),
-                    span: start..start + trimmed.len(),
-                    words: std::mem::take(&mut self.words),
-                    word_spans: std::mem::take(&mut self.word_spans),
-                });
-            }
-        }
-    }
-
-    let mut reading = Reading::default();
-    let mut quote: Option<char> = None;
-    let mut chars = command_line.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        match (quote, c) {
-            (Some(open), c) if c == open => quote = None,
-            (Some('"'), '\\') => {
-                if let Some((_, escaped)) = chars.next() {
-                    reading.current(at).push(escaped);
-                }
-            }
-            (None, '\'' | '"') => {
-                quote = Some(c);
-                reading.current(at);
-            }
-            (None, '\\') => match chars.next() {
-                Some((_, '\n')) | None => {}
-                Some((_, escaped)) => reading.current(at).push(escaped),
-            },
-            (None, ' ' | '\t') => reading.end_word(at),
-            (None, '\n' | ';' | '&' | '|' | '(' | ')' | '`') => {
-                reading.end_segment(at, command_line);
-                reading.start = at + c.len_utf8();
-            }
-            (_, c) => reading.current(at).push(c),
-        }
-    }
-    reading.end_segment(command_line.len(), command_line);
-    reading.segments
-}
-
-/// The last component of a program path: `./node_modules/.bin/next` is `next`.
-pub(crate) fn basename(program: &str) -> &str {
-    program.rsplit('/').next().unwrap_or(program)
-}
-
-/// Whether a word is a `NAME=value` assignment, which a shell applies to the command that follows it.
-pub(crate) fn is_assignment(word: &str) -> bool {
-    word.split_once('=').is_some_and(|(name, _)| {
-        name.chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
-}
-
-/// The words of a command without what only launches it: variables set for it, `nohup`, `exec`, `time`, `npx`,
-/// `pnpm exec`, `bundle exec` and the like.
-pub(crate) fn strip_launchers(mut words: &[String]) -> &[String] {
-    loop {
-        let Some(first) = words.first() else {
-            return words;
-        };
-        let second = words.get(1).map(String::as_str);
-        let skip = match (basename(first), second) {
-            _ if is_assignment(first) => 1,
-            // `command -v vite` asks where a program is and starts nothing.
-            ("command", Some("-v" | "-V")) => return words,
-            // Also the keywords that open a command in a shell script: `if ready; then npm run dev; fi`.
-            (
-                "env" | "nohup" | "exec" | "time" | "command" | "setsid" | "npx" | "bunx" | "pnpx" | "then" | "do"
-                | "else" | "!" | "{",
-                _,
-            ) => 1,
-            ("pnpm" | "yarn", Some("exec" | "dlx"))
-            | ("bun", Some("x"))
-            | ("npm" | "bundle", Some("exec"))
-            | ("poetry" | "uv", Some("run")) => 2,
-            _ => return words,
-        };
-        words = &words[skip..];
-        // The options of the wrapper, such as `npx -y`.
-        while words.first().is_some_and(|word| word.starts_with('-')) {
-            words = &words[1..];
-        }
-    }
-}
-
-/// The words after the program that are not options, skipping the value of an option that takes one.
-pub(crate) fn positional<'a>(words: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
-    let mut positional = Vec::new();
-    let mut words = words.iter().map(String::as_str);
-    while let Some(word) = words.next() {
-        if with_value.contains(&word) {
-            words.next();
-        } else if !word.starts_with('-') {
-            positional.push(word);
-        }
-    }
-    positional
 }
 
 /// Whether a package script name is one that serves: `dev`, `start`, `serve`, `develop`, or one of them with a suffix
@@ -1168,6 +1007,38 @@ mod tests {
             .as_deref(),
             Some("/p/work/acme/web/infra/other.yml")
         );
+    }
+
+    #[test]
+    fn a_path_above_the_root_of_the_worktree_keeps_its_parent_directories_and_matches_nothing_inside() {
+        assert_eq!(
+            resolve(Path::new("apps/web"), "../api"),
+            Some(PathBuf::from("apps/api"))
+        );
+        assert_eq!(resolve(Path::new(""), ".."), Some(PathBuf::from("..")));
+        assert_eq!(resolve(Path::new("apps"), "../../x"), Some(PathBuf::from("../x")));
+        assert_eq!(resolve(Path::new("apps"), "/"), None);
+        assert_eq!(resolve(Path::new("apps"), "/srv/app"), None);
+        assert_eq!(resolve(Path::new("apps"), "~"), None);
+        assert_eq!(resolve(Path::new("apps"), "~/web"), None);
+    }
+
+    #[test]
+    fn an_absolute_path_is_relative_to_the_root_only_when_it_is_inside_it() {
+        assert_eq!(
+            within(root(), "/p/work/acme/web/apps/../compose.yml"),
+            Path::new("compose.yml")
+        );
+        assert_eq!(within(root(), "/p/work/acme/web"), Path::new(""));
+        assert_eq!(
+            within(root(), "/p/work/acme/web/../compose.yml"),
+            Path::new("/p/work/acme/compose.yml")
+        );
+        assert_eq!(
+            within(root(), "/p/work/acme/web2/compose.yml"),
+            Path::new("/p/work/acme/web2/compose.yml")
+        );
+        assert_eq!(within(root(), "/../srv"), Path::new("/srv"));
     }
 
     #[test]

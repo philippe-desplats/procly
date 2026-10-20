@@ -7,10 +7,11 @@
 //! rather than guess.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::group::{self, Command};
 use crate::guard;
+use crate::shell::{self, Resolved};
 
 /// A workspace package of the Worktree that init proposes a Service for.
 #[derive(Debug)]
@@ -52,14 +53,14 @@ fn tie(command: &Command, members: &[Member]) -> Result<Vec<usize>, String> {
         place = place.and_then(|place| resolve(&place, directory));
     }
     let mut tied = Vec::new();
-    for segment in guard::segments(&command.text) {
+    for segment in shell::segments(&command.text) {
         if let Some(directory) = group::changes_to(&segment) {
             place = place.and_then(|place| resolve(&place, &directory));
         } else if !group::sets_the_scene(&segment) {
             let place = place
                 .as_deref()
                 .ok_or("it runs from a directory outside the Worktree")?;
-            tied.extend(tie_segment(guard::strip_launchers(&segment.words), place, members)?);
+            tied.extend(tie_segment(shell::strip_launchers(&segment.words), place, members)?);
         }
     }
     Ok(tied)
@@ -70,7 +71,7 @@ fn tie_segment(words: &[String], place: &Path, members: &[Member]) -> Result<Vec
     let Some((program, args)) = words.split_first() else {
         return Err("it is empty".to_owned());
     };
-    let program = guard::basename(program);
+    let program = shell::basename(program);
     let mut filters = Vec::new();
     let mut directory = None;
     if guard::RUNNERS.contains(&program) {
@@ -93,7 +94,7 @@ fn tie_segment(words: &[String], place: &Path, members: &[Member]) -> Result<Vec
             }
         }
         if let ("yarn", ["workspace", package, ..]) =
-            (program, guard::positional(args, &guard::PACKAGE_OPTIONS).as_slice())
+            (program, shell::positional(args, &guard::PACKAGE_OPTIONS).as_slice())
         {
             filters.push(package);
         }
@@ -140,20 +141,10 @@ fn filtered(value: &str, place: &Path, members: &[Member]) -> Result<usize, Stri
 
 /// `path` as a directory of the Worktree, `base` being where it is read from. `None` outside the Worktree.
 fn resolve(base: &Path, path: &str) -> Option<PathBuf> {
-    let mut resolved = base.to_path_buf();
-    for component in Path::new(path).components() {
-        match component {
-            Component::Normal(part) => resolved.push(part),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !resolved.pop() {
-                    return None;
-                }
-            }
-            Component::RootDir | Component::Prefix(_) => return None,
-        }
+    match shell::resolve(base, path) {
+        Resolved::Inside(resolved) => Some(resolved),
+        Resolved::Above(_) | Resolved::Absolute(_) => None,
     }
-    Some(resolved)
 }
 
 #[cfg(test)]
@@ -267,6 +258,18 @@ mod tests {
             );
             assert!(notes.last().unwrap().starts_with("No Group is proposed"), "{text}");
         }
+    }
+
+    #[test]
+    fn a_path_above_the_root_of_the_worktree_is_no_directory_of_it() {
+        assert_eq!(
+            resolve(Path::new("apps/web"), "../api"),
+            Some(PathBuf::from("apps/api"))
+        );
+        assert_eq!(resolve(Path::new(""), ".."), None);
+        assert_eq!(resolve(Path::new("apps/web"), "../../.."), None);
+        assert_eq!(resolve(Path::new("apps"), "/srv/app"), None);
+        assert_eq!(resolve(Path::new("apps"), "/"), None);
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod placeholder;
 mod ports;
 mod proposal;
 mod protocol;
+mod shell;
 mod state_dir;
 mod status;
 mod topology;
