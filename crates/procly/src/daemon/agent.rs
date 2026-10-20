@@ -58,9 +58,10 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
     let work = move || match request {
         Request::AgentInstall { cwd, file } => install(&registry, &cwd, file.as_deref()).map(Response::AgentInstall),
         Request::Switch { cwd, off } => switch(&registry, &cwd, off).map(Response::Switched),
-        Request::Guard { cwd } => guard(&registry, &cwd).map(|(off, directory, services)| Response::Guard {
+        Request::Guard { cwd } => guard(&registry, &cwd).map(|(off, directory, root, services)| Response::Guard {
             off,
             directory,
+            root,
             services,
         }),
         other => unreachable!("only agent requests are handed to the agent module, not {other:?}"),
@@ -151,7 +152,10 @@ pub(super) fn switch(registry: &Registry, cwd: &Path, off: bool) -> Result<Switc
 /// Whether the Repository holding `cwd` is Off, where `cwd` is relative to the root of its Worktree (`None` when it cannot be placed), and the Services the
 /// Worktree declares, which the Guard matches the command it blocks against and names in its answer. A configuration
 /// that cannot be read declares none: the Guard still answers.
-pub(super) fn guard(registry: &Registry, cwd: &Path) -> Result<(bool, Option<PathBuf>, Vec<GuardService>), AgentError> {
+pub(super) fn guard(
+    registry: &Registry,
+    cwd: &Path,
+) -> Result<(bool, Option<PathBuf>, PathBuf, Vec<GuardService>), AgentError> {
     let topology = topology_in(cwd)?;
     let off = registry.offs.is_off(&topology.git_common_dir)?;
     let directory = topology::canonicalize(cwd)
@@ -170,7 +174,7 @@ pub(super) fn guard(registry: &Registry, cwd: &Path) -> Result<(bool, Option<Pat
                 .collect()
         })
         .unwrap_or_default();
-    Ok((off, directory, services))
+    Ok((off, directory, topology.worktree.path, services))
 }
 
 /// The instruction file to write: the one asked for, or the default one.

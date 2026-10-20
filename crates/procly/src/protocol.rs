@@ -147,6 +147,8 @@ pub(crate) enum Response {
         /// The directory asked about, relative to the root of its Worktree (empty at the root, where a dev command of
         /// the whole Repository runs), `None` when it cannot be placed.
         directory: Option<PathBuf>,
+        /// The root of the Worktree, which a compose file given with an absolute path is placed against.
+        root: PathBuf,
         services: Vec<GuardService>,
     },
     /// The Repository is ejected.

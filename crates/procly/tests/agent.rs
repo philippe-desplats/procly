@@ -333,6 +333,52 @@ fn the_guard_answers_a_compose_command_with_the_compose_services_it_starts() {
 }
 
 #[test]
+fn the_guard_judges_a_compose_file_given_with_an_absolute_path_against_the_root_of_the_worktree() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join("procly.toml"),
+        "[services.db]\ncompose = 'postgres'\n[services.cache]\ncompose = 'redis'\n",
+    );
+    let below = main.join("apps/web");
+    std::fs::create_dir_all(&below).unwrap();
+    let root = main.canonicalize().unwrap();
+    let root = root.display();
+
+    // Any absolute path but the compose file of the root, inside the Worktree or not, is not managed by Procly.
+    for (dir, file) in [
+        (&main, format!("{root}/infra/other.yml")),
+        (&below, format!("{root}/infra/other.yml")),
+        (&main, format!("{root}/compose.dev.yml")),
+        (&main, "/srv/app/compose.yaml".to_owned()),
+        (&main, format!("{root}/../compose.yaml")),
+    ] {
+        let command = format!("docker compose -f {file} up -d");
+        let reason = denial(&guard(&procly, dir, &command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(
+            reason.contains(&format!("The compose file `{file}` is not managed by Procly"))
+                && !reason.contains("procly up")
+                && !reason.contains("Declared Services"),
+            "{command}: {reason}"
+        );
+    }
+
+    // The compose file of the root, named by its absolute path, is the one Procly drives.
+    for (dir, file) in [
+        (&main, format!("{root}/compose.yaml")),
+        (&below, format!("{root}/compose.yaml")),
+        (&main, format!("{root}/apps/../compose.yaml")),
+    ] {
+        let command = format!("docker compose -f {file} up -d");
+        let reason = denial(&guard(&procly, dir, &command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(
+            reason.contains("Run `procly up cache && procly up db`"),
+            "{command}: {reason}"
+        );
+    }
+}
+
+#[test]
 fn the_guard_says_a_compose_file_procly_does_not_manage_is_not_and_names_no_service() {
     let procly = Procly::new();
     let main = repository_with_instructions(&procly);
