@@ -1,0 +1,16 @@
+# acme-shop, a fictitious shop for the Procly demo. Both Services need nothing but python3.
+
+[services.web]
+run = "python3 -m http.server {ports.http} --bind 127.0.0.1 --directory web"
+ports = { http = 24080 }
+needs = ["api"]
+
+[services.web.env]
+API_URL = "http://localhost:{services.api.ports.http}"
+
+[services.api]
+run = "python3 -m http.server {ports.http} --bind 127.0.0.1 --directory api"
+ports = { http = 24081 }
+
+[services.api.health]
+path = "/health.json"
