@@ -8,7 +8,8 @@
 use std::ops::Range;
 
 use super::scripts::shell_word;
-use crate::guard::{self, Kind, Segment};
+use crate::guard::{self, Kind};
+use crate::shell::{self, Segment};
 
 /// What the root `dev` script becomes as the command of a Group.
 #[derive(Debug, PartialEq, Eq)]
@@ -139,16 +140,16 @@ fn starts_a_dev_server(command: &str) -> bool {
 /// Whether `segment` only sets the scene for the commands after it: `cd apps/web`, `export NODE_ENV=development`.
 pub(super) fn sets_the_scene(segment: &Segment) -> bool {
     let words = &segment.words;
-    words.iter().all(|word| guard::is_assignment(word))
+    words.iter().all(|word| shell::is_assignment(word))
         || words
             .first()
-            .is_some_and(|word| matches!(guard::basename(word), "cd" | "pushd" | "export"))
+            .is_some_and(|word| matches!(shell::basename(word), "cd" | "pushd" | "export"))
 }
 
 /// The directory a `cd` or `pushd` command changes to, `None` for any other command. A `cd` with no argument goes home.
 pub(super) fn changes_to(segment: &Segment) -> Option<String> {
     let words = &segment.words;
-    matches!(guard::basename(words.first()?), "cd" | "pushd")
+    matches!(shell::basename(words.first()?), "cd" | "pushd")
         .then(|| words.get(1).map_or("~", String::as_str).to_owned())
 }
 
@@ -162,9 +163,9 @@ fn expand_shorthand(argument: &str) -> String {
 
 /// The index of the first argument of `concurrently` among `words`, `None` when they are another command.
 fn concurrently_arguments(words: &[String]) -> Option<usize> {
-    let launched = guard::strip_launchers(words);
+    let launched = shell::strip_launchers(words);
     let program = launched.first()?;
-    matches!(guard::basename(program), "concurrently" | "conc").then(|| words.len() - launched.len() + 1)
+    matches!(shell::basename(program), "concurrently" | "conc").then(|| words.len() - launched.len() + 1)
 }
 
 /// The commands `concurrently` runs, the words of its command being `words` and its arguments starting at `first`.
@@ -200,7 +201,7 @@ fn role(segment: &Segment) -> Role {
     if sets_the_scene(segment) {
         return Role::Context;
     }
-    if words.first().is_some_and(|word| guard::basename(word) == "wait") {
+    if words.first().is_some_and(|word| shell::basename(word) == "wait") {
         return Role::Wait;
     }
     if let Some(first) = concurrently_arguments(words) {
@@ -271,7 +272,7 @@ fn read(script: &str) -> Option<(Vec<Segment>, Vec<Join>)> {
 fn split(script: &str) -> Option<(Vec<Segment>, Vec<Join>)> {
     let mut segments: Vec<Segment> = Vec::new();
     let mut joins = Vec::new();
-    for segment in guard::segments(script) {
+    for segment in shell::segments(script) {
         if let Some(previous) = segments.last_mut() {
             let operator = script[previous.span.end..segment.span.start].trim();
             // `2>&1` and `&>file` are redirections, which the splitting took for a `&`.
