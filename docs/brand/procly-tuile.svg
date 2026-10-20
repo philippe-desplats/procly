@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<!-- grid 12x12, unit 26, offset 100 -->
+<rect x="0" y="0" width="512" height="512" rx="116" fill="#14161A"/>
+<path d="M204,100 L412,100 L412,308 L308,412 L100,412 L100,204 Z M256,152 L308,152 L100,360 L100,308 Z M360,204 L360,256 L204,412 L152,412 Z" fill="#A8BF22" fill-rule="evenodd"/>
+<path d="M204,100 L412,100 L412,308 L360,360 L360,152 L152,152 Z" fill="#D7F23C"/>
+</svg>

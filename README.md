@@ -1,6 +1,9 @@
 <div align="center">
 
-# Procly
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/procly-horizontal-couleur-sombre.svg">
+  <img src="docs/brand/procly-horizontal-encre.svg" alt="Procly" height="64">
+</picture>
 
 **A local supervisor for coding agents, built for parallel git worktrees**
 
