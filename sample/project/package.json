@@ -1,0 +1,7 @@
+{
+  "name": "acme-shop",
+  "private": true,
+  "scripts": {
+    "dev": "python3 -m http.server 24080 --bind 127.0.0.1 --directory web"
+  }
+}
