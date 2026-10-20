@@ -42,7 +42,7 @@ On Linux, `sha256sum --check` replaces `shasum -a 256 --check`.
 ## cargo
 
 ```console
-$ cargo install --locked --git https://github.com/philippe-desplats/procly --tag v0.1.0 --bin procly
+$ cargo install --locked --git https://github.com/philippe-desplats/procly --tag v0.2.0 --bin procly
 ```
 
 `--tag` installs a release, leave it out to install the head of the default branch. `--bin procly` leaves out `procly-test-server`, a fixture of the tests that the crate also builds. From a clone, `cargo install --locked --path crates/procly --bin procly` does the same. A compiler older than the `rust-version` of the crate is refused.
