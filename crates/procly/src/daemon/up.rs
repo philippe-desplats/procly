@@ -596,7 +596,10 @@ mod tests {
     }
 
     fn leases(leases: &[(&str, u16)]) -> BTreeMap<String, u16> {
-        leases.iter().map(|&(port_name, port)| (port_name.to_owned(), port)).collect()
+        leases
+            .iter()
+            .map(|&(port_name, port)| (port_name.to_owned(), port))
+            .collect()
     }
 
     fn urls(urls: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -607,7 +610,8 @@ mod tests {
 
     #[test]
     fn a_mailpit_gets_an_http_url_for_its_web_port_and_an_smtp_url_for_its_smtp_port() {
-        let mailpit = declared("compose = 'mailpit'\nhealth = { port = 'smtp' }\nports = { http = 8025, smtp = 1025 }\n");
+        let mailpit =
+            declared("compose = 'mailpit'\nhealth = { port = 'smtp' }\nports = { http = 8025, smtp = 1025 }\n");
         assert_eq!(
             lease_urls("mailpit", &mailpit, None, &leases(&[("http", 24000), ("smtp", 24001)])).unwrap(),
             urls(&[("http", "http://localhost:24000"), ("smtp", "smtp://localhost:24001")])
@@ -646,7 +650,8 @@ mod tests {
     fn a_compose_service_with_a_driver_is_reached_with_the_scheme_of_the_driver() {
         let dir = tempfile::tempdir().unwrap();
         let postgres = Driver::load("postgres", dir.path(), None).unwrap();
-        let db = declared("compose = 'db'\ndriver = 'postgres'\nports = { db = 5432 }\nresources.dev = { name = 'shop' }\n");
+        let db =
+            declared("compose = 'db'\ndriver = 'postgres'\nports = { db = 5432 }\nresources.dev = { name = 'shop' }\n");
         assert_eq!(
             lease_urls("db", &db, Some(&postgres), &leases(&[("db", 24000)])).unwrap(),
             urls(&[("db", "postgresql://localhost:24000")])

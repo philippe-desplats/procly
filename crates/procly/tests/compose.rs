@@ -128,10 +128,7 @@ fn docker_up_starts_the_service_through_the_unmodified_compose_file_on_its_lease
 
     assert_success(&output);
     let port = fixture.port;
-    assert_eq!(
-        stdout(&output),
-        format!("db started db port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db started db port {port}\n"));
     // The compose file read `DB_PORT`, so the container is reachable on the Lease and nowhere else.
     assert!(listens(port), "nothing listens on {port}");
     assert_eq!(
@@ -158,10 +155,7 @@ fn docker_2_worktrees_share_one_container_on_one_port() {
 
     assert_success(&output);
     let port = fixture.port;
-    assert_eq!(
-        stdout(&output),
-        format!("db reused db port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db reused db port {port}\n"));
     // The same container, not one recreated under the first Worktree.
     assert_eq!(fixture.project.container(), container);
     assert!(fixture.project.is_running());
@@ -273,10 +267,7 @@ fn docker_a_process_service_starts_the_compose_service_it_needs_first() {
         format!("web started http://localhost:{web_port} port {web_port}\n")
     );
     let port = fixture.port;
-    assert_eq!(
-        stderr(&output),
-        format!("db started db port {port} (needed by web)\n")
-    );
+    assert_eq!(stderr(&output), format!("db started db port {port} (needed by web)\n"));
     assert!(fixture.project.is_running());
 }
 
@@ -515,10 +506,7 @@ fn docker_a_container_started_by_plain_docker_compose_with_matching_labels_is_ad
     let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
 
     assert_success(&output);
-    assert_eq!(
-        stdout(&output),
-        format!("db reused db port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db reused db port {port}\n"));
     // The very container started outside Procly, neither recreated nor restarted.
     assert_eq!(fixture.project.container(), container);
     assert!(fixture.project.is_running());
@@ -824,10 +812,7 @@ fn docker_after_a_daemon_crash_the_container_is_still_counted_for_both_worktrees
     let port = fixture.port;
     let output = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
     assert_success(&output);
-    assert_eq!(
-        stdout(&output),
-        format!("db reused db port {port}\n")
-    );
+    assert_eq!(stdout(&output), format!("db reused db port {port}\n"));
     assert_eq!(fixture.project.container(), container);
     let first = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
     assert_success(&first);
