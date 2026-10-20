@@ -1019,9 +1019,10 @@ fn guard_hook() -> ExitCode {
     match asked {
         Ok(Response::Guard {
             off: false,
-            at_root,
+            directory,
+            root,
             services,
-        }) => println!("{}", guard::denial(&recognized, &services, at_root)),
+        }) => println!("{}", guard::denial(&recognized, &services, directory.as_deref(), &root)),
         Ok(Response::Guard { off: true, .. }) => {}
         Ok(Response::Error { message }) => eprintln!("procly guard: {message}, letting the command through"),
         Ok(other) => eprintln!("procly guard: unexpected answer {other:?}, letting the command through"),

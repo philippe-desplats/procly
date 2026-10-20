@@ -151,9 +151,11 @@ pub(crate) enum Response {
     /// Whether the Guard stands for the Repository, and the Services it declares for the Worktree.
     Guard {
         off: bool,
-        /// Whether the directory asked about is the root of its Worktree, where a dev command of the whole Repository
-        /// runs.
-        at_root: bool,
+        /// The directory asked about, relative to the root of its Worktree (empty at the root, where a dev command of
+        /// the whole Repository runs), `None` when it cannot be placed.
+        directory: Option<PathBuf>,
+        /// The root of the Worktree, which a compose file given with an absolute path is placed against.
+        root: PathBuf,
         services: Vec<GuardService>,
     },
     /// The Repository is ejected.
