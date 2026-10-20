@@ -106,7 +106,7 @@ web reused http://localhost:24080 port 24080
 Run from another Worktree of the same Repository, the same command starts its own copy on its own Leases. The daily commands:
 
 ```sh
-procly up web              # start web and what it needs, wait until healthy, print its URL and port
+procly up web              # start web and what it needs, wait until healthy, print where to reach each of its ports
 procly up                  # start every declared Service, each after what it needs
 procly env web             # print the variables Procly injects into web, without starting it
 procly logs web            # the recent output of web
