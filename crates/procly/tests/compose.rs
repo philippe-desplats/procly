@@ -679,6 +679,44 @@ fn docker_a_service_with_an_smtp_and_an_http_port_prints_an_http_url_for_the_htt
 }
 
 #[test]
+fn docker_a_postgres_as_procly_init_proposes_it_without_a_driver_prints_a_postgresql_url() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let port = fixture.port;
+    // Credentials the bundled Driver does not know, so that `procly init` gives the service no Driver.
+    let compose = format!(
+        "name: {}\nservices:\n  db:\n    image: postgres:17-alpine\n    environment:\n      POSTGRES_PASSWORD: secret\n    \
+         ports:\n      - \"${{DB_PORT:-{port}}}:5432\"\n",
+        fixture.project.name
+    );
+    std::fs::write(fixture.main.join("compose.yaml"), compose).unwrap();
+    std::fs::remove_file(fixture.main.join("procly.toml")).unwrap();
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["init"]));
+    let proposed = std::fs::read_to_string(fixture.main.join("procly.toml")).unwrap();
+    assert!(!proposed.contains("driver"), "{proposed}");
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db started postgresql://localhost:{port} port {port}\n")
+    );
+    let document = json_succeeded(&fixture.procly.procly_in(&fixture.main, &["up", "--json", "db"]));
+    let service = &document["services"][0];
+    assert_eq!(
+        service["url"],
+        serde_json::json!(format!("postgresql://localhost:{port}"))
+    );
+    assert_eq!(
+        service["urls"],
+        serde_json::json!({ "db": format!("postgresql://localhost:{port}") })
+    );
+}
+
+#[test]
 fn docker_a_container_holding_the_container_name_without_matching_labels_is_a_conflict() {
     if !require_docker() {
         return;

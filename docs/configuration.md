@@ -357,16 +357,19 @@ web started http://localhost:3000 port 3000
 $ procly up mailpit
 mailpit started smtp://localhost:1025 port 1025, http://localhost:8025 port 8025
 $ procly up db
-db started db port 5432
+db started postgresql://localhost:5432 port 5432
+$ procly up mysql
+mysql started db port 3306
 ```
 
 The scheme of a Lease is the first of these that applies:
 
 - The scheme of the URL of the Driver of the Service, for the Lease that URL reads, such as `postgresql` for the bundled `postgres` Driver and `redis` for `redis`.
+- For a Compose service without a `driver`, the scheme of the URL of the Driver that ships with Procly for its image, read from the compose file of the Main worktree as written, so that a Postgres is reached as `postgresql` whether or not `procly init` gave it a Driver. The images are the ones `procly init` recognizes, `postgres:17` or `ghcr.io/acme/postgis:16` for Postgres, and an image the compose file interpolates, such as `${DB_IMAGE}`, is not recognized.
 - The Port name itself when it is `amqp`, `http`, `https`, `redis` or `smtp`, such as the `smtp` and `http` ports `procly init` declares for a Mailpit.
 - `http` for the Lease the health check of a Process service probes, and for the Lease of an HTTP health check, one that sets `health.path` or `health.status`.
 
-Up to v0.1, `procly up` printed an `http` URL and the port of the health check alone, whatever that port spoke. Since v0.2 the line names every Lease. Since the CLI output is public interface (ADR 0009), the change is recorded here: a Process service with a single Port name prints the same line as before, a Service with several Port names gets one more `, <lease>` for each of the others, and a Compose service whose port has no known scheme, such as a database without a Driver, prints `db started db port 5432` where it printed `db started http://localhost:5432 port 5432`. A script that reads the port of the health check reads the number before the first comma. With `--json`, `url` and `urls` carry the same URLs, see [JSON output](json.md#up).
+Up to v0.1, `procly up` printed an `http` URL and the port of the health check alone, whatever that port spoke. Since v0.2 the line names every Lease. Since the CLI output is public interface (ADR 0009), the change is recorded here: a Process service with a single Port name prints the same line as before, a Service with several Port names gets one more `, <lease>` for each of the others, and a Compose service whose port has no known scheme, such as a MySQL, prints `mysql started db port 3306` where it printed `mysql started http://localhost:3306 port 3306`. A script that reads the port of the health check reads the number before the first comma. With `--json`, `url` and `urls` carry the same URLs, see [JSON output](json.md#up).
 
 ## Derived variables
 

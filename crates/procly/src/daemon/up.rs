@@ -549,13 +549,32 @@ fn service_leases(
             environment::injected(&service, Leasing::AsGranted)?.leases
         }
     };
-    let driver = declared
-        .driver
-        .as_deref()
-        .map(|driver| Driver::load(driver, scope.worktree(), driver::user_dir().as_deref()))
-        .transpose()?;
+    let driver = scheme_driver(name, declared, scope.worktree(), driver::user_dir().as_deref(), || {
+        Ok(scope.topology.main()?.worktree.path)
+    })?;
     let urls = lease_urls(name, declared, driver.as_ref(), &leases)?;
     Ok((leases, urls))
+}
+
+/// The Driver whose URL gives the scheme of the Leases of the Service `name`: the one it declares, else, for a
+/// Compose service, the one that ships with Procly for the image the compose file of the Main worktree `main` gives
+/// it, so that a Postgres is reached as one whether or not `procly init` gave it a Driver. A Driver found from the
+/// image and failing to load leaves the Leases without a scheme rather than failing `up`.
+fn scheme_driver(
+    name: &str,
+    declared: &ServiceConfig,
+    worktree: &Path,
+    user_dir: Option<&Path>,
+    main: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<Option<Driver>> {
+    if let Some(driver) = declared.driver.as_deref() {
+        return Ok(Some(Driver::load(driver, worktree, user_dir)?));
+    }
+    let ServiceKind::Compose { service } = declared.kind(name)? else {
+        return Ok(None);
+    };
+    Ok(crate::proposal::bundled_driver(&main()?, service)
+        .and_then(|driver| Driver::load(driver, worktree, user_dir).ok()))
 }
 
 /// Where to reach each of the `leases` of the Service `name`, by Port name, for the Leases whose scheme is known.
@@ -664,6 +683,52 @@ mod tests {
         assert_eq!(
             lease_urls("db", &db, Some(&postgres), &leases(&[("db", 24000)])).unwrap(),
             urls(&[("db", "postgresql://localhost:24000")])
+        );
+    }
+
+    #[test]
+    fn a_compose_postgres_as_procly_init_proposes_it_is_reached_with_the_scheme_of_the_bundled_driver() {
+        // The bundled credentials get a Driver from `procly init`, other ones none.
+        for password in ["postgres", "secret"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("compose.yaml"),
+                format!(
+                    "services:\n  db:\n    image: postgres:17\n    environment:\n      POSTGRES_PASSWORD: {password}\n    \
+                     ports:\n      - \"5432:5432\"\n"
+                ),
+            )
+            .unwrap();
+            let config: Config = toml::from_str(&crate::proposal::propose(dir.path()).unwrap()).unwrap();
+            let db = &config.services["db"];
+            assert_eq!(db.driver.is_some(), password == "postgres", "{password}");
+
+            let driver = scheme_driver("db", db, dir.path(), None, || Ok(dir.path().to_owned())).unwrap();
+
+            assert_eq!(
+                lease_urls("db", db, driver.as_ref(), &leases(&[("db", 24000)])).unwrap(),
+                urls(&[("db", "postgresql://localhost:24000")]),
+                "{password}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_service_of_an_image_without_a_bundled_driver_has_no_scheme_driver() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("compose.yaml"),
+            "services:\n  db:\n    image: mysql:8\n    ports:\n      - \"3306:3306\"\n",
+        )
+        .unwrap();
+        let db = declared("compose = 'db'\nports = { db = 3306 }\n");
+
+        let driver = scheme_driver("db", &db, dir.path(), None, || Ok(dir.path().to_owned())).unwrap();
+
+        assert!(driver.is_none());
+        assert_eq!(
+            lease_urls("db", &db, driver.as_ref(), &leases(&[("db", 24000)])).unwrap(),
+            urls(&[])
         );
     }
 }

@@ -116,6 +116,17 @@ fn technology(image: &str) -> Option<&'static Technology> {
     TECHNOLOGIES.iter().find(|technology| technology.images.contains(&name))
 }
 
+/// The Driver that ships with Procly for the technology the service `compose` of the compose file in `dir` runs, as
+/// `postgres` for a `postgres:17` image. The file is read as written, and `None` stands for a file, a service or an
+/// image Procly cannot read or knows no such Driver for.
+pub(crate) fn bundled_driver(dir: &Path, compose: &str) -> Option<&'static str> {
+    let text = fs::read_to_string(find(dir)?).ok()?;
+    let mut file: Value = serde_yaml_ng::from_str(&text).ok()?;
+    file.apply_merge().ok()?;
+    let image = file.get("services")?.get(compose)?.get("image")?.as_str()?;
+    Some(technology(image)?.logical.as_ref()?.driver)
+}
+
 /// A port a compose service publishes on the host.
 #[derive(Debug, PartialEq, Eq)]
 struct PortMapping {
