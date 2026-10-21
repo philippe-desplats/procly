@@ -294,6 +294,32 @@ mod tests {
     }
 
     #[test]
+    fn the_s3_driver_of_the_configuration_reference_loads_and_names_buckets_within_their_limit() {
+        let reference =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/configuration.md")).unwrap();
+        let (_, section) = reference
+            .split_once("### Example: a Driver for an S3-compatible store")
+            .expect("the reference documents the S3 Driver");
+        let (_, block) = section
+            .split_once("```toml\n")
+            .expect("the section shows a Driver file");
+        let (text, _) = block.split_once("```").expect("the Driver file is fenced");
+        let s3 = Driver::parse("s3", text, "docs/configuration.md").unwrap();
+        assert_eq!(
+            s3.url("assets", &leases(), Some(24000)).unwrap(),
+            "http://localhost:24000"
+        );
+        assert!(s3.copy.is_none());
+        assert_eq!(s3.index_capacity(), None);
+        let longest = "a".repeat(63);
+        assert_eq!(s3.resource_name(&longest, "", true).unwrap(), longest);
+        assert!(matches!(
+            s3.resource_name(&longest, "other", false),
+            Err(DriverError::NameTooLong { max: 63, .. })
+        ));
+    }
+
+    #[test]
     fn the_scheme_of_the_url_is_the_one_of_the_lease_the_url_reaches() {
         let health = driver(MINIMAL);
         assert_eq!(health.scheme_of("db", true), Some("db"));
