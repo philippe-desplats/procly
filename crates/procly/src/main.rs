@@ -8,6 +8,7 @@ mod envfile;
 mod guard;
 mod init;
 mod json;
+mod mcp;
 mod output;
 mod placeholder;
 mod ports;
@@ -226,6 +227,15 @@ enum Command {
         #[command(flatten)]
         json: JsonFlag,
     },
+    /// Serve the verbs of the Daemon as MCP tools over stdio, for agents that prefer MCP to a shell. Each tool takes
+    /// the arguments of its command plus an optional working directory and returns the `--json` document of that
+    /// command. Procly writes no agent configuration, see docs/mcp.md.
+    #[command(
+        after_help = "Register it with your agent, for example `claude mcp add procly -- procly mcp`. The tools are \
+                      run, wait, logs, up, down, env, status and worktree_init. A command that fails is a tool error \
+                      carrying its exit code and its stderr. See docs/mcp.md."
+    )]
+    Mcp,
     /// Run the Daemon in the foreground. Every other command starts it on demand.
     #[command(hide = true)]
     Daemon,
@@ -351,6 +361,11 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
     if let Command::Init { json } = &command {
         return init(json.json);
     }
+    // Every tool of the MCP server runs a command of its own, which resolves the state directory and starts the Daemon.
+    if let Command::Mcp = command {
+        mcp::serve()?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let state = StateDir::resolve()?;
     match command {
         Command::Run { timeout, json, command } => {
@@ -423,6 +438,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Eject { agent, json } => eject(&state, agent, json.json),
         Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
+        Command::Mcp => unreachable!("the MCP server is served before the state directory is resolved"),
         Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
         Command::Daemon => {
             daemon::run(&state)?;
