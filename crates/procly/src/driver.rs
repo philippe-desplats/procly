@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn the_s3_driver_of_the_configuration_reference_loads_and_names_buckets_within_their_limit() {
+    fn the_s3_driver_of_the_configuration_reference_loads_and_refuses_a_name_past_the_bucket_limit() {
         let reference =
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/configuration.md")).unwrap();
         let (_, section) = reference
