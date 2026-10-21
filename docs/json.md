@@ -1,6 +1,6 @@
 # JSON output
 
-Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, and `daemon`, which prints nothing.
+Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, `mcp`, which speaks JSON-RPC and returns these documents as tool results, and `daemon`, which prints nothing.
 
 **The schema version is 1.** It is the `schema_version` of every document, the one `procly status --json` prints. This page is where it is defined, the examples in the other docs repeat the value. It is bumped on any incompatible change to any document, independently of the socket protocol between the CLI and the Daemon. Adding a key or a document is not incompatible, so a reader ignores the keys it does not know. Removing a key, renaming one or changing what it means bumps the version.
 
@@ -28,6 +28,7 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
 | `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |
+| `mcp` | none, it serves the documents above as MCP tools | [The MCP server](mcp.md) |
 
 ## `run`
 

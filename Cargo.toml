@@ -15,6 +15,7 @@ clap = { version = "4.6", features = ["derive"] }
 nix = { version = "0.31.3", features = ["process", "signal", "user"] }
 portable-pty = "0.9.0"
 process-wrap = { version = "10.0.1", features = ["tokio1"] }
+rmcp = { version = "3.6", features = ["transport-io"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
