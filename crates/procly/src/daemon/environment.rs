@@ -307,8 +307,9 @@ pub(super) type DriverResources = (Driver, BTreeMap<String, Resource>);
 
 /// The Driver of the Compose service and its Logical resources in the Worktree, `None` when it has no Driver.
 ///
-/// A Service that is Shared gives every Worktree the resources of the Main worktree. A Driver that numbers its
-/// resources has its indexes handed out here, and stored, since the URL of a resource holds one.
+/// A Service that is Shared gives every Worktree the resources of the Main worktree, and one that is Isolated gives
+/// each Worktree's own container the names and indexes the Main worktree has. A Driver that numbers its resources has
+/// its indexes handed out here, and stored, since the URL of a resource holds one.
 pub(super) fn logical_resources(
     service: &DeclaredService<'_>,
     leases: &BTreeMap<String, u16>,
@@ -328,8 +329,9 @@ pub(super) fn logical_resources(
     let health_port = declared
         .health_port_name(name)?
         .and_then(|port_name| leases.get(port_name).copied());
-    // Whose resources the Worktree reads: its own, or the ones of the Main worktree when the Service is Shared.
-    let shared = config.isolation(declared) == IsolationMode::Shared;
+    // Whose names the Worktree reads: its own in a Logical container, or the ones of the Main worktree in a container
+    // every Worktree shares or in a container of its own.
+    let shared = config.isolation(declared) != IsolationMode::Logical;
     let numbered = match driver.index_capacity() {
         Some(capacity) => {
             // Before any index is handed out, so that a configuration bound to fail never takes one.
@@ -443,8 +445,9 @@ fn grant_referenced(
     Ok(table)
 }
 
-/// Grants the Leases of the Service `service`. The container of a Compose service is shared by every Worktree, so it
-/// holds the Leases of the Main worktree, whichever Worktree asks.
+/// Grants the Leases of the Service `service`. The container of a Compose service is shared by every Worktree unless
+/// it is Isolated, so it holds the Leases of the Main worktree, whichever Worktree asks. An Isolated container belongs
+/// to its Worktree, and holds the Leases of that Worktree as a Process service would.
 fn grant(
     registry: &Registry,
     topology: &Topology,
@@ -455,13 +458,12 @@ fn grant(
     leasing: Leasing,
 ) -> Result<BTreeMap<String, u16>, EnvironmentError> {
     let shared;
-    let compose = config
-        .services
-        .get(service)
-        .and_then(|declared| declared.compose.as_deref());
+    let declared = config.services.get(service);
+    let compose = declared.and_then(|declared| declared.compose.as_deref());
+    let isolated = declared.is_some_and(|declared| config.isolation(declared) == IsolationMode::Isolated);
     // The container of a Compose service is shared by every Worktree, so it holds the Leases of the Main worktree
     // and never those of a Pinned branch.
-    let (topology, pinned) = if compose.is_some() {
+    let (topology, pinned) = if compose.is_some() && !isolated {
         shared = topology.main()?;
         (&shared, None)
     } else {
@@ -471,9 +473,10 @@ fn grant(
         });
         (topology, pinned)
     };
-    let main = &topology.worktree.path;
+    // Where the container runs from: the Main worktree, or the Worktree itself when it is Isolated.
+    let project_dir = &topology.worktree.path;
     let held_by_container =
-        |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, main, compose));
+        |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, project_dir, compose));
     Ok(registry.leases.grant(&LeaseRequest {
         topology,
         service,

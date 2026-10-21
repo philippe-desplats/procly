@@ -321,8 +321,12 @@ pub(crate) struct Left {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Stopped {
     pub(crate) service: String,
-    /// The Worktree it ran for, `None` for a Compose service, whose container belongs to the Repository.
+    /// The Worktree it ran for, `None` for a Compose service whose container belongs to the Repository.
     pub(crate) worktree: Option<PathBuf>,
+    /// Whether it is a Compose service whose container belongs to `worktree`, an Isolated one. Left out when not, so
+    /// that the report of the other Services reads as it did before Isolated ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) isolated: bool,
 }
 
 /// What `eject` did to a Repository.
@@ -446,6 +450,23 @@ pub(crate) struct WorktreeStatus {
     /// Worktree without any reads as it did before Foreign processes were reported.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) foreign: Vec<ForeignProcess>,
+    /// The Isolated containers Procly runs for the Worktree. Left out when empty, so that the status of a Worktree
+    /// without any reads as it did before Isolated containers were reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) containers: Vec<ContainerStatus>,
+}
+
+/// An Isolated container Procly started or adopted for a Worktree, which runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContainerStatus {
+    /// The name of the Compose service in `procly.toml`.
+    pub(crate) service: String,
+    /// The compose project of the Worktree the container belongs to.
+    pub(crate) project: String,
+    /// The service of the compose file it runs.
+    pub(crate) compose: String,
+    /// The Lease its health check probes.
+    pub(crate) port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

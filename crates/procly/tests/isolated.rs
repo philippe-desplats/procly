@@ -1,0 +1,412 @@
+//! Compose services in Isolated mode: one container per Worktree, under a compose project name of its own. The tests
+//! marked Docker drive a real engine and skip themselves when `docker compose` v2 is unavailable, they start containers
+//! of projects named after the test and remove them at the end.
+
+mod common;
+
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use common::{
+    Procly, assert_success, free_port, git, git_repository, git_worktree_add, json_succeeded, require_docker, stderr,
+    stdout,
+};
+
+/// A compose file running a TCP listener in `alpine` whose port comes from `DB_PORT`, with its data in a named volume.
+fn compose_file(project: &str, extra: &str) -> String {
+    format!(
+        "name: {project}\nservices:\n  db:\n    image: alpine\n    init: true\n    command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]\n    \
+         ports:\n      - \"${{DB_PORT:-1}}:80\"\n    volumes:\n      - data:/data\n{extra}volumes:\n  data:\n"
+    )
+}
+
+/// The `procly.toml` of a Repository whose service `db` is the compose service `db`, one container per Worktree.
+fn config(port: u16) -> String {
+    format!(
+        "[services.db]\ncompose = \"db\"\nisolation = \"isolated\"\nports = {{ db = {port} }}\n\
+         env = {{ DB_PORT = \"{{services.db.ports.db}}\" }}\n"
+    )
+}
+
+/// Removes the containers, network and volumes of one compose project when the test ends, passed or failed.
+struct Project {
+    name: String,
+    dir: PathBuf,
+}
+
+impl Project {
+    fn try_docker(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        // A project is found by its name alone once its Worktree is removed.
+        let dir = if self.dir.exists() {
+            self.dir.clone()
+        } else {
+            std::env::temp_dir()
+        };
+        Command::new("docker")
+            .args(["compose", "-p", &self.name])
+            .args(args)
+            .current_dir(dir)
+            .env("DB_PORT", "1")
+            .output()
+    }
+
+    fn docker(&self, args: &[&str]) -> std::process::Output {
+        self.try_docker(args).expect("docker runs")
+    }
+
+    /// The id of the container of service `db`, running or not, empty when there is none.
+    fn container(&self) -> String {
+        stdout(&self.docker(&["ps", "-a", "-q", "db"])).trim().to_owned()
+    }
+
+    fn is_running(&self) -> bool {
+        stdout(&self.docker(&["ps", "--status", "running", "--services"]))
+            .lines()
+            .any(|service| service == "db")
+    }
+
+    fn volume_exists(&self) -> bool {
+        Command::new("docker")
+            .args(["volume", "inspect", &format!("{}_data", self.name)])
+            .output()
+            .expect("docker runs")
+            .status
+            .success()
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        // A test that needs no Docker never started anything, and may run where Docker is absent.
+        let _ = self.try_docker(&["down", "--volumes", "--remove-orphans"]);
+    }
+}
+
+/// A Repository with a compose file and a `procly.toml`, and a second Worktree, each with a project of its own.
+struct Fixture {
+    // First, so that the containers are removed while the working directories still exist.
+    main_project: Project,
+    other_project: Project,
+    procly: Procly,
+    main: PathBuf,
+    other: PathBuf,
+    port: u16,
+}
+
+/// The fixture, with `extra` added to the compose service `db`.
+fn fixture(extra: &str) -> Fixture {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let procly = Procly::with_clock();
+    // The Worktree other than the Main worktree draws from the Range, which parallel tests must not share.
+    procly.narrow_range();
+    let name = format!(
+        "pcl-iso-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    std::fs::write(main.join("compose.yaml"), compose_file(&name, extra)).expect("write the compose file");
+    std::fs::write(main.join("procly.toml"), config(port)).expect("write the config");
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "--quiet", "--message", "compose"]);
+    let other = git_worktree_add(&main, "app-feature");
+    Fixture {
+        procly,
+        // The Main worktree keeps the project name of the compose file, another one appends its Worktree slug.
+        main_project: Project {
+            name: name.clone(),
+            dir: main.clone(),
+        },
+        other_project: Project {
+            name: format!("{name}-app_feature"),
+            dir: other.clone(),
+        },
+        main,
+        other,
+        port,
+    }
+}
+
+fn listens(port: u16) -> bool {
+    TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+/// The port `up` printed in `db started db port 24001`.
+fn printed_port(output: &std::process::Output) -> u16 {
+    stdout(output)
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("no port in {:?}", stdout(output)))
+}
+
+#[test]
+fn each_worktree_gets_leases_of_its_own_and_the_main_worktree_keeps_the_declared_port() {
+    let fixture = fixture("");
+
+    let main = stdout(&fixture.procly.procly_in(&fixture.main, &["env", "db"]));
+    let other = stdout(&fixture.procly.procly_in(&fixture.other, &["env", "db"]));
+
+    let port = fixture.port;
+    assert!(main.contains(&format!("export PORT_DB='{port}'\n")), "{main}");
+    assert!(!other.contains(&format!("PORT_DB='{port}'")), "{other}");
+    assert!(other.contains("export PORT_DB='"), "{other}");
+}
+
+#[test]
+fn docker_2_worktrees_run_2_containers_side_by_side_each_on_its_own_lease() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+
+    let main = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    let other = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+
+    assert_success(&main);
+    assert_success(&other);
+    let port = fixture.port;
+    assert_eq!(stdout(&main), format!("db started db port {port}\n"));
+    let other_port = printed_port(&other);
+    assert_ne!(other_port, port);
+    assert_eq!(stdout(&other), format!("db started db port {other_port}\n"));
+    // 2 containers, each in a project of its own and with a volume of its own.
+    let (main_container, other_container) = (fixture.main_project.container(), fixture.other_project.container());
+    assert!(!main_container.is_empty() && !other_container.is_empty());
+    assert_ne!(main_container, other_container);
+    assert!(fixture.main_project.is_running() && fixture.other_project.is_running());
+    assert!(listens(port) && listens(other_port));
+    assert!(fixture.main_project.volume_exists() && fixture.other_project.volume_exists());
+}
+
+#[test]
+fn docker_up_again_in_the_same_worktree_reuses_its_own_container() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let first = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_success(&first);
+    let container = fixture.other_project.container();
+
+    let again = fixture.procly.procly_in(&fixture.other, &["up", "--json", "db"]);
+
+    let document = json_succeeded(&again);
+    let port = printed_port(&first);
+    assert_eq!(document["services"][0]["outcome"], "reused", "{document}");
+    assert_eq!(document["services"][0]["ports"], serde_json::json!({ "db": port }));
+    assert_eq!(fixture.other_project.container(), container);
+    // Reusing the container of one Worktree never starts the one of another.
+    assert_eq!(fixture.main_project.container(), "");
+}
+
+#[test]
+fn docker_a_compose_file_that_fixes_the_container_name_is_refused_with_the_offending_line() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("    container_name: pcl-iso-fixed-db\n");
+
+    let output = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+
+    assert_eq!(output.status.code(), Some(125), "{}", stderr(&output));
+    let message = stderr(&output);
+    let compose = fixture.other.join("compose.yaml");
+    assert!(
+        message.contains(&format!("{}:11: container_name: pcl-iso-fixed-db", compose.display())),
+        "{message}"
+    );
+    assert!(message.contains("isolation = \"isolated\""), "{message}");
+    assert!(fixture.other_project.container().is_empty(), "a container was created");
+}
+
+#[test]
+fn docker_a_compose_file_that_fixes_a_network_name_is_refused_with_the_offending_line() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("    networks:\n      - back\nnetworks:\n  back:\n    name: pcl-iso-fixed-net\n");
+
+    let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_eq!(output.status.code(), Some(125), "{}", stderr(&output));
+    let message = stderr(&output);
+    let compose = fixture.main.join("compose.yaml");
+    assert!(
+        message.contains(&format!("{}:15: name: pcl-iso-fixed-net", compose.display())),
+        "{message}"
+    );
+    assert!(fixture.main_project.container().is_empty(), "a container was created");
+}
+
+#[test]
+fn docker_down_stops_the_container_of_the_worktree_at_once_and_keeps_it_with_its_volume() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.other_project.container();
+
+    let output = fixture.procly.procly_in(&fixture.other, &["down", "db"]);
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "db stopped\n");
+    // Without a Grace period, nobody else needs it.
+    assert!(!fixture.other_project.is_running());
+    assert!(!listens(other_port));
+    assert_eq!(fixture.other_project.container(), container);
+    assert!(fixture.other_project.volume_exists());
+    // The container of the other Worktree is its own business.
+    assert!(fixture.main_project.is_running());
+    let again = fixture.procly.procly_in(&fixture.other, &["down", "db"]);
+    assert_eq!(stdout(&again), "db not running\n");
+}
+
+#[test]
+fn docker_status_shows_the_containers_of_the_worktree_and_its_json_lists_them() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let project = &fixture.other_project.name;
+
+    let text = stdout(&fixture.procly.procly_in(&fixture.other, &["status"]));
+    let document = json_succeeded(&fixture.procly.procly_in(&fixture.other, &["status", "--json"]));
+
+    assert!(
+        text.contains(&format!(
+            "    container of service db (compose project {project}, service db) port {other_port}, Isolated\n"
+        )),
+        "{text}"
+    );
+    // Only the container of the current Worktree, and never as a Foreign process.
+    let main_project = &fixture.main_project.name;
+    assert!(!text.contains(&format!("compose project {main_project}, ")), "{text}");
+    assert!(!text.contains("foreign"), "{text}");
+    let worktree = &document["repositories"][0]["worktrees"][0];
+    assert_eq!(
+        worktree["containers"],
+        serde_json::json!([{ "service": "db", "project": project, "compose": "db", "port": other_port }]),
+        "{document}"
+    );
+}
+
+#[test]
+fn docker_eject_stops_the_containers_of_every_worktree_and_keeps_them_with_their_volumes() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let containers = (fixture.main_project.container(), fixture.other_project.container());
+
+    let output = fixture.procly.procly_in(&fixture.main, &["eject"]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    for worktree in [&fixture.main, &fixture.other] {
+        assert!(
+            text.contains(&format!(
+                "stopped db of {} (Isolated Compose service, its container and volumes are kept)",
+                worktree.display()
+            )),
+            "{text}"
+        );
+    }
+    assert!(!fixture.main_project.is_running() && !fixture.other_project.is_running());
+    assert_eq!(
+        (fixture.main_project.container(), fixture.other_project.container()),
+        containers
+    );
+    assert!(fixture.main_project.volume_exists() && fixture.other_project.volume_exists());
+}
+
+#[test]
+fn docker_logs_reads_the_container_of_the_worktree() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let talking = |marker: &str| {
+        compose_file(&fixture.main_project.name, "").replace(
+            "command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]",
+            &format!("command: [\"sh\", \"-c\", \"echo {marker}; exec nc -lk -p 80 -e /bin/cat\"]"),
+        )
+    };
+    write(&fixture.main, &talking("procly-main-marker"));
+    write(&fixture.other, &talking("procly-other-marker"));
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+
+    let output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+
+    assert_success(&output);
+    let logs = stdout(&output);
+    assert!(logs.contains("procly-other-marker"), "{logs}");
+    assert!(!logs.contains("procly-main-marker"), "{logs}");
+}
+
+#[test]
+fn docker_the_container_of_a_worktree_removed_without_down_stops_on_the_next_down() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.other_project.container();
+    git(
+        &fixture.main,
+        &["worktree", "remove", "--force", &fixture.other.to_string_lossy()],
+    );
+
+    let output = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+
+    assert_success(&output);
+    // The Main worktree tells of its own container only.
+    assert_eq!(stdout(&output), "db stopped\n");
+    assert!(!fixture.other_project.is_running());
+    assert_eq!(fixture.other_project.container(), container);
+    assert!(fixture.other_project.volume_exists());
+}
+
+#[test]
+fn docker_after_a_daemon_crash_the_container_of_a_worktree_is_still_its_own() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let first = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_success(&first);
+    let container = fixture.other_project.container();
+
+    fixture.procly.kill_daemon();
+
+    let again = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_success(&again);
+    let port = printed_port(&first);
+    assert_eq!(stdout(&again), format!("db reused db port {port}\n"));
+    assert_eq!(fixture.other_project.container(), container);
+    let status = stdout(&fixture.procly.procly_in(&fixture.other, &["status"]));
+    assert!(status.contains("container of service db (compose project "), "{status}");
+    // The Main worktree never had a container, and the one of the other Worktree is not its own.
+    let down = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+    assert_eq!(stdout(&down), "db not running\n");
+    assert!(fixture.other_project.is_running());
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["down", "db"]));
+    assert!(!fixture.other_project.is_running());
+}
+
+/// Replaces the compose file of the Worktree `worktree`, which reads its own.
+fn write(worktree: &Path, compose: &str) {
+    std::fs::write(worktree.join("compose.yaml"), compose).expect("write the compose file");
+}

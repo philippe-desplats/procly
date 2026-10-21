@@ -91,7 +91,7 @@ $ procly down --json
 {"schema_version":1,"service":null,"stopped":["api","web"],"released":[]}
 ```
 
-`service` is the Service asked for, or `null` for all of them. `released` lists the Compose services the Worktree let go of, each with `service`, `others` (how many other Worktrees still need the container) and `grace_ms` (how long it keeps running once none does).
+`service` is the Service asked for, or `null` for all of them. `stopped` also lists the Isolated Compose services whose container of the Worktree was stopped. `released` lists the Shared and Logical Compose services the Worktree let go of, each with `service`, `others` (how many other Worktrees still need the container) and `grace_ms` (how long it keeps running once none does).
 
 ## `status`
 
@@ -100,4 +100,10 @@ $ procly status --json
 {"schema_version":1,"repositories":[{"git_common_dir":"/home/me/app/.git","worktrees":[{"path":"/home/me/app","slug":"app","main":true,"services":[{"service":"web","port":4101,"reattached":false,"state":"healthy"}],"jobs":[{"id":"3f9a1c2e","command":"bun test","cwd":"/home/me/app","state":"ended","end":{"kind":"exited","code":3}}]}]}],"jobs_outside_repositories":[]}
 ```
 
-`services` lists the Process services and Groups Procly started in the Worktree. A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Compose service is not listed in v0.1, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
+`services` lists the Process services and Groups Procly started in the Worktree. A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Shared or Logical Compose service is not listed, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
+
+A Worktree lists the Isolated containers Procly runs for it under `containers` when it has some, each with `service`, the compose `project` of the Worktree, the `compose` service and the `port` its health check probes, see [Isolated mode](configuration.md#isolated-mode). The key was added without a change of the schema version, and is left out when the list is empty:
+
+```json
+"containers":[{"service":"cache","project":"app-app_login","compose":"redis","port":24001}]
+```

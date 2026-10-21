@@ -984,6 +984,12 @@ fn eject_summary(report: &EjectReport) -> String {
     let mut text = String::new();
     for stopped in &report.stopped {
         let _ = match &stopped.worktree {
+            Some(worktree) if stopped.isolated => writeln!(
+                text,
+                "stopped {} of {} (Isolated Compose service, its container and volumes are kept)",
+                stopped.service,
+                worktree.display()
+            ),
             Some(worktree) => writeln!(text, "stopped {} of {}", stopped.service, worktree.display()),
             None => writeln!(
                 text,

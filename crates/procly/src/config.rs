@@ -308,14 +308,16 @@ impl PortConfig {
     }
 }
 
-/// How a Compose service is separated between Worktrees. The Isolated mode, one container per Worktree, is for a later
-/// version.
+/// How a Compose service is separated between Worktrees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IsolationMode {
     /// One container, and every Worktree reads the resources of the Main worktree.
     Shared,
     /// One container, and each Worktree has resources of its own in it.
     Logical,
+    /// One container per Worktree, under a compose project name of its own, holding the resources the Main worktree
+    /// names.
+    Isolated,
 }
 
 impl<'de> Deserialize<'de> for IsolationMode {
@@ -326,17 +328,14 @@ impl<'de> Deserialize<'de> for IsolationMode {
             type Value = IsolationMode;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("\"shared\" or \"logical\"")
+                formatter.write_str("\"shared\", \"logical\" or \"isolated\"")
             }
 
             fn visit_str<E: de::Error>(self, value: &str) -> Result<IsolationMode, E> {
                 match value {
                     "shared" => Ok(IsolationMode::Shared),
                     "logical" => Ok(IsolationMode::Logical),
-                    // Named apart so that nobody waits for it to start working.
-                    "isolated" => Err(E::custom(
-                        "the Isolated mode is not in v0.1, use \"shared\" or \"logical\"",
-                    )),
+                    "isolated" => Ok(IsolationMode::Isolated),
                     other => Err(E::invalid_value(Unexpected::Str(other), &self)),
                 }
             }
@@ -894,10 +893,14 @@ impl Config {
     }
 
     /// How the Compose service `service` is separated between Worktrees: the mode it sets, else the one of the
-    /// Repository, else Logical. A Service without a Driver has no resources to separate, so it is Shared.
+    /// Repository, else Logical. A Service without a Driver has no resources to separate, so it is Shared unless it
+    /// declares a container per Worktree itself.
     pub(crate) fn isolation(&self, service: &ServiceConfig) -> IsolationMode {
         if service.driver.is_none() {
-            return IsolationMode::Shared;
+            return match service.isolation {
+                Some(IsolationMode::Isolated) => IsolationMode::Isolated,
+                _ => IsolationMode::Shared,
+            };
         }
         service
             .isolation
@@ -1412,19 +1415,23 @@ mod tests {
     }
 
     #[test]
-    fn the_isolated_mode_is_refused_as_not_there_yet_and_any_other_word_as_unknown() {
-        for text in [
-            "[settings]\nisolation = 'isolated'\n",
-            "[services.db]\ncompose = 'x'\nisolation = 'isolated'\n",
-        ] {
-            let error = Value::Table(table(text)).try_into::<Config>().unwrap_err().to_string();
-            assert!(error.contains("Isolated mode is not in v0.1"), "{error}");
-        }
+    fn a_compose_service_is_isolated_where_it_declares_it_and_any_other_word_is_unknown() {
+        let config = parsed(
+            "[settings]\nisolation = 'isolated'\n\
+             [services.cache]\ncompose = 'redis'\ndriver = 'redis'\nresources = { main = {} }\n\
+             [services.app]\ncompose = 'app'\nisolation = 'isolated'\n\
+             [services.mail]\ncompose = 'mailpit'\n",
+        );
+        let isolation = |name: &str| config.isolation(&config.services[name]);
+        assert_eq!(isolation("cache"), IsolationMode::Isolated);
+        assert_eq!(isolation("app"), IsolationMode::Isolated);
+        // Without a Driver, only the Service itself can ask for its own container per Worktree.
+        assert_eq!(isolation("mail"), IsolationMode::Shared);
         let error = Value::Table(table("[settings]\nisolation = 'soft'\n"))
             .try_into::<Config>()
             .unwrap_err()
             .to_string();
-        assert!(error.contains("\"shared\" or \"logical\""), "{error}");
+        assert!(error.contains("\"shared\", \"logical\" or \"isolated\""), "{error}");
     }
 
     #[test]

@@ -7,6 +7,11 @@
 //!
 //! A Compose service with a Driver is Logical: its container also holds a Logical resource per Worktree, which the
 //! Driver creates through `docker compose exec` once the container is healthy, whichever Worktree started it.
+//!
+//! A Compose service that declares Isolated runs one container per Worktree instead, from the compose file of that
+//! Worktree and under a compose project name of its own, on the Leases of that Worktree. Its compose file must leave
+//! the names of the container and of its networks to compose. The container stops as soon as its Worktree no longer
+//! needs it, there is nobody else to wait for.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -29,7 +34,7 @@ use crate::config::Seed;
 use crate::derived::Resource;
 use crate::driver::Driver;
 use crate::duration;
-use crate::protocol::{Conflict, Held, JobEnd, Released, ServiceEnd, StartOutcome};
+use crate::protocol::{Conflict, ContainerStatus, Held, JobEnd, Released, ServiceEnd, StartOutcome};
 use crate::topology::Topology;
 
 /// Where to install `docker compose` v2, named in the error of a machine that lacks it.
@@ -112,6 +117,17 @@ pub(crate) enum ComposeError {
         reason: String,
         outcome: String,
     },
+    #[error(
+        "service {service} is set to `isolation = \"isolated\"`, which runs one container per Worktree, but its \
+         compose service {compose} fixes {what}, which 2 Worktrees cannot both use: {line}. Remove that line so that \
+         compose names it after the project, or make the service Shared"
+    )]
+    FixedName {
+        service: String,
+        compose: String,
+        what: String,
+        line: String,
+    },
     #[error("service {service} needs what runs outside Procly, which Procly never stops")]
     Conflict { service: String, conflicts: Vec<Conflict> },
     #[error(
@@ -137,8 +153,10 @@ pub(crate) struct ComposeSpec {
     pub(crate) name: String,
     /// The service of the compose file the Service maps to.
     pub(crate) compose: String,
-    /// The Main worktree, where the compose file is read from.
+    /// Where the compose file is read from: the Main worktree, or the Worktree of an Isolated container.
     pub(crate) project_dir: PathBuf,
+    /// `Some` when the container is Isolated, so that it gets a project name of its own.
+    pub(crate) isolated: Option<Isolated>,
     /// The environment of the caller, then the Leases and the variables the compose file interpolates.
     pub(crate) env: Vec<(String, String)>,
     /// The Leases of the Service, which the compose file must publish.
@@ -149,6 +167,16 @@ pub(crate) struct ComposeSpec {
     pub(crate) injected: Vec<String>,
     pub(crate) health: HealthCheck,
     pub(crate) health_timeout: Duration,
+}
+
+/// Where the project name of an Isolated container comes from.
+#[derive(Debug, Clone)]
+pub(crate) struct Isolated {
+    /// The Main worktree, whose compose file gives the project name of the Repository.
+    pub(crate) main: PathBuf,
+    /// The Worktree slug the project name of the Repository is followed by, `None` in the Main worktree, which keeps
+    /// the project name of its compose file as it keeps its declared ports.
+    pub(crate) slug: Option<String>,
 }
 
 /// The Logical resources of one Worktree in the container of a Compose service, and what it takes to create them.
@@ -191,7 +219,8 @@ pub(crate) struct Brought {
     pub(crate) health: Result<(), (ServiceEnd, String)>,
 }
 
-/// A Compose service is shared by the Worktrees of one Repository, so it is keyed by the Repository and its name.
+/// A Compose service is shared by the Worktrees of one Repository, so it is keyed by the Repository and its name, and
+/// by the Worktree too when it is Isolated.
 pub(crate) type ComposeKey = ContainerKey;
 
 /// Every container Procly started from a compose file.
@@ -418,13 +447,14 @@ impl Composes {
     }
 
     /// The recent output of the container of the Compose service `name`, the service `compose` of the compose file
-    /// of `project_dir`, the Main worktree, whether it runs or not. Read with `docker compose logs` in `env`, so that
-    /// the compose file interpolates as it does for `up`.
+    /// of `project_dir`, the Main worktree or the Worktree of an `isolated` container, whether it runs or not. Read
+    /// with `docker compose logs` in `env`, so that the compose file interpolates as it does for `up`.
     pub(crate) async fn logs(
         &self,
         name: &str,
         compose: &str,
         project_dir: PathBuf,
+        isolated: Option<&Isolated>,
         env: Vec<(String, String)>,
     ) -> Result<String, ComposeError> {
         let mut docker = Docker {
@@ -436,19 +466,22 @@ impl Composes {
             recorded_env: Vec::new(),
         };
         docker.check_available().await?;
-        docker.project = docker.config().await?.name;
+        docker.stack(isolated).await?;
         Ok(docker.logs(RECENT_LOG_LINES).await)
     }
 
-    /// Lets `worktree` go of the containers of the Repository `repository`, of the Compose service `name` only when
-    /// given. A Worktree whose directory no longer exists stops counting too. A container no Worktree needs anymore
-    /// stops once its Grace period has passed on the clock. Blocking, it reads the disk and writes the record.
+    /// Lets `worktree` go of the containers every Worktree of the Repository `repository` shares, of the Compose
+    /// service `name` only when given. A Worktree whose directory no longer exists stops counting too. A container no
+    /// Worktree needs anymore stops once its Grace period has passed on the clock. Blocking, it reads the disk and
+    /// writes the record.
     pub(crate) fn release(&self, repository: &Path, worktree: &Path, name: Option<&str>) -> Vec<Released> {
         let mut released = Vec::new();
         let containers: Vec<_> = self
             .table()
             .iter()
-            .filter(|((path, service), _)| path == repository && name.is_none_or(|name| name == service))
+            .filter(|((path, service, isolated), _)| {
+                path == repository && isolated.is_none() && name.is_none_or(|name| name == service)
+            })
             .map(|(key, container)| (key.clone(), Arc::clone(container)))
             .collect();
         for (key, container) in containers {
@@ -488,8 +521,78 @@ impl Composes {
         released
     }
 
-    /// The Main worktree root and the name of every container Procly started and that runs, which hold the Leases of
-    /// the Main worktree.
+    /// The Isolated containers of the Repository `repository` that `worktree` lets go of: its own, of the Compose
+    /// service `name` only when given, and those of every Worktree whose directory no longer exists, removed without
+    /// `procly down`. Blocking, it reads the disk.
+    pub(crate) fn isolated_released(&self, repository: &Path, worktree: &Path, name: Option<&str>) -> Vec<ComposeKey> {
+        let keys: Vec<_> = self
+            .table()
+            .keys()
+            .filter(|(path, _, isolated)| path == repository && isolated.is_some())
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter(|(_, service, isolated)| {
+                let Some(isolated) = isolated else { return false };
+                (isolated == worktree && name.is_none_or(|name| name == service)) || !isolated.exists()
+            })
+            .collect()
+    }
+
+    /// Stops the Isolated containers `keys` at once, and returns the keys of those that were running.
+    pub(crate) async fn stop_isolated(&self, keys: Vec<ComposeKey>) -> Result<Vec<ComposeKey>, ComposeError> {
+        let containers: Vec<_> = {
+            let table = self.table();
+            keys.into_iter()
+                .filter_map(|key| Some((key.clone(), Arc::clone(table.get(&key)?))))
+                .collect()
+        };
+        let mut stopped = Vec::new();
+        let mut failure = None;
+        for (key, result) in self.stop_containers(containers).await {
+            match result {
+                Ok(true) => {
+                    eprintln!(
+                        "stopped the Isolated container of service {} of {}, its Worktree no longer needs it",
+                        key.1,
+                        key.2.as_deref().unwrap_or(Path::new("")).display()
+                    );
+                    stopped.push(key);
+                }
+                Ok(false) => {}
+                Err(error) => failure = failure.or(Some(error)),
+            }
+        }
+        stopped.sort();
+        failure.map_or(Ok(stopped), Err)
+    }
+
+    /// The Isolated containers Procly started or adopted and that run, by the root of their Worktree.
+    pub(crate) fn isolated(&self) -> Vec<(PathBuf, ContainerStatus)> {
+        let mut isolated: Vec<_> = self
+            .table()
+            .iter()
+            .filter_map(|((_, service, isolated), container)| {
+                let worktree = isolated.clone()?;
+                let state = container.state();
+                let alive = state.alive.as_ref()?;
+                Some((
+                    worktree,
+                    ContainerStatus {
+                        service: service.clone(),
+                        project: alive.docker.project.clone(),
+                        compose: alive.docker.compose.clone(),
+                        port: alive.port,
+                    },
+                ))
+            })
+            .collect();
+        isolated.sort_by(|a, b| (&a.0, &a.1.service).cmp(&(&b.0, &b.1.service)));
+        isolated
+    }
+
+    /// The Worktree root and the name of every container Procly started and that runs, which hold the Leases of the
+    /// Main worktree, or of their own Worktree when they are Isolated.
     pub(crate) fn running(&self) -> BTreeSet<(PathBuf, String)> {
         self.table()
             .values()
@@ -514,20 +617,24 @@ impl Composes {
     }
 
     /// Stops every container Procly started for the Repository `repository`, without waiting for any Grace period,
-    /// and returns the names of the Compose services whose container it stopped. A container that was not running
-    /// is not named. The containers are stopped, never removed, so their volumes stay.
-    pub(crate) async fn stop_repository(&self, repository: &Path) -> Result<Vec<String>, ComposeError> {
+    /// and returns the names of the Compose services whose container it stopped, with the Worktree of an Isolated
+    /// one. A container that was not running is not named. The containers are stopped, never removed, so their
+    /// volumes stay.
+    pub(crate) async fn stop_repository(
+        &self,
+        repository: &Path,
+    ) -> Result<Vec<(String, Option<PathBuf>)>, ComposeError> {
         let containers: Vec<_> = self
             .table()
             .iter()
-            .filter(|((path, _), _)| path == repository)
+            .filter(|((path, _, _), _)| path == repository)
             .map(|(key, container)| (key.clone(), Arc::clone(container)))
             .collect();
         let mut stopped = Vec::new();
         let mut failure = None;
-        for (service, result) in self.stop_containers(containers).await {
+        for ((_, service, isolated), result) in self.stop_containers(containers).await {
             match result {
-                Ok(true) => stopped.push(service),
+                Ok(true) => stopped.push((service, isolated)),
                 Ok(false) => {}
                 Err(error) => failure = failure.or(Some(error)),
             }
@@ -540,7 +647,7 @@ impl Composes {
     async fn stop_containers(
         &self,
         containers: Vec<(ComposeKey, Arc<Container>)>,
-    ) -> Vec<(String, Result<bool, ComposeError>)> {
+    ) -> Vec<(ComposeKey, Result<bool, ComposeError>)> {
         let mut stopping = JoinSet::new();
         for (key, container) in containers {
             let ledger = self.ledger.clone();
@@ -554,7 +661,7 @@ impl Composes {
                     state.alive.take()
                 };
                 let Some(alive) = alive else {
-                    return (key.1, Ok(false));
+                    return (key, Ok(false));
                 };
                 let stopped = alive.docker.stop().await;
                 if stopped.is_ok() {
@@ -564,7 +671,7 @@ impl Composes {
                     container.state().alive = Some(alive);
                 }
                 ledger.recorded(&key, &container).await;
-                (key.1, stopped.map(|()| true))
+                (key, stopped.map(|()| true))
             });
         }
         let mut results = Vec::new();
@@ -645,6 +752,7 @@ impl Container {
             grace_ms: millis(alive.grace),
             worktrees: state.worktrees.iter().cloned().collect(),
             deadline_ms: state.deadline.map(millis),
+            isolated: key.2.clone(),
         })
     }
 
@@ -816,8 +924,7 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
         recorded_env: recorded_env(&spec.env, &spec.injected),
     };
     docker.check_available().await?;
-    let stack = docker.config().await?;
-    docker.project = stack.name;
+    let stack = docker.stack(spec.isolated.as_ref()).await?;
     let service = stack
         .services
         .get(&spec.compose)
@@ -826,6 +933,16 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
             compose: spec.compose.clone(),
             dir: spec.project_dir.clone(),
         })?;
+    if spec.isolated.is_some()
+        && let Some((what, key, value)) = stack.fixed_name(service)
+    {
+        return Err(ComposeError::FixedName {
+            service: spec.name.clone(),
+            compose: spec.compose.clone(),
+            what,
+            line: offending_line(spec.project_dir.clone(), spec.env.clone(), key, value).await,
+        });
+    }
     for published in &spec.published {
         if !service.publishes(published.port) {
             return Err(ComposeError::NotPublished {
@@ -853,8 +970,14 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
         }
         Occupants::Conflicts(_) => {}
     }
-    // `--wait` returns once the container runs, or is healthy when the compose file defines a health check.
-    let up = ["up", "--detach", "--wait", &spec.compose];
+    // `--wait` returns once the container runs, or is healthy when the compose file defines a health check. An
+    // Isolated container starts alone: what it depends on would be started again in its project, on the same ports
+    // as the containers of the Repository.
+    let mut up = vec!["up", "--detach", "--wait"];
+    if spec.isolated.is_some() {
+        up.push("--no-deps");
+    }
+    up.push(&spec.compose);
     let waited_out = match tokio::time::timeout(spec.health_timeout, docker.project_command(&up)).await {
         Ok(Ok(())) => None,
         Ok(Err(error)) => {
@@ -865,6 +988,43 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
         Err(_) => Some(health_timeout(spec.health_timeout)),
     };
     Ok((docker, Begun::Started(waited_out)))
+}
+
+/// The compose files `docker compose` reads in a project directory when `COMPOSE_FILE` names none: the first of these,
+/// and its override.
+const COMPOSE_FILES: [(&str, &str); 4] = [
+    ("compose.yaml", "compose.override.yaml"),
+    ("compose.yml", "compose.override.yml"),
+    ("docker-compose.yaml", "docker-compose.override.yaml"),
+    ("docker-compose.yml", "docker-compose.override.yml"),
+];
+
+/// The line of the compose files of `project_dir` that sets `key` to `value`, as `<file>:<line>: <text>`, or the
+/// setting alone when no line holds it as it is, such as one the compose file interpolates.
+async fn offending_line(project_dir: PathBuf, env: Vec<(String, String)>, key: &'static str, value: String) -> String {
+    let setting = format!("{key}: {value}");
+    let found = tokio::task::spawn_blocking(move || {
+        let files: Vec<PathBuf> = match env.iter().rev().find(|(name, _)| name == "COMPOSE_FILE") {
+            Some((_, files)) => std::env::split_paths(files)
+                .map(|file| project_dir.join(file))
+                .collect(),
+            None => COMPOSE_FILES
+                .iter()
+                .find(|(file, _)| project_dir.join(file).is_file())
+                .map(|(file, over)| vec![project_dir.join(file), project_dir.join(over)])
+                .unwrap_or_default(),
+        };
+        files.into_iter().find_map(|file| {
+            let text = std::fs::read_to_string(&file).ok()?;
+            text.lines().enumerate().find_map(|(index, line)| {
+                let (found, rest) = line.trim().split_once(':')?;
+                let rest = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+                (found == key && rest == value).then(|| format!("{}:{}: {}", file.display(), index + 1, line.trim()))
+            })
+        })
+    })
+    .await;
+    found.ok().flatten().unwrap_or(setting)
 }
 
 /// What holds what the container of a Compose service needs.
@@ -977,9 +1137,38 @@ impl Docker {
         }
     }
 
-    /// The effective stack of the compose file of the Main worktree.
+    /// Names the compose project and returns its stack. The project is named by the compose file of the project
+    /// directory, unless the container is `isolated` outside the Main worktree: it is then named by the compose file
+    /// of the Main worktree, the project name of the Repository, followed by the Worktree slug.
+    async fn stack(&mut self, isolated: Option<&Isolated>) -> Result<Stack, ComposeError> {
+        if let Some(Isolated { main, slug: Some(slug) }) = isolated {
+            let repository = Self {
+                project_dir: main.clone(),
+                ..self.clone()
+            };
+            self.project = format!("{}-{slug}", repository.config().await?.name);
+        }
+        let stack = self.config().await?;
+        self.project.clone_from(&stack.name);
+        Ok(stack)
+    }
+
+    /// The effective stack of the compose file of the project directory, under the project name when it is known.
     async fn config(&self) -> Result<Stack, ComposeError> {
-        let output = self.checked(&["config", "--format", "json"]).await?;
+        let args = ["config", "--format", "json"];
+        let output = if self.project.is_empty() {
+            self.checked(&args).await?
+        } else {
+            let output = self
+                .project_output(&args)
+                .await
+                .map_err(|error| ComposeError::Unavailable {
+                    service: self.service.clone(),
+                    reason: format!("cannot run docker: {error}"),
+                })?;
+            self.succeeded(&args, &output)?;
+            output
+        };
         serde_json::from_slice(&output.stdout).map_err(|source| ComposeError::Config {
             service: self.service.clone(),
             source,
@@ -1249,13 +1438,23 @@ impl Docker {
         self.output(&command).await
     }
 
-    /// Runs `docker compose` with the arguments in the Main worktree, in the environment the compose file
+    /// Runs `docker compose` with the arguments in the project directory, in the environment the compose file
     /// interpolates. The program is looked up on the `PATH` of that environment, which is the caller's.
     async fn output(&self, args: &[&str]) -> std::io::Result<Output> {
+        // The Isolated container of a Worktree removed without `procly down` is still found by its project name.
+        let project_dir = self.project_dir.clone();
+        let dir = if tokio::task::spawn_blocking(move || project_dir.exists())
+            .await
+            .unwrap_or(false)
+        {
+            &self.project_dir
+        } else {
+            Path::new("/")
+        };
         Command::new("docker")
             .arg("compose")
             .args(args)
-            .current_dir(&self.project_dir)
+            .current_dir(dir)
             .env_clear()
             .envs(self.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
@@ -1271,6 +1470,8 @@ struct Stack {
     name: String,
     #[serde(default)]
     services: BTreeMap<String, StackService>,
+    #[serde(default)]
+    networks: BTreeMap<String, StackNetwork>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1279,6 +1480,31 @@ struct StackService {
     ports: Vec<StackPort>,
     /// The name the compose file gives the container, which is `<project>-<service>-1` when it gives none.
     container_name: Option<String>,
+    /// The networks the service joins by their key in the stack, `default` when it names none.
+    networks: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StackNetwork {
+    /// The name of the network in the engine, which is `<project>_<key>` when the compose file gives none.
+    name: Option<String>,
+}
+
+impl Stack {
+    /// What the compose service `compose` has a fixed name for, which 2 projects cannot both use: its container, or
+    /// a network it joins. Told as what it is, the key that fixes it and the name.
+    fn fixed_name(&self, service: &StackService) -> Option<(String, &'static str, String)> {
+        if let Some(name) = &service.container_name {
+            return Some(("the name of its container".to_owned(), "container_name", name.clone()));
+        }
+        let default = BTreeMap::from([("default".to_owned(), serde_json::Value::Null)]);
+        let joined = service.networks.as_ref().unwrap_or(&default);
+        joined.keys().find_map(|key| {
+            let name = self.networks.get(key)?.name.as_ref()?;
+            (*name != format!("{}_{key}", self.name))
+                .then(|| (format!("the name of its network {key}"), "name", name.clone()))
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1348,6 +1574,69 @@ mod tests {
         assert!(service.publishes(8000));
         assert!(service.publishes(8010));
         assert!(!service.publishes(8011));
+    }
+
+    fn fixed(stack: &str) -> Option<(String, &'static str, String)> {
+        let stack: Stack = serde_json::from_str(stack).unwrap();
+        stack.fixed_name(&stack.services["db"])
+    }
+
+    #[test]
+    fn a_stack_whose_names_compose_gives_after_the_project_fixes_none() {
+        assert_eq!(
+            fixed(r#"{"name": "app", "services": {"db": {}}, "networks": {"default": {"name": "app_default"}}}"#),
+            None
+        );
+        let back = r#"{"name": "app", "services": {"db": {"networks": {"back": null}}},
+            "networks": {"default": {"name": "pinned"}, "back": {"name": "app_back"}}}"#;
+        // A network the service does not join is none of its business.
+        assert_eq!(fixed(back), None);
+        // A service on the network of the host joins none of the stack.
+        assert_eq!(
+            fixed(r#"{"name": "app", "services": {"db": {"network_mode": "host"}}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_container_name_or_the_name_of_a_joined_network_is_fixed() {
+        assert_eq!(
+            fixed(r#"{"name": "app", "services": {"db": {"container_name": "pg"}}}"#),
+            Some((
+                "the name of its container".to_owned(),
+                "container_name",
+                "pg".to_owned()
+            ))
+        );
+        assert_eq!(
+            fixed(r#"{"name": "app", "services": {"db": {}}, "networks": {"default": {"name": "shared"}}}"#),
+            Some((
+                "the name of its network default".to_owned(),
+                "name",
+                "shared".to_owned()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_offending_line_is_found_in_the_compose_file_or_told_as_a_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("compose.yaml"),
+            "services:\n  db:\n    container_name: \"pg\"\n  cache:\n    container_name: ${NAME:-redis}\n",
+        )
+        .unwrap();
+        let line = |value: &str| offending_line(dir.path().to_owned(), Vec::new(), "container_name", value.to_owned());
+
+        assert_eq!(
+            line("pg").await,
+            format!(
+                "{}:3: container_name: \"pg\"",
+                dir.path().join("compose.yaml").display()
+            )
+        );
+        // Interpolated, so no line of the file holds the name the stack gives.
+        assert_eq!(line("redis").await, "container_name: redis");
     }
 
     #[test]

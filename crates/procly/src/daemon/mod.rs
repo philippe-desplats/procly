@@ -405,18 +405,33 @@ async fn down(
     .context("the request could not be read")??;
     let worktree = topology.worktree.path.clone();
     let stopping = registry.services.stop(&worktree, service.as_deref());
-    let released = {
+    let (released, isolated) = {
         let (registry, worktree, service) = (Arc::clone(&registry), worktree.clone(), service.clone());
         // Whether the other Worktrees still exist is read from the disk, and the record is written to it.
         tokio::task::spawn_blocking(move || {
-            registry
-                .composes
-                .release(&topology.git_common_dir, &worktree, service.as_deref())
+            let composes = &registry.composes;
+            let repository = &topology.git_common_dir;
+            (
+                composes.release(repository, &worktree, service.as_deref()),
+                composes.isolated_released(repository, &worktree, service.as_deref()),
+            )
         })
         .await
         .context("the containers could not be released")?
     };
-    if let (Some(name), true) = (&service, stopping.is_empty() && released.is_empty()) {
+    // The containers of other Worktrees, removed without `procly down`, are stopped too, but are not this one's to tell.
+    let isolated: Vec<String> = registry
+        .composes
+        .stop_isolated(isolated)
+        .await?
+        .into_iter()
+        .filter(|(_, _, owner)| owner.as_deref() == Some(worktree.as_path()))
+        .map(|(_, name, _)| name)
+        .collect();
+    if let (Some(name), true) = (
+        &service,
+        stopping.is_empty() && released.is_empty() && isolated.is_empty(),
+    ) {
         // Nothing to stop is fine for a declared Service, and a typo for any other.
         let (name, worktree, registry) = (name.clone(), worktree.clone(), Arc::clone(&registry));
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -439,6 +454,10 @@ async fn down(
     let mut stopped = Vec::new();
     for (name, service) in stopping {
         service.ended().await;
+        stopped.push(name);
+    }
+    for name in isolated {
+        eprintln!("down {name} of {} requested by {who}", worktree.display());
         stopped.push(name);
     }
     for released in &released {
@@ -493,15 +512,17 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
         let name = name.clone();
         // Reading the configuration is blocking, and finding the Main worktree runs git.
         blocking("the logs could not be read", move || {
-            let config = read_config(&topology.worktree.path)?;
-            match config
+            let scope = up::Scope::of(&topology.worktree.path)?;
+            match scope
+                .config()
                 .services
                 .get(&name)
                 .map(|declared| declared.kind(&name))
                 .transpose()?
             {
                 Some(config::ServiceKind::Compose { service }) => {
-                    Ok(Some((service.to_owned(), topology.main()?.worktree.path)))
+                    let (project_dir, isolated) = scope.project(&name)?;
+                    Ok(Some((service.to_owned(), project_dir, isolated)))
                 }
                 Some(config::ServiceKind::Process { .. } | config::ServiceKind::Group { .. }) | None => Ok(None),
             }
@@ -509,9 +530,9 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
         .await
     };
     match compose {
-        Ok(Some((compose, project_dir))) => registry
+        Ok(Some((compose, project_dir, isolated))) => registry
             .composes
-            .logs(&name, &compose, project_dir, env)
+            .logs(&name, &compose, project_dir, isolated.as_ref(), env)
             .await
             .map_or_else(failure, |output| Response::Logs { output }),
         Ok(None) => unknown(),

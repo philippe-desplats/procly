@@ -23,3 +23,7 @@ Added with the `[pinned.<branch>.ports]` table. A Pinned branch may name an expl
 ## The Main worktree never takes branch-scoped Leases
 
 The Main worktree keeps Leases of its own whatever its branch, even when that branch is pinned, since its declared ports are already fixed and a Lease bound to the branch would keep them from it once the branch is checked out elsewhere. The container of a Compose service is shared by every Worktree, so it holds the Leases of the Main worktree and never those of a Pinned branch. The behaviour of record is `pinned_branch` in `crates/procly/src/daemon/environment.rs` and the unit test `a_pinned_branch_binds_its_lease_to_the_branch_and_prefers_its_explicit_port` in `crates/procly/src/daemon/lease.rs`.
+
+## Isolated containers
+
+Added with the Isolated mode. A Compose service set to `isolation = "isolated"` runs one container per Worktree, so its Leases are the ones of that Worktree, drawn as for a Process service: the declared port in the Main worktree, then the Pool and the Range, or the ports of a Pinned branch. The behaviour of record is `grant` in `crates/procly/src/daemon/environment.rs` and the test `each_worktree_gets_leases_of_its_own_and_the_main_worktree_keeps_the_declared_port` in `crates/procly/tests/isolated.rs`.

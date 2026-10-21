@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::compose::{ComposeError, ComposeSpec, PlannedResource, PublishedLease, ResourcePlan};
+use super::compose::{ComposeError, ComposeSpec, Isolated, PlannedResource, PublishedLease, ResourcePlan};
 use super::environment::{self, DeclaredService, Leasing};
 use super::health::HealthCheck;
 use super::service::{Relation, Service, ServiceSpec, Start};
 use super::{Registry, blocking, message, read_config, topology_of};
-use crate::config::{Config, ServiceConfig, ServiceKind};
+use crate::config::{Config, IsolationMode, ServiceConfig, ServiceKind};
 use crate::driver::{self, Driver};
 use crate::ports;
 use crate::protocol::{Response, ServiceEnd, StartOutcome, UpService};
@@ -41,6 +41,10 @@ impl Scope {
         Ok(Self { topology, config })
     }
 
+    pub(super) fn config(&self) -> &Config {
+        &self.config
+    }
+
     fn worktree(&self) -> &Path {
         &self.topology.worktree.path
     }
@@ -59,6 +63,26 @@ impl Scope {
             name,
             declared: self.declared(name)?,
         })
+    }
+
+    /// Whether the Compose service `name`, which must be declared, runs one container per Worktree.
+    fn is_isolated(&self, name: &str) -> bool {
+        self.config
+            .services
+            .get(name)
+            .is_some_and(|declared| self.config.isolation(declared) == IsolationMode::Isolated)
+    }
+
+    /// Where the container of the Compose service `name` reads its compose file from, and where an Isolated one takes
+    /// its project name from. Blocking, finding the Main worktree runs git.
+    pub(super) fn project(&self, name: &str) -> anyhow::Result<(PathBuf, Option<Isolated>)> {
+        let main = self.topology.main()?.worktree.path;
+        if !self.is_isolated(name) {
+            return Ok((main, None));
+        }
+        let worktree = &self.topology.worktree;
+        let slug = (!worktree.main).then(|| worktree.slug.clone());
+        Ok((worktree.path.clone(), Some(Isolated { main, slug })))
     }
 
     /// The Services to bring up for `name`, needs first, or for every Service no Group covers without `name`.
@@ -410,8 +434,15 @@ async fn up_compose(
     grace: Duration,
     env: Vec<(String, String)>,
 ) -> Result<Running, Box<Response>> {
-    let key = (scope.topology.git_common_dir.clone(), name.to_owned());
     let worktree = scope.worktree().to_owned();
+    let isolated = scope.is_isolated(name);
+    // An Isolated container belongs to its Worktree alone, nobody is left to wait for once it lets go.
+    let (owner, grace) = if isolated {
+        (Some(worktree.clone()), Duration::ZERO)
+    } else {
+        (None, grace)
+    };
+    let key = (scope.topology.git_common_dir.clone(), name.to_owned(), owner);
     let prepare = {
         let (registry, scope, name, env) = (Arc::clone(registry), scope.clone(), name.to_owned(), env.clone());
         move || prepare_compose(&registry, &scope, &name, env)
@@ -482,10 +513,12 @@ fn prepare_compose(
     let injected_names = injected.variables.iter().map(|(name, _)| name.clone()).collect();
     let mut env = env;
     env.extend(injected.variables);
+    let (project_dir, isolated) = scope.project(name)?;
     Ok(ComposeSpec {
         name: name.to_owned(),
         compose: compose.to_owned(),
-        project_dir: scope.topology.main()?.worktree.path,
+        project_dir,
+        isolated,
         env,
         published,
         variables,

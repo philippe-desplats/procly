@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::duration;
 use crate::protocol::{
-    ForeignProcess, JobEnd, JobState, JobStatus, ServiceEnd, ServiceState, ServiceStatus, StatusReport,
+    ContainerStatus, ForeignProcess, JobEnd, JobState, JobStatus, ServiceEnd, ServiceState, ServiceStatus, StatusReport,
 };
 
 pub(crate) fn json(report: &StatusReport) -> String {
@@ -25,6 +25,9 @@ pub(crate) fn text(report: &StatusReport) -> String {
             let _ = writeln!(text, "  worktree {}{main} {}", worktree.slug, worktree.path.display());
             for service in &status.services {
                 service_line(&mut text, service);
+            }
+            for container in &status.containers {
+                container_line(&mut text, container);
             }
             for foreign in &status.foreign {
                 foreign_line(&mut text, foreign);
@@ -63,6 +66,16 @@ fn service_line(text: &mut String, service: &ServiceStatus) {
         ""
     };
     let _ = writeln!(text, "    service {} {state}{reattached}", service.service);
+}
+
+/// An Isolated container of the Worktree, with the Lease its health check probes.
+fn container_line(text: &mut String, container: &ContainerStatus) {
+    let port = container.port.map(|port| format!(" port {port}")).unwrap_or_default();
+    let _ = writeln!(
+        text,
+        "    container of service {} (compose project {}, service {}){port}, Isolated",
+        container.service, container.project, container.compose
+    );
 }
 
 /// A Foreign process of the Worktree, with the ports it holds.
@@ -210,6 +223,7 @@ mod tests {
                                 ports: vec![5432, 5433],
                             },
                         ],
+                        containers: vec![],
                     },
                     WorktreeStatus {
                         worktree: Worktree {
@@ -220,6 +234,12 @@ mod tests {
                         services: vec![],
                         jobs: vec![],
                         foreign: vec![],
+                        containers: vec![ContainerStatus {
+                            service: "cache".to_owned(),
+                            project: "app-app_login".to_owned(),
+                            compose: "redis".to_owned(),
+                            port: Some(24_001),
+                        }],
                     },
                 ],
             }],
@@ -253,6 +273,7 @@ mod tests {
              \x20   job 3f9a1c2e running: sleep 30\n\
              \x20   job 0b1c2d3e exited 101 in crates/api: cargo test\n\
              \x20 worktree app_login /src/app-login\n\
+             \x20   container of service cache (compose project app-app_login, service redis) port 24001, Isolated\n\
              \x20   no jobs\n\
              outside any repository\n\
              \x20 job 77aa88bb killed by signal 15 in /tmp/scratch: make\n\
