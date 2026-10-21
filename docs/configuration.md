@@ -251,7 +251,6 @@ How a Compose service that sets a `driver` is separated between Worktrees is its
 | --- | --- |
 | `"logical"` | Resources of its own in the one container, such as a database or a Redis index. |
 | `"shared"` | The resources of the Main worktree, under the names or the indexes the Main worktree has, so the Worktrees share the same data. They take no capacity of the container. |
-
 | `"isolated"` | A container of its own, holding the resources under the names or the indexes the Main worktree has, see [Isolated mode](#isolated-mode). |
 
 A Service without a `driver` has no resources to separate and stays Shared unless it sets `isolation = "isolated"` itself, a Repository-wide `"logical"` or `"isolated"` leaves it alone. Setting `isolation = "logical"` on a Service without a `driver` is an error, and so is `isolation` on a Process service.
