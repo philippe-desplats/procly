@@ -85,6 +85,18 @@ struct LeaseDocument {
     leases: Vec<Lease>,
 }
 
+/// A Lease bound to a Worktree rather than to a Pinned branch, as `procly gc` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeLease {
+    /// The common git directory identifying the Repository.
+    pub(crate) repository: PathBuf,
+    /// The root of the Worktree.
+    pub(crate) worktree: PathBuf,
+    pub(crate) service: String,
+    pub(crate) port_name: String,
+    pub(crate) port: u16,
+}
+
 /// Every Lease the Daemon granted, across all Repositories, so that no 2 of them share a port. They persist in a
 /// document of the state directory, so they survive restarts of the Daemon.
 #[derive(Debug)]
@@ -196,6 +208,59 @@ impl Leases {
             self.write(&touched)?;
             *table = touched;
         }
+        Ok(())
+    }
+
+    /// Every Lease bound to a Worktree, those of Pinned branches left out, in the order of the document. Blocking: it
+    /// reads the document on the first request.
+    pub(crate) fn bound_to_worktrees(&self) -> Result<Vec<WorktreeLease>, StoreError> {
+        let mut table = self
+            .table
+            .lock()
+            .expect("the lease table mutex is never poisoned, no code panics while holding it");
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read(self.clock.since_epoch())?),
+        };
+        Ok(table
+            .iter()
+            .filter_map(|(key, granted)| match &key.scope {
+                Scope::Worktree(worktree) => Some(WorktreeLease {
+                    repository: key.repository.clone(),
+                    worktree: worktree.clone(),
+                    service: key.service.clone(),
+                    port_name: key.port_name.clone(),
+                    port: granted.port,
+                }),
+                Scope::Branch(_) => None,
+            })
+            .collect())
+    }
+
+    /// Releases `lease`, so that its port returns to the Range, and stores the Leases left before it returns. A Lease
+    /// granted another port since it was read is left as it is. Blocking: it writes the document.
+    pub(crate) fn release(&self, lease: &WorktreeLease) -> Result<(), StoreError> {
+        let mut table = self
+            .table
+            .lock()
+            .expect("the lease table mutex is never poisoned, no code panics while holding it");
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read(self.clock.since_epoch())?),
+        };
+        let key = LeaseKey {
+            repository: lease.repository.clone(),
+            scope: Scope::Worktree(lease.worktree.clone()),
+            service: lease.service.clone(),
+            port_name: lease.port_name.clone(),
+        };
+        if table.get(&key).map(|granted| granted.port) != Some(lease.port) {
+            return Ok(());
+        }
+        let mut released = table.clone();
+        released.remove(&key);
+        self.write(&released)?;
+        *table = released;
         Ok(())
     }
 

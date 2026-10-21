@@ -130,10 +130,11 @@ procly worktree init       # prepare a fresh Worktree: copy untracked files, run
 procly agent install       # write the Rules block and the Guard, nothing is written without it
 procly off                 # make the Guard and the Rules block stand aside (procly on reverts)
 procly eject               # remove everything Procly wrote into this Repository
+procly gc                  # list the Orphans removed Worktrees left behind (--apply deletes them)
 procly unit install        # start the Daemon with your session (launchd or systemd)
 ```
 
-Every command but `guard` accepts `--json` and then prints one document carrying a `schema_version`. Exit codes are stable, so an agent can branch on them without parsing the output: 0 on success, 3 when a Service ended before it was healthy, 4 on a Port mismatch, 5 on a conflict with something running outside Procly, 124 on a timeout, 125 when Procly itself fails. See [Exit codes](docs/exit-codes.md) and [JSON output](docs/json.md).
+Every command but `guard` accepts `--json` and then prints one document carrying a `schema_version`. Exit codes are stable, so an agent can branch on them without parsing the output: 0 on success, 3 when a Service ended before it was healthy, 4 on a Port mismatch, 5 on a conflict with something running outside Procly, 6 when `gc --apply` could not delete every Orphan, 124 on a timeout, 125 when Procly itself fails. See [Exit codes](docs/exit-codes.md) and [JSON output](docs/json.md).
 
 To point your agents at Procly, run `procly agent install` once and commit what it writes. The Guard covers Claude Code: it reads each Bash call through a `PreToolUse` hook, lets unknown commands through without asking the Daemon, and denies a known dev-server or `docker compose up` command with the equivalent Procly command. See [Steering agents to Procly](docs/agents.md).
 

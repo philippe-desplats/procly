@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 16;
+pub(crate) const PROTOCOL_VERSION: u32 = 17;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -72,6 +72,9 @@ pub(crate) enum Request {
     /// Stops the Services of the Repository holding `cwd` and removes what Procly wrote into it, apart from the
     /// Managed blocks that were edited.
     Eject { cwd: PathBuf },
+    /// Lists the Orphans of every Repository, and deletes them with `apply`. `cwd` only names the requester in the
+    /// Daemon log.
+    Gc { cwd: PathBuf, apply: bool },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -162,6 +165,8 @@ pub(crate) enum Response {
     },
     /// The Repository is ejected.
     Eject(EjectReport),
+    /// The Orphans `gc` found, and what became of each with `apply`.
+    Gc(GcReport),
     Error {
         message: String,
     },
@@ -589,6 +594,80 @@ pub(crate) fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error>
     Ok(line)
 }
 
+/// What `gc` found, and with `applied` what it deleted.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct GcReport {
+    /// Whether `gc` was asked to delete the Orphans, and not only to list them.
+    pub(crate) applied: bool,
+    /// Every Orphan, Leases first, then output directories, then setup directories, the order they are deleted in.
+    pub(crate) orphans: Vec<Orphan>,
+    /// The Repositories whose Worktrees git could not list, nothing of which is an Orphan.
+    pub(crate) skipped: Vec<SkippedRepository>,
+}
+
+impl GcReport {
+    /// Whether some deletion failed.
+    pub(crate) fn failed(&self) -> bool {
+        self.orphans.iter().any(|orphan| orphan.error.is_some())
+    }
+}
+
+/// Something a removed Worktree left behind, whose Worktree git no longer lists and that no Pinned branch holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Orphan {
+    #[serde(flatten)]
+    pub(crate) kind: OrphanKind,
+    /// The common git directory identifying the Repository.
+    pub(crate) repository: PathBuf,
+    /// The root of the removed Worktree.
+    pub(crate) worktree: PathBuf,
+    /// Whether it was deleted, always `false` without `apply`.
+    pub(crate) deleted: bool,
+    /// Why it could not be deleted.
+    pub(crate) error: Option<String>,
+}
+
+impl Orphan {
+    /// What the Orphan is and which Worktree it belongs to, for the text of `gc` and the Daemon log.
+    pub(crate) fn describe(&self) -> String {
+        let worktree = self.worktree.display();
+        match &self.kind {
+            OrphanKind::Lease {
+                service,
+                port_name,
+                port,
+            } => format!("lease {service}.{port_name} port {port} of {worktree}"),
+            OrphanKind::OutputDirectory { path } => format!("output directory {} of {worktree}", path.display()),
+            OrphanKind::SetupDirectory { path } => format!("setup directory {} of {worktree}", path.display()),
+        }
+    }
+}
+
+/// What an Orphan is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OrphanKind {
+    /// A Lease of a Port name of a Service.
+    Lease {
+        service: String,
+        port_name: String,
+        port: u16,
+    },
+    /// The directory of the state directory holding the output files of the Services of the Worktree.
+    OutputDirectory { path: PathBuf },
+    /// The directory of the state directory holding the log of the setup commands of the Worktree.
+    SetupDirectory { path: PathBuf },
+}
+
+/// A Repository whose Worktrees git could not list, so that none of them counts as removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SkippedRepository {
+    /// The common git directory identifying the Repository.
+    pub(crate) repository: PathBuf,
+    /// Why git could not list its Worktrees.
+    pub(crate) error: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,8 +678,33 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":16,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":17,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
+    }
+
+    #[test]
+    fn an_orphan_carries_its_kind_beside_its_worktree_and_round_trips() {
+        let orphan = Orphan {
+            kind: OrphanKind::Lease {
+                service: "web".to_owned(),
+                port_name: "http".to_owned(),
+                port: 24000,
+            },
+            repository: PathBuf::from("/src/app/.git"),
+            worktree: PathBuf::from("/src/app-a"),
+            deleted: false,
+            error: None,
+        };
+        let line = encode(Response::Gc(GcReport {
+            applied: false,
+            orphans: vec![orphan.clone()],
+            skipped: Vec::new(),
+        }))
+        .unwrap();
+        assert!(line.contains(
+            r#"{"kind":"lease","service":"web","port_name":"http","port":24000,"repository":"/src/app/.git","#
+        ));
+        assert!(matches!(decode::<Response>(&line), Ok(Response::Gc(report)) if report.orphans == [orphan]));
     }
 
     #[test]

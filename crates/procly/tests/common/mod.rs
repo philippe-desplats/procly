@@ -85,6 +85,29 @@ impl Procly {
         self.state_dir.path()
     }
 
+    /// The output files and their previous files the Daemon holds in the state directory, in the directory of their
+    /// Worktree or, written before those directories existed, in the output directory itself. The record of each
+    /// Worktree directory is not one of them.
+    pub fn output_files(&self) -> Vec<PathBuf> {
+        let output = self.state_dir().join("output");
+        let mut files = Vec::new();
+        let mut dirs = vec![output];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.expect("read the output directory").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.file_name().is_some_and(|name| name != "worktree.json") {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
     /// The directory of the user settings, so that no test reads the developer's real ones.
     pub fn config_dir(&self) -> &Path {
         self.config_dir.path()

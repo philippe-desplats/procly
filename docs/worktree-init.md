@@ -45,12 +45,12 @@ A setup command that is still running after `settings.setup_progress_interval`, 
 
 ```console
 $ procly worktree init
-procly: setup command `pnpm install` still running after 1m, log: /home/me/.local/state/procly/setup/5c2e0d6b8a41f7e3.log
-procly: setup command `pnpm install` still running after 2m, log: /home/me/.local/state/procly/setup/5c2e0d6b8a41f7e3.log
+procly: setup command `pnpm install` still running after 1m, log: /home/me/.local/state/procly/setup/app_feature-5c2e0d6b8a41f7e3/setup.log
+procly: setup command `pnpm install` still running after 2m, log: /home/me/.local/state/procly/setup/app_feature-5c2e0d6b8a41f7e3/setup.log
 ran pnpm install
 ```
 
-The log holds the output of the setup commands of that Worktree, each one after a `$ command` line, and `tail -f` follows it while they run. It is emptied by the next `worktree init` of the Worktree, removed once every setup command succeeded, and kept when one failed or ran past `settings.setup_timeout`, so that the path of the last line stays valid to tell why. The exit code and the message of a setup command that ran past its time limit are the same with or without these lines.
+The log holds the output of the setup commands of that Worktree, each one after a `$ command` line, and `tail -f` follows it while they run. It sits in the setup directory of the Worktree, in the `setup` directory of the state directory. It is emptied by the next `worktree init` of the Worktree, removed with its directory once every setup command succeeded, and kept when one failed or ran past `settings.setup_timeout`, so that the path of the last line stays valid to tell why. Once git no longer lists the Worktree, its setup directory is an Orphan that `procly gc --apply` deletes, see [Collecting Orphans](gc.md). The exit code and the message of a setup command that ran past its time limit are the same with or without these lines.
 
 With `--json`, these lines are still on stderr and stdout holds its single document.
 

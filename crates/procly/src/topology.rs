@@ -1,5 +1,6 @@
 //! Topology: the Repository and the Worktree a directory belongs to, discovered through `git` (ADR 0011).
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt as _;
@@ -142,6 +143,25 @@ pub(crate) fn worktrees(git_common_dir: &Path) -> Result<Vec<Worktree>, Topology
                 path,
                 main: is_main,
             }
+        })
+        .collect())
+}
+
+/// The root of every Worktree `git worktree list` lists for a Repository, the prunable ones included, so that a
+/// Worktree on a disk that is not mounted still counts as one. Each root is given both as git records it and resolved
+/// through symlinks, the parent alone when the Worktree directory is gone, so that it matches a root Procly recorded
+/// canonicalized.
+pub(crate) fn listed_roots(git_common_dir: &Path) -> Result<BTreeSet<PathBuf>, TopologyError> {
+    let listed = parse_worktree_list(&git(git_common_dir, &["worktree", "list", "--porcelain", "-z"])?);
+    Ok(listed
+        .into_iter()
+        .filter(|entry| !entry.bare)
+        .flat_map(|entry| {
+            let resolved = std::fs::canonicalize(&entry.path).ok().or_else(|| {
+                let parent = std::fs::canonicalize(entry.path.parent()?).ok()?;
+                Some(parent.join(entry.path.file_name()?))
+            });
+            [Some(entry.path), resolved].into_iter().flatten()
         })
         .collect())
 }

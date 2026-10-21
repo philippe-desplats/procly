@@ -45,6 +45,8 @@ const EXIT_SERVICE_ENDED: u8 = 3;
 const EXIT_PORT_MISMATCH: u8 = 4;
 /// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly.
 const EXIT_CONFLICT: u8 = 5;
+/// The exit code of `gc --apply` when some Orphan could not be deleted.
+const EXIT_GC_FAILED: u8 = 6;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
@@ -63,7 +65,8 @@ struct JsonFlag {
     version,
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
-                  healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 124 when `wait` finds the Job timed out or `up` \
+                  healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
+                  every Orphan, 124 when `wait` finds the Job timed out or `up` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
                   docs/exit-codes.md."
@@ -202,6 +205,22 @@ enum Command {
         /// goes to stderr.
         #[arg(long, value_enum)]
         agent: Option<AgentCli>,
+        #[command(flatten)]
+        json: JsonFlag,
+    },
+    /// List the Orphans of every Repository, what removed Worktrees left behind: the Leases, the output directories
+    /// and the setup directories of each Worktree git no longer lists. Nothing is deleted without `--apply`.
+    #[command(
+        after_help = "A Worktree git still lists, even one marked prunable, never counts as removed, and nothing a Pinned \
+                      branch holds is an Orphan. Exit codes: 0 when every Orphan is listed, or deleted with \
+                      `--apply`, 6 when `--apply` could not delete some of them, each failure on stderr, 125 when \
+                      Procly itself fails. See docs/gc.md and docs/exit-codes.md."
+    )]
+    Gc {
+        /// Delete the Orphans, reporting each deletion and each failure and going on after a failure. The Daemon logs
+        /// every deletion and who asked.
+        #[arg(long)]
+        apply: bool,
         #[command(flatten)]
         json: JsonFlag,
     },
@@ -421,6 +440,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Off { json } => switch(&state, true, json.json),
         Command::On { json } => switch(&state, false, json.json),
         Command::Eject { agent, json } => eject(&state, agent, json.json),
+        Command::Gc { apply, json } => gc(&state, apply, json.json),
         Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
@@ -903,6 +923,68 @@ fn init(json: bool) -> anyhow::Result<ExitCode> {
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Runs `gc`, printing each Orphan, or with `apply` each deletion on stdout and each failure on stderr.
+fn gc(state: &StateDir, apply: bool, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let report = match client::send(state, &Request::Gc { cwd, apply })? {
+        Response::Gc(report) => report,
+        other => return unexpected(other),
+    };
+    let code = if report.applied && report.failed() {
+        ExitCode::from(EXIT_GC_FAILED)
+    } else {
+        ExitCode::SUCCESS
+    };
+    if json {
+        json::print(&report)?;
+        return Ok(code);
+    }
+    for skipped in &report.skipped {
+        eprintln!(
+            "procly: cannot list the Worktrees of {}, nothing of it is an Orphan: {}",
+            skipped.repository.display(),
+            skipped.error
+        );
+    }
+    if report.orphans.is_empty() {
+        println!("no Orphans");
+        return Ok(code);
+    }
+    if !report.applied {
+        for orphan in &report.orphans {
+            println!("{}", orphan.describe());
+        }
+        eprintln!(
+            "procly: {}, `procly gc --apply` deletes {}",
+            orphans_count(report.orphans.len()),
+            if report.orphans.len() == 1 { "it" } else { "them" }
+        );
+        return Ok(code);
+    }
+    for orphan in &report.orphans {
+        match &orphan.error {
+            None => println!("deleted {}", orphan.describe()),
+            Some(error) => eprintln!("procly: cannot delete {}: {error}", orphan.describe()),
+        }
+    }
+    let failed = report.orphans.iter().filter(|orphan| orphan.error.is_some()).count();
+    if failed > 0 {
+        eprintln!(
+            "procly: {failed} of {} could not be deleted",
+            orphans_count(report.orphans.len())
+        );
+    }
+    Ok(code)
+}
+
+/// `1 Orphan` or `3 Orphans`.
+fn orphans_count(count: usize) -> String {
+    match count {
+        1 => "1 Orphan".to_owned(),
+        _ => format!("{count} Orphans"),
+    }
 }
 
 /// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands

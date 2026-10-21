@@ -27,6 +27,7 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `worktree init` | what was copied and what ran | [Preparing a Worktree](worktree-init.md) |
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
 | `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
+| `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |
 
 ## `run`
@@ -92,6 +93,17 @@ $ procly down --json
 ```
 
 `service` is the Service asked for, or `null` for all of them. `stopped` also lists the Isolated Compose services whose container of the Worktree was stopped. `released` lists the Shared and Logical Compose services the Worktree let go of, each with `service`, `others` (how many other Worktrees still need the container) and `grace_ms` (how long it keeps running once none does).
+
+## `gc`
+
+```console
+$ procly gc --json
+{"schema_version":1,"applied":false,"orphans":[{"kind":"lease","service":"web","port_name":"http","port":24081,"repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null},{"kind":"setup_directory","path":"/home/me/.local/state/procly/setup/app_login-5c2e0d6b8a41f7e3","repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null}],"skipped":[]}
+```
+
+`applied` is `true` for `gc --apply`. `orphans` lists every Orphan in the order `--apply` deletes them, the Leases, then the output directories, then the setup directories. Each one has a `kind` of `lease` (with `service`, `port_name` and `port`), `output_directory` or `setup_directory` (with `path`), the `repository` and the removed `worktree` it belongs to, whether it was `deleted`, always `false` without `--apply`, and the `error` that kept it from being deleted, or `null`. `skipped` lists the Repositories whose Worktrees git could not list, each with its `repository` and the `error` of git, nothing of which is an Orphan.
+
+`gc --apply --json` exits with 6 when some `error` is not `null`, as without `--json`, and prints none of the lines of stderr, which the document carries.
 
 ## `status`
 

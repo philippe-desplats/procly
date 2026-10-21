@@ -555,7 +555,7 @@ fn launch(
     output: &Arc<Mutex<OutputBuffer>>,
     outputs: &OutputFiles,
 ) -> Result<Process, ServiceError> {
-    let file = outputs.create().map_err(|source| ServiceError::Output {
+    let file = outputs.create(&spec.topology).map_err(|source| ServiceError::Output {
         service: spec.name.clone(),
         dir: outputs.dir().to_owned(),
         source,

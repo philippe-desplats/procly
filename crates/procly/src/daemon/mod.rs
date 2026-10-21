@@ -9,6 +9,7 @@ mod cpu;
 mod eject;
 mod environment;
 mod foreign;
+mod gc;
 mod health;
 mod hook;
 mod idle;
@@ -28,6 +29,7 @@ mod service;
 mod status;
 mod store;
 mod up;
+mod worktree_dir;
 mod worktree_init;
 
 use std::collections::{BTreeSet, HashMap};
@@ -77,7 +79,8 @@ struct Registry {
     mirroring: Mutex<()>,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
-    /// The directory holding the log of the setup commands `worktree init` runs.
+    /// The directory holding the setup directory of each Worktree, with the log of the setup commands `worktree init`
+    /// runs.
     setup_logs: PathBuf,
     /// Set once the Services recorded by the previous Daemon are reconciled. Left unset when their document cannot
     /// be read, so that the request after it is fixed or removed reconciles again.
@@ -288,7 +291,7 @@ async fn dispatch(
     let jobs = &registry.jobs;
     if matches!(
         request,
-        Request::Up { .. } | Request::Down { .. } | Request::Status { .. } | Request::Eject { .. }
+        Request::Up { .. } | Request::Down { .. } | Request::Status { .. } | Request::Eject { .. } | Request::Gc { .. }
     ) && let Err(message) = registry.reconciled().await
     {
         return Response::Error { message };
@@ -359,6 +362,7 @@ async fn dispatch(
             .await
             .unwrap_or_else(failure),
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
+        Request::Gc { cwd, apply } => gc::run(registry, cwd, apply, peer).await,
         request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
             agent::answer(registry, request).await
         }
