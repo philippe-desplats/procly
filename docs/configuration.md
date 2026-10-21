@@ -295,6 +295,84 @@ Commands run in the container of the Compose service with `docker compose exec`,
 
 The bundled Postgres Driver creates one database per resource with `createdb`, as the user `${POSTGRES_USER:-postgres}` of the container, and builds `postgresql://postgres:postgres@localhost:{port}/{resource}`. A Repository whose container uses other credentials copies the file to `.procly/drivers/postgres.toml` and edits the URL.
 
+### Example: a Driver for an S3-compatible store
+
+Procly bundles no Driver for an S3-compatible object store. This one creates one bucket per resource and Worktree. Save it as `.procly/drivers/s3.toml` at the root of the Repository, or in `drivers/` next to the user settings, and set `driver = "s3"` on the Compose service that runs your store.
+
+```toml
+# One bucket per resource in an S3-compatible store.
+#
+# It expects, inside the container:
+#   - the MinIO client, `mc`, on the PATH,
+#   - the store listening on port 9000 of the container, the port the commands below reach,
+#   - the variables S3_ACCESS_KEY and S3_SECRET_KEY, set by the `environment` of the service in the compose file. The secret must
+#     not hold a character that is special in a URL.
+
+# The endpoint, not a bucket: a bucket name holds no underscore, and the name of a resource does in every Worktree but
+# the Main one. The application reads the bucket name from {services.<service>.resources.<key>.name}, see below.
+url = "http://localhost:{port}"
+
+# The longest bucket name S3 accepts. The commands turn each underscore into a hyphen, which keeps the length.
+max_length = 63
+
+ready = 'MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc ls local'
+
+check = '''
+bucket=$(printf %s '{resource}' | tr _ -)
+MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc stat "local/$bucket"
+'''
+create = '''
+bucket=$(printf %s '{resource}' | tr _ -)
+MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc mb "local/$bucket"
+'''
+drop = '''
+bucket=$(printf %s '{resource}' | tr _ -)
+MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc rb --force "local/$bucket"
+'''
+```
+
+The compose file publishes the Lease and defines the 2 variables, with the image you run in place of the comment:
+
+```yaml
+services:
+  store:
+    # image: the S3-compatible image you run, with `mc` inside
+    ports:
+      - "${PORT_API}:9000"
+    environment:
+      S3_ACCESS_KEY: dev-access-key
+      S3_SECRET_KEY: dev-secret-key
+```
+
+The Service that uses it declares the bucket as a resource, and hands the application the endpoint and the bucket name:
+
+```toml
+[services.store]
+compose = "store"
+driver = "s3"
+ports = { api = 9000 }
+
+[services.store.resources.assets]
+name = "assets"
+
+[services.web]
+run = "pnpm --filter web dev"
+needs = ["store"]
+
+[services.web.env]
+S3_ENDPOINT = "{services.store.resources.assets.url}"
+S3_BUCKET_NAME = "{services.store.resources.assets.name}"
+```
+
+Things to know before you rely on it:
+
+- It is not tested in CI beyond the fact that the file loads as a Driver. Nothing checks that the commands work against your image, so run `procly up` once against it and read the result.
+- The name Procly gives a resource holds underscores in every Worktree but the Main one, `assets` there and `assets__app_other` in a Worktree in `app-other`, and a bucket name cannot. The commands replace each underscore with a hyphen, so that Worktree gets the bucket `assets--app-other`. The application makes the same replacement on `S3_BUCKET_NAME`, since the URL cannot carry the bucket for the reason given in its comment.
+- A bucket name holds 3 to 63 characters, so `name` has at least 3 in the Main worktree. The `max_length` of 63 refuses a longer name instead of cutting it. Some stores also reserve a few suffixes such as `-s3alias`, which a Worktree slug can reach, so check the rules of yours.
+- `drop` removes the bucket with every object in it.
+- The Driver has no `copy`, so a resource cannot use the Seed `template`. `empty` and a command Seed work, and the command receives the name with its underscores in `PROCLY_RESOURCE_NAME`, so it applies the same replacement before it addresses the bucket.
+- For another client, such as the AWS CLI with `--endpoint-url`, keep the structure and change the 4 commands.
+
 ### Numbered resources
 
 The bundled `redis` Driver gives each Worktree its own database index in the one Redis container, with 16 of them, the databases a Redis server starts with. It builds `redis://localhost:{port}/{resource}` and has `index = true`, so the URL of each Worktree ends with its own index.
