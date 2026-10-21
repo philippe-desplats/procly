@@ -117,7 +117,7 @@ The Isolation mode where each Worktree runs its own container, under a compose p
 _Avoid_: container mode, dedicated
 
 **Logical resource**:
-A per-Worktree slice inside a Logical container, such as a Postgres database, a Redis database index or a MinIO bucket.
+A per-Worktree slice inside a Logical container, such as a Postgres database, a Redis database index or an S3 bucket.
 _Avoid_: tenant, namespace
 
 **Driver**:
@@ -131,6 +131,10 @@ _Avoid_: fixture, bootstrap data
 **Grace period**:
 The delay a Shared or Logical container keeps running after its last Worktree stopped needing it.
 _Avoid_: cooldown, linger
+
+**Orphan**:
+A Lease, Logical resource or Isolated container whose Worktree git no longer lists, and that no Pinned branch holds.
+_Avoid_: stale, dangling, leftover
 
 **Retention policy**:
 The rule that decides what happens to an Isolated container's data when its Worktree is removed: keep, delete immediately or delete after a delay.
@@ -149,6 +153,10 @@ _Avoid_: dotenv, local env
 **Worktree init**:
 The one-time, idempotent preparation of a new Worktree: copying untracked files from the Main worktree and running its setup commands.
 _Avoid_: bootstrap, setup script, provisioning
+
+**Worktree release**:
+The idempotent undoing of what a Worktree holds in Procly before the Worktree is removed: stopping its Services and Jobs and releasing its Leases, except those of a Pinned branch.
+_Avoid_: teardown, cleanup, worktree remove
 
 ### Agent integration and reversibility
 
@@ -183,6 +191,7 @@ _Avoid_: uninstall, teardown
 - A **Logical** container holds one or more **Logical resources** per **Worktree**, created by its **Driver** and filled by its **Seed**.
 - A **Shared** or **Logical** container is reference-counted by **Worktrees** and stops after its **Grace period**.
 - **Derived variables** are injected into every **Process service** and mirrored in the **Env file**.
+- **Worktree release** keeps the **Logical resources** of a **Worktree**, which become **Orphans** once git no longer lists it.
 - **Eject** removes every **Managed block**, including **Rules blocks** and **Guards**.
 
 ## Flagged ambiguities

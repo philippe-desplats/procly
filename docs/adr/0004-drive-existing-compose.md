@@ -5,5 +5,5 @@ Procly never defines containers itself and never rewrites a compose file. It run
 ## Consequences
 
 - A compose file that fixes `container_name` or a network name cannot run Isolated. Procly detects it through `docker compose config`, refuses that mode with the offending line, and still accepts Shared and Logical.
-- Procly never deletes data by itself. Volumes follow the Retention policy, which defaults to keep.
+- Procly never deletes data on its own inference. It deletes only what a person declared: a command run by hand, such as `procly gc`, or a Retention policy other than keep written in `procly.toml`. The Daemon logs every deletion. Volumes follow the Retention policy, which defaults to keep.
 - A Logical resource whose command Seed fails is dropped again when the same request created it, so that the next `procly up` seeds it afresh instead of finding it and keeping it empty. The request fails with a message that says whether the drop worked, and gives the command to drop it by hand when it did not. A resource the container already had is never dropped, and the resources created earlier in the same request stay, as the request stops at the failed one.
