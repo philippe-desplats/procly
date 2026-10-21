@@ -72,3 +72,5 @@ exec procly worktree init "$@"
 ```
 
 Called as `scripts/setup-worktree.sh /path/to/worktree` from anywhere, or as `scripts/setup-worktree.sh` from inside the Worktree, it prepares the right one. Move what the old script did into `copy` and `setup`.
+
+Before the Worktree is removed, `procly worktree release` stops its work and releases its Leases, see [Releasing a Worktree](worktree-release.md).

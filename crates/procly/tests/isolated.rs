@@ -269,6 +269,33 @@ fn docker_down_stops_the_container_of_the_worktree_at_once_and_keeps_it_with_its
 }
 
 #[test]
+fn docker_a_worktree_release_stops_the_container_of_the_worktree_at_once_and_releases_its_lease() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.other_project.container();
+
+    let output = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db stopped\nlease db.db port {other_port} released\n")
+    );
+    assert!(!fixture.other_project.is_running());
+    assert!(!listens(other_port));
+    assert_eq!(fixture.other_project.container(), container);
+    assert!(fixture.other_project.volume_exists());
+    // The container of the other Worktree is its own business.
+    assert!(fixture.main_project.is_running());
+    let again = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+    assert_eq!(stdout(&again), "nothing to release\n");
+}
+
+#[test]
 fn docker_status_shows_the_containers_of_the_worktree_and_its_json_lists_them() {
     if !require_docker() {
         return;

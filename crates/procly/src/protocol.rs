@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 17;
+pub(crate) const PROTOCOL_VERSION: u32 = 18;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -75,6 +75,9 @@ pub(crate) enum Request {
     /// Lists the Orphans of every Repository, and deletes them with `apply`. `cwd` only names the requester in the
     /// Daemon log.
     Gc { cwd: PathBuf, apply: bool },
+    /// Runs the Worktree release of the Worktree holding `path`: stops its Services and Jobs, lets go of its Compose
+    /// services and releases its Leases, apart from those of a Pinned branch, and answers once their trees are gone.
+    WorktreeRelease { path: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -167,6 +170,8 @@ pub(crate) enum Response {
     Eject(EjectReport),
     /// The Orphans `gc` found, and what became of each with `apply`.
     Gc(GcReport),
+    /// The Worktree is released.
+    WorktreeRelease(ReleaseReport),
     Error {
         message: String,
     },
@@ -367,6 +372,70 @@ pub(crate) struct Released {
     pub(crate) others: usize,
     /// How long the container keeps running once no Worktree needs it.
     pub(crate) grace_ms: u64,
+}
+
+/// What a Worktree release did to a Worktree.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct ReleaseReport {
+    pub(crate) worktree: PathBuf,
+    /// The Services it stopped, by name.
+    pub(crate) services: Vec<String>,
+    /// The Jobs it stopped, by identifier.
+    pub(crate) jobs: Vec<String>,
+    /// The Compose services the Worktree let go of.
+    pub(crate) compose_services: Vec<Released>,
+    /// The Leases it released, whose ports any Worktree can be granted now.
+    pub(crate) leases: Vec<LeaseHeld>,
+    /// The Leases of the Worktree it kept.
+    pub(crate) kept_leases: Vec<KeptLease>,
+    /// The Logical resources of the Worktree, which a Worktree release never drops.
+    pub(crate) logical_resources: Vec<KeptResource>,
+}
+
+impl ReleaseReport {
+    /// Whether nothing was stopped, let go of nor released, as for a second release or a Worktree Procly never saw.
+    pub(crate) fn released_nothing(&self) -> bool {
+        self.services.is_empty() && self.jobs.is_empty() && self.compose_services.is_empty() && self.leases.is_empty()
+    }
+}
+
+/// The port one Port name of one Service holds through its Lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LeaseHeld {
+    pub(crate) service: String,
+    pub(crate) port_name: String,
+    pub(crate) port: u16,
+}
+
+/// A Lease a Worktree release kept, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeptLease {
+    #[serde(flatten)]
+    pub(crate) lease: LeaseHeld,
+    #[serde(flatten)]
+    pub(crate) reason: KeptBecause,
+}
+
+/// Why a Worktree release kept a Lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub(crate) enum KeptBecause {
+    /// The Lease is bound to the Pinned branch `branch` the Worktree is on, so that it survives the Worktree.
+    PinnedBranch { branch: String },
+    /// The container of the Compose service still runs on it, for the other Worktrees or its Grace period.
+    ContainerRunning,
+}
+
+/// A Logical resource a Worktree release kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeptResource {
+    /// The Compose service whose container holds it.
+    pub(crate) service: String,
+    pub(crate) driver: String,
+    /// The key of the resource in the configuration.
+    pub(crate) resource: String,
+    /// Its name in the container.
+    pub(crate) name: String,
 }
 
 /// Why a Service ended.
@@ -713,7 +782,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":17,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":18,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

@@ -29,8 +29,8 @@ use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, Occupant, Released, Request, Response,
-    ServiceEnd, UpService, Written,
+    BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, KeptBecause, KeptLease, LeaseHeld,
+    Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -161,7 +161,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Prepare a Worktree.
+    /// Prepare a Worktree, or run its Worktree release before it is removed.
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommand,
@@ -323,6 +323,22 @@ enum WorktreeCommand {
         /// The Worktree to prepare, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
     },
+    /// Run the Worktree release, before the Worktree is removed: stop its Services and Jobs with their whole process
+    /// trees, let go of its Compose services as `down` does, and release its Leases so that another Worktree can be
+    /// granted their ports at once. The Leases of a Pinned branch are kept, and so is every Logical resource, which
+    /// `procly gc` lists once the Worktree is removed. Nothing is deleted. The Daemon logs who asked.
+    #[command(
+        after_help = "Run it from the pre-remove hook of a worktree manager. Running it again, or in a Worktree Procly \
+                      never saw, prints `nothing to release`. Exit codes: 0 when the Worktree is released, also when \
+                      there was nothing to release, 125 when Procly itself fails, such as for a directory that is not \
+                      in a git Repository. See docs/worktree-release.md and docs/exit-codes.md."
+    )]
+    Release {
+        #[command(flatten)]
+        json: JsonFlag,
+        /// The Worktree to release, or any directory in it. Defaults to the current directory.
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -435,6 +451,9 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Worktree {
             command: WorktreeCommand::Init { json, path },
         } => worktree_init(&state, path, json.json),
+        Command::Worktree {
+            command: WorktreeCommand::Release { json, path },
+        } => worktree_release(&state, path, json.json),
         Command::Unit { command } => unit(&state, &command),
         Command::Agent {
             command: AgentCommand::Install { file, json },
@@ -1214,6 +1233,74 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
         }
         other => unexpected(other),
     }
+}
+
+/// Runs `worktree release`, printing one line per Service, Job, Compose service and Lease it released, then one per
+/// Lease and Logical resource it kept.
+fn worktree_release(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let path = path.map_or(cwd.clone(), |path| cwd.join(path));
+    match client::send(state, &Request::WorktreeRelease { path })? {
+        Response::WorktreeRelease(report) if json => {
+            json::print(&json::WorktreeRelease::new(&report))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Response::WorktreeRelease(report) => {
+            print(&release_summary(&report))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
+/// What `worktree release` prints: what it stopped, let go of and released, or `nothing to release`, then what it kept.
+fn release_summary(report: &ReleaseReport) -> String {
+    let mut text = String::new();
+    if report.released_nothing() {
+        text.push_str("nothing to release\n");
+    }
+    for service in &report.services {
+        let _ = writeln!(text, "{service} stopped");
+    }
+    for job in &report.jobs {
+        let _ = writeln!(text, "job {job} stopped");
+    }
+    for released in &report.compose_services {
+        let _ = writeln!(text, "{}", let_go(released));
+    }
+    for LeaseHeld {
+        service,
+        port_name,
+        port,
+    } in &report.leases
+    {
+        let _ = writeln!(text, "lease {service}.{port_name} port {port} released");
+    }
+    for KeptLease { lease, reason } in &report.kept_leases {
+        let LeaseHeld {
+            service,
+            port_name,
+            port,
+        } = lease;
+        let _ = match reason {
+            KeptBecause::PinnedBranch { branch } => writeln!(
+                text,
+                "lease {service}.{port_name} port {port} kept for Pinned branch {branch}"
+            ),
+            KeptBecause::ContainerRunning => writeln!(
+                text,
+                "lease {service}.{port_name} port {port} kept, its container still runs"
+            ),
+        };
+    }
+    for resource in &report.logical_resources {
+        let _ = writeln!(
+            text,
+            "Logical resource {} of {} ({}) kept, `procly gc` lists it once the Worktree is removed",
+            resource.name, resource.service, resource.driver
+        );
+    }
+    text
 }
 
 /// One line on stderr for a setup command still running, so that a long setup shows it is alive. Stdout, and with it the

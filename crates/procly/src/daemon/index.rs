@@ -113,6 +113,23 @@ impl Indexes {
         self.with_table(|table| Ok(table.get(key).copied()))
     }
 
+    /// The index each resource of the Compose service `service` holds in `worktree` of the Repository `repository`, by
+    /// key, without handing out any. Blocking: it reads the document the first time.
+    pub(crate) fn held(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        service: &str,
+    ) -> Result<BTreeMap<String, u32>, StoreError> {
+        self.with_table(|table| {
+            Ok(table
+                .iter()
+                .filter(|(key, _)| key.repository == repository && key.worktree == worktree && key.service == service)
+                .map(|(key, &index)| (key.resource.clone(), index))
+                .collect())
+        })
+    }
+
     /// Frees the index the resource `key` holds, so that the next resource asking for one can be granted it, when
     /// `release`, given that index, says so, and returns what it said. `release` runs under the lock of the table, so
     /// that no index is handed out between it and the freeing. Blocking: it writes the document when the resource held

@@ -291,6 +291,43 @@ fn docker_down_without_a_service_releases_every_compose_service_of_the_worktree(
 }
 
 #[test]
+fn docker_a_worktree_release_lets_go_of_the_compose_service_like_down_and_keeps_the_lease_its_container_runs_on() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.project.container();
+
+    let other = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+    assert_success(&other);
+    assert_eq!(stdout(&other), "db released, 1 other Worktree still needs it\n");
+    fixture.procly.advance_clock(Duration::from_mins(10));
+    assert!(fixture.project.is_running());
+
+    // The container holds the Leases of the Main worktree, which stay while it runs out its Grace period.
+    let main = fixture.procly.procly_in(&fixture.main, &["worktree", "release"]);
+    assert_success(&main);
+    let port = fixture.port;
+    assert_eq!(
+        stdout(&main),
+        format!(
+            "db released, it stops after 1m unless a Worktree needs it again\n\
+             lease db.db port {port} kept, its container still runs\n"
+        )
+    );
+    fixture.procly.advance_clock(Duration::from_secs(59));
+    assert!(fixture.project.is_running(), "stopped before the Grace period ended");
+    fixture.procly.advance_clock(Duration::from_secs(2));
+    eventually("the container to stop after the Grace period", || {
+        !fixture.project.is_running()
+    });
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}
+
+#[test]
 fn docker_a_compose_file_that_does_not_publish_the_lease_is_refused() {
     if !require_docker() {
         return;

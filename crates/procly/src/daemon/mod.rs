@@ -33,6 +33,7 @@ mod store;
 mod up;
 mod worktree_dir;
 mod worktree_init;
+mod worktree_release;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, Permissions, TryLockError};
@@ -303,7 +304,12 @@ async fn dispatch(
     let jobs = &registry.jobs;
     if matches!(
         request,
-        Request::Up { .. } | Request::Down { .. } | Request::Status { .. } | Request::Eject { .. } | Request::Gc { .. }
+        Request::Up { .. }
+            | Request::Down { .. }
+            | Request::Status { .. }
+            | Request::Eject { .. }
+            | Request::Gc { .. }
+            | Request::WorktreeRelease { .. }
     ) && let Err(message) = registry.reconciled().await
     {
         return Response::Error { message };
@@ -375,6 +381,12 @@ async fn dispatch(
             .unwrap_or_else(failure),
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
         Request::Gc { cwd, apply } => gc::run(registry, cwd, apply, peer).await,
+        Request::WorktreeRelease { path } => answer(
+            worktree_release::run(Arc::clone(registry), path, peer)
+                .await
+                .map_err(message),
+            Response::WorktreeRelease,
+        ),
         request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
             agent::answer(registry, request).await
         }

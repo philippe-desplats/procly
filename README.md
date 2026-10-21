@@ -127,6 +127,7 @@ Setting up a Repository and its Worktrees:
 ```sh
 procly init                # propose a procly.toml from the dev scripts and the compose file
 procly worktree init       # prepare a fresh Worktree: copy untracked files, run setup commands
+procly worktree release    # before removing a Worktree: stop its work, release its Leases, keep its data
 procly agent install       # write the Rules block and the Guard, nothing is written without it
 procly off                 # make the Guard and the Rules block stand aside (procly on reverts)
 procly eject               # remove everything Procly wrote into this Repository
@@ -200,7 +201,7 @@ An unknown key is an error, so a typo never goes unnoticed. [Configuration](docs
 - Stopping a Service sends `SIGTERM` to its whole process group, then `SIGKILL`, so nothing it forked survives it.
 - Compose services go through the `docker compose` v2 CLI and the compose file of the Repository, which Procly never modifies.
 
-The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Proposing a configuration](docs/init.md) and [Removing Procly from a Repository](docs/eject.md).
+The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Releasing a Worktree](docs/worktree-release.md), [Proposing a configuration](docs/init.md) and [Removing Procly from a Repository](docs/eject.md).
 
 ## Development
 

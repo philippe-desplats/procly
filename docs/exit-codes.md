@@ -4,7 +4,7 @@ Every `procly` command exits with one of these codes. They are stable: an agent 
 
 | Code | Meaning | Commands |
 | --- | --- | --- |
-| 0 | Success. For `up`, the Service is healthy, whether it was `started` or `reused`, and for `up` without arguments, every Service is. For `worktree init`, the Worktree is ready, also when there was nothing to do. | all |
+| 0 | Success. For `up`, the Service is healthy, whether it was `started` or `reused`, and for `up` without arguments, every Service is. For `worktree init`, the Worktree is ready, also when there was nothing to do. For `worktree release`, the Worktree release is done, also when there was nothing to release. | all |
 | 2 | Usage error: an unknown command, a missing argument or an invalid flag value. | all |
 | 3 | The Service ended before it became healthy: it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing until Procly gave up restarting it. A Compose service whose container fails to start exits with 125 instead, with the error of `docker compose` on stderr. For a Service that `up` was asked for through `needs`, the one that failed is named. Its recent output follows the error on stderr. | `up` |
 | 4 | Port mismatch: the process of the Service listened on another port than its Lease, and its process tree was stopped. The error on stderr names both ports, its recent output follows. | `up` |
