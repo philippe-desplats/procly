@@ -25,7 +25,7 @@ const INSTRUCTIONS: &str = "Procly supervises the dev processes and containers o
                             that fails returns a tool error carrying its exit code and its stderr.";
 
 /// The exit code of a command that failed in Procly itself, reported when the command left no code of its own.
-const EXIT_PROCLY_FAILURE: i32 = 125;
+const EXIT_PROCLY_FAILURE: i32 = crate::EXIT_PROCLY_FAILURE as i32;
 
 /// Starts the server on the standard input and output, and returns when the client closes its input.
 pub(crate) fn serve() -> anyhow::Result<()> {
@@ -143,21 +143,26 @@ impl McpServer {
         }
     }
 
-    /// Runs `procly <verb…> --json <rest…>` in `cwd` and turns what it printed into a tool result.
+    /// Runs `procly <verb…> --json <flags…> -- <values…>` in `cwd` and turns what it printed into a tool result. The
+    /// values follow `--` so that one starting with a dash, such as a shell command, is never read as a flag.
     async fn invoke(
         &self,
         verb: &[&str],
-        rest: Vec<String>,
+        flags: Vec<String>,
+        values: Vec<String>,
         cwd: Option<PathBuf>,
     ) -> Result<CallToolResult, ErrorData> {
         let mut command = tokio::process::Command::new(&self.exe);
         command
             .args(verb)
             .arg("--json")
-            .args(rest)
+            .args(flags)
             // The standard input is the channel of the client, a command must never read from it.
             .stdin(Stdio::null())
             .kill_on_drop(true);
+        if !values.is_empty() {
+            command.arg("--").args(values);
+        }
         if let Some(cwd) = &cwd {
             command.current_dir(cwd);
         }
@@ -183,7 +188,8 @@ impl McpServer {
     }
 }
 
-/// The exit code of `status` as a shell reports it: its own, or 128 plus the signal that killed it.
+/// The exit code of a command that ended with `status`, as a shell reports it: its own, or 128 plus the signal that
+/// killed it.
 fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
@@ -217,12 +223,12 @@ impl McpServer {
                        `procly run --json`."
     )]
     async fn run(&self, Parameters(arguments): Parameters<RunArguments>) -> Result<CallToolResult, ErrorData> {
-        let mut rest = Vec::new();
+        let mut flags = Vec::new();
         if let Some(timeout) = arguments.timeout {
-            rest.extend(["--timeout".to_owned(), timeout]);
+            flags.extend(["--timeout".to_owned(), timeout]);
         }
-        rest.push(arguments.command);
-        self.invoke(&["run"], rest, arguments.cwd).await
+        self.invoke(&["run"], flags, vec![arguments.command], arguments.cwd)
+            .await
     }
 
     #[tool(
@@ -231,7 +237,8 @@ impl McpServer {
                        Same as `procly wait --json`."
     )]
     async fn wait(&self, Parameters(arguments): Parameters<WaitArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["wait"], vec![arguments.job], arguments.cwd).await
+        self.invoke(&["wait"], Vec::new(), vec![arguments.job], arguments.cwd)
+            .await
     }
 
     #[tool(
@@ -239,7 +246,7 @@ impl McpServer {
                        response. Same as `procly logs --json`."
     )]
     async fn logs(&self, Parameters(arguments): Parameters<LogsArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["logs"], vec![arguments.job_or_service], arguments.cwd)
+        self.invoke(&["logs"], Vec::new(), vec![arguments.job_or_service], arguments.cwd)
             .await
     }
 
@@ -249,12 +256,13 @@ impl McpServer {
                        Same as `procly up --json`."
     )]
     async fn up(&self, Parameters(arguments): Parameters<UpArguments>) -> Result<CallToolResult, ErrorData> {
-        let mut rest = Vec::new();
-        if arguments.gitignore == Some(true) {
-            rest.push("--gitignore".to_owned());
-        }
-        rest.extend(arguments.service);
-        self.invoke(&["up"], rest, arguments.cwd).await
+        let flags = if arguments.gitignore == Some(true) {
+            vec!["--gitignore".to_owned()]
+        } else {
+            Vec::new()
+        };
+        self.invoke(&["up"], flags, arguments.service.into_iter().collect(), arguments.cwd)
+            .await
     }
 
     #[tool(
@@ -262,8 +270,13 @@ impl McpServer {
                        process trees. Same as `procly down --json`."
     )]
     async fn down(&self, Parameters(arguments): Parameters<DownArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["down"], arguments.service.into_iter().collect(), arguments.cwd)
-            .await
+        self.invoke(
+            &["down"],
+            Vec::new(),
+            arguments.service.into_iter().collect(),
+            arguments.cwd,
+        )
+        .await
     }
 
     #[tool(
@@ -271,7 +284,8 @@ impl McpServer {
                        variables, `PROCLY=1` and `PROCLY_SERVICE`, without starting it. Same as `procly env --json`."
     )]
     async fn env(&self, Parameters(arguments): Parameters<EnvArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["env"], vec![arguments.service], arguments.cwd).await
+        self.invoke(&["env"], Vec::new(), vec![arguments.service], arguments.cwd)
+            .await
     }
 
     #[tool(
@@ -279,12 +293,12 @@ impl McpServer {
                        status --json`."
     )]
     async fn status(&self, Parameters(arguments): Parameters<StatusArguments>) -> Result<CallToolResult, ErrorData> {
-        let rest = if arguments.all == Some(true) {
+        let flags = if arguments.all == Some(true) {
             vec!["--all".to_owned()]
         } else {
             Vec::new()
         };
-        self.invoke(&["status"], rest, arguments.cwd).await
+        self.invoke(&["status"], flags, Vec::new(), arguments.cwd).await
     }
 
     #[tool(
@@ -296,12 +310,13 @@ impl McpServer {
         &self,
         Parameters(arguments): Parameters<WorktreeInitArguments>,
     ) -> Result<CallToolResult, ErrorData> {
-        let rest = arguments
+        let values = arguments
             .path
             .map(|path| path.to_string_lossy().into_owned())
             .into_iter()
             .collect();
-        self.invoke(&["worktree", "init"], rest, arguments.cwd).await
+        self.invoke(&["worktree", "init"], Vec::new(), values, arguments.cwd)
+            .await
     }
 }
 

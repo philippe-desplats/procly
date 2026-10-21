@@ -15,6 +15,8 @@ Any other MCP client takes the same command and arguments in its server list:
 { "mcpServers": { "procly": { "command": "procly", "args": ["mcp"] } } }
 ```
 
+A tool runs its command with the environment of the `procly mcp` process, so the Jobs and Services it starts get that environment and not the one of the shell of your agent. Set what they need in the `env` block of the server entry of your agent.
+
 The server starts the Daemon on demand, on the first tool call, like any other command. It ends when the client closes its input. It gives a client no ownership of the Services it starts, see ADR 0010.
 
 ## Tools

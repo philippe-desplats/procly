@@ -265,6 +265,19 @@ fn run_returns_the_run_json_of_the_cli() {
 }
 
 #[test]
+fn an_argument_that_starts_with_a_dash_is_a_value_not_a_flag() {
+    let procly = Procly::new();
+    let mut server = McpServer::start(&procly);
+
+    let started = server.text("run", json!({ "command": "-version" }));
+    let unknown = server.call("env", json!({ "service": "-web" }));
+
+    assert!(started.contains("\"started\""), "{started}");
+    // A usage error would exit with 2, a Service that is not declared with 125.
+    assert_eq!(unknown["structuredContent"]["exit_code"], json!(125), "{unknown}");
+}
+
+#[test]
 fn run_takes_the_timeout_of_the_cli_and_wait_reports_the_timeout_as_a_tool_error() {
     let procly = Procly::new();
     let mut server = McpServer::start(&procly);

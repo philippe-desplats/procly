@@ -202,7 +202,7 @@ An unknown key is an error, so a typo never goes unnoticed. [Configuration](docs
 - Stopping a Service sends `SIGTERM` to its whole process group, then `SIGKILL`, so nothing it forked survives it.
 - Compose services go through the `docker compose` v2 CLI and the compose file of the Repository, which Procly never modifies.
 
-The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Proposing a configuration](docs/init.md) and [Removing Procly from a Repository](docs/eject.md), [The MCP server](docs/mcp.md).
+The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Proposing a configuration](docs/init.md), [Removing Procly from a Repository](docs/eject.md) and [The MCP server](docs/mcp.md).
 
 ## Development
 
