@@ -114,6 +114,11 @@ struct ManagedDocument {
     blocks: Vec<Record>,
 }
 
+/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
+pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
+    store::load::<ManagedDocument>(path, DOCUMENT_VERSION).map(|_| ())
+}
+
 impl ManagedBlocks {
     /// The fingerprints stored in the document at `path`.
     pub(crate) fn new(path: PathBuf) -> Self {

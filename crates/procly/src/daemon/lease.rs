@@ -86,6 +86,11 @@ struct LeaseDocument {
     leases: Vec<Lease>,
 }
 
+/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
+pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
+    store::load::<LeaseDocument>(path, DOCUMENT_VERSION).map(|_| ())
+}
+
 /// A Lease bound to a Worktree rather than to a Pinned branch, as `procly gc` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorktreeLease {

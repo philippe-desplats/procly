@@ -1751,7 +1751,7 @@ impl StackService {
 }
 
 /// The major version in `2.29.1` or `v2.29.1`.
-fn major(version: &str) -> Option<u32> {
+pub(crate) fn major(version: &str) -> Option<u32> {
     version.trim_start_matches('v').split('.').next()?.parse().ok()
 }
 

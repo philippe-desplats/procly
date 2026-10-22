@@ -29,6 +29,7 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
 | `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
 | `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
+| `doctor` | every check with its status, message and fix | below, and [Checking the installation](doctor.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |
 | `mcp` | none, it serves the documents above as MCP tools | [The MCP server](mcp.md) |
 
@@ -108,6 +109,17 @@ $ procly gc --json
 The kinds `isolated_container` and `isolated_volume` were added without a change of the schema version: a reader that does not know a `kind` should skip that Orphan.
 
 `gc --apply --json` exits with 6 when some `error` is not `null`, as without `--json`, and prints none of the lines of stderr, which the document carries.
+
+## `doctor`
+
+```console
+$ procly doctor --json
+{"schema_version":1,"result":"problems","checks":[{"name":"docker_compose","status":"passed","message":"docker compose 2.29.1","fix":null},{"name":"session_unit","status":"failed","message":"the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session","fix":"procly unit install"},{"name":"guard","status":"skipped","message":"/home/me/app/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered","fix":null}]}
+```
+
+`result` is `healthy` when no check failed and `problems` otherwise, and `doctor --json` exits with 7 in that case, as without `--json`. `checks` lists every check in the order the text prints them: `docker_compose`, `daemon`, `session_unit`, `state_documents`, `configuration`, `guard`, `leased_ports` and `orphans`, see [Checking the installation](doctor.md#the-checks). Each one has a `name`, a `status` of `passed`, `failed` or `skipped`, a `message` and a `fix`. The `message` of a check with several problems holds one per line. The `fix` is the command that fixes the problem, or `null` when nothing is wrong or no command fixes it, and holds one command per line when there are several. Doctor runs none of them.
+
+A later version of procly may add a check. A reader that does not know a `name` should skip that check, and the schema version stays 1.
 
 ## `status`
 

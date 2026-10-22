@@ -1,0 +1,48 @@
+# Checking the installation
+
+`procly doctor` checks that Procly can work here: the machine, the Daemon, the state it keeps, the `procly.toml` of the current Worktree and what holds the ports Procly leased. It lists every check with its result, and for each problem the command that fixes it. It changes nothing and runs none of those commands, you decide what runs.
+
+```console
+$ procly doctor
+passed  docker_compose: docker compose 2.29.1
+passed  daemon: the Daemon answers and runs procly 0.4.0
+failed  session_unit: the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session
+        fix: procly unit install
+passed  state_documents: every state document can be read
+passed  configuration: /home/me/app/procly.toml is valid and its Drivers load
+skipped guard: /home/me/app/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered
+failed  leased_ports: lease web.http port 24081 of /home/me/app-login is held by process 4812 node, which Procly did not start
+        fix: kill 4812
+failed  orphans: 3 Orphans left by removed Worktrees
+        fix: procly gc
+procly: 3 checks failed, the commands above fix them and doctor ran none
+$ echo $?
+7
+```
+
+A check is `passed`, `failed`, or `skipped` when it does not apply here or could not run, such as the Guard in a directory that is in no git Repository. Only a `failed` check is a problem. Several problems of one check are on lines of their own, with one command per line under `fix`.
+
+Doctor works without the Daemon. It runs the checks that need only the machine, the state directory and the Worktree itself, and asks the Daemon for the others. A Daemon that cannot be reached or started is a problem of its own, and the two checks that need it are `skipped`. Like every command, doctor starts the Daemon when none runs.
+
+## The checks
+
+| Check | Passes when | The fix it names |
+| --- | --- | --- |
+| `docker_compose` | `docker compose version` answers with a major version of 2 or more, which the Compose services need. | On macOS `brew install --cask docker`, nothing elsewhere since the way to install it depends on the system. |
+| `daemon` | The Daemon answers and runs the same version of procly as this command. A Daemon left running by an older procly, or speaking another protocol version, fails. | `kill "$(cat <state directory>/daemon.pid)"`, which stops the Daemon with its Services, so that the next command starts the new one. For a Daemon that does not answer, `tail -n 20 <state directory>/daemon.log`. |
+| `session_unit` | The [Session unit](daemon.md) is installed and the session manager has loaded it, so that the Daemon comes back with your session. The session manager is asked only when the unit file exists. | `procly unit install` |
+| `state_documents` | Every document of the state directory can be read: the Leases, the indexes, the Logical resources, the Services, the containers, the Isolated containers, the Repositories that are Off and the Managed blocks. A document that is absent is fine. | `mv <document> <document>.broken` for a document that is corrupt. None for a document written by a newer procly, since moving it aside would lose what that one recorded. |
+| `configuration` | The `procly.toml` of the current Worktree, with the user settings and `procly.local.toml`, is valid, and every Driver a Service names loads. `skipped` without a `procly.toml`. | `${EDITOR:-vi}` on the file, or on the Driver file in `.procly/drivers`. |
+| `guard` | The Guard in `.claude/settings.json` of the current Worktree is the one `procly agent install` recorded. `skipped` when there is none, since the Guard is opt-in. A Guard that left the settings fails, and so does one you edited. | `procly agent install` when the Guard is gone. None when you edited it, since `agent install` leaves an edited Guard as it is, restore the hook group running `procly guard` by hand. |
+| `leased_ports` | No Service ended on a [Port mismatch](exit-codes.md), and nothing Procly did not start answers on a port a Lease holds while its Service does not run. | `cd <worktree> && procly env <service>` for a Port mismatch, which prints the Lease the Service has to listen on, and the command that stops the [Foreign process](daemon.md#foreign-processes) otherwise. |
+| `orphans` | No removed Worktree left anything behind, see [Collecting Orphans](gc.md). | `procly gc`, which lists them. `procly gc --apply` deletes them. |
+
+The Leases of a Pinned branch have no Worktree, so `leased_ports` leaves them out.
+
+## Exit code
+
+`procly doctor` exits with 0 when no check failed, with 7 when at least one did, and with 125 when Procly itself fails, see [exit codes](exit-codes.md). A script can run it and branch on the code.
+
+## JSON
+
+`procly doctor --json` prints one document, see [JSON output](json.md#doctor). It lists the same checks in the same order, with the same fix, so that a script or an agent acts on each problem.
