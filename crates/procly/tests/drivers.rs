@@ -1118,20 +1118,72 @@ fn docker_gc_apply_never_drops_a_resource_a_worktree_added_while_it_runs_uses() 
     let applied = gc.wait_with_output().expect("gc --apply ends");
 
     assert_success(&applied);
-    let first = first.display();
-    assert!(
-        stdout(&applied).contains(&format!(
-            "deleted logical resource db.dev app__login (driver dir) of {first}\n"
-        )),
-        "{}",
-        stdout(&applied)
-    );
-    assert!(!stdout(&applied).contains("app_test__login"), "{}", stdout(&applied));
+    // Neither is reported: the one dropped before the Worktree was added is in use again once dropped, so it stays
+    // recorded, and the other one was kept.
+    assert!(!stdout(&applied).contains("logical resource"), "{}", stdout(&applied));
     // The resource dropped before the Worktree was added is created again by its `up`, the other one was kept.
     assert_eq!(
         resources(&fixture.project),
         ["app", "app__login", "app_test", "app_test__login"]
     );
+    let listed = procly.procly(&["gc"]);
+    assert!(!stdout(&listed).contains("logical resource"), "{}", stdout(&listed));
+}
+
+#[test]
+fn docker_gc_apply_never_frees_the_index_of_a_worktree_added_again_at_the_same_path_while_it_runs() {
+    if !require_docker() {
+        return;
+    }
+    let api = "[services.db.resources.main]\n[services.api]\nrun = 'true'\n[services.api.env]\n\
+               REDIS_URL = '{services.db.resources.main.url}'\n";
+    let fixture = logical_fixture(redis_compose, "redis", api);
+    // The drop marks that it began, and takes long enough for the Worktree to be added again meanwhile.
+    let slow = redis_driver(3).replace("drop = '", "drop = 'touch /tmp/dropping; sleep 5; ");
+    write_driver_file(&fixture.main.join(".procly/drivers"), "redis", &slow);
+    let fixture = commit_and_add_worktree(fixture);
+    let (procly, main, other) = (&fixture.procly, &fixture.main, &fixture.other);
+    let index = |worktree: &Path| {
+        let url = exported(&procly.procly_in(worktree, &["env", "api"]), "REDIS_URL");
+        url.rsplit('/').next().expect("an index").to_owned()
+    };
+    assert_success(&procly.procly_in(main, &["up", "db"]));
+    assert_success(&procly.procly_in(other, &["up", "db"]));
+    assert_eq!(index(other), "1");
+    remove_worktree(main, other);
+    let gc = procly
+        .command()
+        .current_dir(main)
+        .args(["gc", "--apply"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the procly binary runs");
+    let began = std::time::Instant::now();
+    while fixture.project.exec("test -e /tmp/dropping && echo began").trim() != "began" {
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(30),
+            "the drop never began"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // While index 1 is dropped, the Worktree is added again at the same path, and `env` hands it its index outside
+    // the lock of the container.
+    git(
+        main,
+        &["worktree", "add", "--quiet", "-b", "again", &other.to_string_lossy()],
+    );
+    assert_eq!(index(other), "1");
+    let applied = gc.wait_with_output().expect("gc --apply ends");
+
+    assert_success(&applied);
+    assert!(!stdout(&applied).contains("logical resource"), "{}", stdout(&applied));
+    // The index stays the Worktree's own, so the next Worktree is granted another one.
+    let next = git_worktree_add(main, "app-next");
+    assert_success(&procly.procly_in(&next, &["up", "db"]));
+    assert_eq!(index(&next), "2");
+    assert_eq!(index(other), "1");
     let listed = procly.procly(&["gc"]);
     assert!(!stdout(&listed).contains("logical resource"), "{}", stdout(&listed));
 }

@@ -69,6 +69,8 @@ The record of a resource is forgotten and its index freed only once `drop` succe
 
 `gc --apply` holds the container through the check, the drop and the forgetting, as `procly up` does to create resources in it, and works out once more, with the container held, whether the resource is still an Orphan. A Worktree added while `gc --apply` runs, and brought up meanwhile, thus keeps the resources it uses: such a resource is no longer an Orphan, and is neither dropped nor reported.
 
+`procly env`, and the `procly up` of a Service process, are handed their indexes without the container, so `gc --apply` works out once more, after the drop and under the lock that hands the indexes out, whether the resource is still an Orphan before it forgets it and frees its index. A Worktree added again at the same path while its resource is dropped thus keeps its record and its index, and the resource is not reported: its data was the one of the removed Worktree, and its next `procly up` creates it again.
+
 The Daemon log names who asked and every deletion, `gc deleted lease web.http port 24081 of /home/me/app-login, requested by pid 4242 (procly) in /home/me/app, parent pid 4100 (zsh)`, and every failure, so that a deletion can always be traced.
 
 ## JSON

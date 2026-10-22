@@ -667,15 +667,16 @@ impl Composes {
     /// worktree. Each command of the Driver may run for `timeout`.
     ///
     /// The container must run: it is never started for a drop. A resource the `check` of the Driver no longer finds
-    /// counts as dropped, and once dropped `forget` forgets it. The container is held throughout, so that no stop
-    /// overlaps the drop, and so that no `up` creates or reuses the resource between `still_orphan`, which tells
-    /// whether it is still an Orphan, and `forget`. Both are blocking and run on a blocking thread.
+    /// counts as dropped, and once dropped `forget` forgets it, unless it tells, by returning `false`, that the resource
+    /// is no longer an Orphan. The container is held throughout, so that no stop overlaps the drop, and so that no `up`
+    /// creates or reuses the resource between `still_orphan`, which tells whether it is still an Orphan, and `forget`.
+    /// Both are blocking and run on a blocking thread.
     pub(crate) async fn drop_resource<E>(
         &self,
         orphan: ToDrop<'_>,
         timeout: Duration,
         still_orphan: impl FnOnce() -> Result<bool, E> + Send + 'static,
-        forget: impl FnOnce() -> Result<(), E> + Send + 'static,
+        forget: impl FnOnce() -> Result<bool, E> + Send + 'static,
     ) -> Result<Dropped, E>
     where
         E: From<DropError> + Send + 'static,
@@ -697,7 +698,10 @@ impl Composes {
             return Ok(Dropped::Held);
         }
         self.drop_held(name, driver, timeout, &container, not_running).await?;
-        in_blocking(forget).await??;
+        // A Worktree added again at the same path may hold the resource again: it is handed its index outside the lock.
+        if !in_blocking(forget).await?? {
+            return Ok(Dropped::Held);
+        }
         Ok(Dropped::Dropped)
     }
 

@@ -113,22 +113,31 @@ impl Indexes {
         self.with_table(|table| Ok(table.get(key).copied()))
     }
 
-    /// Frees the index the resource `key` holds, so that the next resource asking for one can be granted it.
-    /// Blocking: it writes the document when the resource held one.
-    pub(crate) fn free(&self, key: &ResourceKey) -> Result<(), StoreError> {
+    /// Frees the index the resource `key` holds, so that the next resource asking for one can be granted it, when
+    /// `release`, given that index, says so, and returns what it said. `release` runs under the lock of the table, so
+    /// that no index is handed out between it and the freeing. Blocking: it writes the document when the resource held
+    /// one.
+    pub(crate) fn free_if<E: From<StoreError>>(
+        &self,
+        key: &ResourceKey,
+        release: impl FnOnce(Option<u32>) -> Result<bool, E>,
+    ) -> Result<bool, E> {
         self.with_table(|table| {
+            if !release(table.get(key).copied())? {
+                return Ok(false);
+            }
             if table.contains_key(key) {
                 let mut freed = table.clone();
                 freed.remove(key);
                 self.write(&freed)?;
                 *table = freed;
             }
-            Ok(())
+            Ok(true)
         })
     }
 
     /// Runs `f` on the table, read from the document when it was not yet.
-    fn with_table<T>(&self, f: impl FnOnce(&mut Table) -> Result<T, StoreError>) -> Result<T, StoreError> {
+    fn with_table<T, E: From<StoreError>>(&self, f: impl FnOnce(&mut Table) -> Result<T, E>) -> Result<T, E> {
         let mut table = self
             .table
             .lock()
@@ -385,7 +394,14 @@ mod tests {
         };
         assert_eq!(indexes.get(&key).unwrap(), Some(1));
 
-        indexes.free(&key).unwrap();
+        // Kept while the resource may not be released, then freed.
+        assert!(!indexes.free_if(&key, |_| Ok::<_, StoreError>(false)).unwrap());
+        assert_eq!(indexes.get(&key).unwrap(), Some(1));
+        assert!(
+            indexes
+                .free_if(&key, |index| Ok::<_, StoreError>(index == Some(1)))
+                .unwrap()
+        );
 
         assert_eq!(indexes.get(&key).unwrap(), None);
         let restarted = Indexes::new(path);

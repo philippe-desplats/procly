@@ -145,7 +145,8 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
     for resource in resources {
         let config = configs.get(&resource.key.repository).and_then(Option::as_ref);
         let roots = listed.get(&resource.key.repository);
-        if held(registry, &resource, config, roots)? {
+        let index = registry.indexes.get(&resource.key)?;
+        if held(&resource, index, config, roots) {
             continue;
         }
         orphans.push(resource_orphan(resource));
@@ -196,30 +197,30 @@ fn main_config(repository: &Path) -> Option<Config> {
 
 /// Whether the removed Worktree's `resource` is still held: by the Pinned branch the Worktree was on, while the
 /// configuration `config` of the Main worktree pins it or cannot be read, for an index, by nothing it can be matched
-/// with, such as an index handed out again after the index document was removed, and for a name, by a Worktree git
+/// with, such as an index handed out again after the index document was removed, its key holding `index` now, and for
+/// a name, by a Worktree git
 /// still lists among `roots` whose directory has the same name, since a Driver that names its resources names them
 /// after the Worktree slug alone and such a Worktree uses the same resource.
 fn held(
-    registry: &Registry,
     resource: &LogicalResource,
+    index: Option<u32>,
     config: Option<&Config>,
     roots: Option<&BTreeSet<PathBuf>>,
-) -> Result<bool, StoreError> {
+) -> bool {
     if let Some(branch) = &resource.branch
         && config.is_none_or(|config| config.pinned.contains_key(branch))
     {
-        return Ok(true);
+        return true;
     }
     if resource.indexed {
-        let index = registry.indexes.get(&resource.key)?;
-        return Ok(index.is_none_or(|index| index.to_string() != resource.name));
+        return index.is_none_or(|index| index.to_string() != resource.name);
     }
     // A declared name holds no double underscore, so the slug is what follows the first one. A name without one is
     // not a name the Daemon gave a Worktree, and is left alone.
     let Some((_, slug)) = resource.name.split_once("__") else {
-        return Ok(true);
+        return true;
     };
-    Ok(roots.is_some_and(|roots| roots.iter().any(|root| topology::slug_of(root) == slug)))
+    roots.is_some_and(|roots| roots.iter().any(|root| topology::slug_of(root) == slug))
 }
 
 /// The root of every Worktree where a Service runs, or where `worktree init` runs a setup command: nothing of it is
@@ -317,11 +318,14 @@ async fn delete(registry: &Arc<Registry>, orphan: &Orphan, timeout: Duration) ->
         };
         let still = {
             let (registry, key, name) = (Arc::clone(registry), key.clone(), name.clone());
-            move || still_orphan(&registry, &key, &name)
+            move || {
+                let index = registry.indexes.get(&key)?;
+                still_orphan(&registry, &key, &name, index)
+            }
         };
         let forget = {
-            let registry = Arc::clone(registry);
-            move || forget(&registry, &key)
+            let (registry, name) = (Arc::clone(registry), name.clone());
+            move || forget(&registry, &key, &name)
         };
         let to_drop = ToDrop {
             repository: &orphan.repository,
@@ -339,10 +343,10 @@ async fn delete(registry: &Arc<Registry>, orphan: &Orphan, timeout: Duration) ->
     Ok(Dropped::Dropped)
 }
 
-/// Whether the Logical resource `key`, named `name`, is still an Orphan, worked out again from what git lists now,
-/// as [`collect`] does. A resource recorded under another name since, or forgotten, is not one. Blocking: it runs git
-/// and reads the disk.
-fn still_orphan(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bool, DeleteError> {
+/// Whether the Logical resource `key`, named `name`, whose key holds the index `index`, is still an Orphan, worked
+/// out again from what git lists now, as [`collect`] does. A resource recorded under another name since, or
+/// forgotten, is not one. Blocking: it runs git and reads the disk.
+fn still_orphan(registry: &Registry, key: &ResourceKey, name: &str, index: Option<u32>) -> Result<bool, DeleteError> {
     let Some(resource) = registry
         .resources
         .all()?
@@ -356,14 +360,25 @@ fn still_orphan(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bo
         return Ok(false);
     }
     let config = main_config(&key.repository);
-    Ok(!held(registry, &resource, config.as_ref(), Some(&roots))?)
+    Ok(!held(&resource, index, config.as_ref(), Some(&roots)))
 }
 
-/// Forgets the dropped Logical resource `key`, then frees its index, so that a failure in between leaves an index
-/// taken, never a record of an index another Worktree may be granted. Blocking: it writes the documents.
-fn forget(registry: &Registry, key: &ResourceKey) -> Result<(), DeleteError> {
-    registry.resources.forget(key)?;
-    Ok(registry.indexes.free(key)?)
+/// Forgets the dropped Logical resource `key`, named `name`, then frees its index, so that a failure in between leaves
+/// an index taken, never a record of an index another Worktree may be granted, and returns `true`. A resource that is
+/// no longer an Orphan is left recorded with its index, and `false` returned.
+///
+/// Worked out again under the lock of the index table: `procly env` and the `up` of a Service process are handed
+/// their indexes outside the lock of the container, so a Worktree added again at the same path while the resource
+/// was dropped may hold its index again. Git lists such a Worktree before it asks for an index, and one asking once
+/// the index is freed is handed it as a new one. Blocking: it runs git and writes the documents.
+fn forget(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bool, DeleteError> {
+    registry.indexes.free_if(key, |index| {
+        if !still_orphan(registry, key, name, index)? {
+            return Ok(false);
+        }
+        registry.resources.forget(key)?;
+        Ok(true)
+    })
 }
 
 /// Deletes what `orphan` leaves on the disk of the state directory.
