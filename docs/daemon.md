@@ -17,7 +17,7 @@ The Daemon log names every Service it re-attached or stopped this way, with its 
 
 A re-attached Service is not a child of the new Daemon, which brings 3 limits:
 
-- Its output is kept, without the restart showing in it. A Service writes into a pipe read by a writer of its own, `procly output-file`, which outlives the Daemon and appends to an output file in the `output` directory of the state directory. The next Daemon reads that file, so `procly logs` shows what the Service printed before, during and after the restart. While no Daemon runs, the writer keeps the file bounded: once it holds 4 MiB, it moves the last MiB, as much as the output buffer of a Service holds, into a `.prev` file next to it and empties the file. A Service printing with no Daemon running therefore takes at most about 5 MiB of disk, its most recent output, and what it printed before that is dropped. A running Daemon empties the file the same way at 1 MiB, once it has read it.
+- Its output is kept, without the restart showing in it. A Service writes into a pipe read by a writer of its own, `procly output-file`, which outlives the Daemon and appends to an output file in the output directory of its Worktree, under the `output` directory of the state directory. The next Daemon reads that file, so `procly logs` shows what the Service printed before, during and after the restart. While no Daemon runs, the writer keeps the file bounded: once it holds 4 MiB, it moves the last MiB, as much as the output buffer of a Service holds, into a `.prev` file next to it and empties the file. A Service printing with no Daemon running therefore takes at most about 5 MiB of disk, its most recent output, and what it printed before that is dropped. A running Daemon empties the file the same way at 1 MiB, once it has read it.
 - Its exit code is unknown when it ends, and it is not restarted: its next `up` starts it again.
 - It is stopped like any other Service, `SIGTERM` to its whole group then `SIGKILL`, but the Daemon looks at it every 100 ms rather than waiting for it.
 
@@ -38,6 +38,8 @@ The containers of Compose services outlive the Daemon too, whether it crashed or
 | Docker does not answer | Re-attaches it as recorded, so that its counts are not lost while the engine is down |
 
 A Worktree whose directory no longer exists, removed without `procly down`, stops counting when the Daemon reconciles and whenever `procly down` reads the count. A container no Worktree needs anymore then enters its Grace period.
+
+Once it has reconciled them, the Daemon applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers whose Worktree git no longer lists. A deletion a previous Daemon was waiting for is recorded in `isolated.json`, and runs when it is due, at once if it already is.
 
 Only what `docker compose` needs to reach the engine is recorded with a container: `PATH`, `HOME`, the `DOCKER_*` and `COMPOSE_*` variables, and the variables Procly injected. The rest of the environment of the command that started it is never written to disk.
 

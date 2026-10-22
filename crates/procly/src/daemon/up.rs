@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::compose::{ComposeError, ComposeSpec, PlannedResource, PublishedLease, ResourcePlan};
+use super::compose::{ComposeError, ComposeSpec, Isolated, PlannedResource, PublishedLease, ResourcePlan};
 use super::environment::{self, DeclaredService, Leasing};
 use super::health::HealthCheck;
 use super::service::{Relation, Service, ServiceSpec, Start};
 use super::{Registry, blocking, message, read_config, topology_of};
-use crate::config::{Config, ServiceConfig, ServiceKind};
+use crate::config::{Config, IsolationMode, ServiceConfig, ServiceKind};
 use crate::driver::{self, Driver};
 use crate::ports;
 use crate::protocol::{Response, ServiceEnd, StartOutcome, UpService};
@@ -41,6 +41,10 @@ impl Scope {
         Ok(Self { topology, config })
     }
 
+    pub(super) fn config(&self) -> &Config {
+        &self.config
+    }
+
     fn worktree(&self) -> &Path {
         &self.topology.worktree.path
     }
@@ -59,6 +63,41 @@ impl Scope {
             name,
             declared: self.declared(name)?,
         })
+    }
+
+    /// Whether the Compose service `name`, which must be declared, runs one container per Worktree.
+    fn is_isolated(&self, name: &str) -> bool {
+        self.config
+            .services
+            .get(name)
+            .is_some_and(|declared| self.config.isolation(declared) == IsolationMode::Isolated)
+    }
+
+    /// Where the container of the Compose service `name` reads its compose file from, and where an Isolated one takes
+    /// its project name from. Blocking, finding the Main worktree runs git.
+    pub(super) fn project(&self, name: &str) -> anyhow::Result<(PathBuf, Option<Isolated>)> {
+        let main = self.topology.main()?.worktree.path;
+        if !self.is_isolated(name) {
+            return Ok((main, None));
+        }
+        let worktree = &self.topology.worktree;
+        let slug = (!worktree.main).then(|| worktree.slug.clone());
+        let pinned = environment::pinned_branch(&self.topology, &self.config)?.map(str::to_owned);
+        let retention = self
+            .config
+            .services
+            .get(name)
+            .and_then(|declared| declared.retention)
+            .unwrap_or_default();
+        Ok((
+            worktree.path.clone(),
+            Some(Isolated {
+                main,
+                slug,
+                pinned,
+                retention,
+            }),
+        ))
     }
 
     /// The Services to bring up for `name`, needs first, or for every Service no Group covers without `name`.
@@ -410,8 +449,15 @@ async fn up_compose(
     grace: Duration,
     env: Vec<(String, String)>,
 ) -> Result<Running, Box<Response>> {
-    let key = (scope.topology.git_common_dir.clone(), name.to_owned());
     let worktree = scope.worktree().to_owned();
+    let isolated = scope.is_isolated(name);
+    // An Isolated container belongs to its Worktree alone, nobody is left to wait for once it lets go.
+    let (owner, grace) = if isolated {
+        (Some(worktree.clone()), Duration::ZERO)
+    } else {
+        (None, grace)
+    };
+    let key = (scope.topology.git_common_dir.clone(), name.to_owned(), owner);
     let prepare = {
         let (registry, scope, name, env) = (Arc::clone(registry), scope.clone(), name.to_owned(), env.clone());
         move || prepare_compose(&registry, &scope, &name, env)
@@ -420,16 +466,35 @@ async fn up_compose(
         let (registry, scope, name) = (Arc::clone(registry), scope.clone(), name.to_owned());
         move || plan_resources(&registry, &scope, &name, env)
     };
+    let retention = isolated.then(|| {
+        let declared = scope.config.services.get(name);
+        (
+            (key.0.clone(), key.1.clone(), worktree.clone()),
+            declared.and_then(|declared| declared.retention).unwrap_or_default(),
+        )
+    });
     match registry
         .composes
         .up::<anyhow::Error, _, _>(key, worktree, grace, prepare, plan)
         .await
     {
-        Ok(brought) => Ok(Running::Compose {
-            outcome: brought.outcome,
-            port: brought.port,
-            health: brought.health,
-        }),
+        Ok(brought) => {
+            // A container that already ran was recorded with the policy of its last start, the one declared now applies.
+            if let Some((key, retention)) = retention
+                && brought.outcome == StartOutcome::Reused
+            {
+                let registry = Arc::clone(registry);
+                let retained = tokio::task::spawn_blocking(move || registry.isolated.retain(&key, retention)).await;
+                if let Ok(Err(error)) = retained {
+                    eprintln!("cannot record the retention policy of service {name}: {error:#}");
+                }
+            }
+            Ok(Running::Compose {
+                outcome: brought.outcome,
+                port: brought.port,
+                health: brought.health,
+            })
+        }
         Err(error) => match error.downcast::<ComposeError>() {
             Ok(ComposeError::Conflict { service, conflicts }) => Err(Box::new(Response::Conflict {
                 service,
@@ -482,10 +547,12 @@ fn prepare_compose(
     let injected_names = injected.variables.iter().map(|(name, _)| name.clone()).collect();
     let mut env = env;
     env.extend(injected.variables);
+    let (project_dir, isolated) = scope.project(name)?;
     Ok(ComposeSpec {
         name: name.to_owned(),
         compose: compose.to_owned(),
-        project_dir: scope.topology.main()?.worktree.path,
+        project_dir,
+        isolated,
         env,
         published,
         variables,

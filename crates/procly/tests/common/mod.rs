@@ -6,10 +6,11 @@
     reason = "each integration test binary compiles this module and uses a different part of it"
 )]
 
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
@@ -20,6 +21,10 @@ use tokio::net::TcpSocket;
 
 /// How long a test waits for an asynchronous effect before failing.
 pub const DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long a test waits for what the Daemon does with Docker on its own, a chain of `docker` commands that takes
+/// seconds on an idle machine and much longer while other test runs keep the engine busy.
+pub const DOCKER_DEADLINE: Duration = Duration::from_mins(1);
 
 /// A temporary state directory, so the Daemon started by the first command never touches the user's real one.
 ///
@@ -83,6 +88,29 @@ impl Procly {
 
     pub fn state_dir(&self) -> &Path {
         self.state_dir.path()
+    }
+
+    /// The output files and their previous files the Daemon holds in the state directory, in the directory of their
+    /// Worktree or, written before those directories existed, in the output directory itself. The record of each
+    /// Worktree directory is not one of them.
+    pub fn output_files(&self) -> Vec<PathBuf> {
+        let output = self.state_dir().join("output");
+        let mut files = Vec::new();
+        let mut dirs = vec![output];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.expect("read the output directory").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.file_name().is_some_and(|name| name != "worktree.json") {
+                    files.push(path);
+                }
+            }
+        }
+        files
     }
 
     /// The directory of the user settings, so that no test reads the developer's real ones.
@@ -182,10 +210,25 @@ pub fn assert_success(output: &Output) {
 }
 
 /// Polls `condition` until it holds, failing the test after [`DEADLINE`].
-pub fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+pub fn eventually(what: &str, condition: impl FnMut() -> bool) {
+    eventually_within(DEADLINE, what, condition, String::new);
+}
+
+/// Polls `condition` until it holds, failing the test after `deadline` with what `context` tells then, such as the
+/// Daemon log.
+pub fn eventually_within(
+    deadline: Duration,
+    what: &str,
+    mut condition: impl FnMut() -> bool,
+    context: impl Fn() -> String,
+) {
     let start = Instant::now();
     while !condition() {
-        assert!(start.elapsed() < DEADLINE, "timed out waiting for {what}");
+        assert!(
+            start.elapsed() < deadline,
+            "timed out waiting for {what}\n{}",
+            context()
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -251,21 +294,75 @@ pub fn test_server() -> PathBuf {
 
 /// A port nothing listens on right now, and that the Daemon will accept as a Lease when a test declares it.
 ///
-/// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, which the standard library
-/// sets. A port in `TIME_WAIT` passes the standard bind and fails the Daemon's, and the ephemeral ports this hands out
-/// are the ones the suite's own connections use as source ports and leave in `TIME_WAIT` when they close first. Under
-/// load that sent the Lease of a test to the Range, away from the port it declared.
+/// The ports come from 10000 to 19999, below the ephemeral ports of macOS and Linux, below the slots of
+/// [`Procly::narrow_range`] and the default Range. An ephemeral port is one the suite's own connections may take as
+/// their source port between the moment a test is handed it and the moment the Daemon or Docker binds it, and under load
+/// that sent the Lease of a test to the Range or failed the bind of its container. The ports are handed out in turn
+/// among the test runs of the machine, see [`next_slot`].
+///
+/// A port is also reserved against the other test processes of the machine, which `make check` runs in other
+/// worktrees at the same time: probing alone left a window in which another run took the port before the Daemon
+/// checked it, and the Lease went to the Range. See [`reserve`].
+///
+/// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, so a port still in `TIME_WAIT`
+/// is skipped.
 pub fn free_port() -> u16 {
+    static RESERVED: Mutex<Vec<std::fs::File>> = Mutex::new(Vec::new());
     loop {
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .expect("bind an ephemeral port")
-            .local_addr()
-            .expect("read the ephemeral port")
-            .port();
-        if accepted_by_the_daemon(port) {
+        let slot = next_slot("next-port", 10_000);
+        let port = 10_000 + u16::try_from(slot).expect("10000 slots fit in a port");
+        if let Some(reservation) = reserve(port)
+            && accepted_by_the_daemon(port)
+        {
+            RESERVED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(reservation);
             return port;
         }
     }
+}
+
+/// Takes the lock of `port` among the test processes of the user, or `None` when another one holds it.
+///
+/// The lock is an advisory lock on a file named after the port, in a directory every test run of the user shares
+/// whatever its `TMPDIR`. It is held until the test process exits, the system releases it even after a crash.
+fn reserve(port: u16) -> Option<std::fs::File> {
+    let file = std::fs::File::create(reservations().join(port.to_string())).expect("create a test port reservation");
+    file.try_lock().ok().map(|()| file)
+}
+
+/// The next of `slots` slots counted in the file `counter`, which every test run of the user shares, so that a slot
+/// is handed out again only once all the others were.
+///
+/// A port a test leaves is not free at once: Colima forwards the ports a container publishes to the host from an ssh
+/// process, which opens and closes them seconds after the container did, and a test handed that port in between saw
+/// its Lease go to the Range. In turn, a port comes back long after.
+fn next_slot(counter: &str, slots: u32) -> u32 {
+    let mut file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(reservations().join(counter))
+        .expect("open a test slot counter");
+    file.lock().expect("lock a test slot counter");
+    let mut text = String::new();
+    file.read_to_string(&mut text).expect("read a test slot counter");
+    let slot = text.trim().parse::<u32>().unwrap_or(0) % slots;
+    file.set_len(0).expect("empty a test slot counter");
+    file.seek(std::io::SeekFrom::Start(0))
+        .expect("rewind a test slot counter");
+    write!(file, "{}", (slot + 1) % slots).expect("write a test slot counter");
+    slot
+}
+
+/// The directory of the test port reservations and slot counters, which every test run of the user shares whatever
+/// its `TMPDIR`.
+fn reservations() -> PathBuf {
+    let directory = PathBuf::from(format!("/tmp/procly-test-ports-{}", nix::unistd::getuid()));
+    std::fs::create_dir_all(&directory).expect("create the test port reservations directory");
+    directory
 }
 
 /// Whether the bind the Daemon checks a Lease with succeeds on `port`, IPv4 and IPv6.
@@ -315,10 +412,9 @@ impl Procly {
     /// its own Daemon, never draw the same ports. Returns its bounds.
     ///
     /// The Ranges sit below the ephemeral ports of Linux and macOS, so that [`free_port`] never returns one of them,
-    /// and each test of a binary gets the next one, offset by the pid against other test runs on the same machine.
+    /// and each test gets the next one among the test runs of the machine, see [`next_slot`].
     pub fn narrow_range(&self) -> (u16, u16) {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let slot = (std::process::id() * 7 + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 600;
+        let slot = next_slot("next-range", 600);
         let start = 20_000 + u16::try_from(slot * 20).expect("600 slots of 20 ports fit below 32768");
         let end = start + 19;
         std::fs::write(
@@ -366,9 +462,33 @@ pub fn git_output(dir: &Path, args: &[&str]) -> String {
     stdout(&output)
 }
 
+/// How many Docker tests of one test binary run at once.
+///
+/// Each Compose project gets a network of its own, carved from the few address pools of the engine, and the engine
+/// refuses a network once they are spent. One Docker test per test thread spent them on a machine with many cores.
+const DOCKER_TESTS_AT_ONCE: usize = 4;
+
+/// The Docker tests of this test binary running now.
+static DOCKER_TESTS_RUNNING: Mutex<usize> = Mutex::new(0);
+static DOCKER_TEST_DONE: Condvar = Condvar::new();
+
+/// The turn of a Docker test among the [`DOCKER_TESTS_AT_ONCE`] that may run at once, held until it is dropped.
+#[derive(Debug)]
+pub struct DockerTurn(());
+
+impl Drop for DockerTurn {
+    fn drop(&mut self) {
+        *DOCKER_TESTS_RUNNING.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        DOCKER_TEST_DONE.notify_one();
+    }
+}
+
 /// Whether `docker compose` v2 and a running Docker engine are available, printing why a Docker test is skipped
-/// otherwise. A Docker test starts with `if !require_docker() { return; }`.
-pub fn require_docker() -> bool {
+/// otherwise. When they are, waits for the turn of the test and returns it.
+///
+/// A Docker test starts with `let Some(_docker) = require_docker() else { return };`, so that its turn is dropped
+/// after everything else it holds, once its Daemon and Compose projects are gone.
+pub fn require_docker() -> Option<DockerTurn> {
     let works = |args: &[&str]| {
         Command::new("docker")
             .args(args)
@@ -376,11 +496,16 @@ pub fn require_docker() -> bool {
             .output()
             .is_ok_and(|output| output.status.success())
     };
-    let available = works(&["compose", "version"]) && works(&["info"]);
-    if !available {
+    if !(works(&["compose", "version"]) && works(&["info"])) {
         eprintln!("skipped: docker compose v2 and a running Docker engine are required");
+        return None;
     }
-    available
+    let mut running = DOCKER_TESTS_RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+    while *running >= DOCKER_TESTS_AT_ONCE {
+        running = DOCKER_TEST_DONE.wait(running).unwrap_or_else(PoisonError::into_inner);
+    }
+    *running += 1;
+    Some(DockerTurn(()))
 }
 
 /// The one JSON document `output` holds on stdout, which must end with a newline and carry nothing else.

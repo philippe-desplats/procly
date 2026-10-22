@@ -38,18 +38,22 @@ pub(crate) struct ContainerRecord {
     /// When its running Grace period ends, in milliseconds since the Unix epoch, so that it still compares once the
     /// Daemon restarted.
     pub(crate) deadline_ms: Option<u64>,
+    /// The Worktree an Isolated container runs for alone, `None` for a container every Worktree shares. Left out of
+    /// the document when `None`, so that a record of a shared container reads as it did before Isolated ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) isolated: Option<PathBuf>,
 }
 
 impl ContainerRecord {
-    /// The Repository and the name of the Service the container runs for.
+    /// The Repository and the name of the Service the container runs for, and its Worktree when it is Isolated.
     pub(crate) fn key(&self) -> Key {
-        (self.repository.clone(), self.service.clone())
+        (self.repository.clone(), self.service.clone(), self.isolated.clone())
     }
 }
 
 /// A container is shared by the Worktrees of one Repository, so it is keyed by the Repository and the name of its
-/// Service.
-pub(crate) type Key = (PathBuf, String);
+/// Service. An Isolated container belongs to one Worktree, whose root completes its key.
+pub(crate) type Key = (PathBuf, String, Option<PathBuf>);
 
 /// The document holding every record.
 #[derive(Debug, Serialize, Deserialize)]

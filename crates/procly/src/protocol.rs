@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 16;
+pub(crate) const PROTOCOL_VERSION: u32 = 18;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -72,6 +72,12 @@ pub(crate) enum Request {
     /// Stops the Services of the Repository holding `cwd` and removes what Procly wrote into it, apart from the
     /// Managed blocks that were edited.
     Eject { cwd: PathBuf },
+    /// Lists the Orphans of every Repository, and deletes them with `apply`. `cwd` only names the requester in the
+    /// Daemon log.
+    Gc { cwd: PathBuf, apply: bool },
+    /// Runs the Worktree release of the Worktree holding `path`: stops its Services and Jobs, lets go of its Compose
+    /// services and releases its Leases, apart from those of a Pinned branch, and answers once their trees are gone.
+    WorktreeRelease { path: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -162,6 +168,10 @@ pub(crate) enum Response {
     },
     /// The Repository is ejected.
     Eject(EjectReport),
+    /// The Orphans `gc` found, and what became of each with `apply`.
+    Gc(GcReport),
+    /// The Worktree is released.
+    WorktreeRelease(ReleaseReport),
     Error {
         message: String,
     },
@@ -321,8 +331,12 @@ pub(crate) struct Left {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Stopped {
     pub(crate) service: String,
-    /// The Worktree it ran for, `None` for a Compose service, whose container belongs to the Repository.
+    /// The Worktree it ran for, `None` for a Compose service whose container belongs to the Repository.
     pub(crate) worktree: Option<PathBuf>,
+    /// Whether it is a Compose service whose container belongs to `worktree`, an Isolated one. Left out when not, so
+    /// that the report of the other Services reads as it did before Isolated ones.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) isolated: bool,
 }
 
 /// What `eject` did to a Repository.
@@ -358,6 +372,70 @@ pub(crate) struct Released {
     pub(crate) others: usize,
     /// How long the container keeps running once no Worktree needs it.
     pub(crate) grace_ms: u64,
+}
+
+/// What a Worktree release did to a Worktree.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct ReleaseReport {
+    pub(crate) worktree: PathBuf,
+    /// The Services it stopped, by name.
+    pub(crate) services: Vec<String>,
+    /// The Jobs it stopped, by identifier.
+    pub(crate) jobs: Vec<String>,
+    /// The Compose services the Worktree let go of.
+    pub(crate) compose_services: Vec<Released>,
+    /// The Leases it released, whose ports any Worktree can be granted now.
+    pub(crate) leases: Vec<LeaseHeld>,
+    /// The Leases of the Worktree it kept.
+    pub(crate) kept_leases: Vec<KeptLease>,
+    /// The Logical resources of the Worktree, which a Worktree release never drops.
+    pub(crate) logical_resources: Vec<KeptResource>,
+}
+
+impl ReleaseReport {
+    /// Whether nothing was stopped, let go of nor released, as for a second release or a Worktree Procly never saw.
+    pub(crate) fn released_nothing(&self) -> bool {
+        self.services.is_empty() && self.jobs.is_empty() && self.compose_services.is_empty() && self.leases.is_empty()
+    }
+}
+
+/// The port one Port name of one Service holds through its Lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LeaseHeld {
+    pub(crate) service: String,
+    pub(crate) port_name: String,
+    pub(crate) port: u16,
+}
+
+/// A Lease a Worktree release kept, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeptLease {
+    #[serde(flatten)]
+    pub(crate) lease: LeaseHeld,
+    #[serde(flatten)]
+    pub(crate) reason: KeptBecause,
+}
+
+/// Why a Worktree release kept a Lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub(crate) enum KeptBecause {
+    /// The Lease is bound to the Pinned branch `branch` the Worktree is on, so that it survives the Worktree.
+    PinnedBranch { branch: String },
+    /// The container of the Compose service still runs on it, for the other Worktrees or its Grace period.
+    ContainerRunning,
+}
+
+/// A Logical resource a Worktree release kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct KeptResource {
+    /// The Compose service whose container holds it.
+    pub(crate) service: String,
+    pub(crate) driver: String,
+    /// The key of the resource in the configuration.
+    pub(crate) resource: String,
+    /// Its name in the container.
+    pub(crate) name: String,
 }
 
 /// Why a Service ended.
@@ -446,6 +524,23 @@ pub(crate) struct WorktreeStatus {
     /// Worktree without any reads as it did before Foreign processes were reported.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) foreign: Vec<ForeignProcess>,
+    /// The Isolated containers Procly runs for the Worktree. Left out when empty, so that the status of a Worktree
+    /// without any reads as it did before Isolated containers were reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) containers: Vec<ContainerStatus>,
+}
+
+/// An Isolated container Procly started or adopted for a Worktree, which runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContainerStatus {
+    /// The name of the Compose service in `procly.toml`.
+    pub(crate) service: String,
+    /// The compose project of the Worktree the container belongs to.
+    pub(crate) project: String,
+    /// The service of the compose file it runs.
+    pub(crate) compose: String,
+    /// The Lease its health check probes.
+    pub(crate) port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -568,6 +663,115 @@ pub(crate) fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error>
     Ok(line)
 }
 
+/// What `gc` found, and with `applied` what it deleted.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct GcReport {
+    /// Whether `gc` was asked to delete the Orphans, and not only to list them.
+    pub(crate) applied: bool,
+    /// Every Orphan, Leases first, then Logical resources, then output directories, setup directories, Isolated
+    /// containers and their volumes, the order they are deleted in.
+    pub(crate) orphans: Vec<Orphan>,
+    /// The Repositories whose Worktrees git could not list, nothing of which is an Orphan.
+    pub(crate) skipped: Vec<SkippedRepository>,
+}
+
+impl GcReport {
+    /// Whether some deletion failed.
+    pub(crate) fn failed(&self) -> bool {
+        self.orphans.iter().any(|orphan| orphan.error.is_some())
+    }
+}
+
+/// Something a removed Worktree left behind, whose Worktree git no longer lists and that no Pinned branch holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Orphan {
+    #[serde(flatten)]
+    pub(crate) kind: OrphanKind,
+    /// The common git directory identifying the Repository.
+    pub(crate) repository: PathBuf,
+    /// The root of the removed Worktree.
+    pub(crate) worktree: PathBuf,
+    /// Whether it was deleted, always `false` without `apply`.
+    pub(crate) deleted: bool,
+    /// Why it could not be deleted.
+    pub(crate) error: Option<String>,
+}
+
+impl Orphan {
+    /// What the Orphan is and which Worktree it belongs to, for the text of `gc` and the Daemon log.
+    pub(crate) fn describe(&self) -> String {
+        let worktree = self.worktree.display();
+        match &self.kind {
+            OrphanKind::Lease {
+                service,
+                port_name,
+                port,
+            } => format!("lease {service}.{port_name} port {port} of {worktree}"),
+            OrphanKind::LogicalResource {
+                service,
+                resource,
+                name,
+                driver,
+            } => format!("logical resource {service}.{resource} {name} (driver {driver}) of {worktree}"),
+            OrphanKind::OutputDirectory { path } => format!("output directory {} of {worktree}", path.display()),
+            OrphanKind::SetupDirectory { path } => format!("setup directory {} of {worktree}", path.display()),
+            OrphanKind::IsolatedContainer {
+                service,
+                project,
+                compose,
+            } => format!("isolated container {service} (compose project {project}, service {compose}) of {worktree}"),
+            OrphanKind::IsolatedVolume { project, volume } => {
+                format!("isolated volume {volume} (compose project {project}) of {worktree}")
+            }
+        }
+    }
+}
+
+/// What an Orphan is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum OrphanKind {
+    /// A Lease of a Port name of a Service.
+    Lease {
+        service: String,
+        port_name: String,
+        port: u16,
+    },
+    /// A Logical resource of a Compose service, in its Logical container, dropped through the `drop` command of its
+    /// Driver, which frees its index when the Driver numbers its resources.
+    LogicalResource {
+        service: String,
+        /// The key of the resource in the configuration.
+        resource: String,
+        /// Its name in the container, its index for a Driver that numbers its resources.
+        name: String,
+        driver: String,
+    },
+    /// The directory of the state directory holding the output files of the Services of the Worktree.
+    OutputDirectory { path: PathBuf },
+    /// The directory of the state directory holding the log of the setup commands of the Worktree.
+    SetupDirectory { path: PathBuf },
+    /// The Isolated container of a Compose service, running in the compose project of the Worktree.
+    IsolatedContainer {
+        /// The name of the Service in `procly.toml`.
+        service: String,
+        project: String,
+        /// The service of the compose file.
+        compose: String,
+    },
+    /// A named volume of the compose project of the Worktree, which an Isolated container mounted.
+    IsolatedVolume { project: String, volume: String },
+}
+
+/// A Repository whose Worktrees git could not list, so that none of them counts as removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SkippedRepository {
+    /// The common git directory identifying the Repository.
+    pub(crate) repository: PathBuf,
+    /// Why git could not list its Worktrees.
+    pub(crate) error: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,8 +782,33 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":16,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":18,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
+    }
+
+    #[test]
+    fn an_orphan_carries_its_kind_beside_its_worktree_and_round_trips() {
+        let orphan = Orphan {
+            kind: OrphanKind::Lease {
+                service: "web".to_owned(),
+                port_name: "http".to_owned(),
+                port: 24000,
+            },
+            repository: PathBuf::from("/src/app/.git"),
+            worktree: PathBuf::from("/src/app-a"),
+            deleted: false,
+            error: None,
+        };
+        let line = encode(Response::Gc(GcReport {
+            applied: false,
+            orphans: vec![orphan.clone()],
+            skipped: Vec::new(),
+        }))
+        .unwrap();
+        assert!(line.contains(
+            r#"{"kind":"lease","service":"web","port_name":"http","port":24000,"repository":"/src/app/.git","#
+        ));
+        assert!(matches!(decode::<Response>(&line), Ok(Response::Gc(report)) if report.orphans == [orphan]));
     }
 
     #[test]

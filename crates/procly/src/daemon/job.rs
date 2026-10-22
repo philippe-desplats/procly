@@ -12,7 +12,9 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
-use super::process_group::{self, DRAIN_TIMEOUT, Pid, kill_group};
+use nix::sys::signal::Signal;
+
+use super::process_group::{self, DRAIN_TIMEOUT, Pid, STOP_TIMEOUT, kill_group, signal_group};
 use crate::output::{self, OutputBuffer};
 use crate::protocol::{JobEnd, JobState, JobStatus, StartOutcome};
 use crate::topology::Topology;
@@ -144,6 +146,19 @@ impl Jobs {
             .collect()
     }
 
+    /// Every running Job of `worktree`, by identifier in the order they started, for a Worktree release that stops
+    /// them with [`Job::stop`].
+    pub(crate) fn running_in(&self, worktree: &Path) -> Vec<(String, Arc<Job>)> {
+        let mut running: Vec<_> = self
+            .table()
+            .iter()
+            .filter(|(_, job)| job.fingerprint.worktree() == Some(worktree) && job.end.borrow().is_none())
+            .map(|(id, job)| (id.clone(), Arc::clone(job)))
+            .collect();
+        running.sort_by_key(|(_, job)| job.started_at);
+        running
+    }
+
     /// The process group of every running Job.
     pub(crate) fn process_groups(&self) -> Vec<i32> {
         self.table()
@@ -254,6 +269,22 @@ impl Job {
 
     pub(crate) fn output(&self) -> String {
         output::lock(&self.output).text()
+    }
+
+    /// Stops the whole tree of the Job: `SIGTERM` to its process group, then `SIGKILL` once the stop timeout has passed
+    /// with members left, and waits until it has ended.
+    pub(crate) async fn stop(&self) {
+        // An ended Job no longer holds its group id, which another process may lead by now.
+        if self.end.borrow().is_some() {
+            return;
+        }
+        signal_group(self.pid, Signal::SIGTERM);
+        if tokio::time::timeout(STOP_TIMEOUT, self.ended()).await.is_err() {
+            let pid = self.pid;
+            // Signalling a group sleeps between attempts, which must not park a runtime worker.
+            let _ = tokio::task::spawn_blocking(move || kill_group(pid)).await;
+            self.ended().await;
+        }
     }
 }
 

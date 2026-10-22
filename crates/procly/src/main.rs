@@ -29,8 +29,8 @@ use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, Occupant, Released, Request, Response,
-    ServiceEnd, UpService, Written,
+    BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, KeptBecause, KeptLease, LeaseHeld,
+    Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -45,6 +45,8 @@ const EXIT_SERVICE_ENDED: u8 = 3;
 const EXIT_PORT_MISMATCH: u8 = 4;
 /// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly.
 const EXIT_CONFLICT: u8 = 5;
+/// The exit code of `gc --apply` when some Orphan could not be deleted.
+const EXIT_GC_FAILED: u8 = 6;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
@@ -63,7 +65,8 @@ struct JsonFlag {
     version,
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
-                  healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 124 when `wait` finds the Job timed out or `up` \
+                  healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
+                  every Orphan, 124 when `wait` finds the Job timed out or `up` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
                   docs/exit-codes.md."
@@ -158,7 +161,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Prepare a Worktree.
+    /// Prepare a Worktree, or run its Worktree release before it is removed.
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommand,
@@ -202,6 +205,24 @@ enum Command {
         /// goes to stderr.
         #[arg(long, value_enum)]
         agent: Option<AgentCli>,
+        #[command(flatten)]
+        json: JsonFlag,
+    },
+    /// List the Orphans of every Repository, what removed Worktrees left behind: the Leases, the Logical resources,
+    /// the output directories, the setup directories, the Isolated containers and their volumes of each Worktree git
+    /// no longer lists. Nothing is deleted without `--apply`.
+    #[command(
+        after_help = "A Worktree git still lists, even one marked prunable, never counts as removed, and nothing a Pinned \
+                      branch holds is an Orphan. Exit codes: 0 when every Orphan is listed, or deleted with \
+                      `--apply`, 6 when `--apply` could not delete some of them, each failure on stderr, 125 when \
+                      Procly itself fails. See docs/gc.md and docs/exit-codes.md."
+    )]
+    Gc {
+        /// Delete the Orphans, dropping each Logical resource through its Driver in its running container and freeing
+        /// its index, reporting each deletion and each failure and going on after a failure. The Daemon logs every
+        /// deletion and who asked.
+        #[arg(long)]
+        apply: bool,
         #[command(flatten)]
         json: JsonFlag,
     },
@@ -300,6 +321,22 @@ enum WorktreeCommand {
         #[command(flatten)]
         json: JsonFlag,
         /// The Worktree to prepare, or any directory in it. Defaults to the current directory.
+        path: Option<PathBuf>,
+    },
+    /// Run the Worktree release, before the Worktree is removed: stop its Services and Jobs with their whole process
+    /// trees, let go of its Compose services as `down` does, and release its Leases so that another Worktree can be
+    /// granted their ports at once. The Leases of a Pinned branch are kept, and so is every Logical resource, which
+    /// `procly gc` lists once the Worktree is removed. Nothing is deleted. The Daemon logs who asked.
+    #[command(
+        after_help = "Run it from the pre-remove hook of a worktree manager. Running it again, or in a Worktree Procly \
+                      never saw, prints `nothing to release`. Exit codes: 0 when the Worktree is released, also when \
+                      there was nothing to release, 125 when Procly itself fails, such as for a directory that is not \
+                      in a git Repository. See docs/worktree-release.md and docs/exit-codes.md."
+    )]
+    Release {
+        #[command(flatten)]
+        json: JsonFlag,
+        /// The Worktree to release, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
     },
 }
@@ -414,6 +451,9 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Worktree {
             command: WorktreeCommand::Init { json, path },
         } => worktree_init(&state, path, json.json),
+        Command::Worktree {
+            command: WorktreeCommand::Release { json, path },
+        } => worktree_release(&state, path, json.json),
         Command::Unit { command } => unit(&state, &command),
         Command::Agent {
             command: AgentCommand::Install { file, json },
@@ -421,6 +461,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Off { json } => switch(&state, true, json.json),
         Command::On { json } => switch(&state, false, json.json),
         Command::Eject { agent, json } => eject(&state, agent, json.json),
+        Command::Gc { apply, json } => gc(&state, apply, json.json),
         Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
@@ -905,6 +946,68 @@ fn init(json: bool) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Runs `gc`, printing each Orphan, or with `apply` each deletion on stdout and each failure on stderr.
+fn gc(state: &StateDir, apply: bool, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let report = match client::send(state, &Request::Gc { cwd, apply })? {
+        Response::Gc(report) => report,
+        other => return unexpected(other),
+    };
+    let code = if report.applied && report.failed() {
+        ExitCode::from(EXIT_GC_FAILED)
+    } else {
+        ExitCode::SUCCESS
+    };
+    if json {
+        json::print(&report)?;
+        return Ok(code);
+    }
+    for skipped in &report.skipped {
+        eprintln!(
+            "procly: cannot list the Worktrees of {}, nothing of it is an Orphan: {}",
+            skipped.repository.display(),
+            skipped.error
+        );
+    }
+    if report.orphans.is_empty() {
+        println!("no Orphans");
+        return Ok(code);
+    }
+    if !report.applied {
+        for orphan in &report.orphans {
+            println!("{}", orphan.describe());
+        }
+        eprintln!(
+            "procly: {}, `procly gc --apply` deletes {}",
+            orphans_count(report.orphans.len()),
+            if report.orphans.len() == 1 { "it" } else { "them" }
+        );
+        return Ok(code);
+    }
+    for orphan in &report.orphans {
+        match &orphan.error {
+            None => println!("deleted {}", orphan.describe()),
+            Some(error) => eprintln!("procly: cannot delete {}: {error}", orphan.describe()),
+        }
+    }
+    let failed = report.orphans.iter().filter(|orphan| orphan.error.is_some()).count();
+    if failed > 0 {
+        eprintln!(
+            "procly: {failed} of {} could not be deleted",
+            orphans_count(report.orphans.len())
+        );
+    }
+    Ok(code)
+}
+
+/// `1 Orphan` or `3 Orphans`.
+fn orphans_count(count: usize) -> String {
+    match count {
+        1 => "1 Orphan".to_owned(),
+        _ => format!("{count} Orphans"),
+    }
+}
+
 /// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands
 /// to the coding agent instead.
 fn eject(state: &StateDir, agent: Option<AgentCli>, json: bool) -> anyhow::Result<ExitCode> {
@@ -984,6 +1087,12 @@ fn eject_summary(report: &EjectReport) -> String {
     let mut text = String::new();
     for stopped in &report.stopped {
         let _ = match &stopped.worktree {
+            Some(worktree) if stopped.isolated => writeln!(
+                text,
+                "stopped {} of {} (Isolated Compose service, its container and volumes are kept)",
+                stopped.service,
+                worktree.display()
+            ),
             Some(worktree) => writeln!(text, "stopped {} of {}", stopped.service, worktree.display()),
             None => writeln!(
                 text,
@@ -1124,6 +1233,74 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
         }
         other => unexpected(other),
     }
+}
+
+/// Runs `worktree release`, printing one line per Service, Job, Compose service and Lease it released, then one per
+/// Lease and Logical resource it kept.
+fn worktree_release(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let path = path.map_or(cwd.clone(), |path| cwd.join(path));
+    match client::send(state, &Request::WorktreeRelease { path })? {
+        Response::WorktreeRelease(report) if json => {
+            json::print(&json::WorktreeRelease::new(&report))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Response::WorktreeRelease(report) => {
+            print(&release_summary(&report))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
+/// What `worktree release` prints: what it stopped, let go of and released, or `nothing to release`, then what it kept.
+fn release_summary(report: &ReleaseReport) -> String {
+    let mut text = String::new();
+    if report.released_nothing() {
+        text.push_str("nothing to release\n");
+    }
+    for service in &report.services {
+        let _ = writeln!(text, "{service} stopped");
+    }
+    for job in &report.jobs {
+        let _ = writeln!(text, "job {job} stopped");
+    }
+    for released in &report.compose_services {
+        let _ = writeln!(text, "{}", let_go(released));
+    }
+    for LeaseHeld {
+        service,
+        port_name,
+        port,
+    } in &report.leases
+    {
+        let _ = writeln!(text, "lease {service}.{port_name} port {port} released");
+    }
+    for KeptLease { lease, reason } in &report.kept_leases {
+        let LeaseHeld {
+            service,
+            port_name,
+            port,
+        } = lease;
+        let _ = match reason {
+            KeptBecause::PinnedBranch { branch } => writeln!(
+                text,
+                "lease {service}.{port_name} port {port} kept for Pinned branch {branch}"
+            ),
+            KeptBecause::ContainerRunning => writeln!(
+                text,
+                "lease {service}.{port_name} port {port} kept, its container still runs"
+            ),
+        };
+    }
+    for resource in &report.logical_resources {
+        let _ = writeln!(
+            text,
+            "Logical resource {} of {} ({}) kept, `procly gc` lists it once the Worktree is removed",
+            resource.name, resource.service, resource.driver
+        );
+    }
+    text
 }
 
 /// One line on stderr for a setup command still running, so that a long setup shows it is alive. Stdout, and with it the

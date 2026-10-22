@@ -27,13 +27,13 @@ $ procly eject --json
 {"schema_version":1,"stopped":[],"removed":[{"kind":"rules","file":"/home/me/app/AGENTS.md","deleted":true},{"kind":"guard","file":"/home/me/app/.claude/settings.json","deleted":true}],"left":[],"prompt":null,"agent":null}
 ```
 
-A `kind` is `rules`, `guard`, `exclusions` or `env_file`. The fixed lines about what eject never touches are not in the document.
+A Service in `stopped` has the `worktree` it ran for, `null` for a Compose service whose container serves every Worktree. An Isolated Compose service has the Worktree of its container and `"isolated":true`, a key left out for every other Service, and its text line reads `stopped cache of /home/me/app-login (Isolated Compose service, its container and volumes are kept)`. A `kind` is `rules`, `guard`, `exclusions` or `env_file`. The fixed lines about what eject never touches are not in the document.
 
 ## What it does
 
 It acts on the whole Repository, whatever Worktree it runs in.
 
-1. It stops every Service of every Worktree, with its whole process tree. The containers of Compose services are stopped at once, without waiting for their Grace period, and never removed. If a container cannot be stopped, eject fails before it touches a file, and running it again finishes the job.
+1. It stops every Service of every Worktree, with its whole process tree. The containers of Compose services, the Isolated container of each Worktree included, are stopped at once, without waiting for their Grace period, and never removed. If a container cannot be stopped, eject fails before it touches a file, and running it again finishes the job.
 2. It removes the Rules blocks, in `AGENTS.md`, `CLAUDE.md` and any file `procly agent install --file` wrote to.
 3. It removes the Guard from `.claude/settings.json`. The other hooks and settings stay, in their order, but the file is written again in JSON with 2 spaces of indentation, as `agent install` did.
 4. It removes the exclusion block from the shared git exclude file and from the `.gitignore` files that hold it.

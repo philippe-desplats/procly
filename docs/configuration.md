@@ -73,10 +73,10 @@ web = { http = 3200 }
 | `port_range` | `"24000-24999"` | The Range, bounds included, from which Worktrees other than the Main worktree draw their Leases. The default sits below the ephemeral ports of Linux and macOS. |
 | `lease_expiry` | `"30d"` | How long a Lease that no Service used is kept. Past it, the Lease is dropped and its port returns to the Range. Leases of Pinned branches never expire. |
 | `grace_period` | `"10m"` | How long the container of a Compose service keeps running once no Worktree needs it, see [Compose services](#compose-services). |
-| `isolation` | none | The Isolation mode of every Compose service that sets a `driver` and no `isolation` of its own, `"shared"` or `"logical"`, see [Isolation mode](#isolation-mode). Logical when unset. |
+| `isolation` | none | The Isolation mode of every Compose service that sets a `driver` and no `isolation` of its own, `"shared"`, `"logical"` or `"isolated"`, see [Isolation mode](#isolation-mode). Logical when unset. |
 | `setup_timeout` | `"30m"` | How long each setup command of `procly worktree init` may run before its whole process tree is killed and `worktree init` exits with 124, long enough for a cold install. See [Worktree init](worktree-init.md). |
 | `setup_progress_interval` | `"1m"` | How often a setup command of `procly worktree init` that is still running prints its elapsed time and the path of its log on stderr, at most once per second. See [Worktree init](worktree-init.md#a-long-setup). |
-| `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125. |
+| `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125, or `procly gc --apply` reports the resource it was dropping as not deleted. |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
@@ -164,18 +164,19 @@ services:
 | --- | --- | --- |
 | `compose` | none | The name of the service in the compose file. |
 | `env` | none | The Derived variables of the Service, rendered and handed to `docker compose` for the compose file to interpolate, see [Derived variables](#derived-variables). `PORT_<NAME>` is always set too. |
-| `grace_period` | `settings.grace_period` | How long the container keeps running once no Worktree needs it. |
+| `grace_period` | `settings.grace_period` | How long the container keeps running once no Worktree needs it. An Isolated container has none. |
 | `driver` | none | The Driver that creates a Logical resource per Worktree inside the container, see [Logical resources and Drivers](#logical-resources-and-drivers). |
 | `resources` | none | The Logical resources each Worktree gets, required with `driver` and an error without it. |
-| `isolation` | `settings.isolation`, else Logical with a `driver` | `"shared"` or `"logical"`, see [Isolation mode](#isolation-mode). `"logical"` needs a `driver`. |
+| `isolation` | `settings.isolation`, else Logical with a `driver` | `"shared"`, `"logical"` or `"isolated"`, see [Isolation mode](#isolation-mode). `"logical"` needs a `driver`. |
+| `retention` | `"keep"` | The Retention policy of an Isolated container, what happens to it and its volumes once its Worktree is removed: `"keep"`, `"delete"` or a duration such as `"7d"`, see [Retention policy](#retention-policy). An error on a Shared or Logical Service. |
 
 `restart` and `idle` are for Process services and are errors on a Compose service. `needs` and `health` work as they do for a Process service, `up` waits until the container runs, or is healthy when the compose file defines a health check, and then until the health check of Procly passes.
 
-The container is in Shared mode when the Service sets no `driver`, and in Logical mode when it does unless `isolation` says otherwise, see [Isolation mode](#isolation-mode) and [Logical resources and Drivers](#logical-resources-and-drivers). In both, one container serves every Worktree of the Repository, from the compose file of the Main worktree and under the compose project name that file gives. Its Leases are the ones of the Main worktree, so every Worktree reads the same ports, from `procly up` and from `procly env`. A Pinned branch never changes them, and they do not expire while the container runs, nor right after it stops. The Leases reach the compose file through the environment of `docker compose`: `PORT_<NAME>`, `PORT`, the Derived variables of the Service, `PROCLY` and `PROCLY_SERVICE`. The compose file must publish each Lease, which Procly checks with `docker compose config`, and `procly up` fails with 125 naming the variables the compose file may interpolate when it does not.
+The container is in Shared mode when the Service sets no `driver`, and in Logical mode when it does unless `isolation` says otherwise, see [Isolation mode](#isolation-mode) and [Logical resources and Drivers](#logical-resources-and-drivers). In both, one container serves every Worktree of the Repository, from the compose file of the Main worktree and under the compose project name that file gives. Its Leases are the ones of the Main worktree, so every Worktree reads the same ports, from `procly up` and from `procly env`. A Pinned branch never changes them, and they do not expire while the container runs, nor right after it stops. The Leases reach the compose file through the environment of `docker compose`: `PORT_<NAME>`, `PORT`, the Derived variables of the Service, `PROCLY` and `PROCLY_SERVICE`. The compose file must publish each Lease, which Procly checks with `docker compose config`, and `procly up` fails with 125 naming the variables the compose file may interpolate when it does not. A Service set to `isolation = "isolated"` runs one container per Worktree instead, on the Leases of that Worktree, see [Isolated mode](#isolated-mode).
 
-Containers are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting. One limit in v0.1: `docker compose up` also starts the `depends_on` services of the compose file that do not run yet, and Procly neither counts nor stops them. When the Grace period of the Service ends, only its own container stops, and those dependencies keep running until a `docker compose stop` of their own. Procly cannot tell whether another compose service, or a developer, still needs them, and it never stops a container it does not own. Declare such a dependency as a Compose service of its own, listed in `needs`, to have it counted and stopped like any other.
+Containers of Shared and Logical Services are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting. One limit in v0.1: `docker compose up` also starts the `depends_on` services of the compose file that do not run yet, and Procly neither counts nor stops them. When the Grace period of the Service ends, only its own container stops, and those dependencies keep running until a `docker compose stop` of their own. Procly cannot tell whether another compose service, or a developer, still needs them, and it never stops a container it does not own. Declare such a dependency as a Compose service of its own, listed in `needs`, to have it counted and stopped like any other.
 
-`procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon records each container it started or adopted in `containers.json` of its state directory, with the Worktrees that need it and the end of a running Grace period, so a Daemon that exits or crashes leaves its containers running and the next Daemon resumes their counts and Grace periods, see [The Daemon across crashes and sessions](daemon.md#containers-after-a-crash-or-a-restart). A Worktree whose directory no longer exists, removed without `procly down`, stops counting. `procly status` does not list Compose services in v0.1, only Process services, Groups and Jobs, see [JSON output](json.md#status).
+`procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon records each container it started or adopted in `containers.json` of its state directory, with the Worktrees that need it and the end of a running Grace period, so a Daemon that exits or crashes leaves its containers running and the next Daemon resumes their counts and Grace periods, see [The Daemon across crashes and sessions](daemon.md#containers-after-a-crash-or-a-restart). A Worktree whose directory no longer exists, removed without `procly down`, stops counting. `procly status` does not list the Shared and Logical containers, which serve every Worktree, only Process services, Groups, Jobs and the Isolated containers of the Worktree, see [Isolated mode](#isolated-mode) and [JSON output](json.md#status).
 
 ### Containers started outside Procly
 
@@ -237,7 +238,7 @@ A Seed applies when Procly creates the resource, never to one that exists alread
 | `seed = { template = "app_template" }` | A copy of the resource of that name, which must exist in the container and is used as it is written, without the Worktree slug. The Driver needs a `copy` command. For Postgres the template database must have no open connection. |
 | `seed = { run = "pnpm db:migrate", timeout = "5m" }` | What a command leaves in the resource. It runs on the host, by `/bin/sh -c` at the root of the Worktree, as a Job, so its process tree is killed when it reaches `timeout` (`10m` by default). It receives `PROCLY_RESOURCE_URL`, `PROCLY_RESOURCE_NAME` and `PROCLY_RESOURCE`, the key of the resource, on top of the environment of the `procly up` and of the Service. |
 
-A command Seed that fails, or reaches its timeout, drops the resource that same `procly up` just created, so that the next `procly up` seeds it again rather than finding it and keeping it empty. `procly up` then exits with 125, and the error and the Daemon log say that the resource was dropped, or the command to drop it when that failed. Procly never drops a resource that existed before the request, and nothing else ever drops one.
+A command Seed that fails, or reaches its timeout, drops the resource that same `procly up` just created, so that the next `procly up` seeds it again rather than finding it and keeping it empty. `procly up` then exits with 125, and the error and the Daemon log say that the resource was dropped, or the command to drop it when that failed. Procly never drops a resource that existed before the request. Apart from this, only `procly gc --apply` drops a resource, the one of a removed Worktree, see [Collecting Orphans](gc.md).
 
 ### Isolation mode
 
@@ -251,10 +252,11 @@ How a Compose service that sets a `driver` is separated between Worktrees is its
 | --- | --- |
 | `"logical"` | Resources of its own in the one container, such as a database or a Redis index. |
 | `"shared"` | The resources of the Main worktree, under the names or the indexes the Main worktree has, so the Worktrees share the same data. They take no capacity of the container. |
+| `"isolated"` | A container of its own, holding the resources under the names or the indexes the Main worktree has, see [Isolated mode](#isolated-mode). |
 
-A Service without a `driver` has no resources to separate and stays Shared, a Repository-wide `"logical"` leaves it alone. Setting `isolation = "logical"` on a Service without a `driver` is an error, and so is `isolation` on a Process service. The Isolated mode, one container per Worktree, comes in a later version and `"isolated"` is an error saying so.
+A Service without a `driver` has no resources to separate and stays Shared unless it sets `isolation = "isolated"` itself, a Repository-wide `"logical"` or `"isolated"` leaves it alone. Setting `isolation = "logical"` on a Service without a `driver` is an error, and so is `isolation` on a Process service.
 
-Procly cannot tell whether an application reads its resource from the environment. One that hardcodes its Redis database stays on the one it names only in Shared mode:
+Procly cannot tell whether an application reads its resource from the environment. One that hardcodes its Redis database stays on the one it names only in Shared mode, where the Worktrees share its data, or in Isolated mode, where each Worktree has a Redis of its own:
 
 ```toml
 [services.cache]
@@ -264,6 +266,57 @@ isolation = "shared"
 ports = { redis = 6379 }
 resources = { main = {} }
 ```
+
+### Isolated mode
+
+A Compose service set to `isolation = "isolated"` runs one container per Worktree, for an application that cannot share one (ADR 0005). It is never the default: a Service with a `driver` gets it from its own `isolation` or from `[settings]`, and a Service without one only from its own `isolation`.
+
+```toml
+[services.cache]
+compose = "redis"
+isolation = "isolated"
+ports = { redis = 6379 }
+env = { REDIS_PORT = "{services.cache.ports.redis}" }
+```
+
+- Each Worktree runs its own container, from its own compose file, under a compose project name of its own: the Main worktree keeps the project name its compose file gives, as it keeps its declared ports, and every other Worktree uses that name followed by `-` and its Worktree slug, such as `app-app_login`. `docker compose --project-name app-app_login ps` shows it.
+- Each Worktree has Leases of its own for the ports of the Service, drawn like the ones of a Process service: the Main worktree gets the declared port, any other Worktree the Pool and then the Range, or the ports of its Pinned branch. `procly up` and `procly env` give every Worktree its own, and `procly up` answers `started` or `reused` with their URLs, like any other Service.
+- Named volumes belong to the project, so each Worktree has its own data. A volume the compose file gives a fixed `name`, or a bind mount, is still shared, Procly does not look at volumes.
+- `procly down` stops the container of the Worktree at once, with `docker compose stop`, and prints `db stopped`: there is no Grace period, nobody else needs it. The container is never removed and its volumes are kept, until the Worktree is removed and `procly gc --apply` or its [Retention policy](#retention-policy) removes them, see [Collecting Orphans](gc.md). A `procly down` in any Worktree also stops the containers of the Worktrees whose directory no longer exists, removed without `procly down`, and so does the next Daemon when it finds one at its start.
+- `procly status` lists the Isolated containers of the Worktree, `procly logs` reads the one of the Worktree, and `procly eject` stops every one of the Repository and keeps them with their volumes.
+
+The limits of the mode:
+
+- A compose file that fixes the name of the container (`container_name`), or the name of a network the service joins (a `name` under `networks`, an `external` network included), cannot run once per Worktree. Procly reads it from `docker compose config` and `procly up` fails with 125 before it starts anything, naming the offending line, such as `compose.yaml:7: container_name: legacy-redis`, or the setting alone when the compose file interpolates it. The same compose file still runs Shared or Logical.
+- The container starts alone, with `docker compose up --no-deps`: a `depends_on` service would be started again in the project of the Worktree, on the ports the containers of the Repository already hold. Declare such a dependency as a Compose service of its own, listed in `needs`.
+- The container runs on a network of its own project, so it cannot reach the containers of other projects by their service name, the Shared and Logical containers of the Repository included. It reaches them through their Leases on the host, as a Process service does.
+- Every Worktree that runs the Service runs one more container, with the memory it takes.
+- With a `driver`, each container holds the resources under the names or the indexes the Main worktree has, which its Driver creates in it as in Logical mode.
+
+#### Retention policy
+
+`retention` declares what happens to the container of a Worktree and its volumes once the Worktree is removed. Procly never deletes data on its own inference, so a policy other than `"keep"` is a deletion you declare (ADR 0004):
+
+```toml
+[services.db]
+compose = "postgres"
+isolation = "isolated"
+retention = "7d"
+```
+
+| Value | What the Daemon does once it finds the Worktree removed |
+| --- | --- |
+| `"keep"`, the default | Nothing. The container and its volumes stay until `procly gc --apply` removes them. |
+| `"delete"` | Removes them at once. |
+| A duration, such as `"12h"` or `"7d"` | Removes them that long after it found the Worktree removed. The duration takes `ms`, `s`, `m`, `h` or `d`, a bare number meaning seconds. |
+
+The Daemon finds a Worktree removed when it starts and reconciles what the previous Daemon left, and on every `procly worktree release`, in any Worktree. A Worktree is removed as [`procly gc`](gc.md#what-is-an-orphan) tells it: git no longer lists it, and the container is an Orphan. So a container is never removed while it runs, while git still lists its Worktree, even as prunable, when its Worktree was on a Pinned branch, or when another Worktree uses its compose project. It is removed as `gc --apply` removes it, with `docker container rm --force --volumes`, then its volumes with `docker volume rm`.
+
+The Daemon writes when it found the Worktree removed in `isolated.json` of its state directory, so a pending deletion survives a restart of the Daemon: the next one removes the container when it is due, at once if it is already past, and never earlier. A Worktree that git lists again before then keeps its container, and the delay starts over if it is removed again. The policy that applies is the one the Worktree declared when its container last came up, with `procly up`, since `procly.toml` goes with the Worktree.
+
+The Daemon log tells when it found the Worktree removed, `the Worktree /home/me/app-login is removed, retention policy 7d of service db deletes the isolated container of service db of /home/me/app-login`, and each deletion with the policy that caused it, `retention policy 7d of service db deleted isolated container db (compose project app-app_login, service postgres) of /home/me/app-login`. A deletion that fails, Docker failing or not answering, is logged too, and tried again a second later, then less and less often, every 5 minutes at most, until it succeeds, as well as on the next reconciliation or Worktree release. Meanwhile the container stays an Orphan for `procly gc`. While Docker does not tell which volumes the container has, neither is removed, so that no volume is left behind.
+
+`retention` on a Shared or Logical Service, whose container holds the data of every Worktree, or on a Process service, is an error, and `procly up` fails with 125.
 
 ### Where resources are created
 
@@ -285,7 +338,7 @@ A Driver is a TOML file named after the technology. Postgres ships with Procly a
 | `check` | yes | A command that succeeds when the resource exists and fails when it does not. A `check` that cannot run at all (the container does not answer, or the command runs past its time limit) is an error, never read as an absent resource. |
 | `create` | yes | A command that creates an empty resource, and fails when it exists already. `check` decides whether to run it, and the drop of a failed Seed relies on it never meeting a resource that was there before. |
 | `copy` | no | A command that creates `{resource}` as a copy of `{template}`, needed by the Seed `template`. |
-| `drop` | yes | A command that removes the resource, run only to undo a resource whose Seed failed. |
+| `drop` | yes | A command that removes the resource, run to undo a resource whose Seed failed, and by `procly gc --apply` on the resources of a removed Worktree, see [Collecting Orphans](gc.md). |
 | `ready` | no | A command that succeeds once the container accepts the commands above. Procly runs it every quarter of a second until it succeeds. |
 | `max_length` | no | The longest name the technology accepts. A longer name is an error rather than silently cut, which would make 2 Worktrees share a resource. |
 | `index` | no | `true` when the resources are the numbers 0 to `capacity` minus 1, which Procly hands out one per resource and Worktree, so `{resource}` is a number. It needs a `capacity` and has no `max_length`. |

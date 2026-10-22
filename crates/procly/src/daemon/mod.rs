@@ -9,10 +9,12 @@ mod cpu;
 mod eject;
 mod environment;
 mod foreign;
+mod gc;
 mod health;
 mod hook;
 mod idle;
 mod index;
+mod isolated_record;
 mod job;
 mod lease;
 mod listeners;
@@ -24,11 +26,15 @@ mod process_group;
 mod reconcile;
 mod record;
 mod requester;
+mod resource;
+mod retention;
 mod service;
 mod status;
 mod store;
 mod up;
+mod worktree_dir;
 mod worktree_init;
+mod worktree_release;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, Permissions, TryLockError};
@@ -49,12 +55,15 @@ use self::clock::Clock;
 use self::compose::Composes;
 use self::container_record::ContainerRecords;
 use self::index::Indexes;
+use self::isolated_record::IsolatedRecords;
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
 use self::managed::ManagedBlocks;
 use self::off::Offs;
 use self::output_file::OutputFiles;
 use self::record::ServiceRecords;
+use self::resource::LogicalResources;
+use self::retention::Retentions;
 use self::service::Services;
 use crate::config;
 use crate::protocol::{self, Released, Request, Response, StartOutcome};
@@ -68,7 +77,13 @@ struct Registry {
     services: Services,
     composes: Composes,
     leases: Arc<Leases>,
+    /// Every Isolated container, running or stopped, which `gc` removes once its Worktree is.
+    isolated: Arc<IsolatedRecords>,
+    /// The delayed deletions of Isolated containers whose Retention policy is a duration.
+    retentions: Retentions,
     indexes: Indexes,
+    /// The Logical resources of every Worktree other than the Main worktree, which `gc` drops once it is removed.
+    resources: LogicalResources,
     managed: ManagedBlocks,
     offs: Offs,
     /// Held while the Rules block and the Guard are written or switched, so that an install and `off` never cross.
@@ -77,7 +92,8 @@ struct Registry {
     mirroring: Mutex<()>,
     /// One lock per Worktree root, held while `worktree init` prepares it, so that 2 inits never both run a command.
     initializing: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
-    /// The directory holding the log of the setup commands `worktree init` runs.
+    /// The directory holding the setup directory of each Worktree, with the log of the setup commands `worktree init`
+    /// runs.
     setup_logs: PathBuf,
     /// Set once the Services recorded by the previous Daemon are reconciled. Left unset when their document cannot
     /// be read, so that the request after it is fixed or removed reconciles again.
@@ -168,6 +184,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
 
     let clock = Clock::from_env();
     let leases = Arc::new(Leases::new(state.leases(), clock.clone()));
+    let isolated = Arc::new(IsolatedRecords::new(state.isolated()));
     let registry = Arc::new(Registry {
         jobs: Arc::default(),
         services: Services::new(
@@ -179,9 +196,13 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
             clock.clone(),
             Arc::clone(&leases),
             ContainerRecords::new(state.containers()),
+            Arc::clone(&isolated),
         ),
+        isolated,
+        retentions: Retentions::new(clock.clone()),
         leases,
         indexes: Indexes::new(state.indexes()),
+        resources: LogicalResources::new(state.resources()),
         managed: ManagedBlocks::new(state.managed_blocks()),
         offs: Offs::new(state.off()),
         agent: Mutex::default(),
@@ -199,6 +220,8 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
             if let Err(message) = registry.reconciled().await {
                 eprintln!("cannot reconcile the services and containers of the previous daemon: {message}");
             }
+            // Once the containers of removed Worktrees are stopped, which a policy never deletes while they run.
+            retention::sweep(&registry).await;
         }
     });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
@@ -288,7 +311,12 @@ async fn dispatch(
     let jobs = &registry.jobs;
     if matches!(
         request,
-        Request::Up { .. } | Request::Down { .. } | Request::Status { .. } | Request::Eject { .. }
+        Request::Up { .. }
+            | Request::Down { .. }
+            | Request::Status { .. }
+            | Request::Eject { .. }
+            | Request::Gc { .. }
+            | Request::WorktreeRelease { .. }
     ) && let Err(message) = registry.reconciled().await
     {
         return Response::Error { message };
@@ -359,6 +387,13 @@ async fn dispatch(
             .await
             .unwrap_or_else(failure),
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
+        Request::Gc { cwd, apply } => gc::run(registry, cwd, apply, peer).await,
+        Request::WorktreeRelease { path } => answer(
+            worktree_release::run(Arc::clone(registry), path, peer)
+                .await
+                .map_err(message),
+            Response::WorktreeRelease,
+        ),
         request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
             agent::answer(registry, request).await
         }
@@ -405,18 +440,33 @@ async fn down(
     .context("the request could not be read")??;
     let worktree = topology.worktree.path.clone();
     let stopping = registry.services.stop(&worktree, service.as_deref());
-    let released = {
+    let (released, isolated) = {
         let (registry, worktree, service) = (Arc::clone(&registry), worktree.clone(), service.clone());
         // Whether the other Worktrees still exist is read from the disk, and the record is written to it.
         tokio::task::spawn_blocking(move || {
-            registry
-                .composes
-                .release(&topology.git_common_dir, &worktree, service.as_deref())
+            let composes = &registry.composes;
+            let repository = &topology.git_common_dir;
+            (
+                composes.release(repository, &worktree, service.as_deref()),
+                composes.isolated_released(repository, &worktree, service.as_deref()),
+            )
         })
         .await
         .context("the containers could not be released")?
     };
-    if let (Some(name), true) = (&service, stopping.is_empty() && released.is_empty()) {
+    // The containers of other Worktrees, removed without `procly down`, are stopped too, but are not this one's to tell.
+    let isolated: Vec<String> = registry
+        .composes
+        .stop_isolated(isolated)
+        .await?
+        .into_iter()
+        .filter(|(_, _, owner)| owner.as_deref() == Some(worktree.as_path()))
+        .map(|(_, name, _)| name)
+        .collect();
+    if let (Some(name), true) = (
+        &service,
+        stopping.is_empty() && released.is_empty() && isolated.is_empty(),
+    ) {
         // Nothing to stop is fine for a declared Service, and a typo for any other.
         let (name, worktree, registry) = (name.clone(), worktree.clone(), Arc::clone(&registry));
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -439,6 +489,10 @@ async fn down(
     let mut stopped = Vec::new();
     for (name, service) in stopping {
         service.ended().await;
+        stopped.push(name);
+    }
+    for name in isolated {
+        eprintln!("down {name} of {} requested by {who}", worktree.display());
         stopped.push(name);
     }
     for released in &released {
@@ -493,15 +547,17 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
         let name = name.clone();
         // Reading the configuration is blocking, and finding the Main worktree runs git.
         blocking("the logs could not be read", move || {
-            let config = read_config(&topology.worktree.path)?;
-            match config
+            let scope = up::Scope::of(&topology.worktree.path)?;
+            match scope
+                .config()
                 .services
                 .get(&name)
                 .map(|declared| declared.kind(&name))
                 .transpose()?
             {
                 Some(config::ServiceKind::Compose { service }) => {
-                    Ok(Some((service.to_owned(), topology.main()?.worktree.path)))
+                    let (project_dir, isolated) = scope.project(&name)?;
+                    Ok(Some((service.to_owned(), project_dir, isolated)))
                 }
                 Some(config::ServiceKind::Process { .. } | config::ServiceKind::Group { .. }) | None => Ok(None),
             }
@@ -509,9 +565,9 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
         .await
     };
     match compose {
-        Ok(Some((compose, project_dir))) => registry
+        Ok(Some((compose, project_dir, isolated))) => registry
             .composes
-            .logs(&name, &compose, project_dir, env)
+            .logs(&name, &compose, project_dir, isolated.as_ref(), env)
             .await
             .map_or_else(failure, |output| Response::Logs { output }),
         Ok(None) => unknown(),
