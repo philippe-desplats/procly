@@ -6,7 +6,7 @@
     reason = "each integration test binary compiles this module and uses a different part of it"
 )]
 
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, Write as _};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -297,8 +297,8 @@ pub fn test_server() -> PathBuf {
 /// The ports come from 10000 to 19999, below the ephemeral ports of macOS and Linux, below the slots of
 /// [`Procly::narrow_range`] and the default Range. An ephemeral port is one the suite's own connections may take as
 /// their source port between the moment a test is handed it and the moment the Daemon or Docker binds it, and under load
-/// that sent the Lease of a test to the Range or failed the bind of its container. Each port is handed out once per test
-/// binary, from an offset taken from the process, so 2 tests never share one.
+/// that sent the Lease of a test to the Range or failed the bind of its container. The ports are handed out in turn
+/// among the test runs of the machine, see [`next_slot`].
 ///
 /// A port is also reserved against the other test processes of the machine, which `make check` runs in other
 /// worktrees at the same time: probing alone left a window in which another run took the port before the Daemon
@@ -307,11 +307,9 @@ pub fn test_server() -> PathBuf {
 /// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, so a port still in `TIME_WAIT`
 /// is skipped.
 pub fn free_port() -> u16 {
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     static RESERVED: Mutex<Vec<std::fs::File>> = Mutex::new(Vec::new());
-    let offset = std::process::id() * 97;
     loop {
-        let slot = (offset + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 10_000;
+        let slot = next_slot("next-port", 10_000);
         let port = 10_000 + u16::try_from(slot).expect("10000 slots fit in a port");
         if let Some(reservation) = reserve(port)
             && accepted_by_the_daemon(port)
@@ -330,10 +328,41 @@ pub fn free_port() -> u16 {
 /// The lock is an advisory lock on a file named after the port, in a directory every test run of the user shares
 /// whatever its `TMPDIR`. It is held until the test process exits, the system releases it even after a crash.
 fn reserve(port: u16) -> Option<std::fs::File> {
+    let file = std::fs::File::create(reservations().join(port.to_string())).expect("create a test port reservation");
+    file.try_lock().ok().map(|()| file)
+}
+
+/// The next of `slots` slots counted in the file `counter`, which every test run of the user shares, so that a slot
+/// is handed out again only once all the others were.
+///
+/// A port a test leaves is not free at once: Colima forwards the ports a container publishes to the host from an ssh
+/// process, which opens and closes them seconds after the container did, and a test handed that port in between saw
+/// its Lease go to the Range. In turn, a port comes back long after.
+fn next_slot(counter: &str, slots: u32) -> u32 {
+    let mut file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(reservations().join(counter))
+        .expect("open a test slot counter");
+    file.lock().expect("lock a test slot counter");
+    let mut text = String::new();
+    file.read_to_string(&mut text).expect("read a test slot counter");
+    let slot = text.trim().parse::<u32>().unwrap_or(0) % slots;
+    file.set_len(0).expect("empty a test slot counter");
+    file.seek(std::io::SeekFrom::Start(0))
+        .expect("rewind a test slot counter");
+    write!(file, "{}", (slot + 1) % slots).expect("write a test slot counter");
+    slot
+}
+
+/// The directory of the test port reservations and slot counters, which every test run of the user shares whatever
+/// its `TMPDIR`.
+fn reservations() -> PathBuf {
     let directory = PathBuf::from(format!("/tmp/procly-test-ports-{}", nix::unistd::getuid()));
     std::fs::create_dir_all(&directory).expect("create the test port reservations directory");
-    let file = std::fs::File::create(directory.join(port.to_string())).expect("create a test port reservation");
-    file.try_lock().ok().map(|()| file)
+    directory
 }
 
 /// Whether the bind the Daemon checks a Lease with succeeds on `port`, IPv4 and IPv6.
@@ -383,10 +412,9 @@ impl Procly {
     /// its own Daemon, never draw the same ports. Returns its bounds.
     ///
     /// The Ranges sit below the ephemeral ports of Linux and macOS, so that [`free_port`] never returns one of them,
-    /// and each test of a binary gets the next one, offset by the pid against other test runs on the same machine.
+    /// and each test gets the next one among the test runs of the machine, see [`next_slot`].
     pub fn narrow_range(&self) -> (u16, u16) {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let slot = (std::process::id() * 7 + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 600;
+        let slot = next_slot("next-range", 600);
         let start = 20_000 + u16::try_from(slot * 20).expect("600 slots of 20 ports fit below 32768");
         let end = start + 19;
         std::fs::write(
