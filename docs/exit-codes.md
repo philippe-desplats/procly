@@ -22,7 +22,7 @@ Every `procly` command exits with one of these codes. They are stable: an agent 
 
 `gc` exits with 0 when it listed the Orphans, also when there were none, and `gc --apply` with 0 when it deleted every one of them, with 6 when it could not delete some, and with 125 when Procly itself fails: a state document such as `leases.json` that is unreadable, or the Daemon that cannot be reached. A Repository whose Worktrees git cannot list is reported on stderr and does not change the exit code.
 
-`doctor` exits with 0 when no check failed, also when some were skipped because they do not apply here, with 7 when some check found a problem, and with 125 when Procly itself fails: a state directory that cannot be resolved or a current directory that cannot be read. A Daemon that cannot be reached is a problem `doctor` reports with 7, not a failure of Procly.
+`doctor` exits with 0 when no check failed, also when some were skipped because they do not apply here or raised a warning, such as a Session unit that is not installed, with 7 when some check found a problem, and with 125 when Procly itself fails: a state directory that cannot be resolved or a current directory that cannot be read. A Daemon that cannot be reached is a problem `doctor` reports with 7, not a failure of Procly.
 
 `init` exits with 0 when it printed the proposal, also when it left an existing `procly.toml` as it is, and with 125 when Procly itself fails: a Worktree with no `dev` script and no compose file, a `package.json`, a `pnpm-workspace.yaml` or a compose file that cannot be read, a compose file with no `services`, or a directory that is not in a git Repository. See [Proposing a configuration](init.md).
 

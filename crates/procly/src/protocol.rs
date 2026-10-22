@@ -786,6 +786,8 @@ pub(crate) enum CheckStatus {
     Failed,
     /// The check does not apply here, or could not run.
     Skipped,
+    /// Something is missing that Procly can do without, so `doctor` still exits with 0.
+    Warning,
 }
 
 impl CheckStatus {
@@ -794,6 +796,7 @@ impl CheckStatus {
             Self::Passed => "passed",
             Self::Failed => "failed",
             Self::Skipped => "skipped",
+            Self::Warning => "warning",
         }
     }
 }
@@ -826,6 +829,16 @@ impl Check {
         Self {
             name: name.to_owned(),
             status: CheckStatus::Failed,
+            message: message.into(),
+            fix,
+        }
+    }
+
+    /// Something missing that Procly can do without, with the command that adds it, which `doctor` never runs.
+    pub(crate) fn warning(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Warning,
             message: message.into(),
             fix,
         }

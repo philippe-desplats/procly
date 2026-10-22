@@ -216,7 +216,7 @@ fn session_unit(state: &StateDir) -> Check {
     };
     // The session manager is asked only about a unit this command resolved and found, never about one of another home.
     if !unit.path.exists() {
-        return Check::failed(
+        return Check::warning(
             SESSION_UNIT,
             format!(
                 "the Session unit {} is not installed, the Daemon does not start with your session",
@@ -328,11 +328,11 @@ mod tests {
     }
 
     #[test]
-    fn a_report_with_a_failed_check_has_failed_and_one_with_only_skipped_ones_has_not() {
+    fn a_report_with_a_failed_check_has_failed_and_one_with_only_skipped_or_warning_ones_has_not() {
         let report = |statuses: &[CheckStatus]| Report {
             checks: statuses.iter().map(|&status| check(status, "m", None)).collect(),
         };
-        assert!(!report(&[CheckStatus::Passed, CheckStatus::Skipped]).failed());
+        assert!(!report(&[CheckStatus::Passed, CheckStatus::Skipped, CheckStatus::Warning]).failed());
         assert!(report(&[CheckStatus::Passed, CheckStatus::Failed]).failed());
     }
 
@@ -342,12 +342,14 @@ mod tests {
             checks: vec![
                 check(CheckStatus::Passed, "all good", None),
                 check(CheckStatus::Failed, "one\ntwo", Some("kill 1\nkill 2")),
+                check(CheckStatus::Warning, "missing", Some("install it")),
             ],
         };
         assert_eq!(
             text(&report),
             "passed  leased_ports: all good\n\
-             failed  leased_ports: one\n        two\n        fix: kill 1\n        fix: kill 2\n"
+             failed  leased_ports: one\n        two\n        fix: kill 1\n        fix: kill 2\n\
+             warning leased_ports: missing\n        fix: install it\n"
         );
     }
 }

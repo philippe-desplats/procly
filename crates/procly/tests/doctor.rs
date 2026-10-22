@@ -391,12 +391,16 @@ fn a_daemon_that_cannot_start_is_a_problem_and_the_checks_that_need_none_still_r
 }
 
 #[test]
-fn a_session_unit_that_is_not_installed_is_a_problem_and_the_session_manager_is_never_asked() {
-    let setup = Setup::new();
+fn a_session_unit_that_is_not_installed_is_a_warning_with_its_fix_and_the_exit_code_stays_0() {
+    let setup = Setup::healthy();
+    assert_success(&setup.run(&setup.repo, &["unit", "remove"]));
+    std::fs::remove_file(setup.bin.join("calls")).expect("forget the calls of the removal");
 
-    let document = problems(&setup.doctor());
+    let output = setup.doctor();
 
-    assert_eq!(status(&document, "session_unit"), "failed");
+    let document = json_succeeded(&output);
+    assert_eq!(document["result"], json!("healthy"));
+    assert_eq!(status(&document, "session_unit"), "warning");
     assert!(message(&document, "session_unit").contains("is not installed"));
     assert_eq!(check(&document, "session_unit")["fix"], json!("procly unit install"));
     assert_eq!(
@@ -404,6 +408,26 @@ fn a_session_unit_that_is_not_installed_is_a_problem_and_the_session_manager_is_
         "",
         "no unit of this home exists, so the manager has nothing to say about it"
     );
+    let text = setup.run(&setup.repo, &["doctor"]);
+    assert_success(&text);
+    assert_eq!(stderr(&text), "");
+    assert!(stdout(&text).contains("warning session_unit: "), "{}", stdout(&text));
+    assert!(
+        stdout(&text).contains("        fix: procly unit install"),
+        "{}",
+        stdout(&text)
+    );
+}
+
+#[test]
+fn a_missing_session_unit_does_not_hide_a_failed_check() {
+    let setup = Setup::new();
+    write(setup.procly.state_dir(), "leases.json", "this is not json");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "session_unit"), "warning");
+    assert_eq!(status(&document, "state_documents"), "failed");
 }
 
 #[test]
@@ -722,7 +746,7 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 fn doctor_changes_nothing_in_the_repository_the_state_directory_or_the_home() {
     let setup = Setup::healthy();
     write(setup.procly.state_dir(), "off.json", "this is not json");
-    // A first run starts the Daemon, if none runs, as every command does.
+    // Setup::healthy starts the Daemon, so that the runs below find it running and doctor has nothing to start.
     problems(&setup.doctor());
     let scratch = setup.procly.scratch();
     std::fs::remove_file(setup.bin.join("calls")).expect("forget the calls of the installation");
