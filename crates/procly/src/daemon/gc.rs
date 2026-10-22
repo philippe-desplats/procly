@@ -11,8 +11,9 @@
 //! may use it by then.
 //!
 //! An Isolated container is an Orphan only when Procly recorded it, and Docker lists it under the compose project
-//! and service of its record with the removed Worktree as its working directory. Its volumes are the named volumes
-//! of that project it mounts, never a volume the compose file gives a name of its own.
+//! and service of its record with the removed Worktree as its working directory, stopped, and no record of a Worktree
+//! that is not an Orphan has its compose project. Its volumes are the named volumes of that project it mounts, never a
+//! volume the compose file gives a name of its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -191,12 +192,7 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         }));
     }
 
-    // A Pinned branch holds its container whichever Worktree checks it out next, as it holds its Leases.
-    let found: Vec<Found> = isolated
-        .into_iter()
-        .filter(|record| record.pinned.is_none() && removed(&record.repository, &record.worktree))
-        .map(find)
-        .collect();
+    let found = orphan_isolated(isolated, removed);
     orphans.extend(isolated_orphans(&found));
 
     let requester = (apply && !orphans.is_empty()).then(|| requester::describe(peer, cwd));
@@ -214,6 +210,24 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         driver_timeouts,
         found: Arc::new(found),
     })
+}
+
+/// The Isolated containers of `isolated` whose Worktree is `removed`, as Docker lists them now. Blocking.
+fn orphan_isolated(isolated: Vec<IsolatedRecord>, removed: impl Fn(&Path, &Path) -> bool) -> Vec<Found> {
+    // A Pinned branch holds its container whichever Worktree checks it out next, as it holds its Leases.
+    let (removed_records, kept_records): (Vec<IsolatedRecord>, Vec<IsolatedRecord>) = isolated
+        .into_iter()
+        .partition(|record| record.pinned.is_none() && removed(&record.repository, &record.worktree));
+    // Compose restarts the stopped container of a project for another Worktree under the same project name, keeping
+    // the working directory of the first as its label: a project any kept record has is never touched.
+    let kept_projects: BTreeSet<String> = kept_records.into_iter().map(|record| record.project).collect();
+    removed_records
+        .into_iter()
+        .filter(|record| !kept_projects.contains(&record.project))
+        .map(find)
+        // A running container serves someone, whatever Worktree its record names.
+        .filter(|found| !found.running)
+        .collect()
 }
 
 /// The Isolated containers `found` lists, then their volumes.
@@ -356,6 +370,8 @@ struct Found {
     record: IsolatedRecord,
     /// The names of the containers of the record, `None` when Docker did not answer.
     containers: Option<Vec<String>>,
+    /// Whether one of these containers runs.
+    running: bool,
     /// The named volumes of its project it mounts, and those a previous `gc` could not remove, that still exist.
     volumes: Vec<String>,
 }
@@ -370,7 +386,10 @@ impl Found {
 
 /// Looks the container of `record` and its volumes up in Docker. Blocking.
 fn find(record: IsolatedRecord) -> Found {
-    let containers = owned_containers(&record);
+    let listed = owned_containers(&record);
+    let running = listed.iter().flatten().any(|container| container.running);
+    let containers: Option<Vec<String>> =
+        listed.map(|listed| listed.into_iter().map(|container| container.name).collect());
     let mut volumes = record.volumes.clone();
     for container in containers.iter().flatten() {
         for volume in mounted_volumes(container, &record.env) {
@@ -384,6 +403,7 @@ fn find(record: IsolatedRecord) -> Found {
     Found {
         record,
         containers,
+        running,
         volumes,
     }
 }
@@ -391,7 +411,7 @@ fn find(record: IsolatedRecord) -> Found {
 /// The containers Docker lists, running or not, as the one of the compose service of `record` in its project, and
 /// whose working directory is the Worktree of `record`, so that a project of another Repository under the same name
 /// is never touched. `None` when Docker did not answer. Blocking.
-fn owned_containers(record: &IsolatedRecord) -> Option<Vec<String>> {
+fn owned_containers(record: &IsolatedRecord) -> Option<Vec<foreign::Container>> {
     let labels = [
         format!("label=com.docker.compose.project={}", record.project),
         format!("label=com.docker.compose.service={}", record.compose),
@@ -411,7 +431,6 @@ fn owned_containers(record: &IsolatedRecord) -> Option<Vec<String>> {
                         .as_deref()
                         .is_some_and(|dir| resolved(dir) == worktree)
             })
-            .map(|container| container.name)
             .collect(),
     )
 }
@@ -533,6 +552,8 @@ enum DeleteError {
     },
     #[error("Docker did not answer, the container could not be looked up")]
     Unanswered,
+    #[error("no record of an Isolated container tells the engine the volume is on")]
+    Unrecorded,
     #[error("`docker {args}` failed: {reason}")]
     Docker { args: String, reason: String },
 }
@@ -662,12 +683,12 @@ fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orphan) -> Res
             remove(&args, &found.record.env)
         }
         OrphanKind::IsolatedVolume { volume, .. } => {
-            let env = found
+            // Never the engine of the Daemon in place of the one the volume is on.
+            let found = found
                 .iter()
                 .find(|found| found.record.repository == orphan.repository && found.volumes.contains(volume))
-                .map(|found| found.record.env.as_slice())
-                .unwrap_or_default();
-            remove(&["volume", "rm", volume], env)
+                .ok_or(DeleteError::Unrecorded)?;
+            remove(&["volume", "rm", volume], &found.record.env)
         }
     }
 }

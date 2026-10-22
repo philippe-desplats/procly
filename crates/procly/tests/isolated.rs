@@ -609,6 +609,78 @@ fn docker_a_volume_gc_apply_cannot_remove_is_reported_and_removed_by_the_next_gc
     assert!(!fixture.other_project.volume_exists());
 }
 
+#[test]
+fn docker_gc_never_removes_the_container_compose_reused_for_a_worktree_of_the_same_compose_project() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["down", "db"]));
+    git(
+        &fixture.main,
+        &["worktree", "remove", "--force", &fixture.other.to_string_lossy()],
+    );
+    let container = fixture.other_project.container();
+    // A Worktree of the same directory name has the same compose project. With the same configuration, compose
+    // starts the stopped container again for it, labelled with the working directory of the removed Worktree.
+    let again = fixture.procly.scratch().join("again").join("app-feature");
+    git(
+        &fixture.main,
+        &["worktree", "add", "--quiet", "-b", "again", &again.to_string_lossy()],
+    );
+    let again = again.canonicalize().expect("canonicalize the worktree");
+    write(
+        &again,
+        &compose_file(&fixture.main_project.name, "").replace("${DB_PORT:-1}", &other_port.to_string()),
+    );
+    std::fs::write(
+        again.join("procly.toml"),
+        "[services.db]\ncompose = \"db\"\nisolation = \"isolated\"\n",
+    )
+    .expect("write the config");
+    assert_success(&fixture.procly.procly_in(&again, &["up", "db"]));
+    assert_eq!(
+        fixture.other_project.container(),
+        container,
+        "compose created another container"
+    );
+
+    let running = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&running);
+    assert_eq!(
+        isolated_lines(&stdout(&running)),
+        Vec::<String>::new(),
+        "{}",
+        stdout(&running)
+    );
+    assert!(
+        fixture.other_project.is_running(),
+        "gc stopped the container of a Worktree"
+    );
+    assert_success(&fixture.procly.procly_in(&again, &["down", "db"]));
+
+    let stopped = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&stopped);
+    assert_eq!(
+        isolated_lines(&stdout(&stopped)),
+        Vec::<String>::new(),
+        "{}",
+        stdout(&stopped)
+    );
+    assert_eq!(
+        fixture.other_project.container(),
+        container,
+        "gc removed the container of a Worktree"
+    );
+    assert!(
+        fixture.other_project.volume_exists(),
+        "gc removed the volume of a Worktree"
+    );
+}
+
 /// The id of the container `holder`, empty when it no longer exists.
 fn impostor_id(holder: &Holder) -> String {
     let output = Command::new("docker")
