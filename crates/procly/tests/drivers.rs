@@ -1067,6 +1067,76 @@ fn docker_gc_apply_frees_the_redis_index_of_a_removed_worktree_for_a_new_one() {
 }
 
 #[test]
+fn docker_gc_apply_never_drops_a_resource_a_worktree_added_while_it_runs_uses() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = logical_fixture(alpine_compose, "dir", DEV_AND_TEST);
+    // The drop of the first resource marks that it began, and takes long enough for a Worktree to be added meanwhile.
+    let slow = DIRECTORY_DRIVER.replace(
+        "drop = 'rm",
+        "drop = 'test {resource} != app__login || { touch /data/dropping; sleep 5; } ; rm",
+    );
+    write_driver_file(&fixture.main.join(".procly/drivers"), "dir", &slow);
+    let fixture = commit_and_add_worktree(fixture);
+    let (procly, main) = (&fixture.procly, &fixture.main);
+    // 2 Worktrees named `login` under 2 parents, so that both get the slug `login`.
+    let login = |parent: &str| {
+        let path = procly.scratch().join(parent).join("login");
+        fs::create_dir_all(path.parent().expect("a parent")).expect("create the parent");
+        let branch = format!("login-{parent}");
+        git(
+            main,
+            &["worktree", "add", "--quiet", "-b", &branch, &path.to_string_lossy()],
+        );
+        path.canonicalize().expect("canonicalize the worktree")
+    };
+    assert_success(&procly.procly_in(main, &["up", "db"]));
+    let first = login("a");
+    assert_success(&procly.procly_in(&first, &["up", "db"]));
+    remove_worktree(main, &first);
+    let gc = procly
+        .command()
+        .current_dir(main)
+        .args(["gc", "--apply"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the procly binary runs");
+    let began = std::time::Instant::now();
+    while fixture.project.exec("test -e /data/dropping && echo began").trim() != "began" {
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(30),
+            "the drop never began"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // While `app__login` is dropped, another Worktree named `login` is added and brought up.
+    let second = login("b");
+    assert_success(&procly.procly_in(&second, &["up", "db"]));
+    let applied = gc.wait_with_output().expect("gc --apply ends");
+
+    assert_success(&applied);
+    let first = first.display();
+    assert!(
+        stdout(&applied).contains(&format!(
+            "deleted logical resource db.dev app__login (driver dir) of {first}\n"
+        )),
+        "{}",
+        stdout(&applied)
+    );
+    assert!(!stdout(&applied).contains("app_test__login"), "{}", stdout(&applied));
+    // The resource dropped before the Worktree was added is created again by its `up`, the other one was kept.
+    assert_eq!(
+        resources(&fixture.project),
+        ["app", "app__login", "app_test", "app_test__login"]
+    );
+    let listed = procly.procly(&["gc"]);
+    assert!(!stdout(&listed).contains("logical resource"), "{}", stdout(&listed));
+}
+
+#[test]
 fn docker_a_drop_that_fails_is_reported_with_the_command_to_run_and_gc_goes_on() {
     if !require_docker() {
         return;

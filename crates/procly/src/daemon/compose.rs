@@ -163,6 +163,33 @@ pub(crate) enum DropError {
         reason: String,
         by_hand: String,
     },
+    #[error("the drop could not be run: {0}")]
+    Blocking(String),
+}
+
+/// The Logical resource `gc` drops: `name`, of the Compose service `service` the Worktrees of the Repository
+/// `repository` share, on the Driver `driver`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ToDrop<'a> {
+    pub(crate) repository: &'a Path,
+    pub(crate) service: &'a str,
+    pub(crate) name: &'a str,
+    pub(crate) driver: &'a str,
+}
+
+/// What [`Composes::drop_resource`] did with a Logical resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dropped {
+    Dropped,
+    /// Not dropped, it is no longer an Orphan.
+    Held,
+}
+
+/// Runs `work` on a blocking thread.
+async fn in_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, DropError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| DropError::Blocking(error.to_string()))
 }
 
 /// What it takes to start the container of one Compose service.
@@ -635,27 +662,55 @@ impl Composes {
             .collect()
     }
 
-    /// Drops the Logical resource `name` from the container the Worktrees of the Repository `repository` share for the
-    /// Compose service `service`, through the `drop` command of the Driver `driver`, read from the Main worktree. Each
-    /// command of the Driver may run for `timeout`.
+    /// Drops the Logical resource `orphan.name` from the container the Worktrees of the Repository `orphan.repository`
+    /// share for the Compose service `orphan.service`, through the `drop` command of its Driver, read from the Main
+    /// worktree. Each command of the Driver may run for `timeout`.
     ///
     /// The container must run: it is never started for a drop. A resource the `check` of the Driver no longer finds
-    /// counts as dropped. The container is held throughout, so that no stop overlaps the drop.
-    pub(crate) async fn drop_resource(
+    /// counts as dropped, and once dropped `forget` forgets it. The container is held throughout, so that no stop
+    /// overlaps the drop, and so that no `up` creates or reuses the resource between `still_orphan`, which tells
+    /// whether it is still an Orphan, and `forget`. Both are blocking and run on a blocking thread.
+    pub(crate) async fn drop_resource<E>(
         &self,
-        repository: &Path,
-        service: &str,
-        name: &str,
-        driver: &str,
+        orphan: ToDrop<'_>,
         timeout: Duration,
-    ) -> Result<(), DropError> {
+        still_orphan: impl FnOnce() -> Result<bool, E> + Send + 'static,
+        forget: impl FnOnce() -> Result<(), E> + Send + 'static,
+    ) -> Result<Dropped, E>
+    where
+        E: From<DropError> + Send + 'static,
+    {
+        let ToDrop {
+            repository,
+            service,
+            name,
+            driver,
+        } = orphan;
         let not_running = || DropError::NotRunning {
             service: service.to_owned(),
         };
         let key = (repository.to_owned(), service.to_owned(), None);
         let container = self.table().get(&key).cloned().ok_or_else(not_running)?;
         let _commands = container.commands.lock().await;
-        let alive = container.state().alive.clone().ok_or_else(not_running)?;
+        // Worked out again under the lock: a Worktree added since `gc` collected its Orphans may use the resource now.
+        if !in_blocking(still_orphan).await?? {
+            return Ok(Dropped::Held);
+        }
+        self.drop_held(name, driver, timeout, &container, not_running).await?;
+        in_blocking(forget).await??;
+        Ok(Dropped::Dropped)
+    }
+
+    /// Drops the Logical resource `name` from `container`, whose lock the caller holds.
+    async fn drop_held(
+        &self,
+        name: &str,
+        driver: &str,
+        timeout: Duration,
+        container: &Container,
+        not_running: impl Fn() -> DropError,
+    ) -> Result<(), DropError> {
+        let alive = container.state().alive.clone().ok_or_else(&not_running)?;
         let docker = alive.docker;
         if !docker.is_running().await {
             return Err(not_running());

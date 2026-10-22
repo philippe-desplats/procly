@@ -7,6 +7,8 @@
 //!
 //! A Logical resource is dropped in its container through the `drop` command of its Driver, and only then forgotten
 //! and its index freed, so that an index is never granted again while it still holds the data of a removed Worktree.
+//! Whether it is still an Orphan is worked out again with its container held, since a Worktree added while `gc` runs
+//! may use it by then.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -14,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::compose::DropError;
+use super::compose::{DropError, Dropped, ToDrop};
 use super::lease::WorktreeLease;
 use super::resource::{LogicalResource, ResourceKey};
 use super::store::StoreError;
@@ -22,7 +24,7 @@ use super::worktree_dir::{self, WorktreeDir};
 use super::{Registry, blocking, read_config, requester};
 use crate::config::{Config, Settings};
 use crate::protocol::{GcReport, Orphan, OrphanKind, Response, SkippedRepository};
-use crate::topology;
+use crate::topology::{self, TopologyError};
 
 /// What `gc` says when the Orphans could not be collected.
 const COLLECT_FAILED: &str = "the orphans could not be collected";
@@ -43,16 +45,25 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
             "gc --apply of {} orphans requested by {who}",
             collected.report.orphans.len()
         );
-        for orphan in &mut collected.report.orphans {
+        let mut orphans = Vec::new();
+        for mut orphan in std::mem::take(&mut collected.report.orphans) {
             let timeout = collected
                 .driver_timeouts
                 .get(&orphan.repository)
                 .copied()
                 .unwrap_or_else(|| Settings::default().driver_timeout);
-            match delete(registry, orphan, timeout).await {
-                Ok(()) => {
+            match delete(registry, &orphan, timeout).await {
+                Ok(Dropped::Dropped) => {
                     orphan.deleted = true;
                     eprintln!("gc deleted {}, requested by {who}", orphan.describe());
+                }
+                // No longer an Orphan, so no longer reported as one.
+                Ok(Dropped::Held) => {
+                    eprintln!(
+                        "gc kept {}, a Worktree uses it again, requested by {who}",
+                        orphan.describe()
+                    );
+                    continue;
                 }
                 Err(error) => {
                     let error = format!("{:#}", anyhow::Error::from(error));
@@ -60,7 +71,9 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
                     orphan.error = Some(error);
                 }
             }
+            orphans.push(orphan);
         }
+        collected.report.orphans = orphans;
     }
     Response::Gc(collected.report)
 }
@@ -272,6 +285,8 @@ enum DeleteError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
+    Topology(#[from] TopologyError),
+    #[error(transparent)]
     Drop(#[from] DropError),
     #[error("the deletion could not be run: {0}")]
     Blocking(String),
@@ -284,22 +299,71 @@ enum DeleteError {
 }
 
 /// Deletes `orphan`, a Logical resource with Driver commands that may run for `timeout`. A directory already gone
-/// counts as deleted, as does a resource the Driver no longer finds.
-async fn delete(registry: &Arc<Registry>, orphan: &Orphan, timeout: Duration) -> Result<(), DeleteError> {
+/// counts as deleted, as does a resource the Driver no longer finds. A Logical resource that is no longer an Orphan
+/// by the time its container is held is left as it is, [`Dropped::Held`].
+async fn delete(registry: &Arc<Registry>, orphan: &Orphan, timeout: Duration) -> Result<Dropped, DeleteError> {
     if let OrphanKind::LogicalResource {
-        service, name, driver, ..
+        service,
+        resource,
+        name,
+        driver,
     } = &orphan.kind
     {
-        registry
-            .composes
-            .drop_resource(&orphan.repository, service, name, driver, timeout)
-            .await?;
+        let key = ResourceKey {
+            repository: orphan.repository.clone(),
+            worktree: orphan.worktree.clone(),
+            service: service.clone(),
+            resource: resource.clone(),
+        };
+        let still = {
+            let (registry, key, name) = (Arc::clone(registry), key.clone(), name.clone());
+            move || still_orphan(&registry, &key, &name)
+        };
+        let forget = {
+            let registry = Arc::clone(registry);
+            move || forget(&registry, &key)
+        };
+        let to_drop = ToDrop {
+            repository: &orphan.repository,
+            service,
+            name,
+            driver,
+        };
+        return registry.composes.drop_resource(to_drop, timeout, still, forget).await;
     }
     let (registry, orphan) = (Arc::clone(registry), orphan.clone());
     // Writing the documents and removing the directories are blocking.
     tokio::task::spawn_blocking(move || delete_on_disk(&registry, &orphan))
         .await
-        .map_err(|error| DeleteError::Blocking(error.to_string()))?
+        .map_err(|error| DeleteError::Blocking(error.to_string()))??;
+    Ok(Dropped::Dropped)
+}
+
+/// Whether the Logical resource `key`, named `name`, is still an Orphan, worked out again from what git lists now,
+/// as [`collect`] does. A resource recorded under another name since, or forgotten, is not one. Blocking: it runs git
+/// and reads the disk.
+fn still_orphan(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bool, DeleteError> {
+    let Some(resource) = registry
+        .resources
+        .all()?
+        .into_iter()
+        .find(|resource| resource.key == *key && resource.name == name)
+    else {
+        return Ok(false);
+    };
+    let roots = topology::listed_roots(&key.repository)?;
+    if roots.contains(&key.worktree) || in_use(registry).contains(&key.worktree) {
+        return Ok(false);
+    }
+    let config = main_config(&key.repository);
+    Ok(!held(registry, &resource, config.as_ref(), Some(&roots))?)
+}
+
+/// Forgets the dropped Logical resource `key`, then frees its index, so that a failure in between leaves an index
+/// taken, never a record of an index another Worktree may be granted. Blocking: it writes the documents.
+fn forget(registry: &Registry, key: &ResourceKey) -> Result<(), DeleteError> {
+    registry.resources.forget(key)?;
+    Ok(registry.indexes.free(key)?)
 }
 
 /// Deletes what `orphan` leaves on the disk of the state directory.
@@ -316,18 +380,7 @@ fn delete_on_disk(registry: &Registry, orphan: &Orphan) -> Result<(), DeleteErro
             port_name: port_name.clone(),
             port: *port,
         })?),
-        OrphanKind::LogicalResource { service, resource, .. } => {
-            let key = ResourceKey {
-                repository: orphan.repository.clone(),
-                worktree: orphan.worktree.clone(),
-                service: service.clone(),
-                resource: resource.clone(),
-            };
-            // Forgotten before its index is freed, so that a failure in between leaves an index taken, never a
-            // record of an index another Worktree may be granted.
-            registry.resources.forget(&key)?;
-            Ok(registry.indexes.free(&key)?)
-        }
+        OrphanKind::LogicalResource { .. } => unreachable!("a Logical resource is deleted under its container"),
         OrphanKind::OutputDirectory { path } | OrphanKind::SetupDirectory { path } => worktree_dir::remove(path)
             .map_err(|source| DeleteError::Remove {
                 path: path.clone(),
