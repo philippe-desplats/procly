@@ -281,18 +281,40 @@ pub fn test_server() -> PathBuf {
 /// that sent the Lease of a test to the Range or failed the bind of its container. Each port is handed out once per test
 /// binary, from an offset taken from the process, so 2 tests never share one.
 ///
+/// A port is also reserved against the other test processes of the machine, which `make check` runs in other
+/// worktrees at the same time: probing alone left a window in which another run took the port before the Daemon
+/// checked it, and the Lease went to the Range. See [`reserve`].
+///
 /// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, so a port still in `TIME_WAIT`
 /// is skipped.
 pub fn free_port() -> u16 {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static RESERVED: Mutex<Vec<std::fs::File>> = Mutex::new(Vec::new());
     let offset = std::process::id() * 97;
     loop {
         let slot = (offset + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 10_000;
         let port = 10_000 + u16::try_from(slot).expect("10000 slots fit in a port");
-        if accepted_by_the_daemon(port) {
+        if let Some(reservation) = reserve(port)
+            && accepted_by_the_daemon(port)
+        {
+            RESERVED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(reservation);
             return port;
         }
     }
+}
+
+/// Takes the lock of `port` among the test processes of the user, or `None` when another one holds it.
+///
+/// The lock is an advisory lock on a file named after the port, in a directory every test run of the user shares
+/// whatever its `TMPDIR`. It is held until the test process exits, the system releases it even after a crash.
+fn reserve(port: u16) -> Option<std::fs::File> {
+    let directory = PathBuf::from(format!("/tmp/procly-test-ports-{}", nix::unistd::getuid()));
+    std::fs::create_dir_all(&directory).expect("create the test port reservations directory");
+    let file = std::fs::File::create(directory.join(port.to_string())).expect("create a test port reservation");
+    file.try_lock().ok().map(|()| file)
 }
 
 /// Whether the bind the Daemon checks a Lease with succeeds on `port`, IPv4 and IPv6.
