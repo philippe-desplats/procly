@@ -8,7 +8,8 @@ use anyhow::Context as _;
 use serde::{Serialize, Serializer};
 
 use crate::protocol::{
-    Conflict, InitReport, JobEnd, Left, Released, Removed, ServiceEnd, StartOutcome, Stopped, UpService,
+    Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
+    ServiceEnd, StartOutcome, Stopped, UpService,
 };
 
 /// The version of the `--json` schema of every command, bumped on any incompatible change, independently of the
@@ -127,6 +128,56 @@ pub(crate) struct Variables<'a>(pub(crate) &'a [(String, String)]);
 impl Serialize for Variables<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_map(self.0.iter().map(|(name, value)| (name, value)))
+    }
+}
+
+/// What `worktree release` prints: the Worktree, then what it stopped, what it released and what it kept.
+#[derive(Debug, Serialize)]
+pub(crate) struct WorktreeRelease<'a> {
+    worktree: &'a Path,
+    stopped: ReleaseStopped<'a>,
+    released: ReleaseReleased<'a>,
+    kept: ReleaseKept<'a>,
+}
+
+/// The Services and Jobs a Worktree release stopped.
+#[derive(Debug, Serialize)]
+struct ReleaseStopped<'a> {
+    services: &'a [String],
+    jobs: &'a [String],
+}
+
+/// The Compose services a Worktree release let go of and the Leases it released.
+#[derive(Debug, Serialize)]
+struct ReleaseReleased<'a> {
+    compose_services: &'a [Released],
+    leases: &'a [LeaseHeld],
+}
+
+/// The Leases and Logical resources a Worktree release kept.
+#[derive(Debug, Serialize)]
+struct ReleaseKept<'a> {
+    leases: &'a [KeptLease],
+    logical_resources: &'a [KeptResource],
+}
+
+impl<'a> WorktreeRelease<'a> {
+    pub(crate) fn new(report: &'a ReleaseReport) -> Self {
+        Self {
+            worktree: &report.worktree,
+            stopped: ReleaseStopped {
+                services: &report.services,
+                jobs: &report.jobs,
+            },
+            released: ReleaseReleased {
+                compose_services: &report.compose_services,
+                leases: &report.leases,
+            },
+            kept: ReleaseKept {
+                leases: &report.kept_leases,
+                logical_resources: &report.logical_resources,
+            },
+        }
     }
 }
 

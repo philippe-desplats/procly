@@ -10,10 +10,10 @@
 //! the file itself once it reaches [`WRITER_LIMIT`], keeping its last buffer in the previous file as the Daemon does.
 //! When the writer cannot be started, the Service appends to the file directly, as it did before the writer existed.
 
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::hash::BuildHasher as _;
 use std::io::{self, PipeWriter, Read, Seek as _, SeekFrom, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -23,7 +23,9 @@ use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
 
 use super::process_group::{self, DRAIN_TIMEOUT};
+use super::worktree_dir;
 use crate::output::{self, OutputBuffer};
+use crate::topology::Topology;
 
 /// The size at which the Daemon empties an output file, once it has read it. As much as the output buffer holds, the
 /// last of it kept in the previous file, so that a Daemon re-attaching the Service after a crash finds between one
@@ -64,12 +66,13 @@ impl OutputFiles {
         &self.dir
     }
 
-    /// Creates an empty output file under a name no other file holds, readable by the user only.
-    pub(crate) fn create(&self) -> io::Result<NewOutput> {
-        DirBuilder::new().recursive(true).mode(0o700).create(&self.dir)?;
+    /// Creates an empty output file under a name no other file holds, readable by the user only, in the directory of
+    /// the Worktree of `topology`, which `procly gc` deletes once git no longer lists the Worktree.
+    pub(crate) fn create(&self, topology: &Topology) -> io::Result<NewOutput> {
+        let dir = worktree_dir::create(&self.dir, topology).map_err(io::Error::other)?;
         let (path, writer) = loop {
             let random = std::hash::RandomState::new().hash_one(SystemTime::now());
-            let path = self.dir.join(format!("{random:016x}.log"));
+            let path = dir.join(format!("{random:016x}.log"));
             match OpenOptions::new().append(true).create_new(true).mode(0o600).open(&path) {
                 Ok(writer) => break (path, writer),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -92,17 +95,27 @@ impl OutputFiles {
     }
 
     /// Removes every output file but the `kept` ones and their previous files, which belong to the Services
-    /// re-attached after a crash of the Daemon: the others belonged to Services that ended while no Daemon ran.
-    /// Blocking.
+    /// re-attached after a crash of the Daemon: the others belonged to Services that ended while no Daemon ran. The
+    /// directories of the Worktrees stay, with their record. Blocking.
     pub(crate) fn sweep(&self, kept: &[PathBuf]) {
-        let Ok(entries) = fs::read_dir(&self.dir) else {
-            return;
-        };
-        for path in entries.filter_map(|entry| Some(entry.ok()?.path())) {
-            if !kept.iter().any(|kept| *kept == path || previous(kept) == path)
-                && let Err(error) = fs::remove_file(&path)
-            {
-                eprintln!("cannot remove the output file {}: {error}", path.display());
+        // The files of the directory itself were written before output files went into the directory of their
+        // Worktree.
+        let dirs =
+            std::iter::once(self.dir.clone()).chain(worktree_dir::list(&self.dir).into_iter().map(|dir| dir.path));
+        for dir in dirs {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                let is_file = entry.file_type().is_ok_and(|kind| !kind.is_dir());
+                if is_file
+                    && entry.file_name() != worktree_dir::RECORD_FILE
+                    && !kept.iter().any(|kept| *kept == path || previous(kept) == path)
+                    && let Err(error) = fs::remove_file(&path)
+                {
+                    eprintln!("cannot remove the output file {}: {error}", path.display());
+                }
             }
         }
     }
@@ -342,10 +355,23 @@ mod tests {
         Mutex::new(OutputBuffer::new(output::CAPACITY))
     }
 
+    fn topology(worktree: &str) -> Topology {
+        Topology {
+            git_common_dir: PathBuf::from("/src/app/.git"),
+            worktree: crate::topology::Worktree {
+                path: PathBuf::from(worktree),
+                slug: crate::topology::slug(worktree),
+                main: false,
+            },
+        }
+    }
+
     #[test]
     fn reads_what_was_appended_since_the_last_read() {
         let dir = tempfile::tempdir().unwrap();
-        let mut new = OutputFiles::new(dir.path().join("output")).create().unwrap();
+        let mut new = OutputFiles::new(dir.path().join("output"))
+            .create(&topology("/src/app"))
+            .unwrap();
         let (output, mut chunk) = (buffer(), vec![0; CHUNK]);
 
         new.stdout.write_all(b"one\n").unwrap();
@@ -359,7 +385,9 @@ mod tests {
     #[test]
     fn empties_the_file_at_the_limit_and_keeps_reading_what_is_appended_after() {
         let dir = tempfile::tempdir().unwrap();
-        let mut new = OutputFiles::new(dir.path().join("output")).create().unwrap();
+        let mut new = OutputFiles::new(dir.path().join("output"))
+            .create(&topology("/src/app"))
+            .unwrap();
         let (output, mut chunk) = (buffer(), vec![0; CHUNK]);
         let line = [b'x'; 1023].iter().chain(b"\n").copied().collect::<Vec<u8>>();
 
@@ -378,7 +406,9 @@ mod tests {
     #[test]
     fn a_new_daemon_gets_back_what_was_read_before_the_file_was_emptied_then_what_followed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut new = OutputFiles::new(dir.path().join("output")).create().unwrap();
+        let mut new = OutputFiles::new(dir.path().join("output"))
+            .create(&topology("/src/app"))
+            .unwrap();
         let mut chunk = vec![0; CHUNK];
         let line = [b'x'; 1023].iter().chain(b"\n").copied().collect::<Vec<u8>>();
         for _ in 0..LIMIT / 1024 {
@@ -403,7 +433,9 @@ mod tests {
     #[test]
     fn the_writer_empties_the_file_at_its_own_limit_and_keeps_the_last_buffer() {
         let dir = tempfile::tempdir().unwrap();
-        let new = OutputFiles::new(dir.path().join("output")).create().unwrap();
+        let new = OutputFiles::new(dir.path().join("output"))
+            .create(&topology("/src/app"))
+            .unwrap();
         let line = [b'x'; 1023].iter().chain(b"\n").copied().collect::<Vec<u8>>();
         let mut input = line.repeat(usize::try_from(WRITER_LIMIT).unwrap() / 1024 * 3 + 7);
         input.extend_from_slice(b"last\n");
@@ -431,13 +463,19 @@ mod tests {
     fn sweeping_removes_every_output_file_but_the_kept_ones() {
         let dir = tempfile::tempdir().unwrap();
         let files = OutputFiles::new(dir.path().join("output"));
-        let (kept, gone) = (files.create().unwrap().path, files.create().unwrap().path);
+        let kept = files.create(&topology("/src/app")).unwrap().path;
+        let gone = files.create(&topology("/src/app-other")).unwrap().path;
+        let older = dir.path().join("output").join("0123456789abcdef.log");
         fs::write(previous(&kept), "kept").unwrap();
         fs::write(previous(&gone), "gone").unwrap();
+        fs::write(&older, "older").unwrap();
 
         files.sweep(std::slice::from_ref(&kept));
 
         assert!(kept.exists() && previous(&kept).exists());
-        assert!(!gone.exists() && !previous(&gone).exists());
+        assert!(!gone.exists() && !previous(&gone).exists() && !older.exists());
+        // The directory of each Worktree stays with its record, for gc to place it.
+        let worktree_dir = gone.parent().unwrap();
+        assert!(worktree_dir.join(worktree_dir::RECORD_FILE).exists());
     }
 }

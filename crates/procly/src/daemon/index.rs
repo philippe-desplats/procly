@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use super::resource::ResourceKey;
 use super::store::{self, StoreError};
 
 /// The version of the format of the Index document, bumped when a field changes meaning or disappears.
@@ -33,25 +34,13 @@ pub(crate) enum IndexError {
     },
 }
 
-/// What an index binds: one resource of one Compose service in one Worktree of one Repository.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct IndexKey {
-    /// The common git directory identifying the Repository.
-    repository: PathBuf,
-    /// The root of the Worktree.
-    worktree: PathBuf,
-    service: String,
-    /// The key of the resource in the configuration.
-    resource: String,
-}
-
-type Table = BTreeMap<IndexKey, u32>;
+type Table = BTreeMap<ResourceKey, u32>;
 
 /// One index as the document stores it.
 #[derive(Debug, Serialize, Deserialize)]
 struct Index {
     #[serde(flatten)]
-    key: IndexKey,
+    key: ResourceKey,
     index: u32,
 }
 
@@ -119,6 +108,64 @@ impl Indexes {
         Ok(allocated)
     }
 
+    /// The index the resource `key` holds, `None` when it holds none. Blocking: it reads the document the first time.
+    pub(crate) fn get(&self, key: &ResourceKey) -> Result<Option<u32>, StoreError> {
+        self.with_table(|table| Ok(table.get(key).copied()))
+    }
+
+    /// The index each resource of the Compose service `service` holds in `worktree` of the Repository `repository`, by
+    /// key, without handing out any. Blocking: it reads the document the first time.
+    pub(crate) fn held(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        service: &str,
+    ) -> Result<BTreeMap<String, u32>, StoreError> {
+        self.with_table(|table| {
+            Ok(table
+                .iter()
+                .filter(|(key, _)| key.repository == repository && key.worktree == worktree && key.service == service)
+                .map(|(key, &index)| (key.resource.clone(), index))
+                .collect())
+        })
+    }
+
+    /// Frees the index the resource `key` holds, so that the next resource asking for one can be granted it, when
+    /// `release`, given that index, says so, and returns what it said. `release` runs under the lock of the table, so
+    /// that no index is handed out between it and the freeing. Blocking: it writes the document when the resource held
+    /// one.
+    pub(crate) fn free_if<E: From<StoreError>>(
+        &self,
+        key: &ResourceKey,
+        release: impl FnOnce(Option<u32>) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        self.with_table(|table| {
+            if !release(table.get(key).copied())? {
+                return Ok(false);
+            }
+            if table.contains_key(key) {
+                let mut freed = table.clone();
+                freed.remove(key);
+                self.write(&freed)?;
+                *table = freed;
+            }
+            Ok(true)
+        })
+    }
+
+    /// Runs `f` on the table, read from the document when it was not yet.
+    fn with_table<T, E: From<StoreError>>(&self, f: impl FnOnce(&mut Table) -> Result<T, E>) -> Result<T, E> {
+        let mut table = self
+            .table
+            .lock()
+            .expect("the index table mutex is never poisoned, no code panics while holding it");
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read()?),
+        };
+        f(table)
+    }
+
     fn read(&self) -> Result<Table, StoreError> {
         let document = store::load::<IndexDocument>(&self.path, DOCUMENT_VERSION)?;
         Ok(document
@@ -157,7 +204,7 @@ fn allocate_in(table: &mut Table, request: &IndexRequest<'_>) -> Result<BTreeMap
     for &worktree in worktrees {
         wanted = BTreeMap::new();
         for resource in request.resources {
-            let key = IndexKey {
+            let key = ResourceKey {
                 repository: request.repository.to_owned(),
                 worktree: worktree.to_owned(),
                 service: request.service.to_owned(),
@@ -336,6 +383,46 @@ mod tests {
 
         let restarted = Indexes::new(path);
         assert_eq!(restarted.allocate(&request("/src/app-a")).unwrap()["main"], 1);
+        assert_eq!(restarted.allocate(&request("/src/app-b")).unwrap()["main"], 2);
+    }
+
+    #[test]
+    fn a_freed_index_is_the_next_one_handed_out_even_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("indexes.json");
+        let resources = keys(&["main"]);
+        let request = |worktree: &'static str| IndexRequest {
+            repository: Path::new(REPOSITORY),
+            main: Path::new(MAIN),
+            worktree: Path::new(worktree),
+            service: "cache",
+            driver: "redis",
+            capacity: 3,
+            resources: &resources,
+        };
+        let indexes = Indexes::new(path.clone());
+        assert_eq!(indexes.allocate(&request("/src/app-a")).unwrap()["main"], 1);
+        assert_eq!(indexes.allocate(&request("/src/app-b")).unwrap()["main"], 2);
+        let key = ResourceKey {
+            repository: PathBuf::from(REPOSITORY),
+            worktree: PathBuf::from("/src/app-a"),
+            service: "cache".to_owned(),
+            resource: "main".to_owned(),
+        };
+        assert_eq!(indexes.get(&key).unwrap(), Some(1));
+
+        // Kept while the resource may not be released, then freed.
+        assert!(!indexes.free_if(&key, |_| Ok::<_, StoreError>(false)).unwrap());
+        assert_eq!(indexes.get(&key).unwrap(), Some(1));
+        assert!(
+            indexes
+                .free_if(&key, |index| Ok::<_, StoreError>(index == Some(1)))
+                .unwrap()
+        );
+
+        assert_eq!(indexes.get(&key).unwrap(), None);
+        let restarted = Indexes::new(path);
+        assert_eq!(restarted.allocate(&request("/src/app-c")).unwrap()["main"], 1);
         assert_eq!(restarted.allocate(&request("/src/app-b")).unwrap()["main"], 2);
     }
 

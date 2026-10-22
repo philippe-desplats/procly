@@ -15,6 +15,7 @@ use super::clock::Clock;
 use super::store::{self, StoreError};
 use crate::config::PortConfig;
 use crate::ports::Range;
+use crate::protocol::{KeptBecause, KeptLease, LeaseHeld};
 use crate::topology::Topology;
 
 /// The version of the format of the Lease document, bumped when a field changes meaning or disappears.
@@ -83,6 +84,18 @@ struct Lease {
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaseDocument {
     leases: Vec<Lease>,
+}
+
+/// A Lease bound to a Worktree rather than to a Pinned branch, as `procly gc` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeLease {
+    /// The common git directory identifying the Repository.
+    pub(crate) repository: PathBuf,
+    /// The root of the Worktree.
+    pub(crate) worktree: PathBuf,
+    pub(crate) service: String,
+    pub(crate) port_name: String,
+    pub(crate) port: u16,
 }
 
 /// Every Lease the Daemon granted, across all Repositories, so that no 2 of them share a port. They persist in a
@@ -199,6 +212,89 @@ impl Leases {
         Ok(())
     }
 
+    /// Every Lease bound to a Worktree, those of Pinned branches left out, in the order of the document. Blocking: it
+    /// reads the document on the first request.
+    pub(crate) fn bound_to_worktrees(&self) -> Result<Vec<WorktreeLease>, StoreError> {
+        let mut table = self
+            .table
+            .lock()
+            .expect("the lease table mutex is never poisoned, no code panics while holding it");
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read(self.clock.since_epoch())?),
+        };
+        Ok(table
+            .iter()
+            .filter_map(|(key, granted)| match &key.scope {
+                Scope::Worktree(worktree) => Some(WorktreeLease {
+                    repository: key.repository.clone(),
+                    worktree: worktree.clone(),
+                    service: key.service.clone(),
+                    port_name: key.port_name.clone(),
+                    port: granted.port,
+                }),
+                Scope::Branch(_) => None,
+            })
+            .collect())
+    }
+
+    /// Releases `lease`, so that its port returns to the Range, and stores the Leases left before it returns. A Lease
+    /// granted another port since it was read is left as it is. Blocking: it writes the document.
+    pub(crate) fn release(&self, lease: &WorktreeLease) -> Result<(), StoreError> {
+        let mut table = self
+            .table
+            .lock()
+            .expect("the lease table mutex is never poisoned, no code panics while holding it");
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read(self.clock.since_epoch())?),
+        };
+        let key = LeaseKey {
+            repository: lease.repository.clone(),
+            scope: Scope::Worktree(lease.worktree.clone()),
+            service: lease.service.clone(),
+            port_name: lease.port_name.clone(),
+        };
+        if table.get(&key).map(|granted| granted.port) != Some(lease.port) {
+            return Ok(());
+        }
+        let mut released = table.clone();
+        released.remove(&key);
+        self.write(&released)?;
+        *table = released;
+        Ok(())
+    }
+
+    /// Releases the Leases of `worktree` in the Repository `repository`, so that any Worktree can be granted their
+    /// ports at once, and returns them with the Leases it kept: those of the Pinned branch `branch` the Worktree is
+    /// on, and those a Service of `running` still uses, such as a container that serves other Worktrees. Blocking:
+    /// it reads and writes the document.
+    pub(crate) fn release_worktree(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        branch: Option<&str>,
+        running: &BTreeSet<(PathBuf, String)>,
+    ) -> Result<(Vec<LeaseHeld>, Vec<KeptLease>), StoreError> {
+        let now = self.clock.since_epoch();
+        let mut table = self
+            .table
+            .lock()
+            .expect("the lease table mutex is never poisoned, no code panics while holding it");
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read(now)?),
+        };
+        // Released on a copy, so that a Lease the document still holds is not reported as released.
+        let mut released_table = table.clone();
+        let released = release_in(&mut released_table, repository, worktree, branch, running);
+        if released_table != *table {
+            self.write(&released_table)?;
+            *table = released_table;
+        }
+        Ok(released)
+    }
+
     /// Reads the document, a Lease of a document of version 1 counting as used at `now`.
     fn read(&self, now: Duration) -> Result<Table, StoreError> {
         let document = store::load::<LeaseDocument>(&self.path, DOCUMENT_VERSION)?;
@@ -255,6 +351,50 @@ fn expire(table: &mut Table, request: &LeaseRequest<'_>, now: Duration) {
             || matches!(key.scope, Scope::Branch(_))
             || now.saturating_sub(granted.last_used) < request.expiry
     });
+}
+
+/// Drops the Leases of `worktree` in the Repository `repository` from `table`, apart from those a Service of `running`
+/// uses, and returns them, then the Leases kept: those still used, and those of the Pinned branch `branch`.
+fn release_in(
+    table: &mut Table,
+    repository: &Path,
+    worktree: &Path,
+    branch: Option<&str>,
+    running: &BTreeSet<(PathBuf, String)>,
+) -> (Vec<LeaseHeld>, Vec<KeptLease>) {
+    let held = |key: &LeaseKey, granted: &Granted| LeaseHeld {
+        service: key.service.clone(),
+        port_name: key.port_name.clone(),
+        port: granted.port,
+    };
+    let (mut released, mut kept) = (Vec::new(), Vec::new());
+    table.retain(|key, granted| {
+        if key.repository != repository {
+            return true;
+        }
+        match &key.scope {
+            Scope::Worktree(path) if path == worktree => {
+                if running.contains(&(path.clone(), key.service.clone())) {
+                    kept.push(KeptLease {
+                        lease: held(key, granted),
+                        reason: KeptBecause::ContainerRunning,
+                    });
+                    return true;
+                }
+                released.push(held(key, granted));
+                false
+            }
+            Scope::Branch(pinned) if Some(pinned.as_str()) == branch => {
+                kept.push(KeptLease {
+                    lease: held(key, granted),
+                    reason: KeptBecause::PinnedBranch { branch: pinned.clone() },
+                });
+                true
+            }
+            Scope::Worktree(_) | Scope::Branch(_) => true,
+        }
+    });
+    (released, kept)
 }
 
 /// Grants the Leases of `request` in `table`, dated `now`, where `is_free` tells whether nothing outside Procly
@@ -659,6 +799,91 @@ mod tests {
             BTreeSet::from([running.clone(), pinned, elsewhere])
         );
         assert_eq!(table[&running].last_used, 30 * DAY);
+    }
+
+    #[test]
+    fn a_release_drops_the_leases_of_the_worktree_and_keeps_those_of_its_pinned_branch_and_of_running_containers() {
+        let lease = |scope: Scope, service: &str| LeaseKey {
+            repository: PathBuf::from("/src/app/.git"),
+            scope,
+            service: service.to_owned(),
+            port_name: "http".to_owned(),
+        };
+        let released = lease(Scope::Worktree("/src/app-a".into()), "web");
+        let container = lease(Scope::Worktree("/src/app-a".into()), "db");
+        let pinned = lease(Scope::Branch("develop".to_owned()), "web");
+        let other_branch = lease(Scope::Branch("staging".to_owned()), "web");
+        let other_worktree = lease(Scope::Worktree("/src/app-b".into()), "web");
+        let elsewhere = LeaseKey {
+            repository: PathBuf::from("/src/other/.git"),
+            ..released.clone()
+        };
+        let mut table: Table = [
+            &released,
+            &container,
+            &pinned,
+            &other_branch,
+            &other_worktree,
+            &elsewhere,
+        ]
+        .into_iter()
+        .zip(24000..)
+        .map(|(key, port)| {
+            (
+                key.clone(),
+                Granted {
+                    port,
+                    last_used: Duration::ZERO,
+                },
+            )
+        })
+        .collect();
+        let running = BTreeSet::from([(PathBuf::from("/src/app-a"), "db".to_owned())]);
+
+        let (dropped, kept) = release_in(
+            &mut table,
+            Path::new("/src/app/.git"),
+            Path::new("/src/app-a"),
+            Some("develop"),
+            &running,
+        );
+
+        let held = |service: &str, port| LeaseHeld {
+            service: service.to_owned(),
+            port_name: "http".to_owned(),
+            port,
+        };
+        assert_eq!(dropped, [held("web", 24000)]);
+        assert_eq!(
+            kept,
+            [
+                KeptLease {
+                    lease: held("db", 24001),
+                    reason: KeptBecause::ContainerRunning,
+                },
+                KeptLease {
+                    lease: held("web", 24002),
+                    reason: KeptBecause::PinnedBranch {
+                        branch: "develop".to_owned()
+                    },
+                },
+            ]
+        );
+        assert_eq!(
+            table.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([container, pinned, other_branch, other_worktree, elsewhere])
+        );
+        assert_eq!(
+            release_in(
+                &mut table,
+                Path::new("/src/app/.git"),
+                Path::new("/src/app-a"),
+                None,
+                &BTreeSet::new()
+            )
+            .0,
+            [held("db", 24001)]
+        );
     }
 
     #[test]

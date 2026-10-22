@@ -29,6 +29,7 @@ pub(super) fn report(
         .collect();
     let statuses = jobs.statuses();
     let services = services.statuses();
+    let containers = composes.isolated();
     // Every Worktree the Daemon ran something in.
     let known: Vec<&Topology> = services
         .iter()
@@ -59,6 +60,11 @@ pub(super) fn report(
                         jobs: jobs_where(&statuses, |topology| {
                             topology.is_some_and(|topology| topology.worktree.path == worktree.path)
                         }),
+                        containers: containers
+                            .iter()
+                            .filter(|(root, _)| *root == worktree.path)
+                            .map(|(_, container)| container.clone())
+                            .collect(),
                         worktree,
                         foreign: Vec::new(),
                     })

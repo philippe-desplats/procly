@@ -162,7 +162,7 @@ fn logs_of_a_reattached_service_keep_the_output_from_before_the_daemon_last_empt
 
 /// The output files the Daemon holds in the state directory.
 fn output_files(procly: &Procly) -> usize {
-    std::fs::read_dir(procly.state_dir().join("output")).map_or(0, Iterator::count)
+    procly.output_files().len()
 }
 
 #[test]

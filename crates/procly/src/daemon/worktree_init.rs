@@ -4,10 +4,9 @@
 //! The commands that succeeded are recorded in the git directory private to the Worktree, so the record goes away
 //! with the Worktree and a Worktree recreated at the same path starts afresh.
 
-use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,11 +20,14 @@ use super::Registry;
 use super::atomic_file::{self, Mode};
 use super::job::{Fingerprint, Job, JobSpec};
 use super::store;
+use super::worktree_dir;
 use crate::protocol::{InitReport, JobEnd, Response};
 use crate::topology::{self, Topology};
 
 /// The record of the setup commands that succeeded, in the git directory of the Worktree.
 const RECORD_FILE: &str = "procly-worktree-init.json";
+/// The log of the setup commands, in the setup directory of the Worktree.
+const LOG_FILE: &str = "setup.log";
 /// The version of the format of the record, a state document like the ones of the state directory (ADR 0012).
 const RECORD_VERSION: u32 = 1;
 /// The shortest interval between 2 progress reports, the elapsed time they print being in whole seconds.
@@ -74,7 +76,8 @@ struct Prepared {
 /// `settings.setup_progress_interval`.
 ///
 /// The output of the commands is appended to a log in the state directory, one per Worktree and emptied by the next
-/// `worktree init`. It is removed once every command succeeded, and kept when one failed, to tell why.
+/// `worktree init`. It is removed with its directory once every command succeeded, and kept when one failed, to tell
+/// why, until `procly gc` deletes it once git no longer lists the Worktree.
 pub(super) async fn run(
     registry: Arc<Registry>,
     path: PathBuf,
@@ -113,9 +116,9 @@ pub(super) async fn run(
             continue;
         }
         if log.is_none() {
-            let (dir, worktree) = (registry.setup_logs.clone(), topology.worktree.path.clone());
+            let (parent, topology) = (registry.setup_logs.clone(), topology.clone());
             log = Some(
-                tokio::task::spawn_blocking(move || SetupLog::create(&dir, &worktree))
+                tokio::task::spawn_blocking(move || SetupLog::create(&parent, &topology))
                     .await
                     .context("the setup log could not be created")??,
             );
@@ -164,31 +167,27 @@ pub(super) async fn run(
     }
     if let Some(log) = log {
         // Every command succeeded, nothing is left to tell.
-        let _ = tokio::task::spawn_blocking(move || fs::remove_file(&log.path)).await;
+        let _ = tokio::task::spawn_blocking(move || fs::remove_dir_all(&log.dir)).await;
     }
     Ok(Response::WorktreeInit(report))
 }
 
-/// The log the output of the setup commands of a Worktree is appended to.
+/// The log the output of the setup commands of a Worktree is appended to, in the setup directory of the Worktree.
 struct SetupLog {
+    /// The setup directory of the Worktree, which `procly gc` deletes once git no longer lists the Worktree.
+    dir: PathBuf,
     path: PathBuf,
     /// Shared with the Jobs writing to it, so that the output of the commands follows each other.
     file: Arc<File>,
 }
 
 impl SetupLog {
-    /// Creates the log of the Worktree at `worktree` in `dir`, readable by the user only, replacing the one a previous
-    /// `worktree init` left. Blocking.
-    fn create(dir: &Path, worktree: &Path) -> anyhow::Result<Self> {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .with_context(|| format!("cannot create {}", dir.display()))?;
-        // One name per Worktree, so that the logs of the Worktrees running their setup at once never mix.
-        let mut hasher = DefaultHasher::new();
-        worktree.hash(&mut hasher);
-        let path = dir.join(format!("{:016x}.log", hasher.finish()));
+    /// Creates the log of the Worktree of `topology` in its directory of `parent`, readable by the user only,
+    /// replacing the one a previous `worktree init` left. Blocking.
+    fn create(parent: &Path, topology: &Topology) -> anyhow::Result<Self> {
+        // One directory per Worktree, so that the logs of the Worktrees running their setup at once never mix.
+        let dir = worktree_dir::create(parent, topology)?;
+        let path = dir.join(LOG_FILE);
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -197,6 +196,7 @@ impl SetupLog {
             .open(&path)
             .with_context(|| format!("cannot create the setup log {}", path.display()))?;
         Ok(Self {
+            dir,
             path,
             file: Arc::new(file),
         })

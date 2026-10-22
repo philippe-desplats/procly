@@ -569,20 +569,11 @@ fn logs_prints_the_recent_output_of_a_service_of_the_current_worktree() {
 
 /// The size of every output file the Daemon holds in the state directory.
 fn output_files(procly: &Procly) -> Vec<u64> {
-    std::fs::read_dir(procly.state_dir().join("output")).map_or_else(
-        |_| Vec::new(),
-        |entries| {
-            entries
-                .map(|entry| {
-                    entry
-                        .expect("read the output directory")
-                        .metadata()
-                        .expect("stat")
-                        .len()
-                })
-                .collect()
-        },
-    )
+    procly
+        .output_files()
+        .iter()
+        .map(|path| std::fs::metadata(path).expect("stat").len())
+        .collect()
 }
 
 #[test]

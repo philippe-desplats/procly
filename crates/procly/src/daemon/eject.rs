@@ -71,9 +71,10 @@ async fn eject(registry: &Arc<Registry>, cwd: PathBuf, peer: Option<i32>) -> Res
         report.stopped.push(Stopped {
             service,
             worktree: Some(worktree),
+            isolated: false,
         });
     }
-    for service in registry
+    for (service, isolated) in registry
         .composes
         .stop_repository(&topology.git_common_dir)
         .await
@@ -81,7 +82,8 @@ async fn eject(registry: &Arc<Registry>, cwd: PathBuf, peer: Option<i32>) -> Res
     {
         report.stopped.push(Stopped {
             service,
-            worktree: None,
+            isolated: isolated.is_some(),
+            worktree: isolated,
         });
     }
 

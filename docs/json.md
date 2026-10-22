@@ -25,8 +25,10 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `env` | the variables of a Service | [`procly env`](configuration.md#procly-env) |
 | `init` | the proposal and whether it was written | [Proposing a configuration](init.md) |
 | `worktree init` | what was copied and what ran | [Preparing a Worktree](worktree-init.md) |
+| `worktree release` | what the Worktree release stopped, released and kept | [Releasing a Worktree](worktree-release.md#json) |
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
 | `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
+| `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |
 | `mcp` | none, it serves the documents above as MCP tools | [The MCP server](mcp.md) |
 
@@ -92,7 +94,20 @@ $ procly down --json
 {"schema_version":1,"service":null,"stopped":["api","web"],"released":[]}
 ```
 
-`service` is the Service asked for, or `null` for all of them. `released` lists the Compose services the Worktree let go of, each with `service`, `others` (how many other Worktrees still need the container) and `grace_ms` (how long it keeps running once none does).
+`service` is the Service asked for, or `null` for all of them. `stopped` also lists the Isolated Compose services whose container of the Worktree was stopped. `released` lists the Shared and Logical Compose services the Worktree let go of, each with `service`, `others` (how many other Worktrees still need the container) and `grace_ms` (how long it keeps running once none does).
+
+## `gc`
+
+```console
+$ procly gc --json
+{"schema_version":1,"applied":false,"orphans":[{"kind":"lease","service":"web","port_name":"http","port":24081,"repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null},{"kind":"logical_resource","service":"db","resource":"dev","name":"app__app_login","driver":"postgres","repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null},{"kind":"setup_directory","path":"/home/me/.local/state/procly/setup/app_login-5c2e0d6b8a41f7e3","repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null}],"skipped":[]}
+```
+
+`applied` is `true` for `gc --apply`. `orphans` lists every Orphan in the order `--apply` deletes them, the Leases, then the Logical resources, then the output directories, the setup directories, the Isolated containers and their volumes. Each one has a `kind` of `lease` (with `service`, `port_name` and `port`), `logical_resource` (with `service`, `resource`, the key of the resource in the configuration, `name`, its name or index in the container, and `driver`), `output_directory` or `setup_directory` (with `path`), `isolated_container` (with the `service`, its compose `project` and the `compose` service) or `isolated_volume` (with the compose `project` and the `volume`), the `repository` and the removed `worktree` it belongs to, whether it was `deleted`, always `false` without `--apply`, and the `error` that kept it from being deleted, or `null`. `skipped` lists the Repositories whose Worktrees git could not list, each with its `repository` and the `error` of git, nothing of which is an Orphan.
+
+The kinds `isolated_container` and `isolated_volume` were added without a change of the schema version: a reader that does not know a `kind` should skip that Orphan.
+
+`gc --apply --json` exits with 6 when some `error` is not `null`, as without `--json`, and prints none of the lines of stderr, which the document carries.
 
 ## `status`
 
@@ -101,4 +116,10 @@ $ procly status --json
 {"schema_version":1,"repositories":[{"git_common_dir":"/home/me/app/.git","worktrees":[{"path":"/home/me/app","slug":"app","main":true,"services":[{"service":"web","port":4101,"reattached":false,"state":"healthy"}],"jobs":[{"id":"3f9a1c2e","command":"bun test","cwd":"/home/me/app","state":"ended","end":{"kind":"exited","code":3}}]}]}],"jobs_outside_repositories":[]}
 ```
 
-`services` lists the Process services and Groups Procly started in the Worktree. A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Compose service is not listed in v0.1, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
+`services` lists the Process services and Groups Procly started in the Worktree. A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Shared or Logical Compose service is not listed, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
+
+A Worktree lists the Isolated containers Procly runs for it under `containers` when it has some, each with `service`, the compose `project` of the Worktree, the `compose` service and the `port` its health check probes, see [Isolated mode](configuration.md#isolated-mode). The key was added without a change of the schema version, and is left out when the list is empty:
+
+```json
+"containers":[{"service":"cache","project":"app-app_login","compose":"redis","port":24001}]
+```
