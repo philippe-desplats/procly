@@ -37,6 +37,7 @@ A Worktree counts as removed only once `git worktree list` no longer lists it. P
 
 - A Worktree git still lists is never removed, even one marked prunable because its directory is gone, as on a disk that is not mounted. `git worktree prune` makes git forget it, and its leftovers become Orphans.
 - The Leases of a Pinned branch are bound to the branch, not to a Worktree, so that the branch gets the same ports when its Worktree is recreated. They are never Orphans. Nor are the Logical resources of a Worktree that was on a Pinned branch, as long as the `procly.toml` of the Main worktree pins it, or cannot be read.
+- A Driver that names its resources names them after the Worktree slug, which only depends on the name of the Worktree directory. A named resource of a removed Worktree is never an Orphan while git lists a Worktree whose directory has the same name, such as `/work/a/login` removed and `/work/b/login` created, since that Worktree uses the same resource.
 - Nothing of a Worktree where a Service still runs, or where `worktree init` still runs a setup command, is an Orphan until it ends.
 - A Repository whose Worktrees git cannot list, because its git directory was moved or deleted, has no Orphans. `gc` says so on stderr, `procly: cannot list the Worktrees of <repository>, nothing of it is an Orphan`, with the error of git.
 

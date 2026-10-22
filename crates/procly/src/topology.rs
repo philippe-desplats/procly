@@ -211,7 +211,8 @@ pub(crate) fn canonicalize(path: &Path) -> Result<PathBuf, TopologyError> {
     })
 }
 
-fn slug_of(worktree: &Path) -> String {
+/// The Worktree slug of the Worktree at `worktree`, from the name of its directory alone.
+pub(crate) fn slug_of(worktree: &Path) -> String {
     slug(&worktree.file_name().unwrap_or_default().to_string_lossy())
 }
 

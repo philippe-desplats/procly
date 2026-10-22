@@ -131,7 +131,8 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         .collect();
     for resource in resources {
         let config = configs.get(&resource.key.repository).and_then(Option::as_ref);
-        if held(registry, &resource, config)? {
+        let roots = listed.get(&resource.key.repository);
+        if held(registry, &resource, config, roots)? {
             continue;
         }
         orphans.push(resource_orphan(resource));
@@ -181,9 +182,16 @@ fn main_config(repository: &Path) -> Option<Config> {
 }
 
 /// Whether the removed Worktree's `resource` is still held: by the Pinned branch the Worktree was on, while the
-/// configuration `config` of the Main worktree pins it or cannot be read, or, for an index, by nothing it can be
-/// matched with, such as an index handed out again after the index document was removed.
-fn held(registry: &Registry, resource: &LogicalResource, config: Option<&Config>) -> Result<bool, StoreError> {
+/// configuration `config` of the Main worktree pins it or cannot be read, for an index, by nothing it can be matched
+/// with, such as an index handed out again after the index document was removed, and for a name, by a Worktree git
+/// still lists among `roots` whose directory has the same name, since a Driver that names its resources names them
+/// after the Worktree slug alone and such a Worktree uses the same resource.
+fn held(
+    registry: &Registry,
+    resource: &LogicalResource,
+    config: Option<&Config>,
+    roots: Option<&BTreeSet<PathBuf>>,
+) -> Result<bool, StoreError> {
     if let Some(branch) = &resource.branch
         && config.is_none_or(|config| config.pinned.contains_key(branch))
     {
@@ -193,7 +201,12 @@ fn held(registry: &Registry, resource: &LogicalResource, config: Option<&Config>
         let index = registry.indexes.get(&resource.key)?;
         return Ok(index.is_none_or(|index| index.to_string() != resource.name));
     }
-    Ok(false)
+    // A declared name holds no double underscore, so the slug is what follows the first one. A name without one is
+    // not a name the Daemon gave a Worktree, and is left alone.
+    let Some((_, slug)) = resource.name.split_once("__") else {
+        return Ok(true);
+    };
+    Ok(roots.is_some_and(|roots| roots.iter().any(|root| topology::slug_of(root) == slug)))
 }
 
 /// The root of every Worktree where a Service runs, or where `worktree init` runs a setup command: nothing of it is

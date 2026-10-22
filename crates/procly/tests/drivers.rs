@@ -919,6 +919,47 @@ fn gc_lists_the_logical_resources_of_removed_worktrees_but_never_those_of_a_pinn
 }
 
 #[test]
+fn gc_never_lists_a_named_resource_a_worktree_git_still_lists_uses_under_the_same_directory_name() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    fs::write(main.join("procly.toml"), config(port, "postgres")).expect("write the config");
+    // 2 Worktrees named `login` under 2 parents, so that both get the slug `login`, on branches of their own.
+    let login = |parent: &str, branch: &str| {
+        let path = procly.scratch().join(parent).join("login");
+        fs::create_dir_all(path.parent().expect("a parent")).expect("create the parent");
+        git(
+            &main,
+            &["worktree", "add", "--quiet", "-b", branch, &path.to_string_lossy()],
+        );
+        let path = path.canonicalize().expect("canonicalize the worktree");
+        fs::write(path.join("procly.toml"), config(port, "postgres")).expect("write the config");
+        assert_eq!(
+            exported(&procly.procly_in(&path, &["env", "api"]), "DATABASE_NAME"),
+            "app__login"
+        );
+        path
+    };
+    let first = login("a", "login-a");
+    remove_worktree(&main, &first);
+    let listed = procly.procly(&["gc"]);
+    assert!(
+        stdout(&listed).contains(&format!(
+            "logical resource db.dev app__login (driver postgres) of {}",
+            first.display()
+        )),
+        "{}",
+        stdout(&listed)
+    );
+
+    login("b", "login-b");
+    let listed = procly.procly(&["gc"]);
+
+    assert_success(&listed);
+    assert!(!stdout(&listed).contains("logical resource"), "{}", stdout(&listed));
+}
+
+#[test]
 fn docker_gc_apply_drops_the_logical_resources_of_a_removed_worktree_through_the_driver() {
     if !require_docker() {
         return;
