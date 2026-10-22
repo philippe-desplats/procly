@@ -2,8 +2,7 @@
 //!
 //! Doctor changes nothing and runs none of the commands it names. It runs the checks that need only the machine, the
 //! state directory and the Worktree itself, and asks the Daemon for the ones only it can answer, so that an
-//! unreachable Daemon is a problem it reports and not the end of the run. Like every command, it starts the Daemon
-//! when none runs.
+//! unreachable Daemon is a problem it reports and not the end of the run. It never starts a Daemon.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -52,7 +51,7 @@ struct Placement {
 pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
     let placement = place(cwd);
     let worktree = placement.worktree.as_deref();
-    let answer = client::send(state, &Request::Doctor);
+    let answer = client::send_if_running(state, &Request::Doctor);
     let (daemon_check, daemon_checks) = daemon_checks(state, answer);
     let mut checks = vec![
         docker_compose(),
@@ -137,12 +136,21 @@ fn daemon_checks(state: &StateDir, answer: Result<Response, ClientError>) -> (Ch
             Check::failed(DAEMON, format!("unexpected answer from the Daemon: {other:?}"), None),
             skipped("the Daemon gave an unexpected answer"),
         ),
+        // Doctor never starts a Daemon, which would reconcile what the last one left. Any other command does.
+        Err(ClientError::Unreachable { path, .. }) => (
+            Check::failed(
+                DAEMON,
+                format!(
+                    "no Daemon runs, nothing answers on {}, any procly command starts one",
+                    path.display()
+                ),
+                Some("procly status".to_owned()),
+            ),
+            skipped("no Daemon runs"),
+        ),
         Err(error) => {
-            let fix = matches!(
-                error,
-                ClientError::Unreachable { .. } | ClientError::Connection { .. } | ClientError::NoResponse
-            )
-            .then(|| format!("tail -n 20 {}", state.log().display()));
+            let fix = matches!(error, ClientError::Connection { .. } | ClientError::NoResponse)
+                .then(|| format!("tail -n 20 {}", state.log().display()));
             (
                 Check::failed(DAEMON, format!("{:#}", anyhow::Error::from(error)), fix),
                 skipped("the Daemon did not answer"),
@@ -279,6 +287,7 @@ fn configuration(worktree: Option<&Path>, unplaced: &str) -> Check {
             format!("{} is valid and its Drivers load", file.display()),
         );
     }
+    fixes.sort();
     fixes.dedup();
     Check::failed(CONFIGURATION, problems.join("\n"), Some(fixes.join("\n")))
 }

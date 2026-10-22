@@ -313,6 +313,62 @@ fn a_daemon_speaking_another_protocol_version_is_a_problem_and_its_checks_are_sk
 }
 
 #[test]
+fn doctor_reports_a_daemon_that_does_not_run_and_never_starts_one() {
+    let setup = Setup::new();
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "daemon"), "failed");
+    assert!(
+        message(&document, "daemon").starts_with("no Daemon runs"),
+        "{}",
+        message(&document, "daemon")
+    );
+    assert_eq!(check(&document, "daemon")["fix"], json!("procly status"));
+    assert_eq!(status(&document, "leased_ports"), "skipped");
+    assert_eq!(status(&document, "orphans"), "skipped");
+    assert_eq!(status(&document, "state_documents"), "passed");
+    // Starting a Daemon would reconcile what the last one left: nothing was created, no socket, no pid, no log.
+    let left: Vec<_> = std::fs::read_dir(setup.procly.state_dir())
+        .expect("read the state directory")
+        .map(|entry| entry.expect("read the entry").file_name())
+        .collect();
+    assert!(left.is_empty(), "doctor wrote into the state directory: {left:?}");
+}
+
+#[test]
+fn a_daemon_that_answers_with_an_error_is_a_problem_and_its_checks_are_skipped() {
+    let setup = Setup::new();
+    let daemon = fake_daemon(
+        setup.procly.state_dir(),
+        json!({ "response": "error", "message": "the checks could not run" }),
+        None,
+    );
+
+    let document = problems(&setup.doctor());
+
+    daemon.join().expect("the fake Daemon ends");
+    assert_eq!(status(&document, "daemon"), "failed");
+    assert!(message(&document, "daemon").contains("the checks could not run"));
+    assert_eq!(status(&document, "orphans"), "skipped");
+}
+
+#[test]
+fn a_settings_file_that_is_not_json_is_a_guard_problem() {
+    let setup = Setup::healthy();
+    write(&setup.repo.join(".claude"), "settings.json", "{ not json");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "guard"), "failed");
+    assert!(
+        message(&document, "guard").contains("cannot parse"),
+        "{}",
+        message(&document, "guard")
+    );
+}
+
+#[test]
 fn a_daemon_that_cannot_start_is_a_problem_and_the_checks_that_need_none_still_run() {
     let setup = Setup::healthy();
     // A state directory that is a file: the Daemon can neither be reached nor started in it.
@@ -452,6 +508,7 @@ fn a_driver_that_does_not_load_is_a_problem_naming_its_service() {
 fn a_worktree_without_a_procly_toml_and_a_directory_outside_git_skip_the_checks_that_need_them() {
     let setup = Setup::new();
     assert_success(&setup.run(&setup.repo, &["unit", "install"]));
+    assert_success(&setup.run(&setup.repo, &["status"]));
 
     let in_repository = json_succeeded(&setup.doctor());
     let outside = json_succeeded(&setup.run(setup.procly.scratch(), &["doctor", "--json"]));
@@ -528,9 +585,9 @@ fn a_service_that_ended_on_a_port_mismatch_is_a_problem_with_the_command_that_pr
 }
 
 /// A dev server started outside Procly, killed when the test ends.
-struct StartedOutside(Child);
+struct ForeignServer(Child);
 
-impl StartedOutside {
+impl ForeignServer {
     fn start(dir: &Path, port: u16) -> Self {
         let child = Command::new(test_server())
             .args(["--port", &port.to_string()])
@@ -545,7 +602,7 @@ impl StartedOutside {
     }
 }
 
-impl Drop for StartedOutside {
+impl Drop for ForeignServer {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
@@ -559,7 +616,7 @@ fn a_foreign_process_on_a_leased_port_is_a_problem_with_the_command_that_stops_i
     setup.declare_web(port);
     assert_success(&setup.run(&setup.repo, &["up", "web"]));
     assert_success(&setup.run(&setup.repo, &["down", "web"]));
-    let server = StartedOutside::start(&setup.repo, port);
+    let server = ForeignServer::start(&setup.repo, port);
 
     let document = problems(&setup.doctor());
 

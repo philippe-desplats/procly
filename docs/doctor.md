@@ -22,14 +22,14 @@ $ echo $?
 
 A check is `passed`, `failed`, or `skipped` when it does not apply here or could not run, such as the Guard in a directory that is in no git Repository. Only a `failed` check is a problem. Several problems of one check are on lines of their own, with one command per line under `fix`.
 
-Doctor works without the Daemon. It runs the checks that need only the machine, the state directory and the Worktree itself, and asks the Daemon for the others. A Daemon that cannot be reached or started is a problem of its own, and the two checks that need it are `skipped`. Like every command, doctor starts the Daemon when none runs.
+Doctor works without the Daemon. It runs the checks that need only the machine, the state directory and the Worktree itself, and asks the Daemon for the others. A Daemon that does not run, or does not answer, is a problem of its own, and the 2 checks that need it are `skipped`. Doctor never starts a Daemon, since starting one reconciles what the previous Daemon left and a command that changes nothing cannot do that. Any other command starts it, `procly status` for one.
 
 ## The checks
 
 | Check | Passes when | The fix it names |
 | --- | --- | --- |
 | `docker_compose` | `docker compose version` answers with a major version of 2 or more, which the Compose services need. | On macOS `brew install --cask docker`, nothing elsewhere since the way to install it depends on the system. |
-| `daemon` | The Daemon answers and runs the same version of procly as this command. A Daemon left running by an older procly, or speaking another protocol version, fails. | `kill "$(cat <state directory>/daemon.pid)"`, which stops the Daemon with its Services, so that the next command starts the new one. For a Daemon that does not answer, `tail -n 20 <state directory>/daemon.log`. |
+| `daemon` | A Daemon runs, it answers and runs the same version of procly as this command. A Daemon left running by an older procly, or speaking another protocol version, fails. | `kill "$(cat <state directory>/daemon.pid)"`, which stops the Daemon with its Services, so that the next command starts the new one. `procly status` when none runs, which starts one. `tail -n 20 <state directory>/daemon.log` for a Daemon that does not answer. |
 | `session_unit` | The [Session unit](daemon.md) is installed and the session manager has loaded it, so that the Daemon comes back with your session. The session manager is asked only when the unit file exists. | `procly unit install` |
 | `state_documents` | Every document of the state directory can be read: the Leases, the indexes, the Logical resources, the Services, the containers, the Isolated containers, the Repositories that are Off and the Managed blocks. A document that is absent is fine. | `mv <document> <document>.broken` for a document that is corrupt. None for a document written by a newer procly, since moving it aside would lose what that one recorded. |
 | `configuration` | The `procly.toml` of the current Worktree, with the user settings and `procly.local.toml`, is valid, and every Driver a Service names loads. `skipped` without a `procly.toml`. | `${EDITOR:-vi}` on the file, or on the Driver file in `.procly/drivers`. |

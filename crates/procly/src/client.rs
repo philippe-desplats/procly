@@ -61,17 +61,36 @@ pub(crate) fn send(state: &StateDir, request: &Request) -> Result<Response, Clie
 pub(crate) fn send_with_progress(
     state: &StateDir,
     request: &Request,
+    on_progress: impl FnMut(&Response),
+) -> Result<Response, ClientError> {
+    let stream = connect_or_start(state)?;
+    exchange(state, request, &stream, on_progress)
+}
+
+/// Sends one request to the Daemon only if one runs, and never starts it: starting a Daemon reconciles what the
+/// previous one left, and a command that promises to change nothing cannot have that effect.
+pub(crate) fn send_if_running(state: &StateDir, request: &Request) -> Result<Response, ClientError> {
+    let stream = UnixStream::connect(state.socket()).map_err(|source| ClientError::Unreachable {
+        path: state.socket(),
+        source,
+    })?;
+    exchange(state, request, &stream, |_| ())
+}
+
+fn exchange(
+    state: &StateDir,
+    request: &Request,
+    stream: &UnixStream,
     mut on_progress: impl FnMut(&Response),
 ) -> Result<Response, ClientError> {
     let request = protocol::encode(request).map_err(ClientError::Encode)?;
-    let stream = connect_or_start(state)?;
     let connection_error = |source| ClientError::Connection {
         path: state.socket(),
         source,
     };
 
-    (&stream).write_all(request.as_bytes()).map_err(connection_error)?;
-    let mut reader = BufReader::new(&stream);
+    (&*stream).write_all(request.as_bytes()).map_err(connection_error)?;
+    let mut reader = BufReader::new(stream);
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).map_err(connection_error)?;

@@ -3,6 +3,7 @@
 //!
 //! Nothing here changes anything. A check names the command that fixes what it found and never runs it.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -110,6 +111,9 @@ fn leased_ports(registry: &Registry) -> Check {
             "every leased port is free or held by the Service it is leased to",
         );
     }
+    // A process holding 2 leased ports is stopped once.
+    let mut seen = BTreeSet::new();
+    fixes.retain(|fix| seen.insert(fix.clone()));
     Check::failed(
         LEASED_PORTS,
         problems.join("\n"),
