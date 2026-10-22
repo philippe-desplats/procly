@@ -841,3 +841,242 @@ fn docker_redis_2_worktrees_keep_their_keys_in_distinct_databases_of_one_contain
     assert_eq!(redis(&in_main, "get session"), "main-worktree");
     assert_eq!(redis(&in_other, "get session"), "other-worktree");
 }
+
+fn remove_worktree(main: &Path, worktree: &Path) {
+    git(main, &["worktree", "remove", "--force", &worktree.to_string_lossy()]);
+}
+
+#[test]
+fn gc_lists_the_logical_resources_of_removed_worktrees_but_never_those_of_a_pinned_branch() {
+    let procly = Procly::new();
+    let config = format!("{}[pinned.app-b]\n", redis_config("", "", free_port()));
+    let (main, others) = redis_repository(&procly, &config, 16, 3);
+    let indexes: Vec<u32> = others.iter().map(|worktree| redis_index(&procly, worktree)).collect();
+    assert_eq!(indexes, [1, 2, 3]);
+    assert_eq!(redis_index(&procly, &main), 0);
+    let before = procly.procly(&["gc"]);
+    assert_success(&before);
+    assert!(!stdout(&before).contains("logical resource"), "{}", stdout(&before));
+    // `app-a` is on a branch of its own, `app-b` on a Pinned branch, and `app-c` stays.
+    remove_worktree(&main, &others[0]);
+    remove_worktree(&main, &others[1]);
+
+    let listed = procly.procly(&["gc"]);
+
+    assert_success(&listed);
+    let text = stdout(&listed);
+    let resources: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("logical resource"))
+        .collect();
+    assert_eq!(
+        resources,
+        [format!(
+            "logical resource cache.main 1 (driver redis) of {}",
+            others[0].display()
+        )
+        .as_str()]
+    );
+    let document = common::json_succeeded(&procly.procly(&["gc", "--json"]));
+    let in_document: Vec<&serde_json::Value> = document["orphans"]
+        .as_array()
+        .expect("orphans is a list")
+        .iter()
+        .filter(|orphan| orphan["kind"] == "logical_resource")
+        .collect();
+    assert_eq!(
+        in_document,
+        [&serde_json::json!({
+            "kind": "logical_resource",
+            "service": "cache",
+            "resource": "main",
+            "name": "1",
+            "driver": "redis",
+            "repository": main.join(".git"),
+            "worktree": others[0],
+            "deleted": false,
+            "error": null,
+        })]
+    );
+
+    // The container never ran, so nothing can be dropped, and the index stays taken.
+    let applied = procly.procly(&["gc", "--apply"]);
+
+    assert_eq!(applied.status.code(), Some(6), "{}", stderr(&applied));
+    assert!(
+        stderr(&applied).contains(&format!(
+            "procly: cannot delete logical resource cache.main 1 (driver redis) of {}: the container of service \
+             cache does not run",
+            others[0].display()
+        )),
+        "{}",
+        stderr(&applied)
+    );
+    let next = git_worktree_add(&main, "app-d");
+    fs::write(next.join("procly.toml"), &config).expect("write the config");
+    write_driver_file(&next.join(".procly/drivers"), "redis", &redis_driver(16));
+    assert_eq!(redis_index(&procly, &next), 4);
+}
+
+#[test]
+fn docker_gc_apply_drops_the_logical_resources_of_a_removed_worktree_through_the_driver() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = directory_fixture(DEV_AND_TEST);
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let kept = git_worktree_add(&fixture.main, "app-kept");
+    assert_success(&fixture.procly.procly_in(&kept, &["up", "db"]));
+    remove_worktree(&fixture.main, &fixture.other);
+    let other = fixture.other.display();
+    let dev = format!("logical resource db.dev app__app_other (driver dir) of {other}");
+    let test = format!("logical resource db.test app_test__app_other (driver dir) of {other}");
+
+    let listed = fixture.procly.procly(&["gc"]);
+
+    assert_success(&listed);
+    assert!(
+        stdout(&listed).contains(&format!("{dev}\n{test}\n")),
+        "{}",
+        stdout(&listed)
+    );
+    assert!(!stdout(&listed).contains("app_kept"), "{}", stdout(&listed));
+    assert_eq!(
+        resources(&fixture.project),
+        [
+            "app",
+            "app__app_kept",
+            "app__app_other",
+            "app_test",
+            "app_test__app_kept",
+            "app_test__app_other"
+        ]
+    );
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&applied);
+    assert!(
+        stdout(&applied).contains(&format!("deleted {dev}\ndeleted {test}\n")),
+        "{}",
+        stdout(&applied)
+    );
+    // A Worktree git still lists keeps its resources, and the Main worktree its own.
+    assert_eq!(
+        resources(&fixture.project),
+        ["app", "app__app_kept", "app_test", "app_test__app_kept"]
+    );
+    let log = fixture.procly.daemon_log();
+    assert!(log.contains(&format!("gc deleted {dev}, requested by pid ")), "{log}");
+    let again = fixture.procly.procly(&["gc"]);
+    assert!(!stdout(&again).contains("logical resource"), "{}", stdout(&again));
+}
+
+#[test]
+fn docker_gc_apply_frees_the_redis_index_of_a_removed_worktree_for_a_new_one() {
+    if !require_docker() {
+        return;
+    }
+    let api = "[services.db.resources.main]\n[services.api]\nrun = 'true'\n[services.api.env]\n\
+               REDIS_URL = '{services.db.resources.main.url}'\n";
+    let fixture = logical_fixture(redis_compose, "redis", api);
+    // A container holding 2 indexes: the Main worktree and one other Worktree take them all.
+    write_driver_file(&fixture.main.join(".procly/drivers"), "redis", &redis_driver(2));
+    let fixture = commit_and_add_worktree(fixture);
+    let index = |worktree: &Path| {
+        let url = exported(&fixture.procly.procly_in(worktree, &["env", "api"]), "REDIS_URL");
+        url.rsplit('/').next().expect("an index").to_owned()
+    };
+    let redis = |database: &str, command: &str| {
+        fixture
+            .project
+            .exec(&format!("redis-cli -n {database} {command}"))
+            .trim()
+            .to_owned()
+    };
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    assert_eq!(index(&fixture.other), "1");
+    assert_eq!(redis("1", "set session other-worktree"), "OK");
+    let next = git_worktree_add(&fixture.main, "app-next");
+    let exhausted = fixture.procly.procly_in(&next, &["up", "db"]);
+    assert!(
+        stderr(&exhausted).contains("all 2 indexes of service db are taken"),
+        "{}",
+        stderr(&exhausted)
+    );
+    remove_worktree(&fixture.main, &fixture.other);
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&applied);
+    assert!(
+        stdout(&applied).contains(&format!(
+            "deleted logical resource db.main 1 (driver redis) of {}\n",
+            fixture.other.display()
+        )),
+        "{}",
+        stdout(&applied)
+    );
+    assert_eq!(redis("1", "get session"), "");
+    // The freed index is granted to the next Worktree, empty.
+    assert_success(&fixture.procly.procly_in(&next, &["up", "db"]));
+    assert_eq!(index(&next), "1");
+}
+
+#[test]
+fn docker_a_drop_that_fails_is_reported_with_the_command_to_run_and_gc_goes_on() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = logical_fixture(alpine_compose, "dir", DEV_AND_TEST);
+    // The drop of the `dev` resource of the other Worktree fails, the one of its `test` resource works.
+    let failing = DIRECTORY_DRIVER.replace(
+        "drop = 'rm",
+        "drop = 'test {resource} != app__app_other || { echo refused >&2; exit 3; } ; rm",
+    );
+    write_driver_file(&fixture.main.join(".procly/drivers"), "dir", &failing);
+    let fixture = commit_and_add_worktree(fixture);
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    remove_worktree(&fixture.main, &fixture.other);
+    let other = fixture.other.display();
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_eq!(applied.status.code(), Some(6), "{}", stderr(&applied));
+    assert!(
+        stdout(&applied).contains(&format!(
+            "deleted logical resource db.test app_test__app_other (driver dir) of {other}\n"
+        )),
+        "{}",
+        stdout(&applied)
+    );
+    let stderr = stderr(&applied);
+    assert!(
+        stderr.contains(&format!(
+            "procly: cannot delete logical resource db.dev app__app_other (driver dir) of {other}: "
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("refused"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "drop it by hand with `docker compose --project-name {} exec -T db sh -c 'test app__app_other != \
+             app__app_other ||",
+            fixture.project.name
+        )),
+        "{stderr}"
+    );
+    assert_eq!(resources(&fixture.project), ["app", "app__app_other", "app_test"]);
+    // It stays an Orphan, which the next `gc --apply` tries again.
+    let listed = fixture.procly.procly(&["gc"]);
+    assert!(
+        stdout(&listed).contains(&format!(
+            "logical resource db.dev app__app_other (driver dir) of {other}\n"
+        )),
+        "{}",
+        stdout(&listed)
+    );
+}

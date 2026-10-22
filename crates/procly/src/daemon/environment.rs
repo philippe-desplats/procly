@@ -16,6 +16,8 @@ use super::health::HealthCheck;
 use super::index::{IndexError, IndexRequest};
 use super::lease::{Claimed, LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
+use super::resource::{LogicalResource, ResourceKey};
+use super::store::StoreError;
 use crate::config::{self, Config, ConfigError, IsolationMode, PortConfig, ServiceConfig, ServiceKind};
 use crate::derived::{Derived, DerivedError, Facts, Resource};
 use crate::driver;
@@ -38,6 +40,8 @@ pub(super) enum EnvironmentError {
     Lease(#[from] LeaseError),
     #[error(transparent)]
     Index(#[from] IndexError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
     #[error(transparent)]
     Managed(#[from] ManagedError),
     #[error(transparent)]
@@ -378,6 +382,24 @@ pub(super) fn logical_resources(
                 url,
             },
         );
+    }
+    // Only a Logical container holds resources of the Worktree's own, which outlive it until `gc` drops them.
+    if !shared && !worktree.main {
+        let branch = pinned_branch(topology, config)?.map(str::to_owned);
+        registry
+            .resources
+            .record(resources.iter().map(|(key, resource)| LogicalResource {
+                key: ResourceKey {
+                    repository: topology.git_common_dir.clone(),
+                    worktree: worktree.path.clone(),
+                    service: name.to_owned(),
+                    resource: key.clone(),
+                },
+                name: resource.name.clone(),
+                driver: driver.name.clone(),
+                indexed: numbered.is_some(),
+                branch: branch.clone(),
+            }))?;
     }
     Ok(Some((driver, resources)))
 }

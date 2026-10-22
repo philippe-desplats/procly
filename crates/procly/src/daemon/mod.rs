@@ -25,6 +25,7 @@ mod process_group;
 mod reconcile;
 mod record;
 mod requester;
+mod resource;
 mod service;
 mod status;
 mod store;
@@ -57,6 +58,7 @@ use self::managed::ManagedBlocks;
 use self::off::Offs;
 use self::output_file::OutputFiles;
 use self::record::ServiceRecords;
+use self::resource::LogicalResources;
 use self::service::Services;
 use crate::config;
 use crate::protocol::{self, Released, Request, Response, StartOutcome};
@@ -71,6 +73,8 @@ struct Registry {
     composes: Composes,
     leases: Arc<Leases>,
     indexes: Indexes,
+    /// The Logical resources of every Worktree other than the Main worktree, which `gc` drops once it is removed.
+    resources: LogicalResources,
     managed: ManagedBlocks,
     offs: Offs,
     /// Held while the Rules block and the Guard are written or switched, so that an install and `off` never cross.
@@ -185,6 +189,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         ),
         leases,
         indexes: Indexes::new(state.indexes()),
+        resources: LogicalResources::new(state.resources()),
         managed: ManagedBlocks::new(state.managed_blocks()),
         offs: Offs::new(state.off()),
         agent: Mutex::default(),

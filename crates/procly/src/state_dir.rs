@@ -91,6 +91,12 @@ impl StateDir {
         self.path.join("indexes.json")
     }
 
+    /// The document recording the Logical resources of every Worktree other than the Main worktree, which `procly gc`
+    /// drops once the Worktree is removed.
+    pub(crate) fn resources(&self) -> PathBuf {
+        self.path.join("resources.json")
+    }
+
     /// The document recording every running Service, which the next Daemon reconciles after a crash.
     pub(crate) fn services(&self) -> PathBuf {
         self.path.join("services.json")

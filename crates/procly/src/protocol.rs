@@ -599,7 +599,8 @@ pub(crate) fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error>
 pub(crate) struct GcReport {
     /// Whether `gc` was asked to delete the Orphans, and not only to list them.
     pub(crate) applied: bool,
-    /// Every Orphan, Leases first, then output directories, then setup directories, the order they are deleted in.
+    /// Every Orphan, Leases first, then Logical resources, then output directories, then setup directories, the order
+    /// they are deleted in.
     pub(crate) orphans: Vec<Orphan>,
     /// The Repositories whose Worktrees git could not list, nothing of which is an Orphan.
     pub(crate) skipped: Vec<SkippedRepository>,
@@ -637,6 +638,12 @@ impl Orphan {
                 port_name,
                 port,
             } => format!("lease {service}.{port_name} port {port} of {worktree}"),
+            OrphanKind::LogicalResource {
+                service,
+                resource,
+                name,
+                driver,
+            } => format!("logical resource {service}.{resource} {name} (driver {driver}) of {worktree}"),
             OrphanKind::OutputDirectory { path } => format!("output directory {} of {worktree}", path.display()),
             OrphanKind::SetupDirectory { path } => format!("setup directory {} of {worktree}", path.display()),
         }
@@ -652,6 +659,16 @@ pub(crate) enum OrphanKind {
         service: String,
         port_name: String,
         port: u16,
+    },
+    /// A Logical resource of a Compose service, in its Logical container, dropped through the `drop` command of its
+    /// Driver, which frees its index when the Driver numbers its resources.
+    LogicalResource {
+        service: String,
+        /// The key of the resource in the configuration.
+        resource: String,
+        /// Its name in the container, its index for a Driver that numbers its resources.
+        name: String,
+        driver: String,
     },
     /// The directory of the state directory holding the output files of the Services of the Worktree.
     OutputDirectory { path: PathBuf },

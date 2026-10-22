@@ -208,8 +208,9 @@ enum Command {
         #[command(flatten)]
         json: JsonFlag,
     },
-    /// List the Orphans of every Repository, what removed Worktrees left behind: the Leases, the output directories
-    /// and the setup directories of each Worktree git no longer lists. Nothing is deleted without `--apply`.
+    /// List the Orphans of every Repository, what removed Worktrees left behind: the Leases, the Logical resources,
+    /// the output directories and the setup directories of each Worktree git no longer lists. Nothing is deleted
+    /// without `--apply`.
     #[command(
         after_help = "A Worktree git still lists, even one marked prunable, never counts as removed, and nothing a Pinned \
                       branch holds is an Orphan. Exit codes: 0 when every Orphan is listed, or deleted with \
@@ -217,8 +218,9 @@ enum Command {
                       Procly itself fails. See docs/gc.md and docs/exit-codes.md."
     )]
     Gc {
-        /// Delete the Orphans, reporting each deletion and each failure and going on after a failure. The Daemon logs
-        /// every deletion and who asked.
+        /// Delete the Orphans, dropping each Logical resource through its Driver in its running container and freeing
+        /// its index, reporting each deletion and each failure and going on after a failure. The Daemon logs every
+        /// deletion and who asked.
         #[arg(long)]
         apply: bool,
         #[command(flatten)]

@@ -32,7 +32,7 @@ use super::lease::Leases;
 use super::store::StoreError;
 use crate::config::Seed;
 use crate::derived::Resource;
-use crate::driver::Driver;
+use crate::driver::{self, Driver, DriverError};
 use crate::duration;
 use crate::protocol::{Conflict, ContainerStatus, Held, JobEnd, Released, ServiceEnd, StartOutcome};
 use crate::topology::Topology;
@@ -144,6 +144,25 @@ pub(crate) enum ComposeError {
     Prepare(#[source] tokio::task::JoinError),
     #[error("the resources could not be worked out")]
     Plan(#[source] tokio::task::JoinError),
+}
+
+/// Why `gc` could not drop a Logical resource.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DropError {
+    #[error(
+        "the container of service {service} does not run, start it with `procly up {service}` in the Main worktree \
+         and run `procly gc --apply` again"
+    )]
+    NotRunning { service: String },
+    #[error(transparent)]
+    Driver(#[from] DriverError),
+    #[error("the {driver} Driver could not {step} it: {reason}, drop it by hand with `{by_hand}`")]
+    Failed {
+        driver: String,
+        step: &'static str,
+        reason: String,
+        by_hand: String,
+    },
 }
 
 /// What it takes to start the container of one Compose service.
@@ -614,6 +633,67 @@ impl Composes {
                 Some((alive.docker.project.clone(), alive.docker.compose.clone()))
             })
             .collect()
+    }
+
+    /// Drops the Logical resource `name` from the container the Worktrees of the Repository `repository` share for the
+    /// Compose service `service`, through the `drop` command of the Driver `driver`, read from the Main worktree. Each
+    /// command of the Driver may run for `timeout`.
+    ///
+    /// The container must run: it is never started for a drop. A resource the `check` of the Driver no longer finds
+    /// counts as dropped. The container is held throughout, so that no stop overlaps the drop.
+    pub(crate) async fn drop_resource(
+        &self,
+        repository: &Path,
+        service: &str,
+        name: &str,
+        driver: &str,
+        timeout: Duration,
+    ) -> Result<(), DropError> {
+        let not_running = || DropError::NotRunning {
+            service: service.to_owned(),
+        };
+        let key = (repository.to_owned(), service.to_owned(), None);
+        let container = self.table().get(&key).cloned().ok_or_else(not_running)?;
+        let _commands = container.commands.lock().await;
+        let alive = container.state().alive.clone().ok_or_else(not_running)?;
+        let docker = alive.docker;
+        if !docker.is_running().await {
+            return Err(not_running());
+        }
+        let driver = {
+            let (driver, main) = (driver.to_owned(), docker.project_dir.clone());
+            // Reading the Driver file is blocking.
+            tokio::task::spawn_blocking(move || Driver::load(&driver, &main, driver::user_dir().as_deref()))
+                .await
+                .expect("loading a Driver never panics")?
+        };
+        let script = |command: &str| Driver::command(command, name, None);
+        let drop = script(&driver.drop);
+        let failed = |step, reason| DropError::Failed {
+            driver: driver.name.clone(),
+            step,
+            reason,
+            by_hand: format!(
+                "docker compose --project-name {} exec -T {} sh -c '{drop}'",
+                docker.project, docker.compose
+            ),
+        };
+        // A check that fails because the container cannot answer yet would take the resource for gone.
+        if let Some(ready) = &driver.ready {
+            docker
+                .succeeds(timeout, ready)
+                .await
+                .map_err(|reason| failed("reach", reason))?;
+        }
+        match docker.exec_within(timeout, &script(&driver.check)).await {
+            Ok(output) if !output.status.success() => return Ok(()),
+            Ok(_) => {}
+            Err(error) => return Err(failed("check", error.to_string())),
+        }
+        docker
+            .succeeds(timeout, &drop)
+            .await
+            .map_err(|reason| failed("drop", reason))
     }
 
     /// Stops every container Procly started for the Repository `repository`, without waiting for any Grace period,
@@ -1385,12 +1465,26 @@ impl Docker {
 
     /// Runs a shell script of the Driver of `plan` in the container of the service, which must run.
     async fn exec(&self, plan: &ResourcePlan, script: &str) -> std::io::Result<Output> {
+        self.exec_within(plan.command_timeout, script).await
+    }
+
+    /// Runs a shell script in the container of the service, failing with what it printed.
+    async fn succeeds(&self, timeout: Duration, script: &str) -> Result<(), String> {
+        match self.exec_within(timeout, script).await {
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => Err(failure(&output)),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Runs a shell script in the container of the service, which must run, for `timeout` at most.
+    async fn exec_within(&self, timeout: Duration, script: &str) -> std::io::Result<Output> {
         let args = ["exec", "-T", &self.compose, "sh", "-c", script];
-        match tokio::time::timeout(plan.command_timeout, self.project_output(&args)).await {
+        match tokio::time::timeout(timeout, self.project_output(&args)).await {
             Ok(output) => output,
             Err(_) => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("it did not end within {}", duration::format(plan.command_timeout)),
+                format!("it did not end within {}", duration::format(timeout)),
             )),
         }
     }

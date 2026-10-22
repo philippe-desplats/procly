@@ -76,7 +76,7 @@ web = { http = 3200 }
 | `isolation` | none | The Isolation mode of every Compose service that sets a `driver` and no `isolation` of its own, `"shared"`, `"logical"` or `"isolated"`, see [Isolation mode](#isolation-mode). Logical when unset. |
 | `setup_timeout` | `"30m"` | How long each setup command of `procly worktree init` may run before its whole process tree is killed and `worktree init` exits with 124, long enough for a cold install. See [Worktree init](worktree-init.md). |
 | `setup_progress_interval` | `"1m"` | How often a setup command of `procly worktree init` that is still running prints its elapsed time and the path of its log on stderr, at most once per second. See [Worktree init](worktree-init.md#a-long-setup). |
-| `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125. |
+| `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125, or `procly gc --apply` reports the resource it was dropping as not deleted. |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
@@ -237,7 +237,7 @@ A Seed applies when Procly creates the resource, never to one that exists alread
 | `seed = { template = "app_template" }` | A copy of the resource of that name, which must exist in the container and is used as it is written, without the Worktree slug. The Driver needs a `copy` command. For Postgres the template database must have no open connection. |
 | `seed = { run = "pnpm db:migrate", timeout = "5m" }` | What a command leaves in the resource. It runs on the host, by `/bin/sh -c` at the root of the Worktree, as a Job, so its process tree is killed when it reaches `timeout` (`10m` by default). It receives `PROCLY_RESOURCE_URL`, `PROCLY_RESOURCE_NAME` and `PROCLY_RESOURCE`, the key of the resource, on top of the environment of the `procly up` and of the Service. |
 
-A command Seed that fails, or reaches its timeout, drops the resource that same `procly up` just created, so that the next `procly up` seeds it again rather than finding it and keeping it empty. `procly up` then exits with 125, and the error and the Daemon log say that the resource was dropped, or the command to drop it when that failed. Procly never drops a resource that existed before the request, and nothing else ever drops one.
+A command Seed that fails, or reaches its timeout, drops the resource that same `procly up` just created, so that the next `procly up` seeds it again rather than finding it and keeping it empty. `procly up` then exits with 125, and the error and the Daemon log say that the resource was dropped, or the command to drop it when that failed. Procly never drops a resource that existed before the request. Apart from this, only `procly gc --apply` drops a resource, the one of a removed Worktree, see [Collecting Orphans](gc.md).
 
 ### Isolation mode
 
@@ -312,7 +312,7 @@ A Driver is a TOML file named after the technology. Postgres ships with Procly a
 | `check` | yes | A command that succeeds when the resource exists and fails when it does not. A `check` that cannot run at all (the container does not answer, or the command runs past its time limit) is an error, never read as an absent resource. |
 | `create` | yes | A command that creates an empty resource, and fails when it exists already. `check` decides whether to run it, and the drop of a failed Seed relies on it never meeting a resource that was there before. |
 | `copy` | no | A command that creates `{resource}` as a copy of `{template}`, needed by the Seed `template`. |
-| `drop` | yes | A command that removes the resource, run only to undo a resource whose Seed failed. |
+| `drop` | yes | A command that removes the resource, run to undo a resource whose Seed failed, and by `procly gc --apply` on the resources of a removed Worktree, see [Collecting Orphans](gc.md). |
 | `ready` | no | A command that succeeds once the container accepts the commands above. Procly runs it every quarter of a second until it succeeds. |
 | `max_length` | no | The longest name the technology accepts. A longer name is an error rather than silently cut, which would make 2 Worktrees share a resource. |
 | `index` | no | `true` when the resources are the numbers 0 to `capacity` minus 1, which Procly hands out one per resource and Worktree, so `{resource}` is a number. It needs a `capacity` and has no `max_length`. |

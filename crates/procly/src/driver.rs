@@ -122,7 +122,7 @@ struct DriverFile {
     create: String,
     /// A command run in the container, creating the resource as a copy of `{template}`.
     copy: Option<String>,
-    /// A command run in the container, removing the resource, used only to undo a resource whose Seed failed.
+    /// A command run in the container, removing the resource, to undo a resource whose Seed failed and by `procly gc`.
     drop: String,
 }
 
