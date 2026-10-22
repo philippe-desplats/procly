@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 18;
+pub(crate) const PROTOCOL_VERSION: u32 = 19;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -78,6 +78,8 @@ pub(crate) enum Request {
     /// Runs the Worktree release of the Worktree holding `path`: stops its Services and Jobs, lets go of its Compose
     /// services and releases its Leases, apart from those of a Pinned branch, and answers once their trees are gone.
     WorktreeRelease { path: PathBuf },
+    /// Runs the checks only the Daemon can answer, and tells which version it is.
+    Doctor,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -172,6 +174,8 @@ pub(crate) enum Response {
     Gc(GcReport),
     /// The Worktree is released.
     WorktreeRelease(ReleaseReport),
+    /// What the Daemon found when it ran its checks.
+    Doctor(DaemonChecks),
     Error {
         message: String,
     },
@@ -772,6 +776,95 @@ pub(crate) struct SkippedRepository {
     pub(crate) error: String,
 }
 
+/// What a `doctor` check found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CheckStatus {
+    /// Nothing is wrong.
+    Passed,
+    /// A problem, which makes `doctor` exit with 7.
+    Failed,
+    /// The check does not apply here, or could not run.
+    Skipped,
+    /// Something is missing that Procly can do without, so `doctor` still exits with 0.
+    Warning,
+}
+
+impl CheckStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+/// One check of `procly doctor`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Check {
+    /// What is checked, the same in every run so that a script can match it.
+    pub(crate) name: String,
+    pub(crate) status: CheckStatus,
+    pub(crate) message: String,
+    /// The command that fixes the problem, which `doctor` never runs. `None` when nothing is wrong, or when no command
+    /// fixes it.
+    pub(crate) fix: Option<String>,
+}
+
+impl Check {
+    /// A check that found nothing wrong.
+    pub(crate) fn passed(name: &str, message: impl Into<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Passed,
+            message: message.into(),
+            fix: None,
+        }
+    }
+
+    /// A problem, with the command that fixes it when one does.
+    pub(crate) fn failed(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Failed,
+            message: message.into(),
+            fix,
+        }
+    }
+
+    /// Something missing that Procly can do without, with the command that adds it, which `doctor` never runs.
+    pub(crate) fn warning(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Warning,
+            message: message.into(),
+            fix,
+        }
+    }
+
+    /// A check that does not apply here or could not run, `why` telling which.
+    pub(crate) fn skipped(name: &str, why: impl Into<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Skipped,
+            message: why.into(),
+            fix: None,
+        }
+    }
+}
+
+/// What the Daemon answers a `Doctor` request with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DaemonChecks {
+    /// The version of the procly executable the Daemon runs, which the client compares with its own. Not `version`,
+    /// which the envelope of every message already carries.
+    pub(crate) procly_version: String,
+    /// The checks only the Daemon can answer.
+    pub(crate) checks: Vec<Check>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,7 +875,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":18,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":19,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

@@ -7,8 +7,9 @@ use std::path::Path;
 use anyhow::Context as _;
 use serde::{Serialize, Serializer};
 
+use crate::doctor::Report;
 use crate::protocol::{
-    Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
+    Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
     ServiceEnd, StartOutcome, Stopped, UpService,
 };
 
@@ -177,6 +178,22 @@ impl<'a> WorktreeRelease<'a> {
                 leases: &report.kept_leases,
                 logical_resources: &report.logical_resources,
             },
+        }
+    }
+}
+
+/// What `doctor` prints: whether every check passed, then each check.
+#[derive(Debug, Serialize)]
+pub(crate) struct Doctor<'a> {
+    result: &'static str,
+    checks: &'a [Check],
+}
+
+impl<'a> Doctor<'a> {
+    pub(crate) fn new(report: &'a Report) -> Self {
+        Self {
+            result: if report.failed() { "problems" } else { "healthy" },
+            checks: &report.checks,
         }
     }
 }

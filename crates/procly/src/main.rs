@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod daemon;
 mod derived;
+mod doctor;
 mod driver;
 mod duration;
 mod envfile;
@@ -30,8 +31,8 @@ use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, Conflict, EjectReport, Held, InitReport, JobEnd, KeptBecause, KeptLease, LeaseHeld,
-    Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
+    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, InitReport, JobEnd, KeptBecause, KeptLease,
+    LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -48,6 +49,8 @@ const EXIT_PORT_MISMATCH: u8 = 4;
 const EXIT_CONFLICT: u8 = 5;
 /// The exit code of `gc --apply` when some Orphan could not be deleted.
 const EXIT_GC_FAILED: u8 = 6;
+/// The exit code of `doctor` when some check found a problem.
+const EXIT_DOCTOR_FAILED: u8 = 7;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
@@ -67,7 +70,7 @@ struct JsonFlag {
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
                   healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
-                  every Orphan, 124 when `wait` finds the Job timed out or `up` \
+                  every Orphan, 7 when `doctor` found a problem, 124 when `wait` finds the Job timed out or `up` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
                   docs/exit-codes.md."
@@ -224,6 +227,18 @@ enum Command {
         /// deletion and who asked.
         #[arg(long)]
         apply: bool,
+        #[command(flatten)]
+        json: JsonFlag,
+    },
+    /// Check that Procly can work here: `docker compose` v2, the Daemon and its version, the Session unit, the state
+    /// documents, the `procly.toml` of the current Worktree and the Drivers it names, the Guard, the ports Leases hold
+    /// and the Orphans. Each problem comes with the command that fixes it, and nothing is changed or run.
+    #[command(
+        after_help = "Run the commands it names yourself. Exit codes: 0 when every check passed, or was skipped because \
+                      it does not apply here, 7 when some check found a problem, 125 when Procly itself fails. See \
+                      docs/doctor.md and docs/exit-codes.md."
+    )]
+    Doctor {
         #[command(flatten)]
         json: JsonFlag,
     },
@@ -477,6 +492,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::On { json } => switch(&state, false, json.json),
         Command::Eject { agent, json } => eject(&state, agent, json.json),
         Command::Gc { apply, json } => gc(&state, apply, json.json),
+        Command::Doctor { json } => doctor(&state, json.json),
         Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Mcp => unreachable!("the MCP server is served before the state directory is resolved"),
@@ -1014,6 +1030,33 @@ fn gc(state: &StateDir, apply: bool, json: bool) -> anyhow::Result<ExitCode> {
         );
     }
     Ok(code)
+}
+
+/// Runs `doctor`, printing each check with the command that fixes its problem, and exiting with 7 when some check
+/// found one.
+fn doctor(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let report = doctor::run(state, &cwd);
+    if json {
+        json::print(&json::Doctor::new(&report))?;
+    } else {
+        print(&doctor::text(&report))?;
+    }
+    if !report.failed() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !json {
+        let failed = report
+            .checks
+            .iter()
+            .filter(|check| check.status == CheckStatus::Failed)
+            .count();
+        eprintln!(
+            "procly: {failed} {} failed, the commands above fix them and doctor ran none",
+            if failed == 1 { "check" } else { "checks" }
+        );
+    }
+    Ok(ExitCode::from(EXIT_DOCTOR_FAILED))
 }
 
 /// `1 Orphan` or `3 Orphans`.

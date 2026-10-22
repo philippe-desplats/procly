@@ -198,6 +198,12 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
     })
 }
 
+/// The Orphans of every Repository as they are now, deleting nothing: what `procly doctor` reports. Blocking.
+pub(super) fn orphans(registry: &Registry) -> anyhow::Result<GcReport> {
+    // The directory only names the requester of a deletion, and nothing is deleted.
+    collect(registry, Path::new("/"), false, None).map(|collected| collected.report)
+}
+
 /// The Worktrees git no longer lists, as it lists them now, with nothing in use in them.
 pub(super) struct Removed {
     /// The roots git lists, by Repository, without the Repositories whose Worktrees git cannot list.

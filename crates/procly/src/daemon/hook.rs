@@ -52,6 +52,44 @@ fn is_guard(group: &Value) -> bool {
         .is_some_and(|hooks| hooks.iter().any(|hook| hook["command"] == COMMAND))
 }
 
+/// Where the Guard of a settings file stands against what Procly recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Standing {
+    /// The settings hold the group Procly wrote, as it recorded it.
+    Intact,
+    /// The settings hold a group running `procly guard` that is not the one Procly recorded.
+    Edited,
+    /// Procly recorded a Guard in this file, and the settings no longer hold it.
+    Missing,
+    /// Procly never wrote a Guard in this file, and the settings hold none.
+    Absent,
+}
+
+/// Where the Guard of the settings file `file` stands. Reads the file and the record, writes neither.
+pub(super) fn standing(managed: &ManagedBlocks, file: &Path) -> Result<Standing, HookError> {
+    let text = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(HookError::Read {
+                path: file.to_owned(),
+                source,
+            });
+        }
+    };
+    let settings = parse_settings(file, &text)?;
+    let found = settings["hooks"]["PreToolUse"]
+        .as_array()
+        .and_then(|groups| groups.iter().find(|group| is_guard(group)));
+    let Some(found) = found else {
+        let recorded = managed.files_holding(BLOCK)?.iter().any(|recorded| recorded == file);
+        return Ok(if recorded { Standing::Missing } else { Standing::Absent });
+    };
+    let ours = managed.is_recorded(file, BLOCK, &compact(found))?
+        || (*found == group() && !managed.departs_from_record(file, BLOCK, &compact(found))?);
+    Ok(if ours { Standing::Intact } else { Standing::Edited })
+}
+
 /// Makes the settings file `file` register the Guard, creating the file and its directory when they are missing.
 /// Everything else in the file is kept, and a Guard the user edited is left alone.
 pub(super) fn install(managed: &ManagedBlocks, file: &Path) -> Result<Outcome, HookError> {
@@ -289,6 +327,28 @@ mod tests {
         blocks.record(&file, BLOCK, &compact(&older), None).unwrap();
         assert_eq!(install(&blocks, &file).unwrap(), Outcome::Written);
         assert_eq!(settings(&file)["hooks"]["PreToolUse"][0], group());
+    }
+
+    #[test]
+    fn the_standing_of_the_guard_tells_a_missing_one_from_an_edited_one_and_changes_nothing() {
+        let (_dir, blocks, file) = fixture();
+        assert_eq!(standing(&blocks, &file).unwrap(), Standing::Absent);
+
+        install(&blocks, &file).unwrap();
+        let installed = fs::read(&file).unwrap();
+        assert_eq!(standing(&blocks, &file).unwrap(), Standing::Intact);
+
+        let mut edited = settings(&file);
+        edited["hooks"]["PreToolUse"][0]["matcher"] = json!("Bash|Task");
+        fs::write(&file, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
+        assert_eq!(standing(&blocks, &file).unwrap(), Standing::Edited);
+
+        fs::write(&file, "{}").unwrap();
+        assert_eq!(standing(&blocks, &file).unwrap(), Standing::Missing);
+
+        fs::write(&file, &installed).unwrap();
+        assert_eq!(standing(&blocks, &file).unwrap(), Standing::Intact);
+        assert_eq!(fs::read(&file).unwrap(), installed);
     }
 
     #[test]

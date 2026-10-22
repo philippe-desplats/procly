@@ -50,6 +50,11 @@ struct ResourceDocument {
     resources: Vec<LogicalResource>,
 }
 
+/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
+pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
+    store::load::<ResourceDocument>(path, DOCUMENT_VERSION).map(|_| ())
+}
+
 /// Every Logical resource recorded, across all Repositories.
 #[derive(Debug)]
 pub(crate) struct LogicalResources {

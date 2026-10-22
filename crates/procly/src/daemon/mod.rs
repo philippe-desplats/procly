@@ -6,6 +6,7 @@ pub(crate) mod clock;
 mod compose;
 mod container_record;
 mod cpu;
+pub(crate) mod doctor;
 mod eject;
 mod environment;
 mod foreign;
@@ -53,6 +54,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use self::clock::Clock;
 use self::compose::Composes;
+pub(crate) use self::compose::major as compose_major;
 use self::container_record::ContainerRecords;
 use self::index::Indexes;
 use self::isolated_record::IsolatedRecords;
@@ -387,6 +389,7 @@ async fn dispatch(
             .await
             .unwrap_or_else(failure),
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
+        Request::Doctor => doctor::run(registry).await,
         Request::Gc { cwd, apply } => gc::run(registry, cwd, apply, peer).await,
         Request::WorktreeRelease { path } => answer(
             worktree_release::run(Arc::clone(registry), path, peer)
