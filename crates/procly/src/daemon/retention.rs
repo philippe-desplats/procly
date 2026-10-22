@@ -7,6 +7,7 @@
 //! branch holds its container. The moment the Daemon first found it removed is written in the record of the
 //! container, which a delayed deletion counts from, so that a restart of the Daemon neither loses it nor runs it early.
 //! A Worktree git lists again before the deletion keeps its container, and its delay starts over once removed again.
+//! A Worktree of a Repository git cannot list is neither: its container is not deleted and its delay is left as it is.
 //!
 //! The container and its volumes are found and removed as `gc --apply` does it, so that a policy never deletes what
 //! `gc` would not, such as a running container, or one whose compose project another Worktree uses.
@@ -115,8 +116,14 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Vec<(Key, Duration)>> {
         return Ok(Vec::new());
     }
     let repositories: BTreeSet<_> = declared.iter().map(|record| record.repository.clone()).collect();
-    // A Repository whose Worktrees git cannot list has no removed Worktree, nothing of it is deleted.
-    let (worktrees, _) = Removed::list(registry, repositories);
+    let (worktrees, skipped) = Removed::list(registry, repositories);
+    for skipped in &skipped {
+        eprintln!(
+            "cannot list the Worktrees of {}, the retention policies of its Isolated containers wait: {}",
+            skipped.repository.display(),
+            skipped.error
+        );
+    }
     let now = registry.retentions.clock.since_epoch();
     let mut due = BTreeSet::new();
     let mut later = Vec::new();
@@ -124,7 +131,9 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Vec<(Key, Duration)>> {
         let Some(delay) = record.retention.delay() else {
             continue;
         };
-        let removed = record.pinned.is_none() && worktrees.is(&record.repository, &record.worktree);
+        let Some(removed) = removed(record, &worktrees) else {
+            continue;
+        };
         let key = record.key();
         let found = registry
             .isolated
@@ -148,6 +157,15 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Vec<(Key, Duration)>> {
         delete(registry, &found);
     }
     Ok(later)
+}
+
+/// Whether the Worktree of `record` is removed, as `worktrees` lists them. `None` when git could not list the Worktrees
+/// of its Repository: whether it is removed is unknown, so the moment it was found removed stays as it is, neither
+/// cleared nor set, and nothing of it is deleted.
+fn removed(record: &IsolatedRecord, worktrees: &Removed) -> Option<bool> {
+    worktrees
+        .knows(&record.repository)
+        .then(|| record.pinned.is_none() && worktrees.is(&record.repository, &record.worktree))
 }
 
 /// Logs that the Worktree of `record`, which is `removed` and whose moment of being found removed is now `found`, was
@@ -209,4 +227,62 @@ fn delete(registry: &Registry, found: &[Found]) {
         }
     }
     gc::forget_removed(registry, found, &orphans);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn record(repository: &str, worktree: &str) -> IsolatedRecord {
+        IsolatedRecord {
+            repository: PathBuf::from(repository),
+            worktree: PathBuf::from(worktree),
+            service: "db".to_owned(),
+            compose: "db".to_owned(),
+            project: "app-app_login".to_owned(),
+            env: Vec::new(),
+            pinned: None,
+            volumes: Vec::new(),
+            retention: Retention::After(Duration::from_hours(24)),
+            removed_ms: Some(5_000),
+        }
+    }
+
+    #[test]
+    fn a_worktree_of_a_repository_git_cannot_list_is_neither_removed_nor_listed_again() {
+        // git listed the Worktrees of app, and could not list those of api.
+        let worktrees = Removed::new(
+            BTreeMap::from([(
+                PathBuf::from("/src/app/.git"),
+                BTreeSet::from([PathBuf::from("/src/app")]),
+            )]),
+            BTreeSet::new(),
+        );
+
+        assert_eq!(
+            removed(&record("/src/app/.git", "/src/app-login"), &worktrees),
+            Some(true)
+        );
+        assert_eq!(removed(&record("/src/app/.git", "/src/app"), &worktrees), Some(false));
+        // Its pending deletion is left as it is, not started over.
+        assert_eq!(removed(&record("/src/api/.git", "/src/api-login"), &worktrees), None);
+    }
+
+    #[test]
+    fn a_worktree_that_runs_something_or_is_on_a_pinned_branch_is_not_removed() {
+        let worktrees = Removed::new(
+            BTreeMap::from([(PathBuf::from("/src/app/.git"), BTreeSet::new())]),
+            BTreeSet::from([PathBuf::from("/src/app-busy")]),
+        );
+        let mut pinned = record("/src/app/.git", "/src/app-login");
+        pinned.pinned = Some("main".to_owned());
+
+        assert_eq!(
+            removed(&record("/src/app/.git", "/src/app-busy"), &worktrees),
+            Some(false)
+        );
+        assert_eq!(removed(&pinned, &worktrees), Some(false));
+    }
 }

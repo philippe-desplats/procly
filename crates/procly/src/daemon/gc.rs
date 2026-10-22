@@ -229,6 +229,17 @@ impl Removed {
         (Self { listed, in_use }, skipped)
     }
 
+    /// The Worktrees git lists as `listed`, by Repository, of which those `in_use` run something.
+    #[cfg(test)]
+    pub(super) fn new(listed: BTreeMap<PathBuf, BTreeSet<PathBuf>>, in_use: BTreeSet<PathBuf>) -> Self {
+        Self { listed, in_use }
+    }
+
+    /// Whether git listed the Worktrees of the Repository `repository`, so that whether one is removed is known.
+    pub(super) fn knows(&self, repository: &Path) -> bool {
+        self.listed.contains_key(repository)
+    }
+
     /// Whether the Worktree `worktree` of the Repository `repository` is removed.
     pub(super) fn is(&self, repository: &Path, worktree: &Path) -> bool {
         self.listed
