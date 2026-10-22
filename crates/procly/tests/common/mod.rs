@@ -10,6 +10,7 @@ use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
@@ -274,17 +275,20 @@ pub fn test_server() -> PathBuf {
 
 /// A port nothing listens on right now, and that the Daemon will accept as a Lease when a test declares it.
 ///
-/// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, which the standard library
-/// sets. A port in `TIME_WAIT` passes the standard bind and fails the Daemon's, and the ephemeral ports this hands out
-/// are the ones the suite's own connections use as source ports and leave in `TIME_WAIT` when they close first. Under
-/// load that sent the Lease of a test to the Range, away from the port it declared.
+/// The ports come from 10000 to 19999, below the ephemeral ports of macOS and Linux, below the slots of
+/// [`Procly::narrow_range`] and the default Range. An ephemeral port is one the suite's own connections may take as
+/// their source port between the moment a test is handed it and the moment the Daemon or Docker binds it, and under load
+/// that sent the Lease of a test to the Range or failed the bind of its container. Each port is handed out once per test
+/// binary, from an offset taken from the process, so 2 tests never share one.
+///
+/// The Daemon checks a port by binding the wildcard addresses without `SO_REUSEADDR`, so a port still in `TIME_WAIT`
+/// is skipped.
 pub fn free_port() -> u16 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let offset = std::process::id() * 97;
     loop {
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .expect("bind an ephemeral port")
-            .local_addr()
-            .expect("read the ephemeral port")
-            .port();
+        let slot = (offset + NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) % 10_000;
+        let port = 10_000 + u16::try_from(slot).expect("10000 slots fit in a port");
         if accepted_by_the_daemon(port) {
             return port;
         }
@@ -389,9 +393,33 @@ pub fn git_output(dir: &Path, args: &[&str]) -> String {
     stdout(&output)
 }
 
+/// How many Docker tests of one test binary run at once.
+///
+/// Each Compose project gets a network of its own, carved from the few address pools of the engine, and the engine
+/// refuses a network once they are spent. One Docker test per test thread spent them on a machine with many cores.
+const DOCKER_TESTS_AT_ONCE: usize = 4;
+
+/// The Docker tests of this test binary running now.
+static DOCKER_TESTS_RUNNING: Mutex<usize> = Mutex::new(0);
+static DOCKER_TEST_DONE: Condvar = Condvar::new();
+
+/// The turn of a Docker test among the [`DOCKER_TESTS_AT_ONCE`] that may run at once, held until it is dropped.
+#[derive(Debug)]
+pub struct DockerTurn(());
+
+impl Drop for DockerTurn {
+    fn drop(&mut self) {
+        *DOCKER_TESTS_RUNNING.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
+        DOCKER_TEST_DONE.notify_one();
+    }
+}
+
 /// Whether `docker compose` v2 and a running Docker engine are available, printing why a Docker test is skipped
-/// otherwise. A Docker test starts with `if !require_docker() { return; }`.
-pub fn require_docker() -> bool {
+/// otherwise. When they are, waits for the turn of the test and returns it.
+///
+/// A Docker test starts with `let Some(_docker) = require_docker() else { return };`, so that its turn is dropped
+/// after everything else it holds, once its Daemon and Compose projects are gone.
+pub fn require_docker() -> Option<DockerTurn> {
     let works = |args: &[&str]| {
         Command::new("docker")
             .args(args)
@@ -399,11 +427,16 @@ pub fn require_docker() -> bool {
             .output()
             .is_ok_and(|output| output.status.success())
     };
-    let available = works(&["compose", "version"]) && works(&["info"]);
-    if !available {
+    if !(works(&["compose", "version"]) && works(&["info"])) {
         eprintln!("skipped: docker compose v2 and a running Docker engine are required");
+        return None;
     }
-    available
+    let mut running = DOCKER_TESTS_RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+    while *running >= DOCKER_TESTS_AT_ONCE {
+        running = DOCKER_TEST_DONE.wait(running).unwrap_or_else(PoisonError::into_inner);
+    }
+    *running += 1;
+    Some(DockerTurn(()))
 }
 
 /// The one JSON document `output` holds on stdout, which must end with a newline and carry nothing else.

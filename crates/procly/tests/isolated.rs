@@ -159,9 +159,9 @@ fn each_worktree_gets_leases_of_its_own_and_the_main_worktree_keeps_the_declared
 
 #[test]
 fn docker_2_worktrees_run_2_containers_side_by_side_each_on_its_own_lease() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
 
     let main = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
@@ -185,9 +185,9 @@ fn docker_2_worktrees_run_2_containers_side_by_side_each_on_its_own_lease() {
 
 #[test]
 fn docker_up_again_in_the_same_worktree_reuses_its_own_container() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let first = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
     assert_success(&first);
@@ -206,9 +206,9 @@ fn docker_up_again_in_the_same_worktree_reuses_its_own_container() {
 
 #[test]
 fn docker_a_compose_file_that_fixes_the_container_name_is_refused_with_the_offending_line() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("    container_name: pcl-iso-fixed-db\n");
 
     let output = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
@@ -226,9 +226,9 @@ fn docker_a_compose_file_that_fixes_the_container_name_is_refused_with_the_offen
 
 #[test]
 fn docker_a_compose_file_that_fixes_a_network_name_is_refused_with_the_offending_line() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("    networks:\n      - back\nnetworks:\n  back:\n    name: pcl-iso-fixed-net\n");
 
     let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
@@ -245,9 +245,9 @@ fn docker_a_compose_file_that_fixes_a_network_name_is_refused_with_the_offending
 
 #[test]
 fn docker_down_stops_the_container_of_the_worktree_at_once_and_keeps_it_with_its_volume() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -270,9 +270,9 @@ fn docker_down_stops_the_container_of_the_worktree_at_once_and_keeps_it_with_its
 
 #[test]
 fn docker_a_worktree_release_stops_the_container_of_the_worktree_at_once_and_releases_its_lease() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -297,9 +297,9 @@ fn docker_a_worktree_release_stops_the_container_of_the_worktree_at_once_and_rel
 
 #[test]
 fn docker_status_shows_the_containers_of_the_worktree_and_its_json_lists_them() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -328,9 +328,9 @@ fn docker_status_shows_the_containers_of_the_worktree_and_its_json_lists_them() 
 
 #[test]
 fn docker_eject_stops_the_containers_of_every_worktree_and_keeps_them_with_their_volumes() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -359,9 +359,9 @@ fn docker_eject_stops_the_containers_of_every_worktree_and_keeps_them_with_their
 
 #[test]
 fn docker_logs_reads_the_container_of_the_worktree() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let talking = |marker: &str| {
         compose_file(&fixture.main_project.name, "").replace(
@@ -384,9 +384,9 @@ fn docker_logs_reads_the_container_of_the_worktree() {
 
 #[test]
 fn docker_the_container_of_a_worktree_removed_without_down_stops_on_the_next_down() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -408,9 +408,9 @@ fn docker_the_container_of_a_worktree_removed_without_down_stops_on_the_next_dow
 
 #[test]
 fn docker_after_a_daemon_crash_the_container_of_a_worktree_is_still_its_own() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let first = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
     assert_success(&first);
@@ -460,9 +460,9 @@ fn isolated_lines(text: &str) -> Vec<String> {
 
 #[test]
 fn docker_gc_lists_the_container_and_volume_of_a_removed_worktree_and_gc_apply_removes_them() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     leave_behind_the_other_container(&fixture);
     let project = &fixture.other_project.name;
@@ -539,9 +539,9 @@ fn docker_gc_lists_the_container_and_volume_of_a_removed_worktree_and_gc_apply_r
 
 #[test]
 fn docker_gc_never_removes_the_container_of_a_worktree_git_still_lists_or_of_a_pinned_branch() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     // The Worktree is on the branch `app-feature`, which the Worktree pins.
     let pinned = format!("{}[pinned.app-feature]\n", config(fixture.port));
@@ -574,9 +574,9 @@ fn docker_gc_never_removes_the_container_of_a_worktree_git_still_lists_or_of_a_p
 
 #[test]
 fn docker_a_volume_gc_apply_cannot_remove_is_reported_and_removed_by_the_next_gc_apply() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     leave_behind_the_other_container(&fixture);
     let project = &fixture.other_project.name;
@@ -638,9 +638,9 @@ fn docker_a_volume_gc_apply_cannot_remove_is_reported_and_removed_by_the_next_gc
 
 #[test]
 fn docker_gc_never_removes_the_container_compose_reused_for_a_worktree_of_the_same_compose_project() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["down", "db"]));

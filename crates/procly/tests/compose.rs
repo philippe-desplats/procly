@@ -118,9 +118,9 @@ fn listens(port: u16) -> bool {
 
 #[test]
 fn docker_up_starts_the_service_through_the_unmodified_compose_file_on_its_lease() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let compose_before = std::fs::read(fixture.main.join("compose.yaml")).unwrap();
 
@@ -143,9 +143,9 @@ fn docker_up_starts_the_service_through_the_unmodified_compose_file_on_its_lease
 
 #[test]
 fn docker_2_worktrees_share_one_container_on_one_port() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let container = fixture.project.container();
@@ -163,9 +163,9 @@ fn docker_2_worktrees_share_one_container_on_one_port() {
 
 #[test]
 fn docker_the_container_stops_after_the_grace_period_once_no_worktree_needs_it_and_keeps_its_volume() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -199,9 +199,9 @@ fn docker_the_container_stops_after_the_grace_period_once_no_worktree_needs_it_a
 
 #[test]
 fn docker_an_up_during_the_grace_period_keeps_the_container_running() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.main, &["down", "db"]));
@@ -220,9 +220,9 @@ fn docker_an_up_during_the_grace_period_keeps_the_container_running() {
 
 #[test]
 fn docker_the_lease_of_a_running_container_does_not_expire() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let port = fixture.port;
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
@@ -245,9 +245,9 @@ fn docker_the_lease_of_a_running_container_does_not_expire() {
 
 #[test]
 fn docker_a_process_service_starts_the_compose_service_it_needs_first() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let web_port = free_port();
     std::fs::write(
@@ -273,9 +273,9 @@ fn docker_a_process_service_starts_the_compose_service_it_needs_first() {
 
 #[test]
 fn docker_down_without_a_service_releases_every_compose_service_of_the_worktree() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
 
@@ -292,9 +292,9 @@ fn docker_down_without_a_service_releases_every_compose_service_of_the_worktree(
 
 #[test]
 fn docker_a_worktree_release_lets_go_of_the_compose_service_like_down_and_keeps_the_lease_its_container_runs_on() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -329,9 +329,9 @@ fn docker_a_worktree_release_lets_go_of_the_compose_service_like_down_and_keeps_
 
 #[test]
 fn docker_a_compose_file_that_does_not_publish_the_lease_is_refused() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     // The compose file interpolates `DB_PORT`, which the config sets to anything but the Lease.
     std::fs::write(
@@ -351,9 +351,9 @@ fn docker_a_compose_file_that_does_not_publish_the_lease_is_refused() {
 
 #[test]
 fn docker_a_service_missing_from_the_compose_file_is_refused() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     std::fs::write(
         fixture.main.join("procly.local.toml"),
@@ -532,9 +532,9 @@ fn run_stop_command(stderr: &str) {
 
 #[test]
 fn docker_a_container_started_by_plain_docker_compose_with_matching_labels_is_adopted_as_reused() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let port = fixture.port;
     compose_up_outside_procly(&fixture, port);
@@ -553,9 +553,9 @@ fn docker_a_container_started_by_plain_docker_compose_with_matching_labels_is_ad
 
 #[test]
 fn docker_a_container_holding_the_lease_without_matching_labels_is_a_conflict_procly_never_stops() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let port = fixture.port;
     // Granted first, so that the Lease is the port the other container takes.
@@ -608,9 +608,9 @@ impl Drop for Outside {
 
 #[test]
 fn docker_a_process_holding_the_lease_is_a_conflict_naming_the_kill_command_procly_never_runs() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let port = fixture.port;
     // Granted first, so that the Lease is the port the process takes.
@@ -641,9 +641,9 @@ fn docker_a_process_holding_the_lease_is_a_conflict_naming_the_kill_command_proc
 
 #[test]
 fn docker_up_json_of_a_conflict_carries_the_conflicts_and_exits_5_as_the_text_does() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let port = fixture.port;
     assert_success(&fixture.procly.procly_in(&fixture.main, &["env", "db"]));
@@ -675,9 +675,9 @@ fn docker_up_json_of_a_conflict_carries_the_conflicts_and_exits_5_as_the_text_do
 
 #[test]
 fn docker_a_service_with_an_smtp_and_an_http_port_prints_an_http_url_for_the_http_port_only() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let (smtp, http) = (fixture.port, free_port());
     // Shaped as `procly init` proposes a Mailpit: an `smtp` port its health check probes, and an `http` port.
@@ -717,9 +717,9 @@ fn docker_a_service_with_an_smtp_and_an_http_port_prints_an_http_url_for_the_htt
 
 #[test]
 fn docker_a_postgres_as_procly_init_proposes_it_without_a_driver_prints_a_postgresql_url() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let port = fixture.port;
     // Credentials the bundled Driver does not know, so that `procly init` gives the service no Driver.
@@ -755,9 +755,9 @@ fn docker_a_postgres_as_procly_init_proposes_it_without_a_driver_prints_a_postgr
 
 #[test]
 fn docker_a_container_holding_the_container_name_without_matching_labels_is_a_conflict() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let foreign = Foreign::run(&format!("{}-db-1", fixture.project.name), None);
 
@@ -781,9 +781,9 @@ fn docker_a_container_holding_the_container_name_without_matching_labels_is_a_co
 
 #[test]
 fn docker_the_service_running_outside_procly_on_another_port_than_its_lease_is_a_conflict_left_running() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let elsewhere = free_port();
     compose_up_outside_procly(&fixture, elsewhere);
@@ -815,9 +815,9 @@ fn docker_the_service_running_outside_procly_on_another_port_than_its_lease_is_a
 
 #[test]
 fn docker_a_container_started_outside_procly_is_a_foreign_process_in_status_until_it_is_adopted() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let port = fixture.port;
     compose_up_outside_procly(&fixture, port);
@@ -839,9 +839,9 @@ fn docker_a_container_started_outside_procly_is_a_foreign_process_in_status_unti
 
 #[test]
 fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1h\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -885,9 +885,9 @@ fn an_unreadable_container_document_fails_up_down_status_and_eject_with_125_nami
 
 #[test]
 fn docker_after_a_daemon_crash_the_container_is_still_counted_for_both_worktrees_until_its_grace_period() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -921,9 +921,9 @@ fn docker_after_a_daemon_crash_the_container_is_still_counted_for_both_worktrees
 
 #[test]
 fn docker_a_grace_period_running_when_the_daemon_was_killed_resumes_from_its_deadline() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.main, &["down", "db"]));
@@ -944,9 +944,9 @@ fn docker_a_grace_period_running_when_the_daemon_was_killed_resumes_from_its_dea
 
 #[test]
 fn docker_a_grace_period_that_ended_while_no_daemon_ran_stops_the_container_at_reconciliation() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let container = fixture.project.container();
@@ -964,9 +964,9 @@ fn docker_a_grace_period_that_ended_while_no_daemon_ran_stops_the_container_at_r
 
 #[test]
 fn docker_a_clean_daemon_exit_leaves_the_container_running_and_counted() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -984,9 +984,9 @@ fn docker_a_clean_daemon_exit_leaves_the_container_running_and_counted() {
 
 #[test]
 fn docker_a_worktree_removed_without_down_stops_counting() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -1010,9 +1010,9 @@ fn docker_a_worktree_removed_without_down_stops_counting() {
 
 #[test]
 fn docker_a_worktree_removed_while_no_daemon_ran_starts_the_grace_period_at_reconciliation() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
     fixture.procly.kill_daemon();
@@ -1033,9 +1033,9 @@ fn docker_a_worktree_removed_while_no_daemon_ran_starts_the_grace_period_at_reco
 
 #[test]
 fn docker_status_and_eject_see_the_container_of_a_previous_daemon() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1h\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let container = fixture.project.container();
@@ -1058,9 +1058,9 @@ fn docker_status_and_eject_see_the_container_of_a_previous_daemon() {
 
 #[test]
 fn docker_a_recorded_container_that_no_longer_runs_is_forgotten_and_never_stopped() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     fixture.procly.kill_daemon();
@@ -1089,9 +1089,9 @@ fn docker_a_recorded_container_that_no_longer_runs_is_forgotten_and_never_stoppe
 
 #[test]
 fn docker_a_recorded_container_replaced_by_one_without_matching_labels_is_forgotten_and_never_stopped() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("grace_period = \"1m\"\n");
     let port = fixture.port;
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
@@ -1133,9 +1133,9 @@ fn docker_a_recorded_container_replaced_by_one_without_matching_labels_is_forgot
 
 #[test]
 fn docker_logs_of_a_compose_service_prints_the_recent_output_of_its_container() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = fixture("");
     let talking = compose_file(&fixture.project.name).replace(
         "command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]",

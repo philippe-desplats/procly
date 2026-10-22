@@ -299,9 +299,9 @@ const DEV_AND_TEST: &str =
 
 #[test]
 fn docker_2_worktrees_get_distinct_resources_in_the_same_container_from_a_driver_file_of_the_repository() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = directory_fixture(DEV_AND_TEST);
 
     let first = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
@@ -344,9 +344,9 @@ fn marking_seed(project: &Project, ran: &Path) -> String {
 
 #[test]
 fn docker_each_seed_variant_gives_a_new_resource_its_content_and_an_existing_one_is_left_alone() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
     let ran = fixture.procly.scratch().join("seed-ran");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
@@ -387,9 +387,9 @@ fn docker_each_seed_variant_gives_a_new_resource_its_content_and_an_existing_one
 
 #[test]
 fn docker_a_seed_that_fails_drops_the_resource_it_just_created_so_that_the_next_up_seeds_it_again() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     let failing = |run: &str| {
@@ -426,9 +426,9 @@ fn docker_a_seed_that_fails_drops_the_resource_it_just_created_so_that_the_next_
 
 #[test]
 fn docker_a_seed_that_never_ends_is_killed_at_its_timeout_and_drops_its_resource() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     fs::write(
@@ -447,9 +447,9 @@ fn docker_a_seed_that_never_ends_is_killed_at_its_timeout_and_drops_its_resource
 
 #[test]
 fn docker_a_driver_command_running_past_the_driver_timeout_fails_up() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = logical_fixture(
         alpine_compose,
         "slow",
@@ -471,9 +471,9 @@ fn docker_a_driver_command_running_past_the_driver_timeout_fails_up() {
 
 #[test]
 fn docker_a_template_seed_needs_a_driver_with_a_copy_command_and_an_existing_template() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     fs::write(
@@ -538,9 +538,9 @@ fn databases(project: &Project) -> Vec<String> {
 
 #[test]
 fn docker_postgres_2_worktrees_get_distinct_databases_for_dev_and_test_in_one_container() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = postgres_fixture(DEV_AND_TEST);
 
     let first = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
@@ -561,9 +561,9 @@ fn docker_postgres_2_worktrees_get_distinct_databases_for_dev_and_test_in_one_co
 
 #[test]
 fn docker_postgres_each_seed_variant_produces_the_expected_content() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = postgres_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     // The template is a database that exists already, with a table and a row.
@@ -600,9 +600,9 @@ fn docker_postgres_each_seed_variant_produces_the_expected_content() {
 
 #[test]
 fn docker_resources_a_worktree_cannot_create_never_stop_a_container_other_worktrees_still_need() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = directory_fixture("[services.db.resources.plain]\nname = 'app_plain'\n");
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     // The container was stopped from outside Procly, so the next `up` starts it again for the Worktree that needs it.
@@ -809,9 +809,9 @@ fn redis_compose(project: &str) -> String {
 
 #[test]
 fn docker_redis_2_worktrees_keep_their_keys_in_distinct_databases_of_one_container() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let api = "[services.db.resources.main]\n[services.api]\nrun = 'true'\n[services.api.env]\n\
                REDIS_URL = '{services.db.resources.main.url}'\n";
     let fixture = commit_and_add_worktree(logical_fixture(redis_compose, "redis", api));
@@ -961,9 +961,9 @@ fn gc_never_lists_a_named_resource_a_worktree_git_still_lists_uses_under_the_sam
 
 #[test]
 fn docker_gc_apply_drops_the_logical_resources_of_a_removed_worktree_through_the_driver() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = directory_fixture(DEV_AND_TEST);
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
@@ -1016,9 +1016,9 @@ fn docker_gc_apply_drops_the_logical_resources_of_a_removed_worktree_through_the
 
 #[test]
 fn docker_gc_apply_frees_the_redis_index_of_a_removed_worktree_for_a_new_one() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let api = "[services.db.resources.main]\n[services.api]\nrun = 'true'\n[services.api.env]\n\
                REDIS_URL = '{services.db.resources.main.url}'\n";
     let fixture = logical_fixture(redis_compose, "redis", api);
@@ -1068,9 +1068,9 @@ fn docker_gc_apply_frees_the_redis_index_of_a_removed_worktree_for_a_new_one() {
 
 #[test]
 fn docker_gc_apply_never_drops_a_resource_a_worktree_added_while_it_runs_uses() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = logical_fixture(alpine_compose, "dir", DEV_AND_TEST);
     // The drop of the first resource marks that it began, and takes long enough for a Worktree to be added meanwhile.
     let slow = DIRECTORY_DRIVER.replace(
@@ -1132,9 +1132,9 @@ fn docker_gc_apply_never_drops_a_resource_a_worktree_added_while_it_runs_uses() 
 
 #[test]
 fn docker_gc_apply_never_frees_the_index_of_a_worktree_added_again_at_the_same_path_while_it_runs() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let api = "[services.db.resources.main]\n[services.api]\nrun = 'true'\n[services.api.env]\n\
                REDIS_URL = '{services.db.resources.main.url}'\n";
     let fixture = logical_fixture(redis_compose, "redis", api);
@@ -1190,9 +1190,9 @@ fn docker_gc_apply_never_frees_the_index_of_a_worktree_added_again_at_the_same_p
 
 #[test]
 fn docker_a_drop_that_fails_is_reported_with_the_command_to_run_and_gc_goes_on() {
-    if !require_docker() {
+    let Some(_docker) = require_docker() else {
         return;
-    }
+    };
     let fixture = logical_fixture(alpine_compose, "dir", DEV_AND_TEST);
     // The drop of the `dev` resource of the other Worktree fails, the one of its `test` resource works.
     let failing = DIRECTORY_DRIVER.replace(
