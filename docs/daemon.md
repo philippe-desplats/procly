@@ -39,6 +39,8 @@ The containers of Compose services outlive the Daemon too, whether it crashed or
 
 A Worktree whose directory no longer exists, removed without `procly down`, stops counting when the Daemon reconciles and whenever `procly down` reads the count. A container no Worktree needs anymore then enters its Grace period.
 
+Once it has reconciled them, the Daemon applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers whose Worktree git no longer lists. A deletion a previous Daemon was waiting for is recorded in `isolated.json`, and runs when it is due, at once if it already is.
+
 Only what `docker compose` needs to reach the engine is recorded with a container: `PATH`, `HOME`, the `DOCKER_*` and `COMPOSE_*` variables, and the variables Procly injected. The rest of the environment of the command that started it is never written to disk.
 
 A `containers.json` that cannot be read fails `up`, `down`, `status` and `eject` with exit code 125 and its path, as `services.json` does. Fix or remove the file, the containers it recorded are then no longer counted by Procly, and a `procly up` adopts a container still running with the labels of its compose service.

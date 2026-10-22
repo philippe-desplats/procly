@@ -83,7 +83,21 @@ impl Scope {
         let worktree = &self.topology.worktree;
         let slug = (!worktree.main).then(|| worktree.slug.clone());
         let pinned = environment::pinned_branch(&self.topology, &self.config)?.map(str::to_owned);
-        Ok((worktree.path.clone(), Some(Isolated { main, slug, pinned })))
+        let retention = self
+            .config
+            .services
+            .get(name)
+            .and_then(|declared| declared.retention)
+            .unwrap_or_default();
+        Ok((
+            worktree.path.clone(),
+            Some(Isolated {
+                main,
+                slug,
+                pinned,
+                retention,
+            }),
+        ))
     }
 
     /// The Services to bring up for `name`, needs first, or for every Service no Group covers without `name`.
@@ -452,16 +466,35 @@ async fn up_compose(
         let (registry, scope, name) = (Arc::clone(registry), scope.clone(), name.to_owned());
         move || plan_resources(&registry, &scope, &name, env)
     };
+    let retention = isolated.then(|| {
+        let declared = scope.config.services.get(name);
+        (
+            (key.0.clone(), key.1.clone(), worktree.clone()),
+            declared.and_then(|declared| declared.retention).unwrap_or_default(),
+        )
+    });
     match registry
         .composes
         .up::<anyhow::Error, _, _>(key, worktree, grace, prepare, plan)
         .await
     {
-        Ok(brought) => Ok(Running::Compose {
-            outcome: brought.outcome,
-            port: brought.port,
-            health: brought.health,
-        }),
+        Ok(brought) => {
+            // A container that already ran was recorded with the policy of its last start, the one declared now applies.
+            if let Some((key, retention)) = retention
+                && brought.outcome == StartOutcome::Reused
+            {
+                let registry = Arc::clone(registry);
+                let retained = tokio::task::spawn_blocking(move || registry.isolated.retain(&key, retention)).await;
+                if let Ok(Err(error)) = retained {
+                    eprintln!("cannot record the retention policy of service {name}: {error:#}");
+                }
+            }
+            Ok(Running::Compose {
+                outcome: brought.outcome,
+                port: brought.port,
+                health: brought.health,
+            })
+        }
         Err(error) => match error.downcast::<ComposeError>() {
             Ok(ComposeError::Conflict { service, conflicts }) => Err(Box::new(Response::Conflict {
                 service,

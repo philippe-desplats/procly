@@ -31,7 +31,7 @@ use super::isolated_record::{IsolatedRecord, IsolatedRecords};
 use super::job::{Fingerprint, JobSpec, Jobs};
 use super::lease::Leases;
 use super::store::StoreError;
-use crate::config::Seed;
+use crate::config::{Retention, Seed};
 use crate::derived::Resource;
 use crate::driver::{self, Driver, DriverError};
 use crate::duration;
@@ -232,6 +232,8 @@ pub(crate) struct Isolated {
     pub(crate) slug: Option<String>,
     /// The Pinned branch the Worktree is on, whose container `gc` never removes.
     pub(crate) pinned: Option<String>,
+    /// What the Daemon does with the container and its volumes once it finds the Worktree removed.
+    pub(crate) retention: Retention,
 }
 
 /// The Logical resources of one Worktree in the container of a Compose service, and what it takes to create them.
@@ -942,6 +944,8 @@ impl Ledger {
             env: docker.recorded_env.clone(),
             pinned: isolated.pinned.clone(),
             volumes: Vec::new(),
+            retention: isolated.retention,
+            removed_ms: None,
         };
         let records = Arc::clone(&self.isolated);
         tokio::task::spawn_blocking(move || records.record(record))

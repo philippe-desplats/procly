@@ -27,6 +27,7 @@ mod reconcile;
 mod record;
 mod requester;
 mod resource;
+mod retention;
 mod service;
 mod status;
 mod store;
@@ -62,6 +63,7 @@ use self::off::Offs;
 use self::output_file::OutputFiles;
 use self::record::ServiceRecords;
 use self::resource::LogicalResources;
+use self::retention::Retentions;
 use self::service::Services;
 use crate::config;
 use crate::protocol::{self, Released, Request, Response, StartOutcome};
@@ -77,6 +79,8 @@ struct Registry {
     leases: Arc<Leases>,
     /// Every Isolated container, running or stopped, which `gc` removes once its Worktree is.
     isolated: Arc<IsolatedRecords>,
+    /// The delayed deletions of Isolated containers whose Retention policy is a duration.
+    retentions: Retentions,
     indexes: Indexes,
     /// The Logical resources of every Worktree other than the Main worktree, which `gc` drops once it is removed.
     resources: LogicalResources,
@@ -195,6 +199,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
             Arc::clone(&isolated),
         ),
         isolated,
+        retentions: Retentions::new(clock.clone()),
         leases,
         indexes: Indexes::new(state.indexes()),
         resources: LogicalResources::new(state.resources()),
@@ -215,6 +220,8 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
             if let Err(message) = registry.reconciled().await {
                 eprintln!("cannot reconcile the services and containers of the previous daemon: {message}");
             }
+            // Once the containers of removed Worktrees are stopped, which a policy never deletes while they run.
+            retention::sweep(&registry).await;
         }
     });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;

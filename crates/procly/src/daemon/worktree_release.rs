@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 
-use super::{Registry, read_config, requester, topology_of};
+use super::{Registry, read_config, requester, retention, topology_of};
 use crate::config::IsolationMode;
 use crate::driver::{self, Driver};
 use crate::protocol::{KeptResource, ReleaseReport};
@@ -14,7 +14,7 @@ use crate::topology::{self, Topology};
 /// Releases the Worktree holding `path`, logging who asked: stops its Services and Jobs with their whole trees, lets
 /// go of its Compose services, then releases its Leases, apart from those of its Pinned branch and those a container
 /// still runs on. Its Logical resources are kept and named. Running it again, or in a Worktree Procly never saw,
-/// releases nothing.
+/// releases nothing. It then applies the Retention policy of the Isolated containers of the Worktrees already removed.
 pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32>) -> anyhow::Result<ReleaseReport> {
     // Resolving the Topology and the branch runs git, and naming the requester runs ps.
     let (topology, branch, who) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -62,6 +62,8 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
         .filter(|(_, _, owner)| owner.as_deref() == Some(worktree.as_path()))
         .map(|(_, name, _)| name)
         .collect();
+    // Once the containers of removed Worktrees are stopped, which a policy never deletes while they run.
+    retention::sweep(&registry).await;
     let mut report = ReleaseReport {
         worktree: worktree.clone(),
         compose_services,

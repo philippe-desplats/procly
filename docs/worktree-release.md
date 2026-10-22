@@ -21,6 +21,8 @@ Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it on
 2. It lets go of the Compose services of the Worktree as `procly down` does: a Shared or Logical container keeps running while another Worktree needs it, then stops after its Grace period. The Isolated container of the Worktree stops at once and is printed as `<service> stopped`, kept with its volumes, see [Isolated mode](configuration.md#isolated-mode).
 3. It releases the Leases of the Worktree, so that the next Worktree can be granted their ports at once, without waiting for them to expire.
 
+It also applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers of the Worktrees already removed, of every Repository: those set to `"delete"` are removed, and those set to a duration are removed once it has passed. The Worktree being released still exists, so its own container is kept until a later release, or the next start of the Daemon, finds it removed.
+
 It keeps the rest, and deletes no data (ADR 0004):
 
 - The Leases bound to a Pinned branch, so that the branch gets the same ports when its Worktree is recreated. Each one is printed as `kept for Pinned branch <branch>`.

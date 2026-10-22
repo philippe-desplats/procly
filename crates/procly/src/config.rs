@@ -81,6 +81,10 @@ pub(crate) enum ConfigError {
         "service {service} is set to `isolation = \"logical\"` but sets no `driver`, which creates the Logical resources"
     )]
     LogicalWithoutDriver { service: String },
+    #[error(
+        "service {service} sets `retention`, which only an Isolated Compose service has, and its isolation is \"{isolation}\""
+    )]
+    RetentionNotIsolated { service: String, isolation: &'static str },
     #[error("service {service} sets `driver` but declares no `resources` for it to create")]
     DriverWithoutResources { service: String },
     #[error(
@@ -226,6 +230,9 @@ pub(crate) struct ServiceConfig {
     /// Overrides `settings.isolation` for this Compose service.
     #[serde(default)]
     pub(crate) isolation: Option<IsolationMode>,
+    /// What happens to the container and the volumes of an Isolated Compose service once its Worktree is removed.
+    #[serde(default)]
+    pub(crate) retention: Option<Retention>,
     /// The Driver that creates the Logical resources of a Compose service in its container.
     #[serde(default)]
     pub(crate) driver: Option<String>,
@@ -342,6 +349,83 @@ impl<'de> Deserialize<'de> for IsolationMode {
         }
 
         deserializer.deserialize_str(IsolationVisitor)
+    }
+}
+
+impl IsolationMode {
+    /// The word `procly.toml` sets the mode with.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Logical => "logical",
+            Self::Isolated => "isolated",
+        }
+    }
+}
+
+/// The Retention policy of an Isolated Compose service: what happens to its container and its volumes once the Daemon
+/// finds its Worktree removed. Anything but [`Retention::Keep`] is a deletion a person declared (ADR 0004).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Retention {
+    /// Never deleted by the Daemon, only by `procly gc --apply`.
+    #[default]
+    Keep,
+    /// Deleted as soon as the Daemon finds the Worktree removed.
+    Delete,
+    /// Deleted that long after the Daemon found the Worktree removed.
+    After(Duration),
+}
+
+impl Retention {
+    /// How long after the Daemon found the Worktree removed the container is deleted, `None` when it never is.
+    pub(crate) fn delay(self) -> Option<Duration> {
+        match self {
+            Self::Keep => None,
+            Self::Delete => Some(Duration::ZERO),
+            Self::After(delay) => Some(delay),
+        }
+    }
+}
+
+impl std::str::FromStr for Retention {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        match text {
+            "keep" => Ok(Self::Keep),
+            "delete" => Ok(Self::Delete),
+            _ => crate::duration::parse(text).map(Self::After).map_err(|_| {
+                format!("invalid retention {text:?}, expected \"keep\", \"delete\" or a duration such as \"7d\"")
+            }),
+        }
+    }
+}
+
+/// The policy as `procly.toml` writes it, a duration in days when it is a whole number of them.
+impl fmt::Display for Retention {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Keep => formatter.write_str("keep"),
+            Self::Delete => formatter.write_str("delete"),
+            Self::After(delay) if delay.as_millis() > 0 && delay.as_millis().is_multiple_of(86_400_000) => {
+                write!(formatter, "{}d", delay.as_millis() / 86_400_000)
+            }
+            Self::After(delay) => formatter.write_str(&crate::duration::format(*delay)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Retention {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for Retention {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -545,6 +629,9 @@ impl ServiceConfig {
                 }
                 if self.isolation.is_some() {
                     return Err(wrong_key("isolation", "a Process service", "a Compose service"));
+                }
+                if self.retention.is_some() {
+                    return Err(wrong_key("retention", "a Process service", "a Compose service"));
                 }
                 if !self.resources.is_empty() {
                     return Err(wrong_key("resources", "a Process service", "a Compose service"));
@@ -909,11 +996,20 @@ impl Config {
     }
 
     /// Fails on the first Service whose keys disagree, so that no `up` starts anything from a configuration that
-    /// cannot be run.
+    /// cannot be run. A Retention policy is refused on a Shared or Logical Service, whose container holds the data of
+    /// every Worktree.
     fn validate(&self) -> Result<(), ConfigError> {
-        self.services
-            .iter()
-            .try_for_each(|(name, service)| service.kind(name).map(|_| ()))
+        self.services.iter().try_for_each(|(name, service)| {
+            service.kind(name)?;
+            let isolation = self.isolation(service);
+            if service.retention.is_some() && isolation != IsolationMode::Isolated {
+                return Err(ConfigError::RetentionNotIsolated {
+                    service: name.clone(),
+                    isolation: isolation.word(),
+                });
+            }
+            Ok(())
+        })
     }
 
     /// How long `up` waits for `service` to become healthy.
@@ -1432,6 +1528,52 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("\"shared\", \"logical\" or \"isolated\""), "{error}");
+    }
+
+    #[test]
+    fn the_retention_of_an_isolated_service_is_keep_delete_or_a_duration_and_keep_by_default() {
+        let config = parsed(
+            "[services.db]\ncompose = 'postgres'\nisolation = 'isolated'\nretention = 'delete'\n\
+             [services.cache]\ncompose = 'redis'\nisolation = 'isolated'\nretention = '7d'\n\
+             [services.mail]\ncompose = 'mailpit'\nisolation = 'isolated'\nretention = 'keep'\n\
+             [services.queue]\ncompose = 'rabbitmq'\nisolation = 'isolated'\n",
+        );
+        let retention = |name: &str| config.services[name].retention.unwrap_or_default();
+        assert_eq!(retention("db"), Retention::Delete);
+        assert_eq!(retention("cache"), Retention::After(Duration::from_hours(7 * 24)));
+        assert_eq!(retention("mail"), Retention::Keep);
+        assert_eq!(retention("queue"), Retention::Keep);
+        assert!(config.validate().is_ok());
+        let error = Value::Table(table("[services.db]\ncompose = 'db'\nretention = 'forever'\n"))
+            .try_into::<Config>()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("\"keep\", \"delete\" or a duration such as \"7d\""),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_retention_on_a_shared_logical_or_process_service_is_refused() {
+        assert!(matches!(
+            service("run = 'x'\nretention = 'delete'\n").kind("web"),
+            Err(ConfigError::KeyOfOtherKind { key: "retention", .. })
+        ));
+        for (extra, mode) in [
+            ("", "shared"),
+            ("driver = 'postgres'\nresources = { dev = {} }\n", "logical"),
+        ] {
+            let config = parsed(&format!(
+                "[services.db]\ncompose = 'postgres'\nretention = 'delete'\n{extra}"
+            ));
+            let error = config.validate().unwrap_err();
+            assert!(
+                matches!(&error, ConfigError::RetentionNotIsolated { service, .. } if service == "db"),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains(mode), "{error}");
+        }
     }
 
     #[test]

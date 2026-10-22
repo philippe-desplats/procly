@@ -168,6 +168,7 @@ services:
 | `driver` | none | The Driver that creates a Logical resource per Worktree inside the container, see [Logical resources and Drivers](#logical-resources-and-drivers). |
 | `resources` | none | The Logical resources each Worktree gets, required with `driver` and an error without it. |
 | `isolation` | `settings.isolation`, else Logical with a `driver` | `"shared"`, `"logical"` or `"isolated"`, see [Isolation mode](#isolation-mode). `"logical"` needs a `driver`. |
+| `retention` | `"keep"` | The Retention policy of an Isolated container, what happens to it and its volumes once its Worktree is removed: `"keep"`, `"delete"` or a duration such as `"7d"`, see [Retention policy](#retention-policy). An error on a Shared or Logical Service. |
 
 `restart` and `idle` are for Process services and are errors on a Compose service. `needs` and `health` work as they do for a Process service, `up` waits until the container runs, or is healthy when the compose file defines a health check, and then until the health check of Procly passes.
 
@@ -281,7 +282,7 @@ env = { REDIS_PORT = "{services.cache.ports.redis}" }
 - Each Worktree runs its own container, from its own compose file, under a compose project name of its own: the Main worktree keeps the project name its compose file gives, as it keeps its declared ports, and every other Worktree uses that name followed by `-` and its Worktree slug, such as `app-app_login`. `docker compose --project-name app-app_login ps` shows it.
 - Each Worktree has Leases of its own for the ports of the Service, drawn like the ones of a Process service: the Main worktree gets the declared port, any other Worktree the Pool and then the Range, or the ports of its Pinned branch. `procly up` and `procly env` give every Worktree its own, and `procly up` answers `started` or `reused` with their URLs, like any other Service.
 - Named volumes belong to the project, so each Worktree has its own data. A volume the compose file gives a fixed `name`, or a bind mount, is still shared, Procly does not look at volumes.
-- `procly down` stops the container of the Worktree at once, with `docker compose stop`, and prints `db stopped`: there is no Grace period, nobody else needs it. The container is never removed and its volumes are kept, until the Worktree is removed and `procly gc --apply` removes them, see [Collecting Orphans](gc.md). A `procly down` in any Worktree also stops the containers of the Worktrees whose directory no longer exists, removed without `procly down`, and so does the next Daemon when it finds one at its start.
+- `procly down` stops the container of the Worktree at once, with `docker compose stop`, and prints `db stopped`: there is no Grace period, nobody else needs it. The container is never removed and its volumes are kept, until the Worktree is removed and `procly gc --apply` or its [Retention policy](#retention-policy) removes them, see [Collecting Orphans](gc.md). A `procly down` in any Worktree also stops the containers of the Worktrees whose directory no longer exists, removed without `procly down`, and so does the next Daemon when it finds one at its start.
 - `procly status` lists the Isolated containers of the Worktree, `procly logs` reads the one of the Worktree, and `procly eject` stops every one of the Repository and keeps them with their volumes.
 
 The limits of the mode:
@@ -291,6 +292,31 @@ The limits of the mode:
 - The container runs on a network of its own project, so it cannot reach the containers of other projects by their service name, the Shared and Logical containers of the Repository included. It reaches them through their Leases on the host, as a Process service does.
 - Every Worktree that runs the Service runs one more container, with the memory it takes.
 - With a `driver`, each container holds the resources under the names or the indexes the Main worktree has, which its Driver creates in it as in Logical mode.
+
+#### Retention policy
+
+`retention` declares what happens to the container of a Worktree and its volumes once the Worktree is removed. Procly never deletes data on its own inference, so a policy other than `"keep"` is a deletion you declare (ADR 0004):
+
+```toml
+[services.db]
+compose = "postgres"
+isolation = "isolated"
+retention = "7d"
+```
+
+| Value | What the Daemon does once it finds the Worktree removed |
+| --- | --- |
+| `"keep"`, the default | Nothing. The container and its volumes stay until `procly gc --apply` removes them. |
+| `"delete"` | Removes them at once. |
+| A duration, such as `"12h"` or `"7d"` | Removes them that long after it found the Worktree removed. The duration takes `ms`, `s`, `m`, `h` or `d`, a bare number meaning seconds. |
+
+The Daemon finds a Worktree removed when it starts and reconciles what the previous Daemon left, and on every `procly worktree release`, in any Worktree. A Worktree is removed as [`procly gc`](gc.md#what-is-an-orphan) tells it: git no longer lists it, and the container is an Orphan. So a container is never removed while it runs, while git still lists its Worktree, even as prunable, when its Worktree was on a Pinned branch, or when another Worktree uses its compose project. It is removed as `gc --apply` removes it, with `docker container rm --force --volumes`, then its volumes with `docker volume rm`.
+
+The Daemon writes when it found the Worktree removed in `isolated.json` of its state directory, so a pending deletion survives a restart of the Daemon: the next one removes the container when it is due, at once if it is already past, and never earlier. A Worktree that git lists again before then keeps its container, and the delay starts over if it is removed again. The policy that applies is the one the Worktree declared when its container last came up, with `procly up`, since `procly.toml` goes with the Worktree.
+
+The Daemon log tells when it found the Worktree removed, `the Worktree /home/me/app-login is removed, retention policy 7d of service db deletes the isolated container of service db of /home/me/app-login`, and each deletion with the policy that caused it, `retention policy 7d of service db deleted isolated container db (compose project app-app_login, service postgres) of /home/me/app-login`. A deletion that fails is logged too, and tried again on the next reconciliation or Worktree release, as the container stays an Orphan for `procly gc`.
+
+`retention` on a Shared or Logical Service, whose container holds the data of every Worktree, or on a Process service, is an error, and `procly up` fails with 125.
 
 ### Where resources are created
 

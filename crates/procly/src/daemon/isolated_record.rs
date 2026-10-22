@@ -3,15 +3,18 @@
 //! again and never guessed from what Docker runs (ADR 0004).
 //!
 //! The record of a running container is in the container document as well, which only holds the ones that run. This
-//! one outlives the container stopping, since a stopped container keeps its data.
+//! one outlives the container stopping, since a stopped container keeps its data. It keeps the Retention policy the
+//! Worktree declared, and when the Daemon found the Worktree removed, so that a delayed deletion survives a restart.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use super::store::{self, StoreError};
+use crate::config::Retention;
 
 /// The version of the format of the document, bumped when a field changes meaning or disappears.
 const DOCUMENT_VERSION: u32 = 1;
@@ -36,6 +39,13 @@ pub(crate) struct IsolatedRecord {
     /// The volumes of a container `gc` removed but could not remove with it, so that they stay Orphans.
     #[serde(default)]
     pub(crate) volumes: Vec<String>,
+    /// What the Daemon does with the container and its volumes once it finds the Worktree removed.
+    #[serde(default)]
+    pub(crate) retention: Retention,
+    /// When the Daemon found the Worktree removed, in milliseconds since the Unix epoch on its clock, which a delayed
+    /// deletion counts from. `None` while the Worktree is not known to be removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) removed_ms: Option<u64>,
 }
 
 impl IsolatedRecord {
@@ -90,6 +100,42 @@ impl IsolatedRecords {
             }
         }
         loaded.insert(key, record);
+        self.write(loaded)
+    }
+
+    /// Records whether the Worktree of the container `key` is removed, keeping the moment the Daemon first found it
+    /// removed, and returns that moment, `None` once the Worktree is not removed, or the container is not recorded.
+    /// Blocking.
+    pub(crate) fn found_removed(
+        &self,
+        key: &Key,
+        removed: bool,
+        now: Duration,
+    ) -> Result<Option<Duration>, StoreError> {
+        let mut table = self.table();
+        let loaded = self.loaded(&mut table)?;
+        let Some(record) = loaded.get_mut(key) else {
+            return Ok(None);
+        };
+        let marked = match (removed, record.removed_ms) {
+            (true, Some(found)) => return Ok(Some(Duration::from_millis(found))),
+            (false, None) => return Ok(None),
+            (true, None) => Some(u64::try_from(now.as_millis()).unwrap_or(u64::MAX)),
+            (false, Some(_)) => None,
+        };
+        record.removed_ms = marked;
+        self.write(loaded)?;
+        Ok(marked.map(Duration::from_millis))
+    }
+
+    /// Sets the Retention policy of the container `key` to `retention`, as its Worktree declares it now. Blocking.
+    pub(crate) fn retain(&self, key: &Key, retention: Retention) -> Result<(), StoreError> {
+        let mut table = self.table();
+        let loaded = self.loaded(&mut table)?;
+        match loaded.get_mut(key) {
+            Some(record) if record.retention != retention => record.retention = retention,
+            _ => return Ok(()),
+        }
         self.write(loaded)
     }
 
@@ -153,6 +199,8 @@ mod tests {
             env: Vec::new(),
             pinned: None,
             volumes: volumes.iter().map(|&volume| volume.to_owned()).collect(),
+            retention: Retention::After(Duration::from_hours(24)),
+            removed_ms: None,
         }
     }
 
@@ -171,6 +219,30 @@ mod tests {
         let reread = IsolatedRecords::new(path);
 
         assert_eq!(reread.all().expect("read"), [record(&["app-app_login_data"])]);
+        assert_eq!(
+            reread
+                .found_removed(&record(&[]).key(), true, Duration::from_secs(5))
+                .expect("mark"),
+            Some(Duration::from_secs(5))
+        );
+        // The moment the Worktree was first found removed is kept, and outlives the Daemon.
+        let reread = IsolatedRecords::new(dir.path().join("isolated.json"));
+        assert_eq!(
+            reread
+                .found_removed(&record(&[]).key(), true, Duration::from_secs(9))
+                .expect("mark again"),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            reread.all().expect("read")[0].retention,
+            Retention::After(Duration::from_hours(24))
+        );
+        assert_eq!(
+            reread
+                .found_removed(&record(&[]).key(), false, Duration::from_secs(9))
+                .expect("unmark"),
+            None
+        );
         reread.removed(&record(&[]).key(), Vec::new()).expect("forget");
         assert_eq!(reread.all().expect("read"), []);
     }

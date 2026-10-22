@@ -126,23 +126,9 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         )
         .chain(isolated.iter().map(|record| record.repository.clone()))
         .collect();
-    let mut listed = BTreeMap::new();
-    let mut skipped = Vec::new();
-    for repository in repositories {
-        match topology::listed_roots(&repository) {
-            Ok(roots) => {
-                listed.insert(repository, roots);
-            }
-            Err(error) => skipped.push(SkippedRepository {
-                repository,
-                error: format!("{:#}", anyhow::Error::from(error)),
-            }),
-        }
-    }
-    let in_use = in_use(registry);
-    let removed = |repository: &Path, worktree: &Path| {
-        listed.get(repository).is_some_and(|roots| !roots.contains(worktree)) && !in_use.contains(worktree)
-    };
+    let (worktrees, skipped) = Removed::list(registry, repositories);
+    let listed = &worktrees.listed;
+    let removed = |repository: &Path, worktree: &Path| worktrees.is(repository, worktree);
 
     let mut orphans: Vec<Orphan> = leases
         .into_iter()
@@ -192,7 +178,7 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         }));
     }
 
-    let found = orphan_isolated(isolated, removed);
+    let found = orphan_isolated(isolated, removed, |_| true);
     orphans.extend(isolated_orphans(&found));
 
     let requester = (apply && !orphans.is_empty()).then(|| requester::describe(peer, cwd));
@@ -212,8 +198,53 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
     })
 }
 
-/// The Isolated containers of `isolated` whose Worktree is `removed`, as Docker lists them now. Blocking.
-fn orphan_isolated(isolated: Vec<IsolatedRecord>, removed: impl Fn(&Path, &Path) -> bool) -> Vec<Found> {
+/// The Worktrees git no longer lists, as it lists them now, with nothing in use in them.
+pub(super) struct Removed {
+    /// The roots git lists, by Repository, without the Repositories whose Worktrees git cannot list.
+    listed: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
+    in_use: BTreeSet<PathBuf>,
+}
+
+impl Removed {
+    /// Lists the Worktrees of `repositories`, and the Repositories whose Worktrees git cannot list, nothing of which
+    /// is removed. Blocking, it runs git.
+    pub(super) fn list(
+        registry: &Registry,
+        repositories: impl IntoIterator<Item = PathBuf>,
+    ) -> (Self, Vec<SkippedRepository>) {
+        let mut listed = BTreeMap::new();
+        let mut skipped = Vec::new();
+        for repository in repositories {
+            match topology::listed_roots(&repository) {
+                Ok(roots) => {
+                    listed.insert(repository, roots);
+                }
+                Err(error) => skipped.push(SkippedRepository {
+                    repository,
+                    error: format!("{:#}", anyhow::Error::from(error)),
+                }),
+            }
+        }
+        let in_use = in_use(registry);
+        (Self { listed, in_use }, skipped)
+    }
+
+    /// Whether the Worktree `worktree` of the Repository `repository` is removed.
+    pub(super) fn is(&self, repository: &Path, worktree: &Path) -> bool {
+        self.listed
+            .get(repository)
+            .is_some_and(|roots| !roots.contains(worktree))
+            && !self.in_use.contains(worktree)
+    }
+}
+
+/// The Isolated containers of `isolated` whose Worktree is `removed` and that `select` picks, as Docker lists them
+/// now. Blocking.
+pub(super) fn orphan_isolated(
+    isolated: Vec<IsolatedRecord>,
+    removed: impl Fn(&Path, &Path) -> bool,
+    select: impl Fn(&IsolatedRecord) -> bool,
+) -> Vec<Found> {
     // A Pinned branch holds its container whichever Worktree checks it out next, as it holds its Leases.
     let (removed_records, kept_records): (Vec<IsolatedRecord>, Vec<IsolatedRecord>) = isolated
         .into_iter()
@@ -223,7 +254,7 @@ fn orphan_isolated(isolated: Vec<IsolatedRecord>, removed: impl Fn(&Path, &Path)
     let kept_projects: BTreeSet<String> = kept_records.into_iter().map(|record| record.project).collect();
     removed_records
         .into_iter()
-        .filter(|record| !kept_projects.contains(&record.project))
+        .filter(|record| !kept_projects.contains(&record.project) && select(record))
         .map(find)
         // A running container serves someone, whatever Worktree its record names.
         .filter(|found| !found.running)
@@ -231,7 +262,7 @@ fn orphan_isolated(isolated: Vec<IsolatedRecord>, removed: impl Fn(&Path, &Path)
 }
 
 /// The Isolated containers `found` lists, then their volumes.
-fn isolated_orphans(found: &[Found]) -> Vec<Orphan> {
+pub(super) fn isolated_orphans(found: &[Found]) -> Vec<Orphan> {
     let mut orphans: Vec<Orphan> = found
         .iter()
         .filter(|found| found.is_listed())
@@ -366,14 +397,14 @@ fn resource_orphan(resource: LogicalResource) -> Orphan {
 
 /// An Isolated container whose Worktree was removed, as Docker lists it now.
 #[derive(Debug)]
-struct Found {
-    record: IsolatedRecord,
+pub(super) struct Found {
+    pub(super) record: IsolatedRecord,
     /// The names of the containers of the record, `None` when Docker did not answer.
     containers: Option<Vec<String>>,
     /// Whether one of these containers runs.
     running: bool,
     /// The named volumes of its project it mounts, and those a previous `gc` could not remove, that still exist.
-    volumes: Vec<String>,
+    pub(super) volumes: Vec<String>,
 }
 
 impl Found {
@@ -506,7 +537,7 @@ fn resolved(path: &Path) -> PathBuf {
 
 /// Updates the record of each container `gc --apply` found: forgotten once it and its volumes are removed, keeping
 /// the volumes it could not remove otherwise. A container that could not be removed keeps its record as it is.
-fn forget_removed(registry: &Registry, found: &[Found], orphans: &[Orphan]) {
+pub(super) fn forget_removed(registry: &Registry, found: &[Found], orphans: &[Orphan]) {
     for found in found {
         let record = &found.record;
         let of_record = |orphan: &&Orphan| orphan.repository == record.repository && orphan.worktree == record.worktree;
@@ -535,7 +566,7 @@ fn forget_removed(registry: &Registry, found: &[Found], orphans: &[Orphan]) {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum DeleteError {
+pub(super) enum DeleteError {
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -647,7 +678,7 @@ fn forget(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bool, De
 }
 
 /// Deletes `orphan`, anything but a Logical resource, an Isolated container or volume as `found` holds it. Blocking.
-fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orphan) -> Result<(), DeleteError> {
+pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orphan) -> Result<(), DeleteError> {
     let of = |service: &str| {
         found.iter().find(|found| {
             found.record.repository == orphan.repository

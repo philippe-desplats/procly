@@ -158,6 +158,33 @@ fn each_worktree_gets_leases_of_its_own_and_the_main_worktree_keeps_the_declared
 }
 
 #[test]
+fn a_retention_on_a_shared_or_logical_service_fails_up_with_125_before_anything_starts() {
+    let fixture = fixture("");
+    for (declared, isolation) in [
+        ("", "shared"),
+        ("driver = \"postgres\"\nresources = { dev = {} }\n", "logical"),
+    ] {
+        std::fs::write(
+            fixture.main.join("procly.toml"),
+            format!("[services.db]\ncompose = \"db\"\nretention = \"delete\"\n{declared}"),
+        )
+        .expect("write the config");
+
+        let output = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+        assert_eq!(output.status.code(), Some(125), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains(&format!(
+                "service db sets `retention`, which only an Isolated Compose service has, and its isolation is \
+                 \"{isolation}\""
+            )),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
 fn docker_2_worktrees_run_2_containers_side_by_side_each_on_its_own_lease() {
     let Some(_docker) = require_docker() else {
         return;
@@ -724,4 +751,198 @@ impl Drop for Holder {
     fn drop(&mut self) {
         let _ = Command::new("docker").args(["rm", "--force", &self.0]).output();
     }
+}
+
+/// Gives the other Worktree of `fixture` the Retention policy `retention`, then leaves its container behind.
+fn leave_behind_with_retention(fixture: &Fixture, retention: &str) {
+    std::fs::write(
+        fixture.other.join("procly.toml"),
+        format!("{}retention = \"{retention}\"\n", config(fixture.port)),
+    )
+    .expect("write the config");
+    leave_behind_the_other_container(fixture);
+}
+
+#[test]
+fn docker_a_retention_delete_removes_the_container_and_volume_of_a_removed_worktree_on_the_next_release() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "delete");
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "the container is deleted before the release"
+    );
+    let project = &fixture.other_project.name;
+    let worktree = fixture.other.display();
+
+    let released = fixture.procly.procly_in(&fixture.main, &["worktree", "release"]);
+
+    assert_success(&released);
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+    let log = fixture.procly.daemon_log();
+    assert!(
+        log.contains(&format!(
+            "retention policy delete of service db deleted isolated container db (compose project {project}, service \
+             db) of {worktree}"
+        )),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "retention policy delete of service db deleted isolated volume {project}_data (compose project {project}) \
+             of {worktree}"
+        )),
+        "{log}"
+    );
+    // Deleted, they are no longer Orphans, and the container of the Main worktree is its own business.
+    assert_eq!(
+        isolated_lines(&stdout(&fixture.procly.procly(&["gc"]))),
+        Vec::<String>::new()
+    );
+    assert!(!fixture.main_project.container().is_empty() && fixture.main_project.volume_exists());
+}
+
+#[test]
+fn docker_the_retention_declared_when_the_container_last_came_up_is_the_one_applied() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    std::fs::write(
+        fixture.other.join("procly.toml"),
+        format!("{}retention = \"delete\"\n", config(fixture.port)),
+    )
+    .expect("write the config");
+    let reused = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert!(stdout(&reused).starts_with("db reused"), "{}", stdout(&reused));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["down", "db"]));
+    git(
+        &fixture.main,
+        &["worktree", "remove", "--force", &fixture.other.to_string_lossy()],
+    );
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+}
+
+#[test]
+fn docker_a_retention_delete_removes_the_container_of_a_removed_worktree_when_the_daemon_reconciles() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "delete");
+    fixture.procly.stop_daemon();
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "the container is deleted before the Daemon reconciles"
+    );
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+
+    common::eventually("the container and volume are deleted", || {
+        fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists()
+    });
+    let log = fixture.procly.daemon_log();
+    assert!(
+        log.contains(&format!(
+            "retention policy delete of service db deleted isolated container db (compose project {}, service db) of \
+             {}",
+            fixture.other_project.name,
+            fixture.other.display()
+        )),
+        "{log}"
+    );
+}
+
+#[test]
+fn docker_a_retention_keep_never_deletes_the_container_of_a_removed_worktree() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "keep");
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+    fixture.procly.stop_daemon();
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+    fixture.procly.advance_clock(std::time::Duration::from_hours(24 * 365));
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "the container was deleted"
+    );
+    assert!(fixture.other_project.volume_exists(), "the volume was deleted");
+    // `gc --apply` is the only way it goes.
+    assert_eq!(isolated_lines(&stdout(&fixture.procly.procly(&["gc"]))).len(), 2);
+    assert!(!fixture.procly.daemon_log().contains("retention policy"));
+}
+
+#[test]
+fn docker_a_retention_duration_deletes_that_long_after_the_worktree_was_found_removed_across_a_daemon_restart() {
+    use std::time::Duration;
+
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "1h");
+    // Long enough for a deletion run early to be seen.
+    let settle = || std::thread::sleep(Duration::from_millis(500));
+    let kept = |when: &str| {
+        assert!(
+            !fixture.other_project.container().is_empty(),
+            "the container is deleted {when}"
+        );
+        assert!(fixture.other_project.volume_exists(), "the volume is deleted {when}");
+    };
+    // Removed for a while before the Daemon finds it, the hour counts from when it does.
+    fixture.procly.advance_clock(Duration::from_hours(5));
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+    settle();
+    kept("at once");
+    let log = fixture.procly.daemon_log();
+    assert!(
+        log.contains(&format!(
+            "the Worktree {} is removed, retention policy 1h of service db deletes the isolated container of service \
+             db of {}",
+            fixture.other.display(),
+            fixture.other.display()
+        )),
+        "{log}"
+    );
+    fixture.procly.advance_clock(Duration::from_mins(30));
+    settle();
+    kept("after 30 minutes");
+
+    // The pending deletion outlives the Daemon, and is not run early by the next one.
+    fixture.procly.stop_daemon();
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
+    fixture.procly.advance_clock(Duration::from_mins(29));
+    settle();
+    kept("after 59 minutes and a restart");
+
+    fixture.procly.advance_clock(Duration::from_mins(1));
+
+    common::eventually("the container and volume are deleted", || {
+        fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists()
+    });
+    let log = fixture.procly.daemon_log();
+    assert!(
+        log.contains(&format!(
+            "retention policy 1h of service db deleted isolated volume {}_data (compose project {}) of {}",
+            fixture.other_project.name,
+            fixture.other_project.name,
+            fixture.other.display()
+        )),
+        "{log}"
+    );
 }

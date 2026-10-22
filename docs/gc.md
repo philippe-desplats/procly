@@ -51,7 +51,7 @@ A Worktree counts as removed only once `git worktree list` no longer lists it. P
 
 ## Deleting
 
-Procly never deletes on its own inference (ADR 0004): only `procly gc --apply` deletes Orphans. It deletes the Leases first, then the Logical resources, the output directories, the setup directories, the Isolated containers with `docker container rm --force --volumes`, and last their volumes with `docker volume rm`, and prints one `deleted` line per Orphan on stdout. An Orphan it cannot delete is reported on stderr with the reason, and `gc` goes on with the next one:
+Procly never deletes on its own inference (ADR 0004): only `procly gc --apply` deletes Orphans, apart from the Isolated containers whose Service declares a [Retention policy](configuration.md#retention-policy) other than `"keep"`, which the Daemon removes on its own once their Worktree is removed. It deletes the Leases first, then the Logical resources, the output directories, the setup directories, the Isolated containers with `docker container rm --force --volumes`, and last their volumes with `docker volume rm`, and prints one `deleted` line per Orphan on stdout. An Orphan it cannot delete is reported on stderr with the reason, and `gc` goes on with the next one:
 
 ```console
 $ procly gc --apply
