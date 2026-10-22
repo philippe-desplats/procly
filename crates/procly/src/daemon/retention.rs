@@ -10,7 +10,9 @@
 //! A Worktree of a Repository git cannot list is neither: its container is not deleted and its delay is left as it is.
 //!
 //! The container and its volumes are found and removed as `gc --apply` does it, so that a policy never deletes what
-//! `gc` would not, such as a running container, or one whose compose project another Worktree uses.
+//! `gc` would not, such as a running container, or one whose compose project another Worktree uses. A sweep that
+//! cannot do a deletion that is due, Docker failing or not answering, runs again a moment later, then less and less
+//! often while it keeps failing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -29,6 +31,10 @@ use crate::protocol::OrphanKind;
 /// spent asleep, which a monotonic timer may not count, still brings the deletion closer.
 const LONGEST_NAP: Duration = Duration::from_mins(5);
 
+/// How long after a sweep that could not do a deletion the next one runs, doubling while it keeps failing up to
+/// [`LONGEST_NAP`].
+const FIRST_RETRY: Duration = Duration::from_secs(1);
+
 /// The delayed deletions the Daemon waits for, and what keeps 2 sweeps from deleting the same container at once.
 #[derive(Debug)]
 pub(super) struct Retentions {
@@ -37,6 +43,17 @@ pub(super) struct Retentions {
     sweeping: tokio::sync::Mutex<()>,
     /// When each container a wait is running for is due, so that a sweep never starts a second wait for it.
     waiting: Mutex<BTreeMap<Key, Duration>>,
+    /// The sweep run again after one that could not do a deletion.
+    retry: Mutex<Retry>,
+}
+
+/// The sweep run again after one that could not do a deletion.
+#[derive(Debug, Default)]
+struct Retry {
+    /// Whether it is scheduled, so that a failing sweep never schedules a second one.
+    pending: bool,
+    /// How long the last one waited, `None` once a sweep did every deletion that was due.
+    last: Option<Duration>,
 }
 
 impl Retentions {
@@ -45,7 +62,14 @@ impl Retentions {
             clock,
             sweeping: tokio::sync::Mutex::default(),
             waiting: Mutex::default(),
+            retry: Mutex::default(),
         }
+    }
+
+    fn retry(&self) -> std::sync::MutexGuard<'_, Retry> {
+        self.retry
+            .lock()
+            .expect("the retention retry mutex is never poisoned, no code panics while holding it")
     }
 
     fn waiting(&self) -> std::sync::MutexGuard<'_, BTreeMap<Key, Duration>> {
@@ -56,7 +80,7 @@ impl Retentions {
 }
 
 /// Applies the Retention policy of every recorded Isolated container whose Worktree is removed: deletes those that
-/// are due, and waits for the others. Logs what it cannot do, nobody else is told.
+/// are due, and waits for the others. Logs what it cannot do, nobody else is told, and runs again later.
 pub(super) async fn sweep(registry: &Arc<Registry>) {
     let _sweeping = registry.retentions.sweeping.lock().await;
     let swept = {
@@ -64,15 +88,59 @@ pub(super) async fn sweep(registry: &Arc<Registry>) {
         // Listing the Worktrees runs git, finding and removing the containers runs docker, and the record is written.
         tokio::task::spawn_blocking(move || sweep_blocking(&registry)).await
     };
-    match swept {
-        Ok(Ok(later)) => {
+    let done = match swept {
+        Ok(Ok(Swept { later, done })) => {
             for (key, due) in later {
                 wait(registry, key, due);
             }
+            done
         }
-        Ok(Err(error)) => eprintln!("cannot apply the retention policies of the Isolated containers: {error:#}"),
-        Err(error) => eprintln!("cannot apply the retention policies of the Isolated containers: {error}"),
+        Ok(Err(error)) => {
+            eprintln!("cannot apply the retention policies of the Isolated containers: {error:#}");
+            false
+        }
+        Err(error) => {
+            eprintln!("cannot apply the retention policies of the Isolated containers: {error}");
+            false
+        }
+    };
+    if done {
+        registry.retentions.retry().last = None;
+    } else {
+        retry(registry);
     }
+}
+
+/// Sweeps again a moment after a sweep that could not do a deletion, on real time since what failed is Docker or the
+/// disk, not the passing of time.
+fn retry(registry: &Arc<Registry>) {
+    let delay = {
+        let mut retry = registry.retentions.retry();
+        if retry.pending {
+            return;
+        }
+        let delay = next_retry(retry.last);
+        *retry = Retry {
+            pending: true,
+            last: Some(delay),
+        };
+        delay
+    };
+    eprintln!(
+        "the retention policies of the Isolated containers are applied again in {}",
+        crate::duration::format(delay)
+    );
+    let registry = Arc::clone(registry);
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        registry.retentions.retry().pending = false;
+        sweep(&registry).await;
+    });
+}
+
+/// How long to wait before the next sweep, after a failed one that came `last` after another failed one.
+fn next_retry(last: Option<Duration>) -> Duration {
+    last.map_or(FIRST_RETRY, |last| last.saturating_mul(2).min(LONGEST_NAP))
 }
 
 /// Waits until the container `key` is due, at `due` since the Unix epoch on the clock, then sweeps again.
@@ -104,16 +172,27 @@ fn wait(registry: &Arc<Registry>, key: Key, due: Duration) {
     });
 }
 
+/// What a sweep did.
+struct Swept {
+    /// When each container that is not due yet is.
+    later: Vec<(Key, Duration)>,
+    /// Whether every deletion that was due was done.
+    done: bool,
+}
+
 /// Marks the containers whose Worktree the Daemon finds removed, deletes those that are due, and returns when each of
 /// the others is. Blocking.
-fn sweep_blocking(registry: &Registry) -> anyhow::Result<Vec<(Key, Duration)>> {
+fn sweep_blocking(registry: &Registry) -> anyhow::Result<Swept> {
     let records = registry.isolated.all().context("cannot read the Isolated containers")?;
     let declared: Vec<&IsolatedRecord> = records
         .iter()
         .filter(|record| record.retention != Retention::Keep)
         .collect();
     if declared.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Swept {
+            later: Vec::new(),
+            done: true,
+        });
     }
     let repositories: BTreeSet<_> = declared.iter().map(|record| record.repository.clone()).collect();
     let (worktrees, skipped) = Removed::list(registry, repositories);
@@ -148,15 +227,16 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Vec<(Key, Duration)>> {
             later.push((key, at));
         }
     }
+    let mut done = true;
     if !due.is_empty() {
         let found = gc::orphan_isolated(
             records,
             |repository, worktree| worktrees.is(repository, worktree),
             |record| due.contains(&record.key()),
         );
-        delete(registry, &found);
+        done = delete(registry, &found);
     }
-    Ok(later)
+    Ok(Swept { later, done })
 }
 
 /// Whether the Worktree of `record` is removed, as `worktrees` lists them. `None` when git could not list the Worktrees
@@ -194,8 +274,8 @@ fn log_found(record: &IsolatedRecord, removed: bool, found: Option<Duration>) {
 }
 
 /// Deletes the containers `found` and their volumes, logging each deletion with the policy that caused it, then
-/// updates their records as `gc --apply` does. Blocking.
-fn delete(registry: &Registry, found: &[Found]) {
+/// updates their records as `gc --apply` does, and tells whether every deletion was done. Blocking.
+fn delete(registry: &Registry, found: &[Found]) -> bool {
     let mut orphans = gc::isolated_orphans(found);
     for orphan in &mut orphans {
         // The container of a volume is the one that mounts it.
@@ -227,6 +307,7 @@ fn delete(registry: &Registry, found: &[Found]) {
         }
     }
     gc::forget_removed(registry, found, &orphans);
+    orphans.iter().all(|orphan| orphan.error.is_none())
 }
 
 #[cfg(test)]
@@ -284,5 +365,18 @@ mod tests {
             Some(false)
         );
         assert_eq!(removed(&pinned, &worktrees), Some(false));
+    }
+
+    #[test]
+    fn a_failing_sweep_runs_again_less_and_less_often() {
+        let mut waits = Vec::new();
+        let mut last = None;
+        for _ in 0..12 {
+            let next = next_retry(last);
+            waits.push(next.as_secs());
+            last = Some(next);
+        }
+
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300]);
     }
 }

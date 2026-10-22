@@ -22,6 +22,10 @@ use tokio::net::TcpSocket;
 /// How long a test waits for an asynchronous effect before failing.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
+/// How long a test waits for what the Daemon does with Docker on its own, a chain of `docker` commands that takes
+/// seconds on an idle machine and much longer while other test runs keep the engine busy.
+pub const DOCKER_DEADLINE: Duration = Duration::from_mins(1);
+
 /// A temporary state directory, so the Daemon started by the first command never touches the user's real one.
 ///
 /// Dropping it stops the Daemon, which kills every Job it still runs.
@@ -206,10 +210,25 @@ pub fn assert_success(output: &Output) {
 }
 
 /// Polls `condition` until it holds, failing the test after [`DEADLINE`].
-pub fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
+pub fn eventually(what: &str, condition: impl FnMut() -> bool) {
+    eventually_within(DEADLINE, what, condition, String::new);
+}
+
+/// Polls `condition` until it holds, failing the test after `deadline` with what `context` tells then, such as the
+/// Daemon log.
+pub fn eventually_within(
+    deadline: Duration,
+    what: &str,
+    mut condition: impl FnMut() -> bool,
+    context: impl Fn() -> String,
+) {
     let start = Instant::now();
     while !condition() {
-        assert!(start.elapsed() < DEADLINE, "timed out waiting for {what}");
+        assert!(
+            start.elapsed() < deadline,
+            "timed out waiting for {what}\n{}",
+            context()
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }

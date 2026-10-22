@@ -13,7 +13,7 @@
 //! An Isolated container is an Orphan only when Procly recorded it, and Docker lists it under the compose project
 //! and service of its record with the removed Worktree as its working directory, stopped, and no record of a Worktree
 //! that is not an Orphan has its compose project. Its volumes are the named volumes of that project it mounts, never a
-//! volume the compose file gives a name of its own.
+//! volume the compose file gives a name of its own. While Docker does not tell which volumes it has, it is not removed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -410,7 +410,7 @@ fn resource_orphan(resource: LogicalResource) -> Orphan {
 #[derive(Debug)]
 pub(super) struct Found {
     pub(super) record: IsolatedRecord,
-    /// The names of the containers of the record, `None` when Docker did not answer.
+    /// The names of the containers of the record, `None` when Docker did not answer, about them or their volumes.
     containers: Option<Vec<String>>,
     /// Whether one of these containers runs.
     running: bool,
@@ -427,21 +427,31 @@ impl Found {
 }
 
 /// Looks the container of `record` and its volumes up in Docker. Blocking.
+///
+/// When Docker does not tell which volumes it has, the container counts as not looked up, so that it is never
+/// removed and its record never forgotten while a volume of it may be left behind.
 fn find(record: IsolatedRecord) -> Found {
     let listed = owned_containers(&record);
     let running = listed.iter().flatten().any(|container| container.running);
     let containers: Option<Vec<String>> =
         listed.map(|listed| listed.into_iter().map(|container| container.name).collect());
-    let mut volumes = record.volumes.clone();
-    for container in containers.iter().flatten() {
-        for volume in mounted_volumes(container, &record.env) {
-            if !volumes.contains(&volume) {
-                volumes.push(volume);
+    let looked_up = || -> Option<Vec<String>> {
+        let mut volumes = record.volumes.clone();
+        for container in containers.iter().flatten() {
+            for volume in mounted_volumes(container, &record.env)? {
+                if !volumes.contains(&volume) {
+                    volumes.push(volume);
+                }
             }
         }
-    }
-    let of_project = project_volumes(&record.project, &record.env);
-    volumes.retain(|volume| of_project.contains(volume));
+        let of_project = project_volumes(&record.project, &record.env)?;
+        volumes.retain(|volume| of_project.contains(volume));
+        Some(volumes)
+    };
+    let (containers, volumes) = match looked_up() {
+        Some(volumes) => (containers, volumes),
+        None => (None, Vec::new()),
+    };
     Found {
         record,
         containers,
@@ -477,37 +487,41 @@ fn owned_containers(record: &IsolatedRecord) -> Option<Vec<foreign::Container>> 
     )
 }
 
-/// The names of the volumes `container` mounts, anonymous ones included. Blocking.
-fn mounted_volumes(container: &str, env: &[(String, String)]) -> Vec<String> {
+/// The names of the volumes `container` mounts, anonymous ones included, `None` when Docker did not answer. Blocking.
+fn mounted_volumes(container: &str, env: &[(String, String)]) -> Option<Vec<String>> {
     let format = r#"{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}"#;
     lines(&["container", "inspect", "--format", format, container], env)
 }
 
 /// The named volumes compose created for the project `project`: labelled with it and named after it, which a volume
-/// the compose file gives a name of its own is not. Blocking.
-fn project_volumes(project: &str, env: &[(String, String)]) -> BTreeSet<String> {
+/// the compose file gives a name of its own is not. `None` when Docker did not answer. Blocking.
+fn project_volumes(project: &str, env: &[(String, String)]) -> Option<BTreeSet<String>> {
     let label = format!("label=com.docker.compose.project={project}");
     let format = "{{.Name}}\t{{.Label \"com.docker.compose.volume\"}}";
-    lines(&["volume", "ls", "--filter", &label, "--format", format], env)
-        .into_iter()
-        .filter_map(|line| {
-            let (name, key) = line.split_once('\t')?;
-            (name == format!("{project}_{key}")).then(|| name.to_owned())
-        })
-        .collect()
+    Some(
+        lines(&["volume", "ls", "--filter", &label, "--format", format], env)?
+            .into_iter()
+            .filter_map(|line| {
+                let (name, key) = line.split_once('\t')?;
+                (name == format!("{project}_{key}")).then(|| name.to_owned())
+            })
+            .collect(),
+    )
 }
 
-/// The lines `docker args` prints, none when it fails or does not answer. Blocking.
-fn lines(args: &[&str], env: &[(String, String)]) -> Vec<String> {
+/// The lines `docker args` prints, `None` when it fails or does not answer. Blocking.
+fn lines(args: &[&str], env: &[(String, String)]) -> Option<Vec<String>> {
     let mut command = docker(args, env);
     command.stderr(Stdio::null());
     match listeners::bounded_output(&mut command) {
-        Ok(Some(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
+        Ok(Some(output)) if output.status.success() => Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        ),
+        _ => None,
     }
 }
 

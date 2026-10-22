@@ -846,9 +846,12 @@ fn docker_a_retention_delete_removes_the_container_of_a_removed_worktree_when_th
 
     assert_success(&fixture.procly.procly_in(&fixture.main, &["status"]));
 
-    common::eventually("the container and volume are deleted", || {
-        fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists()
-    });
+    common::eventually_within(
+        common::DOCKER_DEADLINE,
+        "the container and volume are deleted",
+        || fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists(),
+        || fixture.procly.daemon_log(),
+    );
     let log = fixture.procly.daemon_log();
     assert!(
         log.contains(&format!(
@@ -858,6 +861,69 @@ fn docker_a_retention_delete_removes_the_container_of_a_removed_worktree_when_th
             fixture.other.display()
         )),
         "{log}"
+    );
+}
+
+#[test]
+fn docker_a_retention_delete_docker_cannot_look_up_keeps_the_volume_and_is_retried() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    std::fs::write(
+        fixture.other.join("procly.toml"),
+        format!("{}retention = \"delete\"\n", config(fixture.port)),
+    )
+    .expect("write the config");
+    // A `docker` that cannot list the volumes while `failing` exists, on the PATH the container is recorded with.
+    let bin = fixture.procly.scratch().join("bin");
+    std::fs::create_dir(&bin).expect("create the bin directory");
+    let failing = fixture.procly.scratch().join("failing");
+    let real = Command::new("sh")
+        .args(["-c", "command -v docker"])
+        .output()
+        .expect("sh runs");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1 $2\" = \"volume ls\" ] && [ -e '{}' ]; then exit 1; fi\nexec '{}' \"$@\"\n",
+        failing.display(),
+        stdout(&real).trim()
+    );
+    std::fs::write(bin.join("docker"), script).expect("write the docker wrapper");
+    std::fs::set_permissions(bin.join("docker"), std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("make the docker wrapper executable");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let in_other = |args: &[&str]| {
+        fixture
+            .procly
+            .command()
+            .current_dir(&fixture.other)
+            .env("PATH", &path)
+            .args(args)
+            .output()
+            .expect("the procly binary runs")
+    };
+    assert_success(&in_other(&["up", "db"]));
+    assert_success(&in_other(&["down", "db"]));
+    git(
+        &fixture.main,
+        &["worktree", "remove", "--force", &fixture.other.to_string_lossy()],
+    );
+    std::fs::write(&failing, "").expect("make the volume lookup fail");
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "the container is deleted while its volumes are unknown"
+    );
+    assert!(fixture.other_project.volume_exists(), "the volume is deleted");
+    std::fs::remove_file(&failing).expect("let the volume lookup succeed");
+    common::eventually_within(
+        common::DOCKER_DEADLINE,
+        "the container and volume are deleted",
+        || fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists(),
+        || fixture.procly.daemon_log(),
     );
 }
 
@@ -932,9 +998,12 @@ fn docker_a_retention_duration_deletes_that_long_after_the_worktree_was_found_re
 
     fixture.procly.advance_clock(Duration::from_mins(1));
 
-    common::eventually("the container and volume are deleted", || {
-        fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists()
-    });
+    common::eventually_within(
+        common::DOCKER_DEADLINE,
+        "the container and volume are deleted",
+        || fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists(),
+        || fixture.procly.daemon_log(),
+    );
     let log = fixture.procly.daemon_log();
     assert!(
         log.contains(&format!(
