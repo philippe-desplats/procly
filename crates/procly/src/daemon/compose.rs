@@ -27,6 +27,7 @@ use super::clock::Clock;
 use super::container_record::{ContainerRecord, ContainerRecords, Key as ContainerKey};
 use super::foreign::{self, Container as ListedContainer};
 use super::health::HealthCheck;
+use super::isolated_record::{IsolatedRecord, IsolatedRecords};
 use super::job::{Fingerprint, JobSpec, Jobs};
 use super::lease::Leases;
 use super::store::StoreError;
@@ -140,6 +141,12 @@ pub(crate) enum ComposeError {
         container: String,
         timeout: String,
     },
+    #[error("the Isolated container of service {service} cannot be recorded, so it was not started")]
+    Record {
+        service: String,
+        #[source]
+        source: StoreError,
+    },
     #[error("the service could not be started")]
     Prepare(#[source] tokio::task::JoinError),
     #[error("the resources could not be worked out")]
@@ -223,6 +230,8 @@ pub(crate) struct Isolated {
     /// The Worktree slug the project name of the Repository is followed by, `None` in the Main worktree, which keeps
     /// the project name of its compose file as it keeps its declared ports.
     pub(crate) slug: Option<String>,
+    /// The Pinned branch the Worktree is on, whose container `gc` never removes.
+    pub(crate) pinned: Option<String>,
 }
 
 /// The Logical resources of one Worktree in the container of a Compose service, and what it takes to create them.
@@ -284,6 +293,9 @@ struct Ledger {
     /// Dated again when a container stops, so that its Leases do not expire the moment it does.
     leases: Arc<Leases>,
     records: Arc<ContainerRecords>,
+    /// Where every Isolated container is recorded before it starts, so that `gc` finds it once its Worktree is
+    /// removed, stopped or not.
+    isolated: Arc<IsolatedRecords>,
 }
 
 #[derive(Debug, Default)]
@@ -327,12 +339,18 @@ struct Docker {
 }
 
 impl Composes {
-    pub(crate) fn new(clock: Clock, leases: Arc<Leases>, records: ContainerRecords) -> Self {
+    pub(crate) fn new(
+        clock: Clock,
+        leases: Arc<Leases>,
+        records: ContainerRecords,
+        isolated: Arc<IsolatedRecords>,
+    ) -> Self {
         Self {
             ledger: Ledger {
                 clock,
                 leases,
                 records: Arc::new(records),
+                isolated,
             },
             table: Mutex::default(),
         }
@@ -420,7 +438,7 @@ impl Composes {
             .map_err(ComposeError::Prepare)??;
         let port = spec.health.port;
         let began = Instant::now();
-        let (docker, found) = start(&spec).await?;
+        let (docker, found) = start(&spec, &key, &self.ledger).await?;
         let waited_out = match found {
             Begun::Started(waited_out) => waited_out,
             Begun::Adopted(adopted) => {
@@ -433,6 +451,7 @@ impl Composes {
                     }
                     .into());
                 }
+                self.ledger.isolated(&key, &spec, &docker).await?;
                 docker.create_resources(planned(plan).await?.as_ref()).await?;
                 eprintln!(
                     "adopted the container {} of service {}, started outside Procly with the labels of its compose \
@@ -908,6 +927,32 @@ impl Ledger {
         self.records.update(key.clone(), || container.record(key));
     }
 
+    /// Records the Isolated container of the Service `key`, which `spec` starts under the project of `docker`, until
+    /// `gc` removes it. A container that cannot be recorded is not started, `gc` would never find it.
+    async fn isolated(&self, key: &ComposeKey, spec: &ComposeSpec, docker: &Docker) -> Result<(), ComposeError> {
+        let (Some(isolated), Some(worktree)) = (&spec.isolated, &key.2) else {
+            return Ok(());
+        };
+        let record = IsolatedRecord {
+            repository: key.0.clone(),
+            worktree: worktree.clone(),
+            service: key.1.clone(),
+            compose: docker.compose.clone(),
+            project: docker.project.clone(),
+            env: docker.recorded_env.clone(),
+            pinned: isolated.pinned.clone(),
+            volumes: Vec::new(),
+        };
+        let records = Arc::clone(&self.isolated);
+        tokio::task::spawn_blocking(move || records.record(record))
+            .await
+            .map_err(ComposeError::Prepare)?
+            .map_err(|source| ComposeError::Record {
+                service: spec.name.clone(),
+                source,
+            })
+    }
+
     /// Writes the record of the container of the Service `key` as it is now, on a blocking thread.
     async fn recorded(&self, key: &ComposeKey, container: &Arc<Container>) {
         let (ledger, key, container) = (self.clone(), key.clone(), Arc::clone(container));
@@ -1053,7 +1098,7 @@ enum Begun {
 
 /// Starts the container of the spec, or finds it running outside Procly for Adoption, and returns the commands that
 /// drive it afterwards. Anything else holding its Leases or its container name is a conflict, and nothing is started.
-async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
+async fn start(spec: &ComposeSpec, key: &ComposeKey, ledger: &Ledger) -> Result<(Docker, Begun), ComposeError> {
     let mut docker = Docker {
         service: spec.name.clone(),
         compose: spec.compose.clone(),
@@ -1109,6 +1154,9 @@ async fn start(spec: &ComposeSpec) -> Result<(Docker, Begun), ComposeError> {
         }
         Occupants::Conflicts(_) => {}
     }
+    // Recorded before it is created, so that a container that never became healthy, which is stopped and kept, is
+    // still found by `gc`.
+    ledger.isolated(key, spec, &docker).await?;
     // `--wait` returns once the container runs, or is healthy when the compose file defines a health check. An
     // Isolated container starts alone: what it depends on would be started again in its project, on the same ports
     // as the containers of the Repository.
@@ -1280,7 +1328,10 @@ impl Docker {
     /// directory, unless the container is `isolated` outside the Main worktree: it is then named by the compose file
     /// of the Main worktree, the project name of the Repository, followed by the Worktree slug.
     async fn stack(&mut self, isolated: Option<&Isolated>) -> Result<Stack, ComposeError> {
-        if let Some(Isolated { main, slug: Some(slug) }) = isolated {
+        if let Some(Isolated {
+            main, slug: Some(slug), ..
+        }) = isolated
+        {
             let repository = Self {
                 project_dir: main.clone(),
                 ..self.clone()

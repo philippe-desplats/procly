@@ -209,8 +209,8 @@ enum Command {
         json: JsonFlag,
     },
     /// List the Orphans of every Repository, what removed Worktrees left behind: the Leases, the Logical resources,
-    /// the output directories and the setup directories of each Worktree git no longer lists. Nothing is deleted
-    /// without `--apply`.
+    /// the output directories, the setup directories, the Isolated containers and their volumes of each Worktree git
+    /// no longer lists. Nothing is deleted without `--apply`.
     #[command(
         after_help = "A Worktree git still lists, even one marked prunable, never counts as removed, and nothing a Pinned \
                       branch holds is an Orphan. Exit codes: 0 when every Orphan is listed, or deleted with \

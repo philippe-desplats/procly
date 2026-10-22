@@ -108,6 +108,12 @@ impl StateDir {
         self.path.join("containers.json")
     }
 
+    /// The document recording every Isolated container Procly started or adopted, running or stopped, until `procly
+    /// gc --apply` removes it.
+    pub(crate) fn isolated(&self) -> PathBuf {
+        self.path.join("isolated.json")
+    }
+
     /// The directory holding the output file of every running Service, which outlives a crash of the Daemon.
     pub(crate) fn outputs(&self) -> PathBuf {
         self.path.join("output")

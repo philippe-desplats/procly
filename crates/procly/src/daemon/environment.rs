@@ -427,7 +427,7 @@ fn not_used(driver: &Driver, service: &str, resource: &str) -> DriverError {
 /// Only a Repository declaring Pinned branches needs to know the branch. The Main worktree keeps Leases of its own
 /// whatever its branch, its declared ports are already fixed, and a Lease of the branch would keep them from it once
 /// it checks out another one.
-fn pinned_branch<'a>(topology: &Topology, config: &'a Config) -> Result<Option<&'a str>, EnvironmentError> {
+pub(super) fn pinned_branch<'a>(topology: &Topology, config: &'a Config) -> Result<Option<&'a str>, EnvironmentError> {
     if config.pinned.is_empty() || topology.worktree.main {
         return Ok(None);
     }

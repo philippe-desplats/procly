@@ -14,6 +14,7 @@ mod health;
 mod hook;
 mod idle;
 mod index;
+mod isolated_record;
 mod job;
 mod lease;
 mod listeners;
@@ -52,6 +53,7 @@ use self::clock::Clock;
 use self::compose::Composes;
 use self::container_record::ContainerRecords;
 use self::index::Indexes;
+use self::isolated_record::IsolatedRecords;
 use self::job::{Fingerprint, JobSpec, Jobs};
 use self::lease::Leases;
 use self::managed::ManagedBlocks;
@@ -72,6 +74,8 @@ struct Registry {
     services: Services,
     composes: Composes,
     leases: Arc<Leases>,
+    /// Every Isolated container, running or stopped, which `gc` removes once its Worktree is.
+    isolated: Arc<IsolatedRecords>,
     indexes: Indexes,
     /// The Logical resources of every Worktree other than the Main worktree, which `gc` drops once it is removed.
     resources: LogicalResources,
@@ -175,6 +179,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
 
     let clock = Clock::from_env();
     let leases = Arc::new(Leases::new(state.leases(), clock.clone()));
+    let isolated = Arc::new(IsolatedRecords::new(state.isolated()));
     let registry = Arc::new(Registry {
         jobs: Arc::default(),
         services: Services::new(
@@ -186,7 +191,9 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
             clock.clone(),
             Arc::clone(&leases),
             ContainerRecords::new(state.containers()),
+            Arc::clone(&isolated),
         ),
+        isolated,
         leases,
         indexes: Indexes::new(state.indexes()),
         resources: LogicalResources::new(state.resources()),

@@ -82,7 +82,8 @@ impl Scope {
         }
         let worktree = &self.topology.worktree;
         let slug = (!worktree.main).then(|| worktree.slug.clone());
-        Ok((worktree.path.clone(), Some(Isolated { main, slug })))
+        let pinned = environment::pinned_branch(&self.topology, &self.config)?.map(str::to_owned);
+        Ok((worktree.path.clone(), Some(Isolated { main, slug, pinned })))
     }
 
     /// The Services to bring up for `name`, needs first, or for every Service no Group covers without `name`.

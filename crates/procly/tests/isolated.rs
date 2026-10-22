@@ -410,3 +410,219 @@ fn docker_after_a_daemon_crash_the_container_of_a_worktree_is_still_its_own() {
 fn write(worktree: &Path, compose: &str) {
     std::fs::write(worktree.join("compose.yaml"), compose).expect("write the compose file");
 }
+
+/// Brings up `db` in the Main worktree and in the other one, stops the one of the other Worktree, and removes that
+/// Worktree as a worktree tool does, so that its container and its volume are left behind.
+fn leave_behind_the_other_container(fixture: &Fixture) {
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["down", "db"]));
+    git(
+        &fixture.main,
+        &["worktree", "remove", "--force", &fixture.other.to_string_lossy()],
+    );
+}
+
+/// The lines of `gc` about Isolated containers and volumes, the Leases aside.
+fn isolated_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.contains("isolated container ") || line.contains("isolated volume "))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn docker_gc_lists_the_container_and_volume_of_a_removed_worktree_and_gc_apply_removes_them() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    leave_behind_the_other_container(&fixture);
+    let project = &fixture.other_project.name;
+    let worktree = fixture.other.display();
+
+    let listed = fixture.procly.procly(&["gc"]);
+
+    assert_success(&listed);
+    assert_eq!(
+        isolated_lines(&stdout(&listed)),
+        [
+            format!("isolated container db (compose project {project}, service db) of {worktree}"),
+            format!("isolated volume {project}_data (compose project {project}) of {worktree}"),
+        ],
+        "{}",
+        stdout(&listed)
+    );
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "gc without --apply removed the container"
+    );
+    assert!(fixture.other_project.volume_exists());
+    let document = json_succeeded(&fixture.procly.procly(&["gc", "--json"]));
+    let orphans = document["orphans"].as_array().expect("a list of Orphans");
+    assert!(
+        orphans.contains(&serde_json::json!({
+            "kind": "isolated_container", "service": "db", "project": project, "compose": "db",
+            "repository": orphans[0]["repository"], "worktree": fixture.other, "deleted": false, "error": null,
+        })),
+        "{document}"
+    );
+    assert!(
+        orphans.contains(&serde_json::json!({
+            "kind": "isolated_volume", "project": project, "volume": format!("{project}_data"),
+            "repository": orphans[0]["repository"], "worktree": fixture.other, "deleted": false, "error": null,
+        })),
+        "{document}"
+    );
+
+    // A container of another directory under the same compose project and service is not the one Procly started.
+    let impostor = Holder(format!("{project}-impostor"));
+    let created = Command::new("docker")
+        .args(["create", "--name", &impostor.0])
+        .args(["--label", &format!("com.docker.compose.project={project}")])
+        .args(["--label", "com.docker.compose.service=db"])
+        .args(["--label", "com.docker.compose.project.working_dir=/elsewhere"])
+        .args(["alpine", "true"])
+        .output()
+        .expect("docker runs");
+    assert_success(&created);
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&applied);
+    assert_eq!(
+        isolated_lines(&stdout(&applied)),
+        [
+            format!("deleted isolated container db (compose project {project}, service db) of {worktree}"),
+            format!("deleted isolated volume {project}_data (compose project {project}) of {worktree}"),
+        ],
+        "{}",
+        stdout(&applied)
+    );
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(
+        !impostor_id(&impostor).is_empty(),
+        "the container of another directory was removed"
+    );
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+    // The container of the Main worktree is not an Orphan.
+    assert!(fixture.main_project.is_running() && fixture.main_project.volume_exists());
+    assert_eq!(stdout(&fixture.procly.procly(&["gc"])), "no Orphans\n");
+}
+
+#[test]
+fn docker_gc_never_removes_the_container_of_a_worktree_git_still_lists_or_of_a_pinned_branch() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    // The Worktree is on the branch `app-feature`, which the Worktree pins.
+    let pinned = format!("{}[pinned.app-feature]\n", config(fixture.port));
+    std::fs::write(fixture.other.join("procly.toml"), pinned).expect("write the config");
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["down", "db"]));
+    // Its directory is gone, but git still lists it, as prunable.
+    std::fs::remove_dir_all(&fixture.other).expect("remove the Worktree directory");
+
+    let listed = stdout(&fixture.procly.procly(&["gc"]));
+
+    assert_eq!(isolated_lines(&listed), Vec::<String>::new(), "{listed}");
+    git(&fixture.main, &["worktree", "prune"]);
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&applied);
+    assert_eq!(
+        isolated_lines(&stdout(&applied)),
+        Vec::<String>::new(),
+        "{}",
+        stdout(&applied)
+    );
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "the container of a Pinned branch was removed"
+    );
+    assert!(fixture.other_project.volume_exists());
+}
+
+#[test]
+fn docker_a_volume_gc_apply_cannot_remove_is_reported_and_removed_by_the_next_gc_apply() {
+    if !require_docker() {
+        return;
+    }
+    let fixture = fixture("");
+    leave_behind_the_other_container(&fixture);
+    let project = &fixture.other_project.name;
+    let volume = format!("{project}_data");
+    // A container outside Procly holds the volume, so that the engine refuses to remove it.
+    let holder = Holder(format!("{project}-holder"));
+    let held = Command::new("docker")
+        .args(["run", "--detach", "--name", &holder.0, "--volume"])
+        .arg(format!("{volume}:/data"))
+        .args(["alpine", "sleep", "300"])
+        .output()
+        .expect("docker runs");
+    assert_success(&held);
+    let worktree = fixture.other.display();
+
+    let failed = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_eq!(failed.status.code(), Some(6), "{}", stderr(&failed));
+    assert_eq!(
+        isolated_lines(&stdout(&failed)),
+        [format!(
+            "deleted isolated container db (compose project {project}, service db) of {worktree}"
+        )],
+        "{}",
+        stdout(&failed)
+    );
+    let message = stderr(&failed);
+    assert!(
+        message.contains(&format!(
+            "procly: cannot delete isolated volume {volume} (compose project {project}) of {worktree}: "
+        )),
+        "{message}"
+    );
+    assert!(fixture.other_project.volume_exists());
+    // The volume stays an Orphan, though its container is gone.
+    let listed = stdout(&fixture.procly.procly(&["gc"]));
+    assert_eq!(
+        isolated_lines(&listed),
+        [format!(
+            "isolated volume {volume} (compose project {project}) of {worktree}"
+        )],
+        "{listed}"
+    );
+    drop(holder);
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&applied);
+    assert_eq!(
+        isolated_lines(&stdout(&applied)),
+        [format!(
+            "deleted isolated volume {volume} (compose project {project}) of {worktree}"
+        )],
+        "{}",
+        stdout(&applied)
+    );
+    assert!(!fixture.other_project.volume_exists());
+}
+
+/// The id of the container `holder`, empty when it no longer exists.
+fn impostor_id(holder: &Holder) -> String {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.Id}}", &holder.0])
+        .output()
+        .expect("docker runs");
+    stdout(&output).trim().to_owned()
+}
+
+/// A container started outside Procly, removed when the test ends.
+struct Holder(String);
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = Command::new("docker").args(["rm", "--force", &self.0]).output();
+    }
+}

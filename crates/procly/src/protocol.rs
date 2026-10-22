@@ -599,8 +599,8 @@ pub(crate) fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error>
 pub(crate) struct GcReport {
     /// Whether `gc` was asked to delete the Orphans, and not only to list them.
     pub(crate) applied: bool,
-    /// Every Orphan, Leases first, then Logical resources, then output directories, then setup directories, the order
-    /// they are deleted in.
+    /// Every Orphan, Leases first, then Logical resources, then output directories, setup directories, Isolated
+    /// containers and their volumes, the order they are deleted in.
     pub(crate) orphans: Vec<Orphan>,
     /// The Repositories whose Worktrees git could not list, nothing of which is an Orphan.
     pub(crate) skipped: Vec<SkippedRepository>,
@@ -646,6 +646,14 @@ impl Orphan {
             } => format!("logical resource {service}.{resource} {name} (driver {driver}) of {worktree}"),
             OrphanKind::OutputDirectory { path } => format!("output directory {} of {worktree}", path.display()),
             OrphanKind::SetupDirectory { path } => format!("setup directory {} of {worktree}", path.display()),
+            OrphanKind::IsolatedContainer {
+                service,
+                project,
+                compose,
+            } => format!("isolated container {service} (compose project {project}, service {compose}) of {worktree}"),
+            OrphanKind::IsolatedVolume { project, volume } => {
+                format!("isolated volume {volume} (compose project {project}) of {worktree}")
+            }
         }
     }
 }
@@ -674,6 +682,16 @@ pub(crate) enum OrphanKind {
     OutputDirectory { path: PathBuf },
     /// The directory of the state directory holding the log of the setup commands of the Worktree.
     SetupDirectory { path: PathBuf },
+    /// The Isolated container of a Compose service, running in the compose project of the Worktree.
+    IsolatedContainer {
+        /// The name of the Service in `procly.toml`.
+        service: String,
+        project: String,
+        /// The service of the compose file.
+        compose: String,
+    },
+    /// A named volume of the compose project of the Worktree, which an Isolated container mounted.
+    IsolatedVolume { project: String, volume: String },
 }
 
 /// A Repository whose Worktrees git could not list, so that none of them counts as removed.

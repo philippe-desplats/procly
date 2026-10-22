@@ -9,19 +9,25 @@
 //! and its index freed, so that an index is never granted again while it still holds the data of a removed Worktree.
 //! Whether it is still an Orphan is worked out again with its container held, since a Worktree added while `gc` runs
 //! may use it by then.
+//!
+//! An Isolated container is an Orphan only when Procly recorded it, and Docker lists it under the compose project
+//! and service of its record with the removed Worktree as its working directory. Its volumes are the named volumes
+//! of that project it mounts, never a volume the compose file gives a name of its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::compose::{DropError, Dropped, ToDrop};
+use super::isolated_record::IsolatedRecord;
 use super::lease::WorktreeLease;
 use super::resource::{LogicalResource, ResourceKey};
 use super::store::StoreError;
 use super::worktree_dir::{self, WorktreeDir};
-use super::{Registry, blocking, read_config, requester};
+use super::{Registry, blocking, foreign, listeners, read_config, requester};
 use crate::config::{Config, Settings};
 use crate::protocol::{GcReport, Orphan, OrphanKind, Response, SkippedRepository};
 use crate::topology::{self, TopologyError};
@@ -52,7 +58,7 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
                 .get(&orphan.repository)
                 .copied()
                 .unwrap_or_else(|| Settings::default().driver_timeout);
-            match delete(registry, &orphan, timeout).await {
+            match delete(registry, &collected.found, &orphan, timeout).await {
                 Ok(Dropped::Dropped) => {
                     orphan.deleted = true;
                     eprintln!("gc deleted {}, requested by {who}", orphan.describe());
@@ -75,6 +81,17 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
         }
         collected.report.orphans = orphans;
     }
+    if apply {
+        let (registry, found, orphans) = (
+            Arc::clone(registry),
+            Arc::clone(&collected.found),
+            collected.report.orphans.clone(),
+        );
+        // Writing the document of the Isolated containers is blocking.
+        if let Err(error) = tokio::task::spawn_blocking(move || forget_removed(&registry, &found, &orphans)).await {
+            eprintln!("cannot update the records of the Isolated containers gc removed: {error}");
+        }
+    }
     Response::Gc(collected.report)
 }
 
@@ -85,6 +102,8 @@ struct Collected {
     requester: Option<String>,
     /// How long one command of a Driver may run, by Repository, as the Main worktree sets it.
     driver_timeouts: BTreeMap<PathBuf, Duration>,
+    /// The Isolated containers of removed Worktrees, as Docker listed them.
+    found: Arc<Vec<Found>>,
 }
 
 fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> anyhow::Result<Collected> {
@@ -92,6 +111,7 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
     let resources = registry.resources.all()?;
     let outputs = worktree_dir::list(registry.services.outputs().dir());
     let setups = worktree_dir::list(&registry.setup_logs);
+    let isolated = registry.isolated.all()?;
 
     let repositories: BTreeSet<PathBuf> = leases
         .iter()
@@ -103,6 +123,7 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
                 .chain(&setups)
                 .filter_map(|dir| Some(dir.owner.as_ref()?.repository.clone())),
         )
+        .chain(isolated.iter().map(|record| record.repository.clone()))
         .collect();
     let mut listed = BTreeMap::new();
     let mut skipped = Vec::new();
@@ -170,6 +191,14 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         }));
     }
 
+    // A Pinned branch holds its container whichever Worktree checks it out next, as it holds its Leases.
+    let found: Vec<Found> = isolated
+        .into_iter()
+        .filter(|record| record.pinned.is_none() && removed(&record.repository, &record.worktree))
+        .map(find)
+        .collect();
+    orphans.extend(isolated_orphans(&found));
+
     let requester = (apply && !orphans.is_empty()).then(|| requester::describe(peer, cwd));
     let driver_timeouts = configs
         .into_iter()
@@ -183,7 +212,47 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         },
         requester,
         driver_timeouts,
+        found: Arc::new(found),
     })
+}
+
+/// The Isolated containers `found` lists, then their volumes.
+fn isolated_orphans(found: &[Found]) -> Vec<Orphan> {
+    let mut orphans: Vec<Orphan> = found
+        .iter()
+        .filter(|found| found.is_listed())
+        .map(|found| Orphan {
+            kind: OrphanKind::IsolatedContainer {
+                service: found.record.service.clone(),
+                project: found.record.project.clone(),
+                compose: found.record.compose.clone(),
+            },
+            repository: found.record.repository.clone(),
+            worktree: found.record.worktree.clone(),
+            deleted: false,
+            error: None,
+        })
+        .collect();
+    // After every container, which holds its volumes until it is removed. A volume 2 containers of the project mount
+    // is listed once.
+    let mut volumes = BTreeSet::new();
+    for found in found {
+        for volume in &found.volumes {
+            if volumes.insert((&found.record.project, volume)) {
+                orphans.push(Orphan {
+                    kind: OrphanKind::IsolatedVolume {
+                        project: found.record.project.clone(),
+                        volume: volume.clone(),
+                    },
+                    repository: found.record.repository.clone(),
+                    worktree: found.record.worktree.clone(),
+                    deleted: false,
+                    error: None,
+                });
+            }
+        }
+    }
+    orphans
 }
 
 /// The configuration of the Main worktree of the Repository `repository`, `None` when it cannot be read.
@@ -281,6 +350,171 @@ fn resource_orphan(resource: LogicalResource) -> Orphan {
     }
 }
 
+/// An Isolated container whose Worktree was removed, as Docker lists it now.
+#[derive(Debug)]
+struct Found {
+    record: IsolatedRecord,
+    /// The names of the containers of the record, `None` when Docker did not answer.
+    containers: Option<Vec<String>>,
+    /// The named volumes of its project it mounts, and those a previous `gc` could not remove, that still exist.
+    volumes: Vec<String>,
+}
+
+impl Found {
+    /// Whether the container is an Orphan to list: Docker lists it, or could not tell. One Docker no longer lists is
+    /// only a record left, which `gc --apply` forgets.
+    fn is_listed(&self) -> bool {
+        self.containers.as_ref().is_none_or(|containers| !containers.is_empty())
+    }
+}
+
+/// Looks the container of `record` and its volumes up in Docker. Blocking.
+fn find(record: IsolatedRecord) -> Found {
+    let containers = owned_containers(&record);
+    let mut volumes = record.volumes.clone();
+    for container in containers.iter().flatten() {
+        for volume in mounted_volumes(container, &record.env) {
+            if !volumes.contains(&volume) {
+                volumes.push(volume);
+            }
+        }
+    }
+    let of_project = project_volumes(&record.project, &record.env);
+    volumes.retain(|volume| of_project.contains(volume));
+    Found {
+        record,
+        containers,
+        volumes,
+    }
+}
+
+/// The containers Docker lists, running or not, as the one of the compose service of `record` in its project, and
+/// whose working directory is the Worktree of `record`, so that a project of another Repository under the same name
+/// is never touched. `None` when Docker did not answer. Blocking.
+fn owned_containers(record: &IsolatedRecord) -> Option<Vec<String>> {
+    let labels = [
+        format!("label=com.docker.compose.project={}", record.project),
+        format!("label=com.docker.compose.service={}", record.compose),
+    ];
+    let listed = foreign::containers(
+        &["--all", "--filter", &labels[0], "--filter", &labels[1]],
+        Some(&record.env),
+    )?;
+    let worktree = resolved(&record.worktree);
+    Some(
+        listed
+            .into_iter()
+            .filter(|container| {
+                container.is_service(&record.project, &record.compose)
+                    && container
+                        .working_dir
+                        .as_deref()
+                        .is_some_and(|dir| resolved(dir) == worktree)
+            })
+            .map(|container| container.name)
+            .collect(),
+    )
+}
+
+/// The names of the volumes `container` mounts, anonymous ones included. Blocking.
+fn mounted_volumes(container: &str, env: &[(String, String)]) -> Vec<String> {
+    let format = r#"{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}"#;
+    lines(&["container", "inspect", "--format", format, container], env)
+}
+
+/// The named volumes compose created for the project `project`: labelled with it and named after it, which a volume
+/// the compose file gives a name of its own is not. Blocking.
+fn project_volumes(project: &str, env: &[(String, String)]) -> BTreeSet<String> {
+    let label = format!("label=com.docker.compose.project={project}");
+    let format = "{{.Name}}\t{{.Label \"com.docker.compose.volume\"}}";
+    lines(&["volume", "ls", "--filter", &label, "--format", format], env)
+        .into_iter()
+        .filter_map(|line| {
+            let (name, key) = line.split_once('\t')?;
+            (name == format!("{project}_{key}")).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// The lines `docker args` prints, none when it fails or does not answer. Blocking.
+fn lines(args: &[&str], env: &[(String, String)]) -> Vec<String> {
+    let mut command = docker(args, env);
+    command.stderr(Stdio::null());
+    match listeners::bounded_output(&mut command) {
+        Ok(Some(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `docker args` in `env`, the environment that reaches the engine the container runs on.
+fn docker(args: &[&str], env: &[(String, String)]) -> Command {
+    let mut command = Command::new("docker");
+    command
+        .args(args)
+        .env_clear()
+        .envs(env.iter().map(|(name, value)| (name, value)))
+        .stdin(Stdio::null());
+    command
+}
+
+/// Runs `docker args` to remove something, which counts as removed when the engine no longer has it. Blocking.
+fn remove(args: &[&str], env: &[(String, String)]) -> Result<(), DeleteError> {
+    let failed = |reason: String| DeleteError::Docker {
+        args: args.join(" "),
+        reason,
+    };
+    let output = docker(args, env)
+        .output()
+        .map_err(|error| failed(format!("cannot run docker: {error}")))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if output.status.success() || stderr.to_ascii_lowercase().contains("no such ") {
+        return Ok(());
+    }
+    Err(failed(stderr))
+}
+
+/// `path` with its symbolic links resolved, through its parent when it no longer exists, as Worktree roots are.
+fn resolved(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .ok()
+        .or_else(|| Some(std::fs::canonicalize(path.parent()?).ok()?.join(path.file_name()?)))
+        .unwrap_or_else(|| path.to_owned())
+}
+
+/// Updates the record of each container `gc --apply` found: forgotten once it and its volumes are removed, keeping
+/// the volumes it could not remove otherwise. A container that could not be removed keeps its record as it is.
+fn forget_removed(registry: &Registry, found: &[Found], orphans: &[Orphan]) {
+    for found in found {
+        let record = &found.record;
+        let of_record = |orphan: &&Orphan| orphan.repository == record.repository && orphan.worktree == record.worktree;
+        let container_removed = !found.is_listed() || orphans.iter().filter(of_record).any(|orphan| {
+            orphan.deleted
+                && matches!(&orphan.kind, OrphanKind::IsolatedContainer { service, .. } if *service == record.service)
+        });
+        if !container_removed {
+            continue;
+        }
+        let left = found
+            .volumes
+            .iter()
+            .filter(|volume| {
+                !orphans.iter().filter(of_record).any(|orphan| {
+                    orphan.deleted
+                        && matches!(&orphan.kind, OrphanKind::IsolatedVolume { volume: removed, .. } if removed == *volume)
+                })
+            })
+            .cloned()
+            .collect();
+        if let Err(error) = registry.isolated.removed(&record.key(), left) {
+            eprintln!("cannot update the record of an Isolated container gc removed: {error:#}");
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum DeleteError {
     #[error(transparent)]
@@ -297,12 +531,22 @@ enum DeleteError {
         #[source]
         source: io::Error,
     },
+    #[error("Docker did not answer, the container could not be looked up")]
+    Unanswered,
+    #[error("`docker {args}` failed: {reason}")]
+    Docker { args: String, reason: String },
 }
 
-/// Deletes `orphan`, a Logical resource with Driver commands that may run for `timeout`. A directory already gone
-/// counts as deleted, as does a resource the Driver no longer finds. A Logical resource that is no longer an Orphan
-/// by the time its container is held is left as it is, [`Dropped::Held`].
-async fn delete(registry: &Arc<Registry>, orphan: &Orphan, timeout: Duration) -> Result<Dropped, DeleteError> {
+/// Deletes `orphan`, a Logical resource with Driver commands that may run for `timeout`, or an Isolated container or
+/// volume as `found` holds it. A directory, a container or a volume already gone counts as deleted, as does a resource
+/// the Driver no longer finds. A Logical resource that is no longer an Orphan by the time its container is held is
+/// left as it is, [`Dropped::Held`].
+async fn delete(
+    registry: &Arc<Registry>,
+    found: &Arc<Vec<Found>>,
+    orphan: &Orphan,
+    timeout: Duration,
+) -> Result<Dropped, DeleteError> {
     if let OrphanKind::LogicalResource {
         service,
         resource,
@@ -335,9 +579,9 @@ async fn delete(registry: &Arc<Registry>, orphan: &Orphan, timeout: Duration) ->
         };
         return registry.composes.drop_resource(to_drop, timeout, still, forget).await;
     }
-    let (registry, orphan) = (Arc::clone(registry), orphan.clone());
-    // Writing the documents and removing the directories are blocking.
-    tokio::task::spawn_blocking(move || delete_on_disk(&registry, &orphan))
+    let (registry, found, orphan) = (Arc::clone(registry), Arc::clone(found), orphan.clone());
+    // Writing the documents, removing the directories and running docker are blocking.
+    tokio::task::spawn_blocking(move || delete_blocking(&registry, &found, &orphan))
         .await
         .map_err(|error| DeleteError::Blocking(error.to_string()))??;
     Ok(Dropped::Dropped)
@@ -381,8 +625,15 @@ fn forget(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bool, De
     })
 }
 
-/// Deletes what `orphan` leaves on the disk of the state directory.
-fn delete_on_disk(registry: &Registry, orphan: &Orphan) -> Result<(), DeleteError> {
+/// Deletes `orphan`, anything but a Logical resource, an Isolated container or volume as `found` holds it. Blocking.
+fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orphan) -> Result<(), DeleteError> {
+    let of = |service: &str| {
+        found.iter().find(|found| {
+            found.record.repository == orphan.repository
+                && found.record.worktree == orphan.worktree
+                && found.record.service == service
+        })
+    };
     match &orphan.kind {
         OrphanKind::Lease {
             service,
@@ -401,5 +652,22 @@ fn delete_on_disk(registry: &Registry, orphan: &Orphan) -> Result<(), DeleteErro
                 path: path.clone(),
                 source,
             }),
+        OrphanKind::IsolatedContainer { service, .. } => {
+            let Some(found) = of(service) else {
+                return Ok(());
+            };
+            let containers = found.containers.as_ref().ok_or(DeleteError::Unanswered)?;
+            let mut args = vec!["container", "rm", "--force", "--volumes"];
+            args.extend(containers.iter().map(String::as_str));
+            remove(&args, &found.record.env)
+        }
+        OrphanKind::IsolatedVolume { volume, .. } => {
+            let env = found
+                .iter()
+                .find(|found| found.record.repository == orphan.repository && found.volumes.contains(volume))
+                .map(|found| found.record.env.as_slice())
+                .unwrap_or_default();
+            remove(&["volume", "rm", volume], env)
+        }
     }
 }
