@@ -56,12 +56,12 @@ if [ "$2" = "--remove" ] && [ -f "$dir/fail-remove" ]; then echo "the proxy is n
 exit 0
 "#;
 
-/// A healthy machine for `doctor`: a Repository, a home directory and fake tools of its own.
+/// A healthy machine for `doctor`: the Main worktree of a Repository, a home directory and fake tools of its own.
 struct Setup {
     procly: Procly,
     home: PathBuf,
     bin: PathBuf,
-    repo: PathBuf,
+    main_worktree: PathBuf,
 }
 
 impl Setup {
@@ -81,12 +81,12 @@ impl Setup {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
         }
         std::fs::write(bin.join("compose-version"), "2.29.1\n").expect("write the fake compose version");
-        let repo = git_repository(procly.scratch(), "app");
+        let main_worktree = git_repository(procly.scratch(), "app");
         Self {
             procly,
             home,
             bin,
-            repo,
+            main_worktree,
         }
     }
 
@@ -108,13 +108,13 @@ impl Setup {
 
     /// `procly doctor --json` in the Repository.
     fn doctor(&self) -> Output {
-        self.run(&self.repo, &["doctor", "--json"])
+        self.run(&self.main_worktree, &["doctor", "--json"])
     }
 
     /// Declares `web` in the Repository, listening on its leased port, declared as `port`.
     fn declare_web(&self, port: u16) {
         write(
-            &self.repo,
+            &self.main_worktree,
             "procly.toml",
             &format!(
                 "[services.web]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {port} }}\n",
@@ -125,8 +125,8 @@ impl Setup {
 
     /// Installs the Session unit, which the fake session manager loads, and the Guard in the Repository.
     fn install_unit_and_guard(&self) {
-        assert_success(&self.run(&self.repo, &["unit", "install"]));
-        assert_success(&self.run(&self.repo, &["agent", "install"]));
+        assert_success(&self.run(&self.main_worktree, &["unit", "install"]));
+        assert_success(&self.run(&self.main_worktree, &["agent", "install"]));
     }
 
     /// Makes every check pass.
@@ -135,16 +135,16 @@ impl Setup {
         setup.declare_web(free_port());
         setup.turn_portless_on();
         setup.install_unit_and_guard();
-        assert_success(&setup.run(&setup.repo, &["worktree", "hooks"]));
+        assert_success(&setup.run(&setup.main_worktree, &["worktree", "hooks"]));
         setup
     }
 
     /// Turns Portless on in the `procly.toml` of the Repository.
     fn turn_portless_on(&self) {
-        let file = self.repo.join("procly.toml");
+        let file = self.main_worktree.join("procly.toml");
         let declared = std::fs::read_to_string(&file).expect("read the configuration");
         write(
-            &self.repo,
+            &self.main_worktree,
             "procly.toml",
             &format!("[settings]\nportless = true\n{declared}"),
         );
@@ -231,7 +231,7 @@ fn a_healthy_setup_passes_every_check_and_exits_0() {
 fn the_text_of_a_healthy_setup_lists_one_passed_line_per_check_and_exits_0() {
     let setup = Setup::healthy();
 
-    let output = setup.run(&setup.repo, &["doctor"]);
+    let output = setup.run(&setup.main_worktree, &["doctor"]);
 
     assert_success(&output);
     assert_eq!(stderr(&output), "");
@@ -381,7 +381,7 @@ fn a_daemon_that_answers_with_an_error_is_a_problem_and_its_checks_are_skipped()
 #[test]
 fn a_settings_file_that_is_not_json_is_a_guard_problem() {
     let setup = Setup::healthy();
-    write(&setup.repo.join(".claude"), "settings.json", "{ not json");
+    write(&setup.main_worktree.join(".claude"), "settings.json", "{ not json");
 
     let document = problems(&setup.doctor());
 
@@ -401,7 +401,7 @@ fn a_daemon_that_cannot_start_is_a_problem_and_the_checks_that_need_none_still_r
     write(setup.procly.scratch(), "not-a-directory", "");
 
     let output = setup
-        .command(&setup.repo)
+        .command(&setup.main_worktree)
         .env("PROCLY_STATE_DIR", &state)
         .args(["doctor", "--json"])
         .output()
@@ -418,7 +418,7 @@ fn a_daemon_that_cannot_start_is_a_problem_and_the_checks_that_need_none_still_r
 #[test]
 fn a_session_unit_that_is_not_installed_is_a_warning_with_its_fix_and_the_exit_code_stays_0() {
     let setup = Setup::healthy();
-    assert_success(&setup.run(&setup.repo, &["unit", "remove"]));
+    assert_success(&setup.run(&setup.main_worktree, &["unit", "remove"]));
     std::fs::remove_file(setup.bin.join("calls")).expect("forget the calls of the removal");
 
     let output = setup.doctor();
@@ -433,7 +433,7 @@ fn a_session_unit_that_is_not_installed_is_a_warning_with_its_fix_and_the_exit_c
         "",
         "no unit of this home exists, so the manager has nothing to say about it"
     );
-    let text = setup.run(&setup.repo, &["doctor"]);
+    let text = setup.run(&setup.main_worktree, &["doctor"]);
     assert_success(&text);
     assert_eq!(stderr(&text), "");
     assert!(stdout(&text).contains("warning session_unit: "), "{}", stdout(&text));
@@ -510,7 +510,7 @@ fn a_state_document_of_a_newer_procly_is_a_problem_without_a_command_that_would_
 #[test]
 fn an_invalid_procly_toml_is_a_problem_with_the_command_that_opens_it() {
     let setup = Setup::healthy();
-    write(&setup.repo, "procly.toml", "[services.web]\nbogus = 1\n");
+    write(&setup.main_worktree, "procly.toml", "[services.web]\nbogus = 1\n");
 
     let document = problems(&setup.doctor());
 
@@ -522,7 +522,10 @@ fn an_invalid_procly_toml_is_a_problem_with_the_command_that_opens_it() {
     );
     assert_eq!(
         check(&document, "configuration")["fix"],
-        json!(format!("${{EDITOR:-vi}} {}", setup.repo.join("procly.toml").display()))
+        json!(format!(
+            "${{EDITOR:-vi}} {}",
+            setup.main_worktree.join("procly.toml").display()
+        ))
     );
 }
 
@@ -530,7 +533,7 @@ fn an_invalid_procly_toml_is_a_problem_with_the_command_that_opens_it() {
 fn a_driver_that_does_not_load_is_a_problem_naming_its_service() {
     let setup = Setup::healthy();
     write(
-        &setup.repo,
+        &setup.main_worktree,
         "procly.toml",
         "[services.db]\ncompose = 'postgres'\ndriver = 'nowhere'\nresources = { dev = { name = 'app' } }\n",
     );
@@ -548,7 +551,7 @@ fn a_driver_that_does_not_load_is_a_problem_naming_its_service() {
         check(&document, "configuration")["fix"],
         json!(format!(
             "${{EDITOR:-vi}} {}",
-            setup.repo.join(".procly/drivers/nowhere.toml").display()
+            setup.main_worktree.join(".procly/drivers/nowhere.toml").display()
         ))
     );
 }
@@ -556,8 +559,8 @@ fn a_driver_that_does_not_load_is_a_problem_naming_its_service() {
 #[test]
 fn a_worktree_without_a_procly_toml_and_a_directory_outside_git_skip_the_checks_that_need_them() {
     let setup = Setup::new();
-    assert_success(&setup.run(&setup.repo, &["unit", "install"]));
-    assert_success(&setup.run(&setup.repo, &["status"]));
+    assert_success(&setup.run(&setup.main_worktree, &["unit", "install"]));
+    assert_success(&setup.run(&setup.main_worktree, &["status"]));
 
     let in_repository = json_succeeded(&setup.doctor());
     let outside = json_succeeded(&setup.run(setup.procly.scratch(), &["doctor", "--json"]));
@@ -579,7 +582,7 @@ fn a_worktree_without_a_procly_toml_and_a_directory_outside_git_skip_the_checks_
 #[test]
 fn a_guard_that_left_the_settings_is_a_problem_with_the_command_that_writes_it_again() {
     let setup = Setup::healthy();
-    write(&setup.repo.join(".claude"), "settings.json", "{}\n");
+    write(&setup.main_worktree.join(".claude"), "settings.json", "{}\n");
 
     let document = problems(&setup.doctor());
 
@@ -591,7 +594,7 @@ fn a_guard_that_left_the_settings_is_a_problem_with_the_command_that_writes_it_a
 #[test]
 fn a_guard_the_user_edited_is_a_problem_that_names_no_command_since_install_leaves_it_alone() {
     let setup = Setup::healthy();
-    let settings = setup.repo.join(".claude/settings.json");
+    let settings = setup.main_worktree.join(".claude/settings.json");
     let text = std::fs::read_to_string(&settings).expect("read the settings");
     std::fs::write(&settings, text.replace("\"Bash\"", "\"Bash|Edit\"")).expect("edit the Guard");
 
@@ -607,14 +610,14 @@ fn a_service_that_ended_on_a_port_mismatch_is_a_problem_with_the_command_that_pr
     let setup = Setup::healthy();
     let (port, actual) = (free_port(), free_port());
     write(
-        &setup.repo,
+        &setup.main_worktree,
         "procly.toml",
         &format!(
             "[services.web]\nrun = '{} --port {actual}'\nports = {{ http = {port} }}\nhealth = {{ timeout = '10s' }}\n",
             test_server().display()
         ),
     );
-    assert_eq!(setup.run(&setup.repo, &["up", "web"]).status.code(), Some(4));
+    assert_eq!(setup.run(&setup.main_worktree, &["up", "web"]).status.code(), Some(4));
 
     let document = problems(&setup.doctor());
 
@@ -622,14 +625,14 @@ fn a_service_that_ended_on_a_port_mismatch_is_a_problem_with_the_command_that_pr
     assert!(
         message(&document, "leased_ports").contains(&format!(
             "service web of {} listened on port {actual} instead of its Lease, port {port} (Port mismatch)",
-            setup.repo.display()
+            setup.main_worktree.display()
         )),
         "{}",
         message(&document, "leased_ports")
     );
     assert_eq!(
         check(&document, "leased_ports")["fix"],
-        json!(format!("cd {} && procly env web", setup.repo.display()))
+        json!(format!("cd {} && procly env web", setup.main_worktree.display()))
     );
 }
 
@@ -663,9 +666,9 @@ fn a_foreign_process_on_a_leased_port_is_a_problem_with_the_command_that_stops_i
     let setup = Setup::healthy();
     let port = free_port();
     setup.declare_web(port);
-    assert_success(&setup.run(&setup.repo, &["up", "web"]));
-    assert_success(&setup.run(&setup.repo, &["down", "web"]));
-    let server = ForeignServer::start(&setup.repo, port);
+    assert_success(&setup.run(&setup.main_worktree, &["up", "web"]));
+    assert_success(&setup.run(&setup.main_worktree, &["down", "web"]));
+    let server = ForeignServer::start(&setup.main_worktree, port);
 
     let document = problems(&setup.doctor());
 
@@ -674,7 +677,7 @@ fn a_foreign_process_on_a_leased_port_is_a_problem_with_the_command_that_stops_i
     assert!(
         message(&document, "leased_ports").contains(&format!(
             "lease web.http port {port} of {} is held by process {pid} procly-test-server, which Procly did not start",
-            setup.repo.display()
+            setup.main_worktree.display()
         )),
         "{}",
         message(&document, "leased_ports")
@@ -685,7 +688,7 @@ fn a_foreign_process_on_a_leased_port_is_a_problem_with_the_command_that_stops_i
 #[test]
 fn a_service_listening_on_its_own_lease_is_no_foreign_process() {
     let setup = Setup::healthy();
-    assert_success(&setup.run(&setup.repo, &["up", "web"]));
+    assert_success(&setup.run(&setup.main_worktree, &["up", "web"]));
 
     let document = json_succeeded(&setup.doctor());
 
@@ -697,13 +700,13 @@ fn the_orphans_of_a_removed_worktree_are_a_problem_with_the_gc_command_that_list
     let setup = Setup::healthy();
     let port = free_port();
     setup.declare_web(port);
-    git(&setup.repo, &["add", "procly.toml"]);
-    git(&setup.repo, &["commit", "--quiet", "--message", "declare web"]);
-    let feature = git_worktree_add(&setup.repo, "app-feature");
+    git(&setup.main_worktree, &["add", "procly.toml"]);
+    git(&setup.main_worktree, &["commit", "--quiet", "--message", "declare web"]);
+    let feature = git_worktree_add(&setup.main_worktree, "app-feature");
     assert_success(&setup.run(&feature, &["up", "web"]));
     assert_success(&setup.run(&feature, &["down", "web"]));
     git(
-        &setup.repo,
+        &setup.main_worktree,
         &["worktree", "remove", "--force", &feature.to_string_lossy()],
     );
 
@@ -718,7 +721,7 @@ fn the_orphans_of_a_removed_worktree_are_a_problem_with_the_gc_command_that_list
     );
     assert_eq!(check(&document, "orphans")["fix"], json!("procly gc"));
     // Doctor lists, it does not collect: the Orphans are still there for the command it named.
-    let gc = setup.run(&setup.repo, &["gc"]);
+    let gc = setup.run(&setup.main_worktree, &["gc"]);
     assert_success(&gc);
     assert!(stdout(&gc).contains("lease web.http"), "{}", stdout(&gc));
 }
@@ -747,7 +750,7 @@ fn a_missing_portless_is_a_problem_when_portless_is_on_with_the_command_that_ins
     let path = std::env::join_paths(std::iter::once(setup.bin.clone()).chain(usual)).expect("join the PATH");
 
     let output = setup
-        .command(&setup.repo)
+        .command(&setup.main_worktree)
         .env("PATH", path)
         .args(["doctor", "--json"])
         .output()
@@ -768,11 +771,11 @@ fn a_missing_portless_is_a_problem_when_portless_is_on_with_the_command_that_ins
 #[test]
 fn a_portless_alias_no_lease_holds_is_a_problem_with_the_command_that_removes_it() {
     let setup = Setup::healthy();
-    let feature = git_worktree_add(&setup.repo, "app-feature");
+    let feature = git_worktree_add(&setup.main_worktree, "app-feature");
     write(
         &feature,
         "procly.toml",
-        &std::fs::read_to_string(setup.repo.join("procly.toml")).expect("read"),
+        &std::fs::read_to_string(setup.main_worktree.join("procly.toml")).expect("read"),
     );
     assert_success(&setup.run(&feature, &["up", "web"]));
     assert_success(&setup.run(&feature, &["down", "web"]));
@@ -802,7 +805,7 @@ fn the_text_of_a_problem_gives_its_fix_and_the_exit_code_is_7() {
     let setup = Setup::healthy();
     write(setup.procly.state_dir(), "leases.json", "this is not json");
 
-    let output = setup.run(&setup.repo, &["doctor"]);
+    let output = setup.run(&setup.main_worktree, &["doctor"]);
 
     assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
     let text = stdout(&output);
@@ -852,7 +855,7 @@ fn doctor_changes_nothing_in_the_repository_the_state_directory_or_the_home() {
     let before = (snapshot(scratch), snapshot(setup.procly.state_dir()));
 
     problems(&setup.doctor());
-    setup.run(&setup.repo, &["doctor"]);
+    setup.run(&setup.main_worktree, &["doctor"]);
 
     assert_eq!(before, (snapshot(scratch), snapshot(setup.procly.state_dir())));
     // It asks the session manager whether the unit is loaded, and never to load or unload it.
@@ -898,7 +901,7 @@ fn no_agent_runs_without_the_flag_and_the_json_document_carries_the_prompt() {
     let prompt = document["prompt"].as_str().expect("the document carries the prompt");
     assert!(prompt.contains("state_documents: cannot parse "), "{prompt}");
     assert!(prompt.contains("- mv "), "{prompt}");
-    let text = setup.run(&setup.repo, &["doctor"]);
+    let text = setup.run(&setup.main_worktree, &["doctor"]);
     assert!(!calls.exists(), "an agent ran without --agent");
     assert!(!stdout(&text).contains("Commands:"), "{}", stdout(&text));
 }
@@ -908,7 +911,7 @@ fn the_agent_gets_the_failed_checks_and_their_fixes_in_its_non_interactive_mode_
     let setup = setup_with_a_problem();
     let calls = fake_agent(&setup, 0);
 
-    let output = setup.run(&setup.repo, &["doctor", "--agent", "claude"]);
+    let output = setup.run(&setup.main_worktree, &["doctor", "--agent", "claude"]);
 
     assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
     let calls = std::fs::read_to_string(calls).expect("the agent ran");
@@ -917,7 +920,7 @@ fn the_agent_gets_the_failed_checks_and_their_fixes_in_its_non_interactive_mode_
         Path::new(directory.strip_prefix("directory=").expect("a directory line"))
             .canonicalize()
             .expect("canonicalize"),
-        setup.repo.canonicalize().expect("canonicalize")
+        setup.main_worktree.canonicalize().expect("canonicalize")
     );
     let (flag, prompt) = rest.split_once('\n').expect("the agent wrote its arguments");
     assert_eq!(flag, "flag=-p");
@@ -941,7 +944,7 @@ fn no_agent_is_started_when_every_check_passes() {
     let setup = Setup::healthy();
     let calls = fake_agent(&setup, 0);
 
-    let output = setup.run(&setup.repo, &["doctor", "--agent", "claude"]);
+    let output = setup.run(&setup.main_worktree, &["doctor", "--agent", "claude"]);
 
     assert_success(&output);
     assert!(!calls.exists(), "an agent ran with nothing to fix");
@@ -951,7 +954,7 @@ fn no_agent_is_started_when_every_check_passes() {
         stderr(&output)
     );
 
-    let json = setup.run(&setup.repo, &["doctor", "--json", "--agent", "claude"]);
+    let json = setup.run(&setup.main_worktree, &["doctor", "--json", "--agent", "claude"]);
     assert_success(&json);
     assert!(!calls.exists(), "an agent ran with nothing to fix");
     let document = json_document(&json);
@@ -964,7 +967,7 @@ fn with_json_the_prompt_goes_to_the_agent_and_the_document_names_it_and_stdout_h
     let setup = setup_with_a_problem();
     let calls = fake_agent(&setup, 0);
 
-    let output = setup.run(&setup.repo, &["doctor", "--json", "--agent", "claude"]);
+    let output = setup.run(&setup.main_worktree, &["doctor", "--json", "--agent", "claude"]);
 
     assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
     let document = json_document(&output);
@@ -984,14 +987,14 @@ fn an_agent_that_fails_or_is_missing_exits_125() {
     let setup = setup_with_a_problem();
     fake_agent(&setup, 3);
 
-    let failing = setup.run(&setup.repo, &["doctor", "--agent", "claude"]);
+    let failing = setup.run(&setup.main_worktree, &["doctor", "--agent", "claude"]);
     assert_eq!(failing.status.code(), Some(125), "{}", stderr(&failing));
     assert!(stderr(&failing).contains("claude exited with"), "{}", stderr(&failing));
 
     // Nothing named codex is on this PATH, whatever the developer installed.
     let nowhere = setup.procly.scratch().join("no-bin");
     let missing = setup
-        .command(&setup.repo)
+        .command(&setup.main_worktree)
         .env("PATH", &nowhere)
         .args(["doctor", "--agent", "codex"])
         .output()
@@ -1004,7 +1007,7 @@ fn an_agent_that_fails_or_is_missing_exits_125() {
 fn an_unknown_agent_is_a_usage_error() {
     let setup = Setup::healthy();
 
-    let output = setup.run(&setup.repo, &["doctor", "--agent", "emacs"]);
+    let output = setup.run(&setup.main_worktree, &["doctor", "--agent", "emacs"]);
 
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }

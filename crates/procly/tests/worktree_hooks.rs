@@ -88,12 +88,16 @@ fn running_it_twice_leaves_one_block_and_changes_nothing() {
 }
 
 #[test]
-fn a_hook_already_set_outside_the_block_writes_nothing_prints_the_lines_to_add_and_exits_5() {
-    for existing in [
-        "pre-start = \"npm ci\"\n",
-        "pre-remove = \"npm run clean\"\n",
-        "post-create = \"npm ci\"\n\n[pre-start]\nnpm = \"npm ci\"\n",
-        "\"pre-remove\" = \"npm run clean\"\n",
+fn a_hook_already_set_outside_the_block_writes_nothing_prints_the_lines_of_both_hooks_and_exits_5() {
+    for (existing, unset) in [
+        ("pre-start = \"npm ci\"\n", Some("pre-remove")),
+        ("pre-remove = \"npm run clean\"\n", Some("pre-start")),
+        (
+            "post-create = \"npm ci\"\n\n[pre-start]\nnpm = \"npm ci\"\n",
+            Some("pre-remove"),
+        ),
+        ("\"pre-remove\" = \"npm run clean\"\n", Some("pre-start")),
+        ("pre-start = \"npm ci\"\npre-remove = \"npm run clean\"\n", None),
     ] {
         let procly = Procly::new();
         let main = repository(&procly);
@@ -104,12 +108,21 @@ fn a_hook_already_set_outside_the_block_writes_nothing_prints_the_lines_to_add_a
         assert_eq!(output.status.code(), Some(CONFLICT), "{existing}: {}", stderr(&output));
         assert_eq!(read(&config(&main)), existing, "nothing is written");
         let lines = stdout(&output);
-        assert!(
-            lines.contains(PRE_START) && lines.contains(PRE_REMOVE),
-            "stdout holds the lines to add: {lines}"
+        assert_eq!(
+            lines.lines().collect::<Vec<_>>(),
+            [PRE_START, PRE_REMOVE],
+            "stdout holds the line of each hook, the one to wire and the one to add"
         );
         assert!(!lines.contains(OPEN), "the lines are not a block: {lines}");
-        assert!(stderr(&output).contains("wt.toml"), "{}", stderr(&output));
+        let stderr = stderr(&output);
+        assert!(stderr.contains("wt.toml"), "{stderr}");
+        match unset {
+            Some(hook) => assert!(
+                stderr.contains(&format!("{hook} is not set, add its line as it is")),
+                "stderr tells to add the line of the hook that is not set: {stderr}"
+            ),
+            None => assert!(!stderr.contains("is not set"), "both hooks are set: {stderr}"),
+        }
     }
 }
 
@@ -138,6 +151,36 @@ fn a_block_the_developer_edited_is_left_as_it_is_and_the_command_still_succeeds(
     assert_success(&output);
     assert_eq!(read(&config(&main)), edited);
     assert!(stdout(&output).contains("edited"), "{}", stdout(&output));
+}
+
+#[test]
+fn a_block_moved_under_a_table_header_is_edited_for_the_command_and_for_doctor() {
+    let procly = Procly::new();
+    let main = repository(&procly);
+    assert_success(&procly.procly_in(&main, &["worktree", "hooks"]));
+    // The same lines, after a table header, where their keys belong to that table and hook nothing.
+    let moved = format!("[post-start]\nserver = \"npm run dev\"\n\n{BLOCK}");
+    write(&config(&main), &moved);
+
+    let output = procly.procly_in(&main, &["worktree", "hooks", "--json"]);
+
+    assert_success(&output);
+    assert_eq!(read(&config(&main)), moved, "the file is left as it is");
+    assert_eq!(common::json_document(&output)["outcome"], "edited");
+    let doctor = common::json_document(&procly.procly_in(&main, &["doctor", "--json"]));
+    let check = doctor["checks"]
+        .as_array()
+        .expect("checks is a list")
+        .iter()
+        .find(|check| check["name"] == "worktrunk_hooks")
+        .expect("a worktrunk_hooks check");
+    assert_eq!(check["status"], "failed", "{check}");
+    assert!(
+        check["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("table header")),
+        "{check}"
+    );
 }
 
 #[test]

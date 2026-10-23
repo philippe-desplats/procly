@@ -135,7 +135,7 @@ procly eject               # remove everything Procly wrote into this Repository
 procly gc                  # list the Orphans removed Worktrees left behind (--apply deletes them)
 procly doctor              # check the installation and this Repository, with the command that fixes each problem
 procly unit install        # start the Daemon with your session (launchd or systemd)
-procly mcp                 # serve the verbs above as MCP tools over stdio, register it with your agent
+procly mcp                 # serve run, wait, logs, up, down, env, status, worktree init and release, gc and doctor as MCP tools (docs/mcp.md)
 ```
 
 Every command but `guard` and `mcp` accepts `--json` and then prints one document carrying a `schema_version`. Exit codes are stable, so an agent can branch on them without parsing the output: 0 on success, 3 when a Service ended before it was healthy, 4 on a Port mismatch, 5 on a conflict with something running outside Procly, 6 when `gc --apply` could not delete every Orphan, 7 when `doctor` found a problem, 124 on a timeout, 125 when Procly itself fails. See [Exit codes](docs/exit-codes.md) and [JSON output](docs/json.md).

@@ -50,6 +50,17 @@ struct Document<T> {
     body: T,
 }
 
+/// A document of the state directory, with the version of its format.
+pub(crate) trait Stored: DeserializeOwned {
+    const VERSION: u32;
+}
+
+/// Whether the document `T` at `path` can be read, as the next request that needs it reads it. Nothing is kept or
+/// written.
+pub(crate) fn readable<T: Stored>(path: &Path) -> Result<(), StoreError> {
+    load::<T>(path, T::VERSION).map(|_| ())
+}
+
 /// Reads the document at `path`, `None` when it does not exist yet. A document of an older version is read as it
 /// is, a newer one is refused rather than misread.
 pub(crate) fn load<T: DeserializeOwned>(path: &Path, version: u32) -> Result<Option<T>, StoreError> {

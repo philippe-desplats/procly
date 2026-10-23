@@ -93,8 +93,8 @@ pre-remove = "procly worktree release"
 
 The block is a Managed block (ADR 0008), delimited by TOML comment markers and recorded with the fingerprint of its content. Procly puts it at the top of the file, since a key written after a table header such as `[post-start]` would belong to that table. The rest of the file stays as it was, byte for byte.
 
-- Procly never overwrites a hook of yours. When `pre-start` or `pre-remove` is already set outside the block, as a key or as a table, it writes nothing, prints the 2 lines on stdout and exits with 5, see [exit codes](exit-codes.md). Add the Procly command to the hook that is set, or replace it.
-- A block you edited is left as it is, the command prints `edited` on stdout and a note on stderr, and exits with 0.
+- Procly never overwrites a hook of yours. When `pre-start` or `pre-remove` is already set outside the block, as a key or as a table, it writes nothing, prints on stdout the lines of both hooks and exits with 5, see [exit codes](exit-codes.md). Add the Procly command to the hook that is set, or replace it, and add the line of the hook that is not set as it is: stderr says which one it is, and without it `worktree release` never runs on removal.
+- A block you edited, or moved under a table header where its keys belong to that table and hook nothing, is left as it is, the command prints `edited` on stdout and a note on stderr, and exits with 0.
 - A `.config/wt.toml` that is not valid TOML is not touched, and the command exits with 125.
 - `procly eject` takes an intact block out and gives the file back as it was, and deletes the file and its directory when only the block created them. A block you edited stays and is described in the prompt, see [Removing Procly from a Repository](eject.md).
 - `procly init` suggests the command on stderr when the Worktree has a `.config/wt.toml` without the block, and writes nothing into it.

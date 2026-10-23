@@ -232,13 +232,14 @@ enum Command {
         json: JsonFlag,
     },
     /// Check that Procly can work here: `docker compose` v2, the Daemon and its version, the Session unit, the state
-    /// documents, the `procly.toml` of the current Worktree and the Drivers it names, the Guard, the ports Leases hold
-    /// and the Orphans. Each problem comes with the command that fixes it, and nothing is changed or run.
+    /// documents, the `procly.toml` of the current Worktree and the Drivers it names, the Guard, Portless, the
+    /// Worktrunk hooks, the ports Leases hold, the Orphans and the Portless aliases. Each problem comes with the
+    /// command that fixes it, and nothing is changed or run.
     #[command(
         after_help = "Run the commands it names yourself, or hand them to your coding agent with `--agent`. Exit codes: \
-                      0 when every check passed, or was skipped because it does not apply here, 7 when some check \
-                      found a problem, also when `--agent` was handed them, 125 when Procly itself fails, such as for \
-                      the agent CLI of `--agent` failing. See docs/doctor.md and docs/exit-codes.md."
+                      0 when every check passed, was skipped because it does not apply here, or is only a warning, 7 \
+                      when some check found a problem, also when `--agent` was handed them, 125 when Procly itself \
+                      fails, such as for the agent CLI of `--agent` failing. See docs/doctor.md and docs/exit-codes.md."
     )]
     Doctor {
         /// Hand a prompt listing the problems and the command that fixes each to your own coding agent in its
@@ -276,8 +277,8 @@ enum Command {
     /// command. Procly writes no agent configuration, see docs/mcp.md.
     #[command(
         after_help = "Register it with your agent, for example `claude mcp add procly -- procly mcp`. The tools are \
-                      run, wait, logs, up, down, env, status and worktree_init. A command that fails is a tool error \
-                      carrying its exit code and its stderr. See docs/mcp.md."
+                      run, wait, logs, up, down, env, status, worktree_init, worktree_release, gc and doctor. A command \
+                      that fails is a tool error carrying its exit code and its stderr. See docs/mcp.md."
     )]
     Mcp,
     /// Run the Daemon in the foreground. Every other command starts it on demand.
@@ -288,8 +289,8 @@ enum Command {
     OutputFile { path: PathBuf },
 }
 
-/// A coding agent CLI that `eject --agent` and `doctor --agent` can hand a prompt to, with the arguments that make it answer the prompt
-/// once and exit.
+/// A coding agent CLI that `eject --agent` and `doctor --agent` can hand a prompt to, with the arguments that make it
+/// answer the prompt once and exit.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AgentCli {
     /// `claude -p <prompt>`
@@ -378,7 +379,7 @@ enum WorktreeCommand {
     #[command(
         after_help = "Exit codes: 0 when the block is written, also when it already was or was left as it is because \
                       you edited it, 5 when `pre-start` or `pre-remove` is already set outside the block, in which \
-                      case nothing is written and the lines to add are printed on stdout, 125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
+                      case nothing is written and the lines of both hooks are printed on stdout, 125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
                       that is not in a git Repository. Worktrunk asks you to approve project hooks the first time \
                       it runs them. See docs/worktree-init.md and docs/exit-codes.md."
     )]
@@ -818,7 +819,12 @@ fn env(state: &StateDir, service: &str, json: bool) -> anyhow::Result<ExitCode> 
 
 /// Tells on stderr what went wrong for the Services `up` reached without failing it.
 fn warn<'a>(services: impl IntoIterator<Item = &'a UpService>) {
-    for warning in services.into_iter().flat_map(|up| &up.warnings) {
+    warn_all(services.into_iter().flat_map(|up| &up.warnings));
+}
+
+/// Tells each warning on stderr, as `procly: warning: ...`.
+fn warn_all<'a>(warnings: impl IntoIterator<Item = &'a String>) {
+    for warning in warnings {
         eprintln!("procly: warning: {warning}");
     }
 }
@@ -1037,6 +1043,7 @@ fn gc(state: &StateDir, apply: bool, json: bool) -> anyhow::Result<ExitCode> {
             skipped.error
         );
     }
+    warn_all(&report.warnings);
     if report.orphans.is_empty() {
         println!("no Orphans");
         return Ok(code);
@@ -1373,6 +1380,7 @@ fn worktree_release(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyh
         }
         Response::WorktreeRelease(report) => {
             print(&release_summary(&report))?;
+            warn_all(&report.warnings);
             Ok(ExitCode::SUCCESS)
         }
         other => unexpected(other),
@@ -1400,14 +1408,20 @@ fn worktree_hooks(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
                     report.file.display()
                 );
             }
-            // Stdout holds only the lines, so that they can be pasted or appended as they are.
+            // Stdout holds only the lines, so that they can be pasted or appended as they are: the line of a hook
+            // that is set goes into that hook, the line of a hook that is not set is added.
             HooksOutcome::Conflict => {
-                eprintln!(
-                    "procly: {} already sets {}, nothing was written. Add these lines to it, running the Procly \
-                     command from the hook that is set already:",
+                let unset = report.unset();
+                let mut advice = format!(
+                    "procly: {} already sets {}, nothing was written. Make the hook that is set already run the \
+                     Procly command, which the lines below name.",
                     report.file.display(),
                     report.set.join(" and ")
                 );
+                if !unset.is_empty() {
+                    let _ = write!(advice, " {} is not set, add its line as it is.", unset.join(" and "));
+                }
+                eprintln!("{advice}");
                 for line in &report.lines {
                     println!("{line}");
                 }
