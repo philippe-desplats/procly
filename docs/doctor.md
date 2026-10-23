@@ -39,9 +39,22 @@ Doctor works without the Daemon. It runs the checks that need only the machine, 
 
 The Leases of a Pinned branch have no Worktree, so `leased_ports` leaves them out.
 
+## Handing the problems to your coding agent
+
+`procly doctor --agent <cli>` hands the problems to your own coding agent instead of leaving you to run the commands. Doctor builds a prompt that lists each failed check with its message and its commands, and runs the agent from the current directory with that prompt, the same way [`procly eject --agent`](eject.md#the-prompt) does. The agent runs in its non-interactive mode, so it applies your own permission settings. Doctor still runs no command of its own. A `warning` or a `skipped` check is not in the prompt.
+
+| `--agent` | Command run |
+| --- | --- |
+| `claude` | `claude -p <prompt>` |
+| `codex` | `codex exec <prompt>` |
+| `gemini` | `gemini -p <prompt>` |
+| `opencode` | `opencode run <prompt>` |
+
+What the agent prints on its standard output goes to stderr, so that stdout keeps the checks, or the document with `--json`. When every check passed there is no prompt, and no agent is started. Without `--agent`, no command is ever run.
+
 ## Exit code
 
-`procly doctor` exits with 0 when no check failed, whatever the `warning` and `skipped` ones, with 7 when at least one did, and with 125 when Procly itself fails, see [exit codes](exit-codes.md). A script can run it and branch on the code.
+`procly doctor` exits with 0 when no check failed, whatever the `warning` and `skipped` ones, with 7 when at least one did, also when `--agent` handed it to your agent, since doctor does not check again, and with 125 when Procly itself fails or when the agent CLI is missing or exits with another code than 0, see [exit codes](exit-codes.md). A script can run it and branch on the code.
 
 ## JSON
 

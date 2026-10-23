@@ -314,6 +314,52 @@ pub(crate) fn text(report: &Report) -> String {
     text
 }
 
+/// What `doctor --agent` hands to the coding agent: each failed check with the command that fixes it. `None` when no
+/// check failed, since there is then nothing to fix and no agent is started.
+pub(crate) fn prompt(report: &Report) -> Option<String> {
+    let failed: Vec<&Check> = report
+        .checks
+        .iter()
+        .filter(|check| check.status == CheckStatus::Failed)
+        .collect();
+    if failed.is_empty() {
+        return None;
+    }
+    let mut prompt = format!(
+        "`procly doctor` checked this machine and found {} {} listed below. Fix them in the order listed. For each \
+         problem, run the commands under it, one after the other, then say what you did. Run no other command and \
+         change nothing else. Do not start a Procly Daemon yourself. A problem with no command is one no command \
+         fixes: explain what is wrong and what you would do, and change nothing.\n",
+        failed.len(),
+        if failed.len() == 1 { "problem" } else { "problems" }
+    );
+    for (index, check) in failed.iter().enumerate() {
+        let mut lines = check.message.lines();
+        let _ = write!(
+            prompt,
+            "\n{}. {}: {}\n",
+            index + 1,
+            check.name,
+            lines.next().unwrap_or_default()
+        );
+        for line in lines {
+            let _ = writeln!(prompt, "   {line}");
+        }
+        match &check.fix {
+            Some(fix) => {
+                let _ = writeln!(prompt, "   Commands:");
+                for line in fix.lines() {
+                    let _ = writeln!(prompt, "   - {line}");
+                }
+            }
+            None => {
+                let _ = writeln!(prompt, "   No command fixes it.");
+            }
+        }
+    }
+    Some(prompt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +397,40 @@ mod tests {
              failed  leased_ports: one\n        two\n        fix: kill 1\n        fix: kill 2\n\
              warning leased_ports: missing\n        fix: install it\n"
         );
+    }
+
+    #[test]
+    fn the_prompt_lists_each_failed_check_with_its_commands_and_leaves_out_the_others() {
+        let report = Report {
+            checks: vec![
+                check(CheckStatus::Passed, "all good", None),
+                check(CheckStatus::Warning, "missing", Some("install it")),
+                check(CheckStatus::Failed, "one\ntwo", Some("kill 1\nkill 2")),
+                check(CheckStatus::Failed, "no way out", None),
+            ],
+        };
+        let prompt = prompt(&report).expect("two checks failed");
+        assert!(prompt.contains("found 2 problems"), "{prompt}");
+        assert!(
+            prompt.contains("1. leased_ports: one\n   two\n   Commands:\n   - kill 1\n   - kill 2\n"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("2. leased_ports: no way out\n   No command fixes it.\n"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("install it"), "{prompt}");
+    }
+
+    #[test]
+    fn there_is_no_prompt_when_no_check_failed() {
+        let report = Report {
+            checks: vec![
+                check(CheckStatus::Passed, "all good", None),
+                check(CheckStatus::Skipped, "n/a", None),
+                check(CheckStatus::Warning, "missing", Some("install it")),
+            ],
+        };
+        assert_eq!(prompt(&report), None);
     }
 }
