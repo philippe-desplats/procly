@@ -165,10 +165,17 @@ fn portless_aliases(registry: &Registry) -> Check {
     let problems: Vec<String> = unheld
         .iter()
         .map(|alias| {
-            format!(
-                "the Portless alias {} points to port {}, which no Lease holds",
-                alias.name, alias.port
-            )
+            if alias.superseded {
+                format!(
+                    "the Portless alias {} was replaced by another name and not removed",
+                    alias.name
+                )
+            } else {
+                format!(
+                    "the Portless alias {} points to port {}, which no Lease holds",
+                    alias.name, alias.port
+                )
+            }
         })
         .collect();
     let fixes: Vec<String> = unheld

@@ -514,7 +514,7 @@ The name of a Lease is:
 | The Main worktree | `<service>` | `<port-name>.<service>` |
 | Any other Worktree | `<branch>.<service>` | `<branch>.<port-name>.<service>` |
 
-The branch is the one the Worktree has checked out, or the name of the Worktree directory on a detached `HEAD`. The Lease of a Pinned branch is named after that branch. Each part is a DNS label, so it is lowercase, and any run of characters other than a letter or a digit becomes one `-`: the branch `feature/E-59` gives `feature-e-59.web`. Portless adds its own suffix, `.localhost` by default, to the name.
+The branch is the one the Worktree has checked out, or the Worktree slug on a detached `HEAD`. The Lease of a Pinned branch is named after that branch. Each part is a DNS label, so it is lowercase, and any run of characters other than a letter or a digit becomes one `-`: the branch `feature/E-59` gives `feature-e-59.web`. Portless adds its own suffix, `.localhost` by default, to the name.
 
 ```console
 $ cd ../app-login
@@ -530,7 +530,7 @@ An alias lives as long as its Lease:
 - `procly down` keeps it, since the Lease stays with the Worktree (ADR 0006).
 - `procly worktree release`, the expiry of the Lease and `procly gc --apply` remove it with `portless alias --remove <name>`. The Lease of a Pinned branch is not released by any of them, so its alias stays too.
 
-Procly records each alias it makes, in the state directory, with the Lease that holds it. An alias is removed whatever the setting is when its Lease goes, so that turning Portless off never leaves a name pointing at a port another Worktree may get. A name is not recorded again once it points to another Lease.
+Procly records each alias it makes, in the state directory, with the Lease that holds it. An alias is removed whatever the setting is when its Lease goes, so that turning Portless off never leaves a name pointing at a port another Worktree may get. A name is not scoped to a Repository, so 2 Repositories that both have a `web` in their Main worktree compete for `web`, and the last `procly up` wins.
 
 Portless stays optional. Procly never starts the Portless proxy, and never runs `sudo`: it only runs `portless alias`, so the proxy is yours to start. When `portless` is not on the `PATH` of the Daemon, or a call fails, `procly up` prints one warning on stderr, `procly: warning: ...`, makes no more alias in that command and exits as it would without Portless. A removal that fails leaves the alias recorded and is tried again by the next removal, and `procly doctor` names the aliases no Lease holds with the command that removes each, see [Checking the installation](doctor.md). It also reports a missing `portless` when the setting is on.
 

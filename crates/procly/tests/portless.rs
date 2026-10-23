@@ -461,3 +461,36 @@ fn a_stale_alias_is_still_removed_once_portless_is_turned_off() {
 
     assert!(machine.calls().contains(&"alias --remove app-login.web".to_owned()));
 }
+
+#[test]
+fn a_lease_renamed_while_its_old_alias_cannot_be_removed_keeps_the_old_alias_recorded() {
+    let machine = Machine::failing(0, 1);
+    let main = machine.repository(ON);
+    let port = port_of(&machine.run(&main, &["up", "web"]));
+    assert_success(&machine.run(&main, &["down", "web"]));
+    // A second HTTP Lease renames the first one from `web` to `http.web`.
+    let config = format!(
+        "{ON}[services.web]\nrun = '{} --port {{ports.app}}'\nports = {{ http = {port}, app = {} }}\n\
+         [services.web.health]\nport = \"app\"\n",
+        test_server().display(),
+        free_port()
+    );
+    std::fs::write(main.join("procly.toml"), config).expect("write the configuration");
+
+    let output = machine.run(&main, &["up", "web"]);
+
+    assert_success(&output);
+    assert!(
+        stderr(&output).contains("`portless alias --remove web` failed"),
+        "{}",
+        stderr(&output)
+    );
+    let recorded = std::fs::read_to_string(machine.procly.state_dir().join("portless-aliases.json"))
+        .expect("the aliases are recorded");
+    let document: serde_json::Value = serde_json::from_str(&recorded).expect("a JSON document");
+    let old = document["aliases"]
+        .as_array()
+        .and_then(|aliases| aliases.iter().find(|alias| alias["name"] == "web"))
+        .unwrap_or_else(|| panic!("the old alias is not recorded: {recorded}"));
+    assert_eq!(old["superseded"], true);
+}

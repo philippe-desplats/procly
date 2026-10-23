@@ -33,6 +33,17 @@ pub(crate) struct Alias {
     key: LeaseKey,
     pub(crate) name: String,
     pub(crate) port: u16,
+    /// Set once the Lease took another name and the removal of this one failed, so that no Lease holds the name any
+    /// more and the next removal tries again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) superseded: bool,
+}
+
+impl Alias {
+    /// Whether the Lease it was made for still holds it, under this name and on this port.
+    fn held(&self, leases: &Leases) -> Result<bool, StoreError> {
+        Ok(!self.superseded && leases.holds(&self.key, self.port)?)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -97,25 +108,26 @@ impl Portless {
                 updated.retain(|alias| alias.name != want.name || alias.key == want.key);
                 let previous = updated
                     .iter()
-                    .position(|alias| alias.key == want.key && alias.name != want.name)
+                    .position(|alias| alias.key == want.key && alias.name != want.name && !alias.superseded)
                     .map(|index| updated.remove(index));
-                if let Some(previous) = previous
+                if let Some(mut previous) = previous
                     && let Err(error) = remove(&previous.name)
                 {
-                    warning = Some(format!(
-                        "{error}, the alias {} may be left in Portless, `{BINARY} alias --remove {}` removes it",
-                        previous.name, previous.name
-                    ));
+                    warning = Some(error.to_string());
+                    // Kept, so that the next removal tries again and `doctor` names it.
+                    previous.superseded = true;
+                    updated.push(previous);
                 }
                 if let Err(error) = call(&["alias", &want.name, &want.port.to_string()]) {
-                    warning = Some(error.to_string());
+                    warning.get_or_insert_with(|| error.to_string());
                     break;
                 }
-                updated.retain(|alias| alias.key != want.key);
+                updated.retain(|alias| alias.key != want.key || alias.superseded);
                 updated.push(Alias {
                     key: want.key.clone(),
                     name: want.name.clone(),
                     port: want.port,
+                    superseded: false,
                 });
             }
             (updated, warning)
@@ -130,7 +142,7 @@ impl Portless {
             let mut warning = None;
             let mut kept = Vec::new();
             for alias in aliases {
-                match leases.holds(&alias.key, alias.port) {
+                match alias.held(leases) {
                     Ok(true) => kept.push(alias.clone()),
                     Ok(false) => {
                         // Only the first failure is told, the next call of `portless` would fail the same way.
@@ -165,7 +177,7 @@ impl Portless {
         let aliases = Self::loaded(&mut table, &self.path)?;
         let mut unheld = Vec::new();
         for alias in aliases {
-            if !leases.holds(&alias.key, alias.port)? {
+            if !alias.held(leases)? {
                 unheld.push(alias.clone());
             }
         }
@@ -173,7 +185,7 @@ impl Portless {
     }
 
     /// Runs `action` on the aliases recorded, and stores what it returns when that differs. The warning it returns is
-    /// logged and handed back; a document that cannot be read or written is one too.
+    /// logged and handed back, and a document that cannot be read or written is one too.
     fn with(&self, action: impl FnOnce(&[Alias]) -> (Vec<Alias>, Option<String>)) -> Option<String> {
         let mut table = self
             .aliases
@@ -233,7 +245,7 @@ pub(super) fn name(prefix: Option<&str>, service: &str, port_name: Option<&str>)
 }
 
 /// What goes before the name of a Service for the Lease `scope`: nothing for the Main worktree, else the branch.
-/// `branch` is the branch of the Worktree, `None` on a detached `HEAD`, where the Worktree directory stands in for it.
+/// `branch` is the branch of the Worktree, `None` on a detached `HEAD`, where the Worktree slug stands in for it.
 pub(super) fn prefix(scope: &Scope, main: &Path, branch: Option<&str>, slug: &str) -> Option<String> {
     match scope {
         Scope::Branch(name) => Some(name.clone()),
@@ -301,7 +313,11 @@ fn call(args: &[&str]) -> Result<(), CallError> {
                 let _ = child.wait();
                 return Err(failed(format!("did not answer within {}s", CALL_TIMEOUT.as_secs())));
             }
-            Err(error) => return Err(failed(format!("cannot wait for it: {error}"))),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failed(format!("cannot wait for it: {error}")));
+            }
         }
     };
     let stderr = reader.join().unwrap_or_default();
