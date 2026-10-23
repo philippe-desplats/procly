@@ -511,8 +511,9 @@ fn grant(
         keep: leasing == Leasing::AsGranted,
         claimed: compose.map(|_| Claimed(&held_by_container)),
     })?;
-    // The grant drops the Leases that expired, and their Portless aliases go with them.
-    registry.portless.prune(&registry.leases);
+    // The grant drops the Leases that expired, and their Portless aliases go with them, unless a call of `portless`
+    // is under way: the grant never waits for it, and the next removal takes what is left.
+    registry.portless.prune_if_idle(&registry.leases);
     Ok(granted)
 }
 

@@ -8,8 +8,8 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Output;
-use std::time::Duration;
+use std::process::{Output, Stdio};
+use std::time::{Duration, Instant};
 
 use common::{Procly, assert_success, free_port, git, git_repository, git_worktree_add, stderr, stdout, test_server};
 
@@ -21,6 +21,8 @@ struct Machine {
     procly: Procly,
     /// The directory first in the `PATH`.
     bin: PathBuf,
+    /// The milliseconds the Daemon gives a call of `portless`, when the test shortens them.
+    timeout_ms: Option<u64>,
 }
 
 impl Machine {
@@ -58,7 +60,26 @@ impl Machine {
             std::fs::write(&path, script).expect("write the fake portless");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
         }
-        Self { procly, bin }
+        Self {
+            procly,
+            bin,
+            timeout_ms: None,
+        }
+    }
+
+    /// A machine whose `portless` logs its arguments, then runs the shell commands `body`, and whose calls the Daemon
+    /// gives `timeout_ms` milliseconds.
+    fn scripted(body: &str, timeout_ms: u64) -> Self {
+        let mut machine = Self::from(Procly::new(), 0, 0, false);
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n",
+            machine.bin.join("calls").display()
+        );
+        let path = machine.bin.join("portless");
+        std::fs::write(&path, script).expect("write the fake portless");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
+        machine.timeout_ms = Some(timeout_ms);
+        machine
     }
 
     /// The `PATH`: the fake tools first, then the usual one without a directory holding a real `portless`.
@@ -70,13 +91,17 @@ impl Machine {
 
     /// `procly` with `args` in `dir`.
     fn run(&self, dir: &Path, args: &[&str]) -> Output {
-        self.procly
-            .command()
-            .current_dir(dir)
-            .env("PATH", self.path())
-            .args(args)
-            .output()
-            .expect("the procly binary runs")
+        self.command(dir, args).output().expect("the procly binary runs")
+    }
+
+    /// The command of [`Machine::run`], not started. The Daemon takes the environment of the command that starts it.
+    fn command(&self, dir: &Path, args: &[&str]) -> std::process::Command {
+        let mut command = self.procly.command();
+        command.current_dir(dir).env("PATH", self.path()).args(args);
+        if let Some(timeout_ms) = self.timeout_ms {
+            command.env("PROCLY_TEST_PORTLESS_TIMEOUT_MS", timeout_ms.to_string());
+        }
+        command
     }
 
     /// What the fake `portless` was called with, one call per line.
@@ -493,4 +518,134 @@ fn a_lease_renamed_while_its_old_alias_cannot_be_removed_keeps_the_old_alias_rec
         .and_then(|aliases| aliases.iter().find(|alias| alias["name"] == "web"))
         .unwrap_or_else(|| panic!("the old alias is not recorded: {recorded}"));
     assert_eq!(old["superseded"], true);
+}
+
+/// The `portless_aliases` check of `procly doctor --json` run in `dir`: its status.
+fn aliases_check(machine: &Machine, dir: &Path) -> String {
+    let report = common::json_document(&machine.run(dir, &["doctor", "--json"]));
+    report["checks"]
+        .as_array()
+        .and_then(|checks| checks.iter().find(|check| check["name"] == "portless_aliases"))
+        .and_then(|check| check["status"].as_str())
+        .unwrap_or_else(|| panic!("no portless_aliases check in {report}"))
+        .to_owned()
+}
+
+#[test]
+fn a_descendant_of_portless_holding_stderr_open_does_not_hold_up_the_call() {
+    let machine = Machine::scripted("sleep 8 &\necho $! > \"$(dirname \"$0\")/grandchild\"\nexit 0", 10_000);
+    let main = machine.repository(ON);
+
+    let start = Instant::now();
+    let output = machine.run(&main, &["up", "web"]);
+
+    port_of(&output);
+    assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    assert_eq!(stderr(&output), "");
+    // What the call left running is not Procly's to kill once the call went through.
+    let grandchild = common::read_pid(&machine.bin.join("grandchild"));
+    nix::sys::signal::kill(grandchild, nix::sys::signal::Signal::SIGKILL).expect("stop the descendant");
+}
+
+#[test]
+fn a_portless_that_never_answers_is_a_warning_and_none_of_its_processes_survive() {
+    let machine = Machine::scripted(
+        "echo $$ > \"$(dirname \"$0\")/leader\"\nsleep 300 &\necho $! > \"$(dirname \"$0\")/grandchild\"\nwait",
+        3_000,
+    );
+    let main = machine.repository(ON);
+
+    let start = Instant::now();
+    let output = machine.run(&main, &["up", "web"]);
+
+    let port = port_of(&output);
+    assert!(start.elapsed() < Duration::from_secs(8), "{:?}", start.elapsed());
+    assert_eq!(
+        stderr(&output),
+        format!("procly: warning: `portless alias web {port}` did not answer within 3s\n")
+    );
+    let leader = common::read_pid(&machine.bin.join("leader"));
+    let grandchild = common::read_pid(&machine.bin.join("grandchild"));
+    common::wait_until_gone(leader);
+    common::wait_until_gone(grandchild);
+}
+
+#[test]
+fn a_lease_grant_does_not_wait_for_a_portless_that_hangs_in_another_worktree() {
+    let machine = Machine::scripted("echo $$ > \"$(dirname \"$0\")/leader\"\nsleep 300 &\nwait", 4_000);
+    let main = machine.repository(ON);
+    let login = git_worktree_add(&main, "app-login");
+    write_config(&login, "");
+    let hanging = machine
+        .command(&main, &["up", "web"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start up");
+    common::read_pid(&machine.bin.join("leader"));
+
+    let start = Instant::now();
+    let output = machine.run(&login, &["up", "web"]);
+
+    assert_success(&output);
+    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+    let hanging = hanging.wait_with_output().expect("the first up ends");
+    assert!(
+        stderr(&hanging).contains("did not answer within 4s"),
+        "{}",
+        stderr(&hanging)
+    );
+}
+
+#[test]
+fn a_removal_of_an_alias_portless_does_not_have_is_done_and_forgotten() {
+    let machine = Machine::scripted(
+        "if [ \"$2\" = \"--remove\" ]; then echo \"Error: No alias found for \\\"$3\\\".\" >&2; exit 1; fi",
+        5_000,
+    );
+    let main = machine.repository(ON);
+    let login = git_worktree_add(&main, "app-login");
+    write_config(&login, ON);
+    let port = port_of(&machine.run(&login, &["up", "web"]));
+
+    let output = machine.run(&login, &["worktree", "release"]);
+
+    assert_success(&output);
+    assert_eq!(
+        machine.calls(),
+        [
+            format!("alias app-login.web {port}"),
+            "alias --remove app-login.web".to_owned()
+        ]
+    );
+    assert!(
+        !machine.procly.daemon_log().contains("warning"),
+        "{}",
+        machine.procly.daemon_log()
+    );
+    // No record is left, so no grant tries the removal again and the check passes.
+    assert_success(&machine.run(&main, &["up", "web"]));
+    let removals = machine.calls().iter().filter(|call| call.contains("--remove")).count();
+    assert_eq!(removals, 1, "{:?}", machine.calls());
+    assert_eq!(aliases_check(&machine, &main), "passed");
+}
+
+#[test]
+fn the_alias_record_survives_a_daemon_that_was_killed_and_the_next_release_removes_the_alias() {
+    let machine = Machine::new();
+    let main = machine.repository(ON);
+    let login = git_worktree_add(&main, "app-login");
+    write_config(&login, ON);
+    let port = port_of(&machine.run(&login, &["up", "web"]));
+
+    machine.procly.kill_daemon();
+    assert_success(&machine.run(&login, &["worktree", "release"]));
+
+    assert_eq!(
+        machine.calls(),
+        [
+            format!("alias app-login.web {port}"),
+            "alias --remove app-login.web".to_owned()
+        ]
+    );
 }
