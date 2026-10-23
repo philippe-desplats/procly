@@ -31,8 +31,8 @@ use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, InitReport, JobEnd, KeptBecause, KeptLease,
-    LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
+    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
+    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -45,7 +45,8 @@ const OUTPUT_TAIL_LINES: usize = 20;
 const EXIT_SERVICE_ENDED: u8 = 3;
 /// The exit code of `up` for a Service whose process listened on another port than its Lease.
 const EXIT_PORT_MISMATCH: u8 = 4;
-/// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly.
+/// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly,
+/// and of `worktree hooks` for a hook the Worktrunk config sets already.
 const EXIT_CONFLICT: u8 = 5;
 /// The exit code of `gc --apply` when some Orphan could not be deleted.
 const EXIT_GC_FAILED: u8 = 6;
@@ -234,11 +235,18 @@ enum Command {
     /// documents, the `procly.toml` of the current Worktree and the Drivers it names, the Guard, the ports Leases hold
     /// and the Orphans. Each problem comes with the command that fixes it, and nothing is changed or run.
     #[command(
-        after_help = "Run the commands it names yourself. Exit codes: 0 when every check passed, or was skipped because \
-                      it does not apply here, 7 when some check found a problem, 125 when Procly itself fails. See \
-                      docs/doctor.md and docs/exit-codes.md."
+        after_help = "Run the commands it names yourself, or hand them to your coding agent with `--agent`. Exit codes: \
+                      0 when every check passed, or was skipped because it does not apply here, 7 when some check \
+                      found a problem, also when `--agent` was handed them, 125 when Procly itself fails, such as for \
+                      the agent CLI of `--agent` failing. See docs/doctor.md and docs/exit-codes.md."
     )]
     Doctor {
+        /// Hand a prompt listing the problems and the command that fixes each to your own coding agent in its
+        /// non-interactive mode, from the current directory. Without this flag no command is ever run, and when
+        /// every check passed no agent is started. The standard output of the agent goes to stderr. With `--json`,
+        /// the prompt is in the document unless it was handed to the agent.
+        #[arg(long, value_enum)]
+        agent: Option<AgentCli>,
         #[command(flatten)]
         json: JsonFlag,
     },
@@ -280,7 +288,7 @@ enum Command {
     OutputFile { path: PathBuf },
 }
 
-/// A coding agent CLI that `eject --agent` can hand a prompt to, with the arguments that make it answer the prompt
+/// A coding agent CLI that `eject --agent` and `doctor --agent` can hand a prompt to, with the arguments that make it answer the prompt
 /// once and exit.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AgentCli {
@@ -363,6 +371,20 @@ enum WorktreeCommand {
         json: JsonFlag,
         /// The Worktree to release, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
+    },
+    /// Write a Managed block into the Worktrunk config of the current Worktree, `.config/wt.toml`, so that Worktrunk
+    /// runs `procly worktree init` when it creates a Worktree and `procly worktree release` before it removes one.
+    /// Run it again to find it in place. A block you edited is left as it is, and `procly eject` takes it out.
+    #[command(
+        after_help = "Exit codes: 0 when the block is written, also when it already was or was left as it is because \
+                      you edited it, 5 when `pre-start` or `pre-remove` is already set outside the block, in which \
+                      case nothing is written and the lines to add are printed on stdout, 125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
+                      that is not in a git Repository. Worktrunk asks you to approve project hooks the first time \
+                      it runs them. See docs/worktree-init.md and docs/exit-codes.md."
+    )]
+    Hooks {
+        #[command(flatten)]
+        json: JsonFlag,
     },
 }
 
@@ -484,6 +506,9 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Worktree {
             command: WorktreeCommand::Release { json, path },
         } => worktree_release(&state, path, json.json),
+        Command::Worktree {
+            command: WorktreeCommand::Hooks { json },
+        } => worktree_hooks(&state, json.json),
         Command::Unit { command } => unit(&state, &command),
         Command::Agent {
             command: AgentCommand::Install { file, json },
@@ -492,7 +517,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::On { json } => switch(&state, false, json.json),
         Command::Eject { agent, json } => eject(&state, agent, json.json),
         Command::Gc { apply, json } => gc(&state, apply, json.json),
-        Command::Doctor { json } => doctor(&state, json.json),
+        Command::Doctor { agent, json } => doctor(&state, agent, json.json),
         Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Mcp => unreachable!("the MCP server is served before the state directory is resolved"),
@@ -1044,30 +1069,67 @@ fn gc(state: &StateDir, apply: bool, json: bool) -> anyhow::Result<ExitCode> {
 }
 
 /// Runs `doctor`, printing each check with the command that fixes its problem, and exiting with 7 when some check
-/// found one.
-fn doctor(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
+/// found one. `--agent` hands the problems and their commands to the coding agent, which is the only way a command
+/// is ever run.
+fn doctor(state: &StateDir, agent: Option<AgentCli>, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let report = doctor::run(state, &cwd);
+    let prompt = doctor::prompt(&report);
+    let handed_to = agent.filter(|_| prompt.is_some());
+    // The document comes before the agent runs, so that it exists even when the agent fails.
     if json {
-        json::print(&json::Doctor::new(&report))?;
+        json::print(&json::Doctor::new(
+            &report,
+            prompt.as_deref().filter(|_| handed_to.is_none()),
+            handed_to.map(AgentCli::program),
+        ))?;
     } else {
         print(&doctor::text(&report))?;
     }
-    if !report.failed() {
+    let Some(prompt) = &prompt else {
+        if let (Some(agent), false) = (agent, json) {
+            eprintln!(
+                "procly: no check failed, so there is nothing to hand to {}",
+                agent.program()
+            );
+        }
         return Ok(ExitCode::SUCCESS);
-    }
-    if !json {
-        let failed = report
-            .checks
-            .iter()
-            .filter(|check| check.status == CheckStatus::Failed)
-            .count();
-        eprintln!(
-            "procly: {failed} {} failed, the commands above fix them and doctor ran none",
-            if failed == 1 { "check" } else { "checks" }
-        );
+    };
+    let failed = report
+        .checks
+        .iter()
+        .filter(|check| check.status == CheckStatus::Failed)
+        .count();
+    let checks = if failed == 1 { "check" } else { "checks" };
+    if let Some(agent) = agent {
+        if !json {
+            eprintln!("procly: {failed} {checks} failed, handing them to {}", agent.program());
+        }
+        // Stdout holds the checks or the document alone.
+        let status = hand_to_agent(agent, prompt, true)?;
+        if !status.success() {
+            anyhow::bail!(
+                "{} exited with {status}, the problems above are left as they are",
+                agent.program()
+            );
+        }
+    } else if !json {
+        eprintln!("procly: {failed} {checks} failed, the commands above fix them and doctor ran none");
     }
     Ok(ExitCode::from(EXIT_DOCTOR_FAILED))
+}
+
+/// Runs the coding agent in its non-interactive mode on `prompt`, from the current directory, and waits for it.
+/// Its standard output goes to stderr when `stdout_to_stderr`, for a command whose standard output holds a document.
+fn hand_to_agent(agent: AgentCli, prompt: &str, stdout_to_stderr: bool) -> anyhow::Result<std::process::ExitStatus> {
+    let mut command = std::process::Command::new(agent.program());
+    command.args(agent.non_interactive()).arg(prompt);
+    if stdout_to_stderr {
+        command.stdout(std::io::stderr());
+    }
+    command
+        .status()
+        .with_context(|| format!("cannot run {}, is it installed and on the PATH?", agent.program()))
 }
 
 /// `1 Orphan` or `3 Orphans`.
@@ -1121,17 +1183,11 @@ fn eject(state: &StateDir, agent: Option<AgentCli>, json: bool) -> anyhow::Resul
             Ok(ExitCode::SUCCESS)
         }
         Some(agent) => {
-            let mut command = std::process::Command::new(agent.program());
-            command.args(agent.non_interactive()).arg(prompt);
-            if json {
-                // Stdout holds the document alone.
-                command.stdout(std::io::stderr());
-            } else {
+            if !json {
                 eprintln!("procly: handing the prompt to {}", agent.program());
             }
-            let status = command
-                .status()
-                .with_context(|| format!("cannot run {}, is it installed and on the PATH?", agent.program()))?;
+            // With `--json`, stdout holds the document alone.
+            let status = hand_to_agent(agent, prompt, json)?;
             if status.success() {
                 Ok(ExitCode::SUCCESS)
             } else {
@@ -1321,6 +1377,48 @@ fn worktree_release(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyh
         }
         other => unexpected(other),
     }
+}
+
+/// Runs `worktree hooks`, printing what became of the block, or the lines to add when a hook is set already.
+fn worktree_hooks(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let report = match client::send(state, &Request::WorktreeHooks { cwd })? {
+        Response::WorktreeHooks(report) => report,
+        other => return unexpected(other),
+    };
+    if json {
+        json::print(&report)?;
+    } else {
+        match report.outcome {
+            HooksOutcome::Written | HooksOutcome::Unchanged => {
+                println!("{} {}", report.outcome.as_str(), report.file.display());
+            }
+            HooksOutcome::Edited => {
+                println!("{} {}", report.outcome.as_str(), report.file.display());
+                eprintln!(
+                    "procly: the Worktrunk hooks block in {} was edited, left as it is",
+                    report.file.display()
+                );
+            }
+            // Stdout holds only the lines, so that they can be pasted or appended as they are.
+            HooksOutcome::Conflict => {
+                eprintln!(
+                    "procly: {} already sets {}, nothing was written. Add these lines to it, running the Procly \
+                     command from the hook that is set already:",
+                    report.file.display(),
+                    report.set.join(" and ")
+                );
+                for line in &report.lines {
+                    println!("{line}");
+                }
+            }
+        }
+    }
+    Ok(if report.outcome == HooksOutcome::Conflict {
+        ExitCode::from(EXIT_CONFLICT)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// What `worktree release` prints: what it stopped, let go of and released, or `nothing to release`, then what it kept.

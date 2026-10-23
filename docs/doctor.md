@@ -12,12 +12,13 @@ passed  state_documents: every state document can be read
 passed  configuration: /home/me/app/procly.toml is valid and its Drivers load
 skipped guard: /home/me/app/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered
 skipped portless: settings.portless is not on, nothing calls portless
+skipped worktrunk_hooks: /home/me/app/.config/wt.toml holds no Worktrunk hooks, `procly worktree hooks` writes them if you use Worktrunk
 failed  leased_ports: lease web.http port 24081 of /home/me/app-login is held by process 4812 node, which Procly did not start
         fix: kill 4812
 failed  orphans: 3 Orphans left by removed Worktrees
         fix: procly gc
 passed  portless_aliases: every Portless alias Procly made is held by a Lease
-procly: 3 checks failed, the commands above fix them and doctor ran none
+procly: 2 checks failed, the commands above fix them and doctor ran none
 $ echo $?
 7
 ```
@@ -37,15 +38,29 @@ Doctor works without the Daemon. It runs the checks that need only the machine, 
 | `configuration` | The `procly.toml` of the current Worktree, with the user settings and `procly.local.toml`, is valid, and every Driver a Service names loads. `skipped` without a `procly.toml`. | `${EDITOR:-vi}` on the file, or on the Driver file in `.procly/drivers`. |
 | `guard` | The Guard in `.claude/settings.json` of the current Worktree is the one `procly agent install` recorded. `skipped` when there is none, since the Guard is opt-in. A Guard that left the settings fails, and so does one you edited. | `procly agent install` when the Guard is gone. None when you edited it, since `agent install` leaves an edited Guard as it is, restore the hook group running `procly guard` by hand. |
 | `portless` | `settings.portless` is on and a `portless` executable is on the `PATH` of this command. `skipped` when the setting is off, which it is by default, and when the configuration cannot be read. It is a problem when the setting is on and `portless` is missing, since `procly up` then makes no [Portless alias](configuration.md#portless-aliases). | `npm install --global portless` |
+| `worktrunk_hooks` | The Worktrunk hooks block in `.config/wt.toml` of the current Worktree is the one `procly worktree hooks` recorded, see [Worktrunk](worktree-init.md#worktrunk). `skipped` when the file holds no block, since the hooks are opt-in. A block that left the file fails, and so does one you edited. | `procly worktree hooks` when the block is gone. None when you edited it, since `worktree hooks` leaves an edited block as it is, restore the lines between its markers by hand. |
 | `leased_ports` | No Service ended on a [Port mismatch](exit-codes.md), and nothing Procly did not start answers on a port a Lease holds while its Service does not run. | `cd <worktree> && procly env <service>` for a Port mismatch, which prints the Lease the Service has to listen on, and the command that stops the [Foreign process](daemon.md#foreign-processes) otherwise. |
 | `orphans` | No removed Worktree left anything behind, see [Collecting Orphans](gc.md). | `procly gc`, which lists them. `procly gc --apply` deletes them. |
 | `portless_aliases` | No [Portless alias](configuration.md#portless-aliases) Procly made outlived its Lease, which a removal that failed leaves behind. Aliases Procly did not make are not looked at. | `portless alias --remove <name>`, once for each alias. |
 
 The Leases of a Pinned branch have no Worktree, so `leased_ports` leaves them out.
 
+## Handing the problems to your coding agent
+
+`procly doctor --agent <cli>` hands the problems to your own coding agent instead of leaving you to run the commands. Doctor builds a prompt that lists each failed check with its message and its commands, and runs the agent from the current directory with that prompt, the same way [`procly eject --agent`](eject.md#the-prompt) does. The agent runs in its non-interactive mode, so it applies your own permission settings. Doctor still runs no command of its own. A `warning` or a `skipped` check is not in the prompt.
+
+| `--agent` | Command run |
+| --- | --- |
+| `claude` | `claude -p <prompt>` |
+| `codex` | `codex exec <prompt>` |
+| `gemini` | `gemini -p <prompt>` |
+| `opencode` | `opencode run <prompt>` |
+
+What the agent prints on its standard output goes to stderr, so that stdout keeps the checks, or the document with `--json`. When every check passed there is no prompt, and no agent is started. Without `--agent`, no command is ever run.
+
 ## Exit code
 
-`procly doctor` exits with 0 when no check failed, whatever the `warning` and `skipped` ones, with 7 when at least one did, and with 125 when Procly itself fails, see [exit codes](exit-codes.md). A script can run it and branch on the code.
+`procly doctor` exits with 0 when no check failed, whatever the `warning` and `skipped` ones, with 7 when at least one did, also when `--agent` handed it to your agent, since doctor does not check again, and with 125 when Procly itself fails or when the agent CLI is missing or exits with another code than 0, see [exit codes](exit-codes.md). A script can run it and branch on the code.
 
 ## JSON
 

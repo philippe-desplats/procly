@@ -33,8 +33,13 @@ Each tool takes the arguments of its CLI verb, named like them, plus an optional
 | `env` | `procly env` | `service`, `cwd` |
 | `status` | `procly status` | `all`, `cwd` |
 | `worktree_init` | `procly worktree init` | `path`, `cwd` |
+| `worktree_release` | `procly worktree release` | `path`, `cwd` |
+| `gc` | `procly gc` | `apply`, `cwd` |
+| `doctor` | `procly doctor` | `cwd` |
 
-`init`, `unit`, `guard`, `agent`, `off`, `on` and `eject` have no tool. They write into the Repository or into the session configuration of the person, and an MCP client must not. A call to one of them is refused.
+`init`, `unit`, `guard`, `agent`, `off`, `on`, `eject` and `worktree hooks` have no tool. They write into the Repository or into the session configuration of the person, and an MCP client must not. A call to one of them is refused.
+
+`gc` only lists the Orphans unless it is called with `apply`, which deletes them as `procly gc --apply` does. When some Orphan cannot be deleted the tool is an error with `exit_code` 6, and `stdout` holds the report. `doctor` has no `agent` argument, a call carrying one is refused, so the hand-off of the problems to a coding agent stays a command the person runs. It changes nothing and runs nothing, and a check that found a problem is an error with `exit_code` 7 and the document in `stdout`.
 
 `wait` and `logs` return in one response, when the Job has ended for `wait`. A client with a request timeout shorter than the Job should call `wait` on Jobs it expects to be short, or poll `logs`.
 

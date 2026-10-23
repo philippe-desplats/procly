@@ -13,7 +13,7 @@ use super::managed::ManagedBlocks;
 use super::store::StoreError;
 use super::{
     Registry, agent, blocking, container_record, foreign, gc, index, isolated_record, lease, managed, off, portless,
-    record, resource,
+    record, resource, worktrunk,
 };
 use crate::protocol::{Check, DaemonChecks, Occupant, Response, ServiceEnd, ServiceState};
 use crate::state_dir::StateDir;
@@ -24,6 +24,8 @@ pub(crate) const STATE_DOCUMENTS: &str = "state_documents";
 pub(crate) const GUARD: &str = "guard";
 /// The check of the `portless` executable.
 pub(crate) const PORTLESS: &str = "portless";
+/// The check of the Worktrunk hooks in the Worktree.
+pub(crate) const WORKTRUNK_HOOKS: &str = "worktrunk_hooks";
 /// The check of the ports Leases hold.
 const LEASED_PORTS: &str = "leased_ports";
 /// The check of the Orphans.
@@ -217,6 +219,44 @@ pub(crate) fn state_documents(state: &StateDir) -> Check {
         return Check::passed(STATE_DOCUMENTS, "every state document can be read");
     }
     Check::failed(STATE_DOCUMENTS, problems, (!fixes.is_empty()).then(|| fixes.join("\n")))
+}
+
+/// Whether the Worktrunk hooks block of the Worktree `worktree` is in place as Procly recorded it. `unplaced` says why
+/// there is no Worktree when there is none.
+pub(crate) fn worktrunk_hooks(state: &StateDir, worktree: Option<&Path>, unplaced: &str) -> Check {
+    let Some(worktree) = worktree else {
+        return Check::skipped(WORKTRUNK_HOOKS, unplaced);
+    };
+    let file = worktree.join(worktrunk::CONFIG);
+    let write = Some("procly worktree hooks".to_owned());
+    match worktrunk::standing(&ManagedBlocks::new(state.managed_blocks()), &file) {
+        Ok(Standing::Intact) => Check::passed(
+            WORKTRUNK_HOOKS,
+            format!("{} holds the Worktrunk hooks as Procly wrote them", file.display()),
+        ),
+        Ok(Standing::Absent) => Check::skipped(
+            WORKTRUNK_HOOKS,
+            format!(
+                "{} holds no Worktrunk hooks, `procly worktree hooks` writes them if you use Worktrunk",
+                file.display()
+            ),
+        ),
+        Ok(Standing::Missing) => Check::failed(
+            WORKTRUNK_HOOKS,
+            format!("{} no longer holds the Worktrunk hooks Procly wrote", file.display()),
+            write,
+        ),
+        Ok(Standing::Edited) => Check::failed(
+            WORKTRUNK_HOOKS,
+            format!(
+                "the Worktrunk hooks block in {} is not the one Procly recorded, `procly worktree hooks` leaves it as \
+                 it is, restore the lines between its markers by hand",
+                file.display()
+            ),
+            None,
+        ),
+        Err(error) => Check::failed(WORKTRUNK_HOOKS, format!("{:#}", anyhow::Error::from(error)), None),
+    }
 }
 
 /// Whether the Guard of the Worktree `worktree` is in place as Procly recorded it. `unplaced` says why there is no

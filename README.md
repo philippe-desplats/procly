@@ -128,6 +128,7 @@ Setting up a Repository and its Worktrees:
 procly init                # propose a procly.toml from the dev scripts and the compose file
 procly worktree init       # prepare a fresh Worktree: copy untracked files, run setup commands
 procly worktree release    # before removing a Worktree: stop its work, release its Leases, keep its data
+procly worktree hooks      # make Worktrunk run worktree init and release, in .config/wt.toml
 procly agent install       # write the Rules block and the Guard, nothing is written without it
 procly off                 # make the Guard and the Rules block stand aside (procly on reverts)
 procly eject               # remove everything Procly wrote into this Repository
@@ -141,7 +142,7 @@ Every command but `guard` and `mcp` accepts `--json` and then prints one documen
 
 To point your agents at Procly, run `procly agent install` once and commit what it writes. The Guard covers Claude Code: it reads each Bash call through a `PreToolUse` hook, lets unknown commands through without asking the Daemon, and denies a known dev-server or `docker compose up` command with the equivalent Procly command. See [Steering agents to Procly](docs/agents.md).
 
-Agents that prefer MCP to a shell can use `procly mcp`, a stdio MCP server whose tools return the `--json` document of `run`, `wait`, `logs`, `up`, `down`, `env`, `status` and `worktree init`. You register it with your agent yourself, for example `claude mcp add procly -- procly mcp`, and Procly writes no agent configuration. See [The MCP server](docs/mcp.md).
+Agents that prefer MCP to a shell can use `procly mcp`, a stdio MCP server whose tools return the `--json` document of `run`, `wait`, `logs`, `up`, `down`, `env`, `status`, `worktree init`, `worktree release`, `gc` and `doctor`. You register it with your agent yourself, for example `claude mcp add procly -- procly mcp`, and Procly writes no agent configuration. See [The MCP server](docs/mcp.md).
 
 ## Try it without touching your setup
 

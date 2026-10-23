@@ -135,6 +135,7 @@ impl Setup {
         setup.declare_web(free_port());
         setup.turn_portless_on();
         setup.install_unit_and_guard();
+        assert_success(&setup.run(&setup.repo, &["worktree", "hooks"]));
         setup
     }
 
@@ -185,7 +186,7 @@ fn problems(output: &Output) -> Value {
     document
 }
 
-const ALL_CHECKS: [&str; 10] = [
+const ALL_CHECKS: [&str; 11] = [
     "docker_compose",
     "daemon",
     "session_unit",
@@ -193,6 +194,7 @@ const ALL_CHECKS: [&str; 10] = [
     "configuration",
     "guard",
     "portless",
+    "worktrunk_hooks",
     "leased_ports",
     "orphans",
     "portless_aliases",
@@ -859,4 +861,150 @@ fn doctor_changes_nothing_in_the_repository_the_state_directory_or_the_home() {
     for write in ["bootstrap", "bootout", "enable ", "disable"] {
         assert!(!calls.contains(write), "doctor ran {write}: {calls}");
     }
+}
+
+/// A fake `claude` first in the `PATH` of the setup, which logs its directory and the arguments it got to `agent-calls`
+/// next to it, prints a line on its standard output and exits with `code`.
+fn fake_agent(setup: &Setup, code: i32) -> PathBuf {
+    let calls = setup.bin.join("agent-calls");
+    let script = format!(
+        "#!/bin/sh\nprintf 'directory=%s\\nflag=%s\\nprompt=%s\\n' \"$(pwd)\" \"$1\" \"$2\" >> '{}'\n\
+         echo the agent talks\nexit {code}\n",
+        calls.display()
+    );
+    let path = setup.bin.join("claude");
+    std::fs::write(&path, script).expect("write the fake agent");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
+    calls
+}
+
+/// A setup with one failed check, the corrupt `leases.json`, whose fix is the `mv` command that moves it aside.
+fn setup_with_a_problem() -> Setup {
+    let setup = Setup::healthy();
+    write(setup.procly.state_dir(), "leases.json", "this is not json");
+    setup
+}
+
+#[test]
+fn no_agent_runs_without_the_flag_and_the_json_document_carries_the_prompt() {
+    let setup = setup_with_a_problem();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.doctor();
+
+    let document = problems(&output);
+    assert!(!calls.exists(), "an agent ran without --agent");
+    assert_eq!(document["agent"], json!(null));
+    let prompt = document["prompt"].as_str().expect("the document carries the prompt");
+    assert!(prompt.contains("state_documents: cannot parse "), "{prompt}");
+    assert!(prompt.contains("- mv "), "{prompt}");
+    let text = setup.run(&setup.repo, &["doctor"]);
+    assert!(!calls.exists(), "an agent ran without --agent");
+    assert!(!stdout(&text).contains("Commands:"), "{}", stdout(&text));
+}
+
+#[test]
+fn the_agent_gets_the_failed_checks_and_their_fixes_in_its_non_interactive_mode_from_the_current_directory() {
+    let setup = setup_with_a_problem();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.run(&setup.repo, &["doctor", "--agent", "claude"]);
+
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+    let calls = std::fs::read_to_string(calls).expect("the agent ran");
+    let (directory, rest) = calls.split_once('\n').expect("the agent wrote its directory");
+    assert_eq!(
+        Path::new(directory.strip_prefix("directory=").expect("a directory line"))
+            .canonicalize()
+            .expect("canonicalize"),
+        setup.repo.canonicalize().expect("canonicalize")
+    );
+    let (flag, prompt) = rest.split_once('\n').expect("the agent wrote its arguments");
+    assert_eq!(flag, "flag=-p");
+    assert!(prompt.contains("state_documents: cannot parse "), "{prompt}");
+    assert!(prompt.contains("- mv "), "{prompt}");
+    // Only the failed check is in the prompt, and the prompt is not printed as well.
+    assert!(!prompt.contains("docker_compose"), "{prompt}");
+    assert!(!stdout(&output).contains("Commands:"), "{}", stdout(&output));
+    // What the agent prints goes to stderr, the checks stay alone on stdout.
+    assert!(!stdout(&output).contains("the agent talks"), "{}", stdout(&output));
+    assert!(stderr(&output).contains("the agent talks"), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("failed  state_documents: "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn no_agent_is_started_when_every_check_passes() {
+    let setup = Setup::healthy();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.run(&setup.repo, &["doctor", "--agent", "claude"]);
+
+    assert_success(&output);
+    assert!(!calls.exists(), "an agent ran with nothing to fix");
+    assert!(
+        stderr(&output).contains("nothing to hand to claude"),
+        "{}",
+        stderr(&output)
+    );
+
+    let json = setup.run(&setup.repo, &["doctor", "--json", "--agent", "claude"]);
+    assert_success(&json);
+    assert!(!calls.exists(), "an agent ran with nothing to fix");
+    let document = json_document(&json);
+    assert_eq!(document["prompt"], json!(null));
+    assert_eq!(document["agent"], json!(null));
+}
+
+#[test]
+fn with_json_the_prompt_goes_to_the_agent_and_the_document_names_it_and_stdout_holds_the_document_alone() {
+    let setup = setup_with_a_problem();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.run(&setup.repo, &["doctor", "--json", "--agent", "claude"]);
+
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+    let document = json_document(&output);
+    assert_eq!(document["result"], json!("problems"));
+    assert_eq!(document["prompt"], json!(null));
+    assert_eq!(document["agent"], json!("claude"));
+    assert!(
+        std::fs::read_to_string(calls)
+            .expect("the agent ran")
+            .contains("prompt=")
+    );
+    assert!(stderr(&output).contains("the agent talks"), "{}", stderr(&output));
+}
+
+#[test]
+fn an_agent_that_fails_or_is_missing_exits_125() {
+    let setup = setup_with_a_problem();
+    fake_agent(&setup, 3);
+
+    let failing = setup.run(&setup.repo, &["doctor", "--agent", "claude"]);
+    assert_eq!(failing.status.code(), Some(125), "{}", stderr(&failing));
+    assert!(stderr(&failing).contains("claude exited with"), "{}", stderr(&failing));
+
+    // Nothing named codex is on this PATH, whatever the developer installed.
+    let nowhere = setup.procly.scratch().join("no-bin");
+    let missing = setup
+        .command(&setup.repo)
+        .env("PATH", &nowhere)
+        .args(["doctor", "--agent", "codex"])
+        .output()
+        .expect("the procly binary runs");
+    assert_eq!(missing.status.code(), Some(125), "{}", stderr(&missing));
+    assert!(stderr(&missing).contains("cannot run codex"), "{}", stderr(&missing));
+}
+
+#[test]
+fn an_unknown_agent_is_a_usage_error() {
+    let setup = Setup::healthy();
+
+    let output = setup.run(&setup.repo, &["doctor", "--agent", "emacs"]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }

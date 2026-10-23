@@ -187,13 +187,20 @@ impl<'a> WorktreeRelease<'a> {
 pub(crate) struct Doctor<'a> {
     result: &'static str,
     checks: &'a [Check],
+    /// What to tell a coding agent to fix the problems, `None` when no check failed or when it was handed to the
+    /// `agent`.
+    prompt: Option<&'a str>,
+    /// The coding agent CLI the prompt was handed to.
+    agent: Option<&'a str>,
 }
 
 impl<'a> Doctor<'a> {
-    pub(crate) fn new(report: &'a Report) -> Self {
+    pub(crate) fn new(report: &'a Report, prompt: Option<&'a str>, agent: Option<&'a str>) -> Self {
         Self {
             result: if report.failed() { "problems" } else { "healthy" },
             checks: &report.checks,
+            prompt,
+            agent,
         }
     }
 }
@@ -371,6 +378,7 @@ mod tests {
             r#"{"kind":"unknown","find":"lsof"}"#
         );
         assert_eq!(json(&Written::EnvFile), r#""env_file""#);
+        assert_eq!(json(&Written::WorktrunkHooks), r#""worktrunk_hooks""#);
         assert_eq!(json(&BlockOutcome::Edited), r#""edited""#);
         assert_eq!(json(&StartOutcome::Reused), r#""reused""#);
     }

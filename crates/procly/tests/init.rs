@@ -1036,3 +1036,49 @@ fn a_command_run_after_a_cd_home_is_said_to_run_outside_the_worktree() {
         );
     }
 }
+
+#[test]
+fn init_suggests_worktree_hooks_when_the_worktree_has_a_worktrunk_config() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            (
+                "package.json",
+                r#"{"name": "shop", "scripts": {"dev": "node server.js"}}"#,
+            ),
+            (".config/wt.toml", "post-create = \"npm ci\"\n"),
+        ],
+    );
+
+    let output = init(&procly, &main);
+
+    let notes = stderr(&output);
+    assert!(
+        notes.contains(".config/wt.toml") && notes.contains("`procly worktree hooks`"),
+        "{notes}"
+    );
+    assert_eq!(
+        fs::read_to_string(main.join(".config/wt.toml")).expect("read the Worktrunk config"),
+        "post-create = \"npm ci\"\n",
+        "init only suggests, it writes nothing into the Worktrunk config"
+    );
+}
+
+#[test]
+fn init_says_nothing_of_worktree_hooks_without_a_worktrunk_config_or_once_the_block_is_there() {
+    let procly = Procly::new();
+    let scripts = (
+        "package.json",
+        r#"{"name": "shop", "scripts": {"dev": "node server.js"}}"#,
+    );
+    let without = repository(&procly, &[scripts]);
+
+    assert!(!stderr(&init(&procly, &without)).contains("worktree hooks"));
+
+    let procly = Procly::new();
+    let with_block = repository(&procly, &[scripts]);
+    assert_success(&procly.procly_in(&with_block, &["worktree", "hooks"]));
+
+    assert!(!stderr(&init(&procly, &with_block)).contains("worktree hooks"));
+}

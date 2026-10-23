@@ -37,6 +37,7 @@ mod up;
 mod worktree_dir;
 mod worktree_init;
 mod worktree_release;
+pub(crate) mod worktrunk;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, Permissions, TryLockError};
@@ -405,6 +406,7 @@ async fn dispatch(
         request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
             agent::answer(registry, request).await
         }
+        Request::WorktreeHooks { cwd } => worktrunk::answer(registry, cwd).await,
     }
 }
 

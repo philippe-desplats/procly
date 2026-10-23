@@ -6,8 +6,9 @@ mod common;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -30,9 +31,14 @@ struct McpServer {
 impl McpServer {
     /// Starts `procly mcp` in `dir` and completes the MCP handshake.
     fn start_in(procly: &Procly, dir: &Path) -> Self {
-        let mut child = procly
-            .command()
-            .current_dir(dir)
+        let mut command = procly.command();
+        command.current_dir(dir);
+        Self::start_command(command)
+    }
+
+    /// Starts `procly mcp` as `command` runs it, with the working directory and environment it carries.
+    fn start_command(mut command: Command) -> Self {
+        let mut child = command
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -130,6 +136,19 @@ fn text_of(result: &Value) -> String {
     content[0]["text"].as_str().expect("the block holds text").to_owned()
 }
 
+/// The document a verb printed, which a tool returns as its text, or in `structuredContent` when the verb exited with
+/// a code, as `doctor` does when it found a problem.
+fn document_of(result: &Value) -> String {
+    if result["isError"] == json!(true) {
+        result["structuredContent"]["stdout"]
+            .as_str()
+            .expect("the document of the verb")
+            .to_owned()
+    } else {
+        text_of(result)
+    }
+}
+
 /// A `procly.toml` declaring `name` as a test server leasing the port it declares.
 fn server_service(name: &str) -> String {
     format!(
@@ -161,7 +180,19 @@ fn the_server_exposes_the_verbs_of_the_daemon_as_tools_and_nothing_else() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("a name"))
         .collect();
-    let expected = ["run", "wait", "logs", "up", "down", "env", "status", "worktree_init"];
+    let expected = [
+        "run",
+        "wait",
+        "logs",
+        "up",
+        "down",
+        "env",
+        "status",
+        "worktree_init",
+        "worktree_release",
+        "gc",
+        "doctor",
+    ];
     assert_eq!(names, expected.into_iter().collect::<BTreeSet<_>>());
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], json!("object"), "{tool}");
@@ -207,6 +238,10 @@ fn the_argument_schemas_mirror_the_arguments_of_the_cli() {
     assert_eq!(properties("env", true), set(&["service"]));
     assert_eq!(properties("status", false), set(&["all", "cwd"]));
     assert_eq!(properties("worktree_init", false), set(&["path", "cwd"]));
+    assert_eq!(properties("worktree_release", false), set(&["path", "cwd"]));
+    assert_eq!(properties("gc", false), set(&["apply", "cwd"]));
+    assert_eq!(properties("gc", true), set(&[]));
+    assert_eq!(properties("doctor", false), set(&["cwd"]));
 }
 
 #[test]
@@ -214,7 +249,7 @@ fn a_verb_that_is_not_exposed_is_refused() {
     let procly = Procly::new();
     let mut server = McpServer::start(&procly);
 
-    for name in ["init", "unit", "guard", "agent", "off", "on", "eject"] {
+    for name in ["init", "unit", "guard", "agent", "off", "on", "eject", "worktree_hooks"] {
         let response = server.request("tools/call", json!({ "name": name, "arguments": {} }));
         let refused = response.get("error").is_some() || response["result"]["isError"] == json!(true);
         assert!(refused, "{name} was served: {response}");
@@ -402,6 +437,158 @@ fn worktree_init_returns_the_json_of_the_cli() {
     let cli = procly.procly_in(&worktree, &["worktree", "init", "--json"]);
     assert_success(&cli);
     assert_eq!(again, stdout(&cli));
+}
+
+/// A Repository with a Worktree `app-feature` whose Service `web` runs, and the Worktree itself.
+fn running_worktree(procly: &Procly) -> (PathBuf, PathBuf) {
+    procly.narrow_range();
+    let (main, worktree) = repository_with_worktree(procly, &server_service("web"));
+    assert_success(&procly.procly_in(&worktree, &["up", "web"]));
+    (main, worktree)
+}
+
+#[test]
+fn worktree_release_returns_the_json_of_the_cli() {
+    let procly = Procly::new();
+    let (main, worktree) = running_worktree(&procly);
+    let mut server = McpServer::start_in(&procly, &main);
+
+    // Released by the tool, then started and released by the CLI: the 2 documents tell the same release.
+    let released = server.text("worktree_release", json!({ "cwd": worktree }));
+    assert!(released.contains("web"), "{released}");
+    assert_success(&procly.procly_in(&worktree, &["up", "web"]));
+    let cli = procly.procly_in(&worktree, &["worktree", "release", "--json"]);
+    assert_success(&cli);
+    assert_eq!(released, stdout(&cli));
+
+    // Nothing is left to release, from the Worktree the server was not started in and by its path.
+    let again = server.text("worktree_release", json!({ "path": worktree }));
+    let cli = procly.procly_in(&worktree, &["worktree", "release", "--json"]);
+    assert_eq!(again, stdout(&cli));
+}
+
+#[test]
+fn gc_lists_the_orphans_and_deletes_them_only_with_apply() {
+    let procly = Procly::new();
+    let (main, worktree) = running_worktree(&procly);
+    assert_success(&procly.procly_in(&worktree, &["down", "web"]));
+    git(&main, &["worktree", "remove", "--force", &worktree.to_string_lossy()]);
+    let mut server = McpServer::start_in(&procly, &main);
+
+    let listed = server.text("gc", json!({}));
+
+    let cli = procly.procly_in(&main, &["gc", "--json"]);
+    assert_success(&cli);
+    assert_eq!(listed, stdout(&cli));
+    assert!(listed.contains("\"applied\":false"), "{listed}");
+    assert!(listed.contains("\"kind\":\"lease\""), "{listed}");
+    let still_listed = server.text("gc", json!({ "apply": false }));
+    assert_eq!(still_listed, listed);
+
+    let applied = server.text("gc", json!({ "apply": true }));
+
+    assert!(applied.contains("\"applied\":true"), "{applied}");
+    let after = procly.procly_in(&main, &["gc", "--json"]);
+    assert_success(&after);
+    assert!(stdout(&after).contains("\"orphans\":[]"), "{}", stdout(&after));
+}
+
+#[test]
+fn gc_apply_that_fails_to_delete_is_a_tool_error_with_exit_code_6() {
+    let procly = Procly::new();
+    let (main, worktree) = running_worktree(&procly);
+    assert_success(&procly.procly_in(&worktree, &["down", "web"]));
+    git(&main, &["worktree", "remove", "--force", &worktree.to_string_lossy()]);
+    // The output directory cannot be taken out of a directory the Daemon may not write.
+    let outputs = procly.state_dir().join("output");
+    fs::set_permissions(&outputs, fs::Permissions::from_mode(0o500)).expect("make the output directory read-only");
+    let mut server = McpServer::start_in(&procly, &main);
+
+    let result = server.call("gc", json!({ "apply": true }));
+
+    fs::set_permissions(&outputs, fs::Permissions::from_mode(0o700)).expect("make the output directory writable");
+    assert_eq!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["structuredContent"]["exit_code"], json!(6), "{result}");
+    assert!(
+        result["structuredContent"]["stdout"]
+            .as_str()
+            .is_some_and(|document| document.contains("\"applied\":true")),
+        "{result}"
+    );
+}
+
+/// `procly` in `dir` with a home directory of its own and a fake `docker` first in the `PATH`, which has the Compose
+/// plugin when `compose` is true. Nothing of the developer's machine takes part in what `doctor` checks.
+fn doctor_command(procly: &Procly, dir: &Path, compose: bool) -> Command {
+    let (home, bin) = (procly.scratch().join("home"), procly.scratch().join("bin"));
+    fs::create_dir_all(&home).expect("create the home directory");
+    fs::create_dir_all(&bin).expect("create the fake tools directory");
+    let docker = bin.join("docker");
+    let script = if compose {
+        "#!/bin/sh\necho 'Docker Compose version v2.29.1'\n"
+    } else {
+        "#!/bin/sh\necho \"docker: 'compose' is not a docker command.\" >&2\nexit 1\n"
+    };
+    fs::write(&docker, script).expect("write the fake docker");
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).expect("make it executable");
+    let mut command = procly.command();
+    command
+        .current_dir(dir)
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()),
+        );
+    command
+}
+
+#[test]
+fn doctor_that_finds_a_problem_is_a_tool_error_with_exit_code_7_and_the_document_of_the_cli() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let mut server = McpServer::start_command(doctor_command(&procly, &main, false));
+
+    let result = server.call("doctor", json!({}));
+
+    let mut cli = doctor_command(&procly, &main, false);
+    let cli = cli.args(["doctor", "--json"]).output().expect("the procly binary runs");
+    assert_eq!(cli.status.code(), Some(7), "{}", stderr(&cli));
+    assert_eq!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["structuredContent"]["exit_code"], json!(7), "{result}");
+    assert_eq!(result["structuredContent"]["stdout"], json!(stdout(&cli)), "{result}");
+    assert!(stdout(&cli).contains("docker compose"), "{}", stdout(&cli));
+}
+
+#[test]
+fn doctor_returns_the_json_of_the_cli_and_never_accepts_agent() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let mut server = McpServer::start_command(doctor_command(&procly, &main, true));
+
+    let result = server.call("doctor", json!({}));
+
+    let mut cli = doctor_command(&procly, &main, true);
+    let cli = cli.args(["doctor", "--json"]).output().expect("the procly binary runs");
+    assert_eq!(document_of(&result), stdout(&cli));
+    let given = server.call("doctor", json!({ "cwd": main }));
+    assert_eq!(document_of(&given), stdout(&cli));
+
+    let response = server.request(
+        "tools/call",
+        json!({ "name": "doctor", "arguments": { "agent": "claude" } }),
+    );
+    let refused = response.get("error").is_some() || response["result"]["isError"] == json!(true);
+    assert!(refused, "doctor accepted --agent: {response}");
+    let tools = server.request("tools/list", json!({}));
+    let doctor = tools["result"]["tools"]
+        .as_array()
+        .expect("a list of tools")
+        .iter()
+        .find(|tool| tool["name"] == json!("doctor"))
+        .expect("doctor is exposed")
+        .clone();
+    assert!(doctor["inputSchema"]["properties"].get("agent").is_none(), "{doctor}");
 }
 
 #[test]
