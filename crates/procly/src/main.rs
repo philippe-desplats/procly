@@ -31,8 +31,8 @@ use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, InitReport, JobEnd, KeptBecause, KeptLease,
-    LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
+    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
+    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -45,7 +45,8 @@ const OUTPUT_TAIL_LINES: usize = 20;
 const EXIT_SERVICE_ENDED: u8 = 3;
 /// The exit code of `up` for a Service whose process listened on another port than its Lease.
 const EXIT_PORT_MISMATCH: u8 = 4;
-/// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly.
+/// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly,
+/// and of `worktree hooks` for a hook the Worktrunk config sets already.
 const EXIT_CONFLICT: u8 = 5;
 /// The exit code of `gc --apply` when some Orphan could not be deleted.
 const EXIT_GC_FAILED: u8 = 6;
@@ -371,6 +372,20 @@ enum WorktreeCommand {
         /// The Worktree to release, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
     },
+    /// Write a Managed block into the Worktrunk config of the current Worktree, `.config/wt.toml`, so that Worktrunk
+    /// runs `procly worktree init` when it creates a Worktree and `procly worktree release` before it removes one.
+    /// Run it again to find it in place. A block you edited is left as it is, and `procly eject` takes it out.
+    #[command(
+        after_help = "Exit codes: 0 when the block is written, also when it already was or was left as it is because \
+                      you edited it, 5 when `pre-start` or `pre-remove` is already set outside the block, in which \
+                      case nothing is written and the lines to add are printed on stdout, 125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
+                      that is not in a git Repository. Worktrunk asks you to approve project hooks the first time \
+                      it runs them. See docs/worktree-init.md and docs/exit-codes.md."
+    )]
+    Hooks {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -491,6 +506,9 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Worktree {
             command: WorktreeCommand::Release { json, path },
         } => worktree_release(&state, path, json.json),
+        Command::Worktree {
+            command: WorktreeCommand::Hooks { json },
+        } => worktree_hooks(&state, json.json),
         Command::Unit { command } => unit(&state, &command),
         Command::Agent {
             command: AgentCommand::Install { file, json },
@@ -1348,6 +1366,48 @@ fn worktree_release(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyh
         }
         other => unexpected(other),
     }
+}
+
+/// Runs `worktree hooks`, printing what became of the block, or the lines to add when a hook is set already.
+fn worktree_hooks(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    let report = match client::send(state, &Request::WorktreeHooks { cwd })? {
+        Response::WorktreeHooks(report) => report,
+        other => return unexpected(other),
+    };
+    if json {
+        json::print(&report)?;
+    } else {
+        match report.outcome {
+            HooksOutcome::Written | HooksOutcome::Unchanged => {
+                println!("{} {}", report.outcome.as_str(), report.file.display());
+            }
+            HooksOutcome::Edited => {
+                println!("{} {}", report.outcome.as_str(), report.file.display());
+                eprintln!(
+                    "procly: the Worktrunk hooks block in {} was edited, left as it is",
+                    report.file.display()
+                );
+            }
+            // Stdout holds only the lines, so that they can be pasted or appended as they are.
+            HooksOutcome::Conflict => {
+                eprintln!(
+                    "procly: {} already sets {}, nothing was written. Add these lines to it, running the Procly \
+                     command from the hook that is set already:",
+                    report.file.display(),
+                    report.set.join(" and ")
+                );
+                for line in &report.lines {
+                    println!("{line}");
+                }
+            }
+        }
+    }
+    Ok(if report.outcome == HooksOutcome::Conflict {
+        ExitCode::from(EXIT_CONFLICT)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// What `worktree release` prints: what it stopped, let go of and released, or `nothing to release`, then what it kept.

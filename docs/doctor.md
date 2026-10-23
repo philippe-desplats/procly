@@ -11,6 +11,7 @@ warning session_unit: the Session unit /home/me/.config/systemd/user/procly.serv
 passed  state_documents: every state document can be read
 passed  configuration: /home/me/app/procly.toml is valid and its Drivers load
 skipped guard: /home/me/app/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered
+skipped worktrunk_hooks: /home/me/app/.config/wt.toml holds no Worktrunk hooks, `procly worktree hooks` writes them if you use Worktrunk
 failed  leased_ports: lease web.http port 24081 of /home/me/app-login is held by process 4812 node, which Procly did not start
         fix: kill 4812
 failed  orphans: 3 Orphans left by removed Worktrees
@@ -34,6 +35,7 @@ Doctor works without the Daemon. It runs the checks that need only the machine, 
 | `state_documents` | Every document of the state directory can be read: the Leases, the indexes, the Logical resources, the Services, the containers, the Isolated containers, the Repositories that are Off and the Managed blocks. A document that is absent is fine. | `mv <document> <document>.broken` for a document that is corrupt. None for a document written by a newer procly, since moving it aside would lose what that one recorded. |
 | `configuration` | The `procly.toml` of the current Worktree, with the user settings and `procly.local.toml`, is valid, and every Driver a Service names loads. `skipped` without a `procly.toml`. | `${EDITOR:-vi}` on the file, or on the Driver file in `.procly/drivers`. |
 | `guard` | The Guard in `.claude/settings.json` of the current Worktree is the one `procly agent install` recorded. `skipped` when there is none, since the Guard is opt-in. A Guard that left the settings fails, and so does one you edited. | `procly agent install` when the Guard is gone. None when you edited it, since `agent install` leaves an edited Guard as it is, restore the hook group running `procly guard` by hand. |
+| `worktrunk_hooks` | The Worktrunk hooks block in `.config/wt.toml` of the current Worktree is the one `procly worktree hooks` recorded, see [Worktrunk](worktree-init.md#worktrunk). `skipped` when the file holds no block, since the hooks are opt-in. A block that left the file fails, and so does one you edited. | `procly worktree hooks` when the block is gone. None when you edited it, since `worktree hooks` leaves an edited block as it is, restore the lines between its markers by hand. |
 | `leased_ports` | No Service ended on a [Port mismatch](exit-codes.md), and nothing Procly did not start answers on a port a Lease holds while its Service does not run. | `cd <worktree> && procly env <service>` for a Port mismatch, which prints the Lease the Service has to listen on, and the command that stops the [Foreign process](daemon.md#foreign-processes) otherwise. |
 | `orphans` | No removed Worktree left anything behind, see [Collecting Orphans](gc.md). | `procly gc`, which lists them. `procly gc --apply` deletes them. |
 

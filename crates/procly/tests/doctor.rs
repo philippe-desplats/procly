@@ -125,6 +125,7 @@ impl Setup {
         let setup = Self::new();
         setup.declare_web(free_port());
         setup.install_unit_and_guard();
+        assert_success(&setup.run(&setup.repo, &["worktree", "hooks"]));
         setup
     }
 
@@ -164,13 +165,14 @@ fn problems(output: &Output) -> Value {
     document
 }
 
-const ALL_CHECKS: [&str; 8] = [
+const ALL_CHECKS: [&str; 9] = [
     "docker_compose",
     "daemon",
     "session_unit",
     "state_documents",
     "configuration",
     "guard",
+    "worktrunk_hooks",
     "leased_ports",
     "orphans",
 ];
