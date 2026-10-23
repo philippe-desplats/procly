@@ -316,13 +316,15 @@ fn undo(item: &Left) -> String {
         }
         Written::WorktrunkHooks => {
             let (open, close) = markers(worktrunk::BLOCK);
-            let [pre_start, pre_remove] = &worktrunk::lines()[..] else {
-                unreachable!("the Worktrunk block holds one line per hook, and there are 2 hooks");
-            };
+            let hooks = worktrunk::lines()
+                .iter()
+                .map(|line| format!("`{line}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
             format!(
-                "the Worktrunk hooks block. Delete the line `{open}`, the line `{close}` and the lines `{pre_start}` \
-                 and `{pre_remove}` between them, which make Worktrunk run Procly when it creates and removes a \
-                 Worktree. Keep every line that is yours."
+                "the Worktrunk hooks block. Delete the line `{open}`, the line `{close}` and the lines {hooks} \
+                 between them, which make Worktrunk run Procly when it creates and removes a Worktree. Keep every \
+                 line that is yours."
             )
         }
         Written::EnvFile => format!(

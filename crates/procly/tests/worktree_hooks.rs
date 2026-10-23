@@ -327,3 +327,17 @@ fn doctor_skips_the_check_when_the_worktree_has_no_block() {
         .expect("a worktrunk_hooks check");
     assert_eq!(check["status"], "skipped", "{check}");
 }
+
+#[test]
+fn a_block_that_never_closes_is_left_as_it_is_and_is_no_conflict() {
+    let procly = Procly::new();
+    let main = repository(&procly);
+    let unclosed = format!("{OPEN}\n{PRE_START}\n{PRE_REMOVE}\n");
+    write(&config(&main), &unclosed);
+
+    let output = procly.procly_in(&main, &["worktree", "hooks"]);
+
+    assert_success(&output);
+    assert_eq!(read(&config(&main)), unclosed);
+    assert!(stdout(&output).contains("edited"), "{}", stdout(&output));
+}

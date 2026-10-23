@@ -369,10 +369,9 @@ enum WorktreeCommand {
     /// runs `procly worktree init` when it creates a Worktree and `procly worktree release` before it removes one.
     /// Run it again to find it in place. A block you edited is left as it is, and `procly eject` takes it out.
     #[command(
-        after_help = "Writes nothing, prints the lines to add on stdout and exits with 5 when `pre-start` or \
-                      `pre-remove` is already set outside the block. Exit codes: 0 when the block is written, also \
-                      when it already was or was left as it is because you edited it, 5 when a hook is already set, \
-                      125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
+        after_help = "Exit codes: 0 when the block is written, also when it already was or was left as it is because \
+                      you edited it, 5 when `pre-start` or `pre-remove` is already set outside the block, in which \
+                      case nothing is written and the lines to add are printed on stdout, 125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
                       that is not in a git Repository. Worktrunk asks you to approve project hooks the first time \
                       it runs them. See docs/worktree-init.md and docs/exit-codes.md."
     )]

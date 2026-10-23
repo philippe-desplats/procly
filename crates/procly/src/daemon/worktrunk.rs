@@ -64,6 +64,15 @@ fn install(registry: &Registry, cwd: &Path) -> Result<HooksReport, HooksError> {
     let worktree = &topology.worktree.path;
     let file = contained(worktree, &worktree.join(CONFIG))?;
     let lines = lines();
+    // A block that never closes is one to leave alone, its lines are not hooks of the developer.
+    if ManagedBlocks::content(&file, BLOCK)? == Content::Unclosed {
+        return Ok(HooksReport {
+            file,
+            outcome: HooksOutcome::Edited,
+            set: Vec::new(),
+            lines,
+        });
+    }
     let set = match ManagedBlocks::outside(&file, BLOCK)? {
         Some(text) => set_in(&text).map_err(|source| HooksError::NotToml {
             file: file.clone(),
