@@ -48,6 +48,14 @@ fi
 exit 0
 "#;
 
+/// A fake `portless` that logs its calls next to it, and fails to remove an alias while `fail-remove` is there.
+const FAKE_PORTLESS: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+echo "$*" >> "$dir/portless-calls"
+if [ "$2" = "--remove" ] && [ -f "$dir/fail-remove" ]; then echo "the proxy is not running" >&2; exit 1; fi
+exit 0
+"#;
+
 /// A healthy machine for `doctor`: a Repository, a home directory and fake tools of its own.
 struct Setup {
     procly: Procly,
@@ -66,6 +74,7 @@ impl Setup {
             ("launchctl", FAKE_MANAGER),
             ("systemctl", FAKE_MANAGER),
             ("docker", FAKE_DOCKER),
+            ("portless", FAKE_PORTLESS),
         ] {
             let path = bin.join(tool);
             std::fs::write(&path, script).expect("write a fake tool");
@@ -124,9 +133,21 @@ impl Setup {
     fn healthy() -> Self {
         let setup = Self::new();
         setup.declare_web(free_port());
+        setup.turn_portless_on();
         setup.install_unit_and_guard();
         assert_success(&setup.run(&setup.repo, &["worktree", "hooks"]));
         setup
+    }
+
+    /// Turns Portless on in the `procly.toml` of the Repository.
+    fn turn_portless_on(&self) {
+        let file = self.repo.join("procly.toml");
+        let declared = std::fs::read_to_string(&file).expect("read the configuration");
+        write(
+            &self.repo,
+            "procly.toml",
+            &format!("[settings]\nportless = true\n{declared}"),
+        );
     }
 
     fn unit_calls(&self) -> String {
@@ -165,16 +186,18 @@ fn problems(output: &Output) -> Value {
     document
 }
 
-const ALL_CHECKS: [&str; 9] = [
+const ALL_CHECKS: [&str; 11] = [
     "docker_compose",
     "daemon",
     "session_unit",
     "state_documents",
     "configuration",
     "guard",
+    "portless",
     "worktrunk_hooks",
     "leased_ports",
     "orphans",
+    "portless_aliases",
 ];
 
 #[test]
@@ -698,6 +721,80 @@ fn the_orphans_of_a_removed_worktree_are_a_problem_with_the_gc_command_that_list
     let gc = setup.run(&setup.repo, &["gc"]);
     assert_success(&gc);
     assert!(stdout(&gc).contains("lease web.http"), "{}", stdout(&gc));
+}
+
+#[test]
+fn portless_is_skipped_unless_the_settings_turn_it_on() {
+    let setup = Setup::healthy();
+    setup.declare_web(free_port());
+
+    let document = json_succeeded(&setup.doctor());
+
+    assert_eq!(status(&document, "portless"), "skipped");
+    assert_eq!(
+        message(&document, "portless"),
+        "settings.portless is not on, nothing calls portless"
+    );
+}
+
+#[test]
+fn a_missing_portless_is_a_problem_when_portless_is_on_with_the_command_that_installs_it() {
+    let setup = Setup::healthy();
+    std::fs::remove_file(setup.bin.join("portless")).expect("remove the fake portless");
+    // The directories of a real portless are left out, so that the check does not find the developer's.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let usual = std::env::split_paths(&path).filter(|dir| !dir.join("portless").exists());
+    let path = std::env::join_paths(std::iter::once(setup.bin.clone()).chain(usual)).expect("join the PATH");
+
+    let output = setup
+        .command(&setup.repo)
+        .env("PATH", path)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("the procly binary runs");
+
+    let document = problems(&output);
+    assert_eq!(status(&document, "portless"), "failed");
+    assert_eq!(
+        message(&document, "portless"),
+        "settings.portless is on and portless is not on the PATH, `procly up` makes no alias"
+    );
+    assert_eq!(
+        check(&document, "portless")["fix"],
+        json!("npm install --global portless")
+    );
+}
+
+#[test]
+fn a_portless_alias_no_lease_holds_is_a_problem_with_the_command_that_removes_it() {
+    let setup = Setup::healthy();
+    let feature = git_worktree_add(&setup.repo, "app-feature");
+    write(
+        &feature,
+        "procly.toml",
+        &std::fs::read_to_string(setup.repo.join("procly.toml")).expect("read"),
+    );
+    assert_success(&setup.run(&feature, &["up", "web"]));
+    assert_success(&setup.run(&feature, &["down", "web"]));
+    // The proxy is down when the Worktree is released: the Lease goes and the alias stays.
+    write(&setup.bin, "fail-remove", "");
+    assert_success(&setup.run(&feature, &["worktree", "release"]));
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "portless_aliases"), "failed");
+    assert!(
+        message(&document, "portless_aliases").starts_with("the Portless alias app-feature.web points to port "),
+        "{}",
+        message(&document, "portless_aliases")
+    );
+    assert_eq!(
+        check(&document, "portless_aliases")["fix"],
+        json!("portless alias --remove app-feature.web")
+    );
+    // Doctor ran none of it.
+    let calls = std::fs::read_to_string(setup.bin.join("portless-calls")).expect("the fake portless was called");
+    assert_eq!(calls.matches("--remove").count(), 1, "{calls}");
 }
 
 #[test]

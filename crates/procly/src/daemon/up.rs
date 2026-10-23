@@ -11,6 +11,8 @@ use std::time::Duration;
 use super::compose::{ComposeError, ComposeSpec, Isolated, PlannedResource, PublishedLease, ResourcePlan};
 use super::environment::{self, DeclaredService, Leasing};
 use super::health::HealthCheck;
+use super::lease::Scope as LeaseScope;
+use super::portless::{self, Wanted};
 use super::service::{Relation, Service, ServiceSpec, Start};
 use super::{Registry, blocking, message, read_config, topology_of};
 use crate::config::{Config, IsolationMode, ServiceConfig, ServiceKind};
@@ -137,6 +139,8 @@ pub(super) async fn up(
         Err(message) => return Response::Error { message },
     };
     let mut reached = Vec::new();
+    // One warning is enough for a Portless that does not answer, the next call would fail the same way.
+    let mut portless_warned = false;
     for current in &order {
         let (outcome, via, port, health) = match start(registry, &scope, current, &env, gitignore).await {
             Ok(Running::Process { service, outcome }) => {
@@ -177,6 +181,11 @@ pub(super) async fn up(
             Ok(reach) => reach,
             Err(message) => return Response::Error { message },
         };
+        let mut warnings = Vec::new();
+        if scope.config.settings.portless && !portless_warned {
+            warnings.extend(alias(registry, &scope, current, &ports, &urls).await);
+            portless_warned = !warnings.is_empty();
+        }
         // The URL of the Lease the health check probes, among the URLs of every Lease.
         let url = port
             .and_then(|port| ports.iter().find(|&(_, &lease)| lease == port))
@@ -189,6 +198,7 @@ pub(super) async fn up(
             url,
             ports,
             urls,
+            warnings,
         });
     }
     // The Service that was asked for comes last, after everything it needs.
@@ -202,6 +212,7 @@ pub(super) async fn up(
             ports: target.ports,
             needs: reached,
             urls: target.urls,
+            warnings: target.warnings,
         },
         (None, Some(last)) => {
             reached.push(last);
@@ -599,6 +610,67 @@ fn plan_resources(
         ready_timeout: scope.config.health_timeout(declared),
         command_timeout: scope.config.settings.driver_timeout,
     }))
+}
+
+/// Aliases the Leases of the Service `name`, see [`alias_leases`], and returns the warning when that failed.
+async fn alias(
+    registry: &Arc<Registry>,
+    scope: &Scope,
+    name: &str,
+    ports: &BTreeMap<String, u16>,
+    urls: &BTreeMap<String, String>,
+) -> Option<String> {
+    let (registry, scope, name) = (Arc::clone(registry), scope.clone(), name.to_owned());
+    let (ports, urls) = (ports.clone(), urls.clone());
+    // Asking git, running `portless` and writing the aliases are blocking.
+    blocking(START_FAILED, move || {
+        alias_leases(&registry, &scope, &name, &ports, &urls)
+    })
+    .await
+    .unwrap_or_else(Some)
+}
+
+/// Aliases each Lease of the Service `name` that is an `http://` URL to a Portless name, and returns the warning when
+/// an alias could not be made. A Service with several of them names each after its Port name. Outside the Main
+/// worktree the branch comes first, for the Lease of a Pinned branch the Pinned branch. Blocking.
+fn alias_leases(
+    registry: &Registry,
+    scope: &Scope,
+    name: &str,
+    ports: &BTreeMap<String, u16>,
+    urls: &BTreeMap<String, String>,
+) -> anyhow::Result<Option<String>> {
+    let http: Vec<(&String, u16)> = urls
+        .iter()
+        .filter(|(_, url)| url.starts_with("http://"))
+        .filter_map(|(port_name, _)| Some((port_name, *ports.get(port_name)?)))
+        .collect();
+    if http.is_empty() {
+        return Ok(None);
+    }
+    let repository = &scope.topology.git_common_dir;
+    let main = scope.topology.main()?.worktree.path;
+    let mut wanted = Vec::new();
+    for &(port_name, port) in &http {
+        // The Lease the port is bound to, which is the Main worktree's for the container of a Shared Compose service.
+        let Some(key) = registry.leases.bound_to(repository, port)? else {
+            continue;
+        };
+        let (branch, slug) = match &key.scope {
+            LeaseScope::Worktree(path) if *path != main => (
+                crate::topology::branch(path).ok().flatten(),
+                crate::topology::slug_of(path),
+            ),
+            LeaseScope::Worktree(_) | LeaseScope::Branch(_) => (None, String::new()),
+        };
+        let prefix = portless::prefix(&key.scope, &main, branch.as_deref(), &slug);
+        wanted.push(Wanted {
+            name: portless::name(prefix.as_deref(), name, (http.len() > 1).then_some(port_name.as_str())),
+            key,
+            port,
+        });
+    }
+    Ok(registry.portless.alias(&registry.leases, &wanted))
 }
 
 /// The Leases of the Service `name`, by Port name, as `env` exports them, and the URLs of the ones whose scheme is

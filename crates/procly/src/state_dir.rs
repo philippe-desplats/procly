@@ -114,6 +114,11 @@ impl StateDir {
         self.path.join("isolated.json")
     }
 
+    /// The document recording every Portless alias Procly made, which goes with the Lease it names.
+    pub(crate) fn portless_aliases(&self) -> PathBuf {
+        self.path.join("portless-aliases.json")
+    }
+
     /// The directory holding the output file of every running Service, which outlives a crash of the Daemon.
     pub(crate) fn outputs(&self) -> PathBuf {
         self.path.join("output")

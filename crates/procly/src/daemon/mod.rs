@@ -22,6 +22,7 @@ mod listeners;
 mod managed;
 mod off;
 mod output_file;
+mod portless;
 #[cfg(unix)]
 mod process_group;
 mod reconcile;
@@ -64,6 +65,7 @@ use self::lease::Leases;
 use self::managed::ManagedBlocks;
 use self::off::Offs;
 use self::output_file::OutputFiles;
+use self::portless::Portless;
 use self::record::ServiceRecords;
 use self::resource::LogicalResources;
 use self::retention::Retentions;
@@ -89,6 +91,8 @@ struct Registry {
     resources: LogicalResources,
     managed: ManagedBlocks,
     offs: Offs,
+    /// The Portless aliases of the Leases, which go with their Lease.
+    portless: Portless,
     /// Held while the Rules block and the Guard are written or switched, so that an install and `off` never cross.
     agent: Mutex<()>,
     /// Held while the generated files of a Worktree are written, so that 2 starts never write them at once.
@@ -208,6 +212,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         resources: LogicalResources::new(state.resources()),
         managed: ManagedBlocks::new(state.managed_blocks()),
         offs: Offs::new(state.off()),
+        portless: Portless::new(state.portless_aliases()),
         agent: Mutex::default(),
         mirroring: Mutex::default(),
         initializing: Mutex::default(),

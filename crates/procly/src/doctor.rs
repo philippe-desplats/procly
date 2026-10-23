@@ -60,6 +60,7 @@ pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
         daemon::doctor::state_documents(state),
         configuration(worktree, &placement.unplaced),
         daemon::doctor::guard(state, worktree, &placement.unplaced),
+        portless(worktree, &placement.unplaced),
         daemon::doctor::worktrunk_hooks(state, worktree, &placement.unplaced),
     ];
     checks.extend(daemon_checks);
@@ -291,6 +292,23 @@ fn configuration(worktree: Option<&Path>, unplaced: &str) -> Check {
     fixes.sort();
     fixes.dedup();
     Check::failed(CONFIGURATION, problems.join("\n"), Some(fixes.join("\n")))
+}
+
+/// Whether Portless is on for the Worktree and its `portless` executable is on the `PATH`.
+fn portless(worktree: Option<&Path>, unplaced: &str) -> Check {
+    let Some(worktree) = worktree else {
+        return Check::skipped(daemon::doctor::PORTLESS, unplaced);
+    };
+    if !worktree.join(config::VERSIONED_FILE).exists() {
+        return Check::skipped(
+            daemon::doctor::PORTLESS,
+            format!("{} has no {}", worktree.display(), config::VERSIONED_FILE),
+        );
+    }
+    let on = config::load(config::user_settings().as_deref(), worktree)
+        .ok()
+        .map(|config| config.settings.portless);
+    daemon::doctor::portless_binary(on)
 }
 
 /// What `doctor` prints: one line per check, its further lines indented, then the fix of a problem.

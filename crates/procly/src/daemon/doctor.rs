@@ -12,8 +12,8 @@ use super::hook::{self, Standing};
 use super::managed::ManagedBlocks;
 use super::store::StoreError;
 use super::{
-    Registry, agent, blocking, container_record, foreign, gc, index, isolated_record, lease, managed, off, record,
-    resource, worktrunk,
+    Registry, agent, blocking, container_record, foreign, gc, index, isolated_record, lease, managed, off, portless,
+    record, resource, worktrunk,
 };
 use crate::protocol::{Check, DaemonChecks, Occupant, Response, ServiceEnd, ServiceState};
 use crate::state_dir::StateDir;
@@ -22,14 +22,18 @@ use crate::state_dir::StateDir;
 pub(crate) const STATE_DOCUMENTS: &str = "state_documents";
 /// The check of the Guard in the Worktree.
 pub(crate) const GUARD: &str = "guard";
+/// The check of the `portless` executable.
+pub(crate) const PORTLESS: &str = "portless";
 /// The check of the Worktrunk hooks in the Worktree.
 pub(crate) const WORKTRUNK_HOOKS: &str = "worktrunk_hooks";
 /// The check of the ports Leases hold.
 const LEASED_PORTS: &str = "leased_ports";
 /// The check of the Orphans.
 const ORPHANS: &str = "orphans";
+/// The check of the Portless aliases.
+const PORTLESS_ALIASES: &str = "portless_aliases";
 /// The checks only the Daemon answers, which `doctor` reports as skipped when it does not.
-pub(crate) const DAEMON_CHECKS: [&str; 2] = [LEASED_PORTS, ORPHANS];
+pub(crate) const DAEMON_CHECKS: [&str; 3] = [LEASED_PORTS, ORPHANS, PORTLESS_ALIASES];
 
 /// Answers a `Doctor` request with the version of this Daemon and the checks only it can answer.
 pub(super) async fn run(registry: &Arc<Registry>) -> Response {
@@ -50,7 +54,7 @@ pub(super) async fn run(registry: &Arc<Registry>) -> Response {
 /// to the call that fills it.
 fn checks(registry: &Registry, reconciled: Result<(), String>) -> Vec<Check> {
     match reconciled {
-        Ok(()) => vec![leased_ports(registry), orphans(registry)],
+        Ok(()) => vec![leased_ports(registry), orphans(registry), portless_aliases(registry)],
         // What it recorded is unreadable, which the check of the state documents reports.
         Err(error) => DAEMON_CHECKS
             .into_iter()
@@ -151,10 +155,42 @@ fn orphans(registry: &Registry) -> Check {
     }
 }
 
+/// Whether a Portless alias Procly made outlived its Lease, which a removal that failed leaves behind.
+fn portless_aliases(registry: &Registry) -> Check {
+    let unheld = match registry.portless.unheld(&registry.leases) {
+        Ok(unheld) => unheld,
+        Err(error) => return Check::skipped(PORTLESS_ALIASES, format!("{:#}", anyhow::Error::from(error))),
+    };
+    if unheld.is_empty() {
+        return Check::passed(PORTLESS_ALIASES, "every Portless alias Procly made is held by a Lease");
+    }
+    let problems: Vec<String> = unheld
+        .iter()
+        .map(|alias| {
+            if alias.superseded {
+                format!(
+                    "the Portless alias {} was replaced by another name and not removed",
+                    alias.name
+                )
+            } else {
+                format!(
+                    "the Portless alias {} points to port {}, which no Lease holds",
+                    alias.name, alias.port
+                )
+            }
+        })
+        .collect();
+    let fixes: Vec<String> = unheld
+        .iter()
+        .map(|alias| format!("{} alias --remove {}", portless::BINARY, alias.name))
+        .collect();
+    Check::failed(PORTLESS_ALIASES, problems.join("\n"), Some(fixes.join("\n")))
+}
+
 /// Whether every document of the state directory can be read, as the next request that needs it reads it.
 pub(crate) fn state_documents(state: &StateDir) -> Check {
     type Readable = fn(&Path) -> Result<(), StoreError>;
-    let documents: [(PathBuf, Readable); 8] = [
+    let documents: [(PathBuf, Readable); 9] = [
         (state.leases(), lease::readable),
         (state.indexes(), index::readable),
         (state.resources(), resource::readable),
@@ -163,6 +199,7 @@ pub(crate) fn state_documents(state: &StateDir) -> Check {
         (state.isolated(), isolated_record::readable),
         (state.off(), off::readable),
         (state.managed_blocks(), managed::readable),
+        (state.portless_aliases(), portless::readable),
     ];
     let mut problems = String::new();
     let mut fixes = Vec::new();
@@ -258,5 +295,26 @@ pub(crate) fn guard(state: &StateDir, worktree: Option<&Path>, unplaced: &str) -
             None,
         ),
         Err(error) => Check::failed(GUARD, format!("{:#}", anyhow::Error::from(error)), None),
+    }
+}
+
+/// Whether Portless is on in the Worktree, and the `portless` executable it needs is on the `PATH`. `config` is what the
+/// configuration of the Worktree gives, `None` when it cannot be read, which the `configuration` check reports.
+pub(crate) fn portless_binary(on: Option<bool>) -> Check {
+    match on {
+        None => Check::skipped(PORTLESS, "the configuration cannot be read, see configuration"),
+        Some(false) => Check::skipped(PORTLESS, "settings.portless is not on, nothing calls portless"),
+        Some(true) if portless::installed() => Check::passed(
+            PORTLESS,
+            format!("settings.portless is on and {} is on the PATH", portless::BINARY),
+        ),
+        Some(true) => Check::failed(
+            PORTLESS,
+            format!(
+                "settings.portless is on and {} is not on the PATH, `procly up` makes no alias",
+                portless::BINARY
+            ),
+            Some(format!("npm install --global {}", portless::BINARY)),
+        ),
     }
 }

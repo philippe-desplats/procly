@@ -722,13 +722,18 @@ pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orp
             service,
             port_name,
             port,
-        } => Ok(registry.leases.release(&WorktreeLease {
-            repository: orphan.repository.clone(),
-            worktree: orphan.worktree.clone(),
-            service: service.clone(),
-            port_name: port_name.clone(),
-            port: *port,
-        })?),
+        } => {
+            registry.leases.release(&WorktreeLease {
+                repository: orphan.repository.clone(),
+                worktree: orphan.worktree.clone(),
+                service: service.clone(),
+                port_name: port_name.clone(),
+                port: *port,
+            })?;
+            // The alias of the Lease just released goes with it.
+            registry.portless.prune(&registry.leases);
+            Ok(())
+        }
         OrphanKind::LogicalResource { .. } => unreachable!("a Logical resource is deleted under its container"),
         OrphanKind::OutputDirectory { path } | OrphanKind::SetupDirectory { path } => worktree_dir::remove(path)
             .map_err(|source| DeleteError::Remove {

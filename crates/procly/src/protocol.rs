@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 20;
+pub(crate) const PROTOCOL_VERSION: u32 = 21;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -114,6 +114,8 @@ pub(crate) enum Response {
         needs: Vec<UpService>,
         /// Where to reach each Lease whose scheme Procly knows, by Port name.
         urls: BTreeMap<String, String>,
+        /// What went wrong without failing `up`, such as a Portless alias that could not be made.
+        warnings: Vec<String>,
     },
     /// Every Service `up` without a Service brought up or found running, in the order it brought them up.
     UpAll {
@@ -374,6 +376,8 @@ pub(crate) struct UpService {
     pub(crate) ports: BTreeMap<String, u16>,
     /// Where to reach each Lease whose scheme Procly knows, by Port name, the one `url` is among them.
     pub(crate) urls: BTreeMap<String, String>,
+    /// What went wrong without failing `up`, such as a Portless alias that could not be made.
+    pub(crate) warnings: Vec<String>,
 }
 
 /// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.
@@ -920,7 +924,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":20,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":21,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 
