@@ -8,13 +8,18 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::container_record::ContainerDocument;
 use super::hook::{self, Standing};
-use super::managed::ManagedBlocks;
-use super::store::StoreError;
-use super::{
-    Registry, agent, blocking, container_record, foreign, gc, index, isolated_record, lease, managed, off, portless,
-    record, resource, worktrunk,
-};
+use super::index::IndexDocument;
+use super::isolated_record::IsolatedDocument;
+use super::lease::LeaseDocument;
+use super::managed::{ManagedBlocks, ManagedDocument};
+use super::off::OffDocument;
+use super::portless::AliasDocument;
+use super::record::ServiceDocument;
+use super::resource::ResourceDocument;
+use super::store::{self, StoreError};
+use super::{Registry, agent, blocking, foreign, gc, portless, worktrunk};
 use crate::protocol::{Check, DaemonChecks, Occupant, Response, ServiceEnd, ServiceState};
 use crate::state_dir::StateDir;
 
@@ -190,16 +195,17 @@ fn portless_aliases(registry: &Registry) -> Check {
 /// Whether every document of the state directory can be read, as the next request that needs it reads it.
 pub(crate) fn state_documents(state: &StateDir) -> Check {
     type Readable = fn(&Path) -> Result<(), StoreError>;
+    // The state directory names the path of each document, only the module owning it knows its format.
     let documents: [(PathBuf, Readable); 9] = [
-        (state.leases(), lease::readable),
-        (state.indexes(), index::readable),
-        (state.resources(), resource::readable),
-        (state.services(), record::readable),
-        (state.containers(), container_record::readable),
-        (state.isolated(), isolated_record::readable),
-        (state.off(), off::readable),
-        (state.managed_blocks(), managed::readable),
-        (state.portless_aliases(), portless::readable),
+        (state.leases(), store::readable::<LeaseDocument>),
+        (state.indexes(), store::readable::<IndexDocument>),
+        (state.resources(), store::readable::<ResourceDocument>),
+        (state.services(), store::readable::<ServiceDocument>),
+        (state.containers(), store::readable::<ContainerDocument>),
+        (state.isolated(), store::readable::<IsolatedDocument>),
+        (state.off(), store::readable::<OffDocument>),
+        (state.managed_blocks(), store::readable::<ManagedDocument>),
+        (state.portless_aliases(), store::readable::<AliasDocument>),
     ];
     let mut problems = String::new();
     let mut fixes = Vec::new();
@@ -228,34 +234,50 @@ pub(crate) fn worktrunk_hooks(state: &StateDir, worktree: Option<&Path>, unplace
         return Check::skipped(WORKTRUNK_HOOKS, unplaced);
     };
     let file = worktree.join(worktrunk::CONFIG);
-    let write = Some("procly worktree hooks".to_owned());
-    match worktrunk::standing(&ManagedBlocks::new(state.managed_blocks()), &file) {
-        Ok(Standing::Intact) => Check::passed(
-            WORKTRUNK_HOOKS,
-            format!("{} holds the Worktrunk hooks as Procly wrote them", file.display()),
-        ),
-        Ok(Standing::Absent) => Check::skipped(
-            WORKTRUNK_HOOKS,
-            format!(
-                "{} holds no Worktrunk hooks, `procly worktree hooks` writes them if you use Worktrunk",
-                file.display()
+    let standing = worktrunk::standing(&ManagedBlocks::new(state.managed_blocks()), &file);
+    let file = file.display();
+    from_standing(
+        WORKTRUNK_HOOKS,
+        standing,
+        &Messages {
+            intact: format!("{file} holds the Worktrunk hooks as Procly wrote them"),
+            absent: format!(
+                "{file} holds no Worktrunk hooks, `procly worktree hooks` writes them if you use Worktrunk"
             ),
-        ),
-        Ok(Standing::Missing) => Check::failed(
-            WORKTRUNK_HOOKS,
-            format!("{} no longer holds the Worktrunk hooks Procly wrote", file.display()),
-            write,
-        ),
-        Ok(Standing::Edited) => Check::failed(
-            WORKTRUNK_HOOKS,
-            format!(
-                "the Worktrunk hooks block in {} is not the one Procly recorded, `procly worktree hooks` leaves it as \
-                 it is, restore the lines between its markers by hand",
-                file.display()
+            missing: format!("{file} no longer holds the Worktrunk hooks Procly wrote"),
+            edited: format!(
+                "the Worktrunk hooks block in {file} is not the one Procly recorded, or sits under a table header, \
+                 `procly worktree hooks` leaves it as it is, restore the lines between its markers by hand, at the \
+                 root of the file"
             ),
-            None,
-        ),
-        Err(error) => Check::failed(WORKTRUNK_HOOKS, format!("{:#}", anyhow::Error::from(error)), None),
+            fix: "procly worktree hooks",
+        },
+    )
+}
+
+/// What a check of a Managed block says for each [`Standing`] of the block, and the command that puts it back.
+struct Messages {
+    intact: String,
+    absent: String,
+    missing: String,
+    edited: String,
+    fix: &'static str,
+}
+
+/// The check `name` for a block at `standing`: passed when intact, skipped when Procly never wrote it, failed with the
+/// command `messages.fix` when it vanished, and failed with none when it was edited, since the command leaves an edited
+/// block as it is.
+fn from_standing<E: Into<anyhow::Error>>(
+    name: &'static str,
+    standing: Result<Standing, E>,
+    messages: &Messages,
+) -> Check {
+    match standing {
+        Ok(Standing::Intact) => Check::passed(name, messages.intact.clone()),
+        Ok(Standing::Absent) => Check::skipped(name, messages.absent.clone()),
+        Ok(Standing::Missing) => Check::failed(name, messages.missing.clone(), Some(messages.fix.to_owned())),
+        Ok(Standing::Edited) => Check::failed(name, messages.edited.clone(), None),
+        Err(error) => Check::failed(name, format!("{:#}", error.into()), None),
     }
 }
 
@@ -266,39 +288,26 @@ pub(crate) fn guard(state: &StateDir, worktree: Option<&Path>, unplaced: &str) -
         return Check::skipped(GUARD, unplaced);
     };
     let file = worktree.join(agent::SETTINGS);
-    let install = Some("procly agent install".to_owned());
-    match hook::standing(&ManagedBlocks::new(state.managed_blocks()), &file) {
-        Ok(Standing::Intact) => Check::passed(
-            GUARD,
-            format!("{} registers the Guard as Procly wrote it", file.display()),
-        ),
-        Ok(Standing::Absent) => Check::skipped(
-            GUARD,
-            format!(
-                "{} holds no Guard, `procly agent install` writes it if you want your agents steered",
-                file.display()
-            ),
-        ),
-        Ok(Standing::Missing) => Check::failed(
-            GUARD,
-            format!("{} no longer registers the Guard Procly wrote", file.display()),
-            install,
-        ),
-        Ok(Standing::Edited) => Check::failed(
-            GUARD,
-            format!(
-                "the Guard in {} is not the one Procly recorded, `procly agent install` leaves it as it is, \
+    let standing = hook::standing(&ManagedBlocks::new(state.managed_blocks()), &file);
+    let file = file.display();
+    from_standing(
+        GUARD,
+        standing,
+        &Messages {
+            intact: format!("{file} registers the Guard as Procly wrote it"),
+            absent: format!("{file} holds no Guard, `procly agent install` writes it if you want your agents steered"),
+            missing: format!("{file} no longer registers the Guard Procly wrote"),
+            edited: format!(
+                "the Guard in {file} is not the one Procly recorded, `procly agent install` leaves it as it is, \
                  restore the hook group running `{}` by hand",
-                file.display(),
                 hook::COMMAND
             ),
-            None,
-        ),
-        Err(error) => Check::failed(GUARD, format!("{:#}", anyhow::Error::from(error)), None),
-    }
+            fix: "procly agent install",
+        },
+    )
 }
 
-/// Whether Portless is on in the Worktree, and the `portless` executable it needs is on the `PATH`. `config` is what the
+/// Whether Portless is on in the Worktree, and the `portless` executable it needs is on the `PATH`. `on` is what the
 /// configuration of the Worktree gives, `None` when it cannot be read, which the `configuration` check reports.
 pub(crate) fn portless_binary(on: Option<bool>) -> Check {
     match on {

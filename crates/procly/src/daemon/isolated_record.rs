@@ -7,7 +7,7 @@
 //! Worktree declared, and when the Daemon found the Worktree removed, so that a delayed deletion survives a restart.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -58,13 +58,12 @@ impl IsolatedRecord {
 pub(crate) type Key = (PathBuf, String, PathBuf);
 
 #[derive(Debug, Serialize, Deserialize)]
-struct IsolatedDocument {
+pub(super) struct IsolatedDocument {
     containers: Vec<IsolatedRecord>,
 }
 
-/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
-pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
-    store::load::<IsolatedDocument>(path, DOCUMENT_VERSION).map(|_| ())
+impl store::Stored for IsolatedDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// The records of the Isolated containers, read from their document on first use and written on every change.

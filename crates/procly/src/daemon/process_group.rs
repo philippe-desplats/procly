@@ -4,8 +4,8 @@
 //! Every other module goes through this interface and never calls the system itself, so that a Windows port adds a
 //! `#[cfg(windows)]` sibling of this module with the same interface, built on Job Objects, and changes nothing else.
 
-use std::os::unix::process::ExitStatusExt as _;
-use std::process::ExitStatus;
+use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+use std::process::{Child, Command, ExitStatus};
 use std::time::Duration;
 
 use nix::errno::Errno;
@@ -148,6 +148,25 @@ pub(super) fn detach(command: &mut tokio::process::Command) {
 /// Makes the spawned command lead a process group of its own, so that a signal to the group reaches its whole tree.
 pub(super) fn lead_group(command: &mut CommandWrap) {
     command.wrap(ProcessGroup::leader());
+}
+
+/// Like [`lead_group`], for a command the Daemon spawns and waits for itself, without the async runtime.
+pub(super) fn lead_group_blocking(command: &mut Command) {
+    command.process_group(0);
+}
+
+/// Kills the whole tree of a child spawned after [`lead_group_blocking`] and reaps it: the group first, so that no
+/// descendant outlives it, the leader so that it can be waited for, then whatever the leader forked meanwhile. Blocking.
+pub(super) fn kill_tree_blocking(child: &mut Child) {
+    let group = i32::try_from(child.id()).map(Pid::from_raw).ok();
+    if let Some(group) = group {
+        signal_group(group, Signal::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Some(group) = group {
+        kill_group(group);
+    }
 }
 
 /// Stops the leader of the process group of a Service: `SIGTERM` to the whole group, then `SIGKILL` after the stop

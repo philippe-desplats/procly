@@ -274,6 +274,7 @@ fn worktree_release_json_reports_what_was_stopped_released_and_kept() {
                     {"service": "db", "driver": "postgres", "resource": "dev", "name": "app__app_other"},
                 ],
             },
+            "warnings": [],
         })
     );
     assert_eq!(kept["released"]["leases"], serde_json::json!([]));

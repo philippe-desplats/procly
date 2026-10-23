@@ -24,6 +24,9 @@ use crate::topology::Topology;
 /// What `failed` says when a blocking step of `up` could not run to its end.
 const START_FAILED: &str = "the service could not be started";
 
+/// What `alias` says when its blocking step could not run to its end.
+const ALIAS_FAILED: &str = "the Portless alias could not be made";
+
 /// The Port names that are the scheme of the protocol their port speaks, such as the `smtp` and `http` ports `procly
 /// init` gives a Mailpit.
 const SCHEMES: [&str; 5] = ["amqp", "http", "https", "redis", "smtp"];
@@ -623,7 +626,7 @@ async fn alias(
     let (registry, scope, name) = (Arc::clone(registry), scope.clone(), name.to_owned());
     let (ports, urls) = (ports.clone(), urls.clone());
     // Asking git, running `portless` and writing the aliases are blocking.
-    blocking(START_FAILED, move || {
+    blocking(ALIAS_FAILED, move || {
         alias_leases(&registry, &scope, &name, &ports, &urls)
     })
     .await

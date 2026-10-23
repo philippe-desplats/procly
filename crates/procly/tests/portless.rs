@@ -400,6 +400,104 @@ fn gc_apply_removes_the_alias_of_the_orphan_leases_it_deletes() {
     assert_only_aliases(&machine);
 }
 
+/// A Repository whose removed Worktree `app-login` left the Leases of 2 Services, each with an alias that `portless`
+/// cannot remove. Returns the Repository.
+fn removed_worktree_with_2_aliased_leases(machine: &Machine) -> PathBuf {
+    let main = machine.repository(ON);
+    let login = git_worktree_add(&main, "app-login");
+    let config = format!(
+        "{ON}[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {} }}\n\
+         [services.docs]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {} }}\n",
+        free_port(),
+        free_port(),
+        server = test_server().display(),
+    );
+    std::fs::write(login.join("procly.toml"), config).expect("write the configuration");
+    assert_success(&machine.run(&login, &["up"]));
+    assert_success(&machine.run(&login, &["down"]));
+    remove_worktree(&main, &login);
+    main
+}
+
+#[test]
+fn gc_apply_tells_a_failing_portless_once_whatever_the_number_of_leases_it_deletes() {
+    let machine = Machine::failing(0, 1);
+    let main = removed_worktree_with_2_aliased_leases(&machine);
+
+    let output = machine.run(&main, &["gc", "--apply"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output).matches("deleted lease").count(),
+        2,
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        stderr(&output)
+            .lines()
+            .filter(|line| line.starts_with("procly: warning: "))
+            .count(),
+        1,
+        "{}",
+        stderr(&output)
+    );
+    let removals = machine
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("alias --remove"))
+        .count();
+    assert_eq!(
+        removals,
+        1,
+        "the next call would fail the same way: {:?}",
+        machine.calls()
+    );
+}
+
+#[test]
+fn gc_apply_json_carries_the_portless_warning_in_a_warnings_array_empty_when_there_is_none() {
+    let machine = Machine::failing(0, 1);
+    let main = removed_worktree_with_2_aliased_leases(&machine);
+
+    let output = machine.run(&main, &["gc", "--apply", "--json"]);
+
+    assert_success(&output);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one JSON document");
+    let warnings = document["warnings"].as_array().expect("a warnings array");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].as_str().is_some_and(|text| text.contains("alias --remove")),
+        "{warnings:?}"
+    );
+
+    let machine = Machine::new();
+    let main = removed_worktree_with_2_aliased_leases(&machine);
+    let output = machine.run(&main, &["gc", "--apply", "--json"]);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one JSON document");
+    assert_eq!(document["warnings"], serde_json::json!([]));
+}
+
+#[test]
+fn worktree_release_json_carries_the_portless_warning_in_a_warnings_array() {
+    let machine = Machine::failing(0, 1);
+    let main = machine.repository(ON);
+    let login = git_worktree_add(&main, "app-login");
+    write_config(&login, ON);
+    assert_success(&machine.run(&login, &["up", "web"]));
+
+    let output = machine.run(&login, &["worktree", "release", "--json"]);
+
+    assert_success(&output);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("one JSON document");
+    let warnings = document["warnings"].as_array().expect("a warnings array");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].as_str().is_some_and(|text| text.contains("alias --remove")),
+        "{warnings:?}"
+    );
+}
+
 #[test]
 fn a_missing_portless_is_one_warning_and_up_still_succeeds() {
     let machine = Machine::without_portless();
@@ -451,8 +549,13 @@ fn a_failing_removal_leaves_the_alias_recorded_and_the_next_release_tries_again(
     write_config(&login, ON);
     assert_success(&machine.run(&login, &["up", "web"]));
 
-    // The release is not failed by the alias that stays.
-    assert_success(&machine.run(&login, &["worktree", "release"]));
+    // The release is not failed by the alias that stays, and tells the person running it, once.
+    let output = machine.run(&login, &["worktree", "release"]);
+    assert_success(&output);
+    assert_eq!(
+        stderr(&output),
+        "procly: warning: `portless alias --remove app-login.web` failed with exit status: 1\n"
+    );
     assert_eq!(machine.calls().len(), 2);
     let log = machine.procly.daemon_log();
     assert!(
@@ -474,7 +577,7 @@ fn a_failing_removal_leaves_the_alias_recorded_and_the_next_release_tries_again(
 }
 
 #[test]
-fn a_stale_alias_is_still_removed_once_portless_is_turned_off() {
+fn a_recorded_alias_is_still_removed_once_portless_is_turned_off() {
     let machine = Machine::new();
     let main = machine.repository(ON);
     let login = git_worktree_add(&main, "app-login");

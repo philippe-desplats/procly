@@ -139,6 +139,8 @@ pub(crate) struct WorktreeRelease<'a> {
     stopped: ReleaseStopped<'a>,
     released: ReleaseReleased<'a>,
     kept: ReleaseKept<'a>,
+    /// What went wrong without failing the release, such as a Portless alias that could not be removed.
+    warnings: &'a [String],
 }
 
 /// The Services and Jobs a Worktree release stopped.
@@ -178,6 +180,7 @@ impl<'a> WorktreeRelease<'a> {
                 leases: &report.kept_leases,
                 logical_resources: &report.logical_resources,
             },
+            warnings: &report.warnings,
         }
     }
 }

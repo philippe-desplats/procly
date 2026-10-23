@@ -93,7 +93,8 @@ struct Registry {
     offs: Offs,
     /// The Portless aliases of the Leases, which go with their Lease.
     portless: Portless,
-    /// Held while the Rules block and the Guard are written or switched, so that an install and `off` never cross.
+    /// Held while the Rules block, the Guard and the Worktrunk hooks are written or switched, so that an install, a
+    /// hooks write and `off` never cross.
     agent: Mutex<()>,
     /// Held while the generated files of a Worktree are written, so that 2 starts never write them at once.
     mirroring: Mutex<()>,

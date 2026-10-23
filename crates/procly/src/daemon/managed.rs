@@ -121,13 +121,12 @@ struct Record {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ManagedDocument {
+pub(super) struct ManagedDocument {
     blocks: Vec<Record>,
 }
 
-/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
-pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
-    store::load::<ManagedDocument>(path, DOCUMENT_VERSION).map(|_| ())
+impl store::Stored for ManagedDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 impl ManagedBlocks {
@@ -388,7 +387,7 @@ fn read_text(file: &Path) -> Result<String, ManagedError> {
 }
 
 /// The text of `file`, `None` when it does not exist.
-fn read_existing(file: &Path) -> Result<Option<String>, ManagedError> {
+pub(crate) fn read_existing(file: &Path) -> Result<Option<String>, ManagedError> {
     match fs::read_to_string(file) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),

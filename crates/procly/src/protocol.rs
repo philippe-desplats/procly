@@ -406,6 +406,8 @@ pub(crate) struct ReleaseReport {
     pub(crate) kept_leases: Vec<KeptLease>,
     /// The Logical resources of the Worktree, which a Worktree release never drops.
     pub(crate) logical_resources: Vec<KeptResource>,
+    /// What went wrong without failing the release, such as a Portless alias that could not be removed.
+    pub(crate) warnings: Vec<String>,
 }
 
 impl ReleaseReport {
@@ -689,6 +691,9 @@ pub(crate) struct GcReport {
     pub(crate) orphans: Vec<Orphan>,
     /// The Repositories whose Worktrees git could not list, nothing of which is an Orphan.
     pub(crate) skipped: Vec<SkippedRepository>,
+    /// What went wrong without failing `gc`, such as a Portless alias that could not be removed. One for all the
+    /// Orphans, not one for each.
+    pub(crate) warnings: Vec<String>,
 }
 
 impl GcReport {
@@ -904,6 +909,15 @@ pub(crate) struct HooksReport {
     pub(crate) lines: Vec<String>,
 }
 
+impl HooksReport {
+    /// The lines of the hooks already set outside the block, which a `conflict` leaves for the person to wire by hand.
+    pub(crate) fn conflicting_lines(&self) -> impl Iterator<Item = &String> {
+        self.lines
+            .iter()
+            .filter(|line| self.set.iter().any(|hook| line.starts_with(&format!("{hook} = "))))
+    }
+}
+
 /// What the Daemon answers a `Doctor` request with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DaemonChecks {
@@ -945,6 +959,7 @@ mod tests {
             applied: false,
             orphans: vec![orphan.clone()],
             skipped: Vec::new(),
+            warnings: Vec::new(),
         }))
         .unwrap();
         assert!(line.contains(

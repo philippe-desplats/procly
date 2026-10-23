@@ -46,13 +46,12 @@ pub(crate) struct LogicalResource {
 type Table = BTreeMap<ResourceKey, LogicalResource>;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ResourceDocument {
+pub(super) struct ResourceDocument {
     resources: Vec<LogicalResource>,
 }
 
-/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
-pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
-    store::load::<ResourceDocument>(path, DOCUMENT_VERSION).map(|_| ())
+impl store::Stored for ResourceDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// Every Logical resource recorded, across all Repositories.

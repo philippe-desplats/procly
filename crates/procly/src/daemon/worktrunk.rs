@@ -64,8 +64,10 @@ fn install(registry: &Registry, cwd: &Path) -> Result<HooksReport, HooksError> {
     let worktree = &topology.worktree.path;
     let file = contained(worktree, &worktree.join(CONFIG))?;
     let lines = lines();
-    // A block that never closes is one to leave alone, its lines are not hooks of the developer.
-    if ManagedBlocks::content(&file, BLOCK)? == Content::Unclosed {
+    // A block that never closes is one to leave alone, its lines are not hooks of the developer. Nor is one moved
+    // under a table header, whose keys no longer are the hooks.
+    let content = ManagedBlocks::content(&file, BLOCK)?;
+    if content == Content::Unclosed || matches!(content, Content::Closed(_)) && !hooks_at_root(&file)? {
         return Ok(HooksReport {
             file,
             outcome: HooksOutcome::Edited,
@@ -99,6 +101,21 @@ fn install(registry: &Registry, cwd: &Path) -> Result<HooksReport, HooksError> {
         set,
         lines,
     })
+}
+
+/// Whether the TOML of `file` sets each hook of the block to its Procly command at the root, where Worktrunk reads it.
+/// A block moved under a table header holds the same lines, but its keys belong to that table and hook nothing. `true`
+/// for a file that is not TOML, which `worktree hooks` reports on its own.
+fn hooks_at_root(file: &Path) -> Result<bool, ManagedError> {
+    let Some(text) = managed::read_existing(file)? else {
+        return Ok(true);
+    };
+    let Ok(config) = text.parse::<toml::Table>() else {
+        return Ok(true);
+    };
+    Ok(HOOKS
+        .iter()
+        .all(|(hook, command)| config.get(*hook).and_then(toml::Value::as_str) == Some(*command)))
 }
 
 /// The hooks `text` sets, as a key or as a table, which is what Worktrunk reads whatever the spelling of the key.
@@ -144,7 +161,12 @@ pub(super) fn standing(managed: &ManagedBlocks, file: &Path) -> Result<Standing,
             } else {
                 known().contains(&content)
             };
-            if intact { Standing::Intact } else { Standing::Edited }
+            // The lines of an intact block count for nothing under a table header, where they are not the hooks.
+            if intact && hooks_at_root(file)? {
+                Standing::Intact
+            } else {
+                Standing::Edited
+            }
         }
     })
 }

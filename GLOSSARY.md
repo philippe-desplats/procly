@@ -98,6 +98,10 @@ _Avoid_: reserved branch, fixed branch
 The state of a Service whose process listens on a port other than the one its Lease granted.
 _Avoid_: wrong port, port drift
 
+**Portless alias**:
+A stable Portless name Procly gives an HTTP Lease, which lives as long as the Lease.
+_Avoid_: custom domain, hostname, vanity URL
+
 ### Isolation
 
 **Isolation mode**:

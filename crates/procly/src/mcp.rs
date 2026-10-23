@@ -154,8 +154,8 @@ struct DoctorArguments {
 
 /// The server: one tool per verb the CLI exposes, and the executable they run.
 ///
-/// `init`, `unit`, `guard`, `agent`, `off`, `on`, `eject` and `worktree hooks` have no tool: they write into the Repository or the
-/// session configuration of the person, which an MCP client must not do.
+/// `init`, `unit`, `guard`, `agent`, `off`, `on`, `eject` and `worktree hooks` have no tool: they write into the
+/// Repository or the session configuration of the person, which an MCP client must not do.
 #[derive(Debug, Clone)]
 struct McpServer {
     exe: PathBuf,

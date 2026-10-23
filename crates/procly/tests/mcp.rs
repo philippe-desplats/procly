@@ -578,8 +578,12 @@ fn doctor_returns_the_json_of_the_cli_and_never_accepts_agent() {
         "tools/call",
         json!({ "name": "doctor", "arguments": { "agent": "claude" } }),
     );
-    let refused = response.get("error").is_some() || response["result"]["isError"] == json!(true);
-    assert!(refused, "doctor accepted --agent: {response}");
+    assert_eq!(response["result"]["isError"], json!(true), "{response}");
+    let message = response["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("unknown field `agent`"),
+        "doctor must refuse agent as an unknown field: {response}"
+    );
     let tools = server.request("tools/list", json!({}));
     let doctor = tools["result"]["tools"]
         .as_array()

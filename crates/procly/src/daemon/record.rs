@@ -2,7 +2,7 @@
 //! finds them after a crash and never starts one of them a second time (ADR 0012).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -62,13 +62,12 @@ type Key = (PathBuf, String);
 
 /// The document holding every record.
 #[derive(Debug, Serialize, Deserialize)]
-struct ServiceDocument {
+pub(super) struct ServiceDocument {
     services: Vec<ServiceRecord>,
 }
 
-/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
-pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
-    store::load::<ServiceDocument>(path, DOCUMENT_VERSION).map(|_| ())
+impl store::Stored for ServiceDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// The records of the running Services, written to their document on every change.

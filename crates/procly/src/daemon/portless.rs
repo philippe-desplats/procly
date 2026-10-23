@@ -4,17 +4,16 @@
 //! never runs `sudo`. Portless stays optional: a missing binary or a failing call is a warning, never a failure.
 
 use std::io::{self, Read as _, Seek as _, SeekFrom};
-use std::os::unix::process::CommandExt as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::Signal;
 use serde::{Deserialize, Serialize};
 
 use super::lease::{LeaseKey, Leases, Scope};
-use super::process_group::{Pid, kill_group, signal_group};
+use super::process_group::{kill_tree_blocking, lead_group_blocking};
 use super::store::{self, StoreError};
 
 /// The version of the format of the document, bumped when a field changes meaning or disappears.
@@ -60,13 +59,12 @@ impl Alias {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct AliasDocument {
+pub(super) struct AliasDocument {
     aliases: Vec<Alias>,
 }
 
-/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
-pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
-    store::load::<AliasDocument>(path, DOCUMENT_VERSION).map(|_| ())
+impl store::Stored for AliasDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// An alias a Lease asks for.
@@ -354,29 +352,17 @@ fn call(args: &[&str]) -> Result<(), CallError> {
     let stderr = output
         .try_clone()
         .map_err(|error| failed(format!("cannot run: {error}")))?;
-    let mut child = Command::new(BINARY)
+    let mut command = Command::new(BINARY);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr)
-        .process_group(0)
-        .spawn()
-        .map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => CallError::Missing,
-            _ => failed(format!("cannot run: {error}")),
-        })?;
-    let group = i32::try_from(child.id()).map(Pid::from_raw).ok();
-    // Kills the whole group, the leader first so that it can be waited for, then whatever it left behind.
-    let kill = |child: &mut std::process::Child| {
-        if let Some(group) = group {
-            signal_group(group, Signal::SIGKILL);
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        if let Some(group) = group {
-            kill_group(group);
-        }
-    };
+        .stderr(stderr);
+    lead_group_blocking(&mut command);
+    let mut child = command.spawn().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => CallError::Missing,
+        _ => failed(format!("cannot run: {error}")),
+    })?;
     let timeout = call_timeout();
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -384,11 +370,11 @@ fn call(args: &[&str]) -> Result<(), CallError> {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                kill(&mut child);
+                kill_tree_blocking(&mut child);
                 return Err(CallError::TimedOut { args: joined, timeout });
             }
             Err(error) => {
-                kill(&mut child);
+                kill_tree_blocking(&mut child);
                 return Err(failed(format!("cannot wait for it: {error}")));
             }
         }
@@ -421,7 +407,6 @@ pub(crate) fn installed() -> bool {
 }
 
 fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
     path.metadata()
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }

@@ -12,14 +12,13 @@ use super::store::{self, StoreError};
 const DOCUMENT_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct OffDocument {
+pub(super) struct OffDocument {
     /// The common git directory of each Repository that is Off.
     repositories: Vec<PathBuf>,
 }
 
-/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
-pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
-    store::load::<OffDocument>(path, DOCUMENT_VERSION).map(|_| ())
+impl store::Stored for OffDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// Which Repositories are Off, kept in a document of the state directory so that it survives restarts of the Daemon.

@@ -3,7 +3,7 @@
 //! crash or a restart (ADR 0012).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -57,13 +57,12 @@ pub(crate) type Key = (PathBuf, String, Option<PathBuf>);
 
 /// The document holding every record.
 #[derive(Debug, Serialize, Deserialize)]
-struct ContainerDocument {
+pub(super) struct ContainerDocument {
     containers: Vec<ContainerRecord>,
 }
 
-/// Whether the document at `path` can be read, as the next request that needs it reads it. Nothing is kept or written.
-pub(super) fn readable(path: &Path) -> Result<(), StoreError> {
-    store::load::<ContainerDocument>(path, DOCUMENT_VERSION).map(|_| ())
+impl store::Stored for ContainerDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// The records of the running containers, written to their document on every change.
