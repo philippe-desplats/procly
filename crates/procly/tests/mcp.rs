@@ -10,10 +10,11 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{
-    DEADLINE, Procly, assert_success, free_port, git, git_repository, git_worktree_add, stderr, stdout, test_server,
+    DEADLINE, Procly, assert_success, eventually, eventually_within, free_port, git, git_repository, git_worktree_add,
+    stderr, stdout, test_server,
 };
 use serde_json::{Value, json};
 
@@ -102,6 +103,56 @@ impl McpServer {
                 return message;
             }
         }
+    }
+
+    /// Sends a call of the tool `name` without waiting for its answer, and returns the id of the request.
+    fn start_call(&mut self, name: &str, arguments: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut params = json!({ "name": name });
+        params["arguments"] = arguments;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params }));
+        id
+    }
+
+    /// Tells the server that the client gave up on the request `id`.
+    fn cancel(&mut self, id: u64) {
+        self.send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": id, "reason": "the test gave up" }
+        }));
+    }
+
+    /// Every message the server writes within `duration`.
+    fn messages_within(&self, duration: Duration) -> Vec<Value> {
+        let deadline = Instant::now() + duration;
+        let mut messages = Vec::new();
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(line) = self.lines.recv_timeout(left) else {
+                break;
+            };
+            messages.push(serde_json::from_str(&line).expect("the server writes JSON on stdout"));
+        }
+        messages
+    }
+
+    /// The `procly <verb>` processes that are children of the server.
+    fn cli_children(&self, verb: &str) -> Vec<String> {
+        let table = Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid=,command="])
+            .output()
+            .expect("ps runs");
+        let own = self.child.id().to_string();
+        String::from_utf8_lossy(&table.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let (pid, parent) = (fields.next()?, fields.next()?);
+                let command: Vec<&str> = fields.collect();
+                (parent == own && command.contains(&verb)).then(|| format!("{pid} {}", command.join(" ")))
+            })
+            .collect()
     }
 
     /// Calls the tool `name` and returns its `result`.
@@ -611,4 +662,97 @@ fn the_server_ends_when_the_client_closes_its_input() {
         assert!(std::time::Instant::now() < deadline, "the server outlived its client");
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// How long a cancelled call may take to stop its command.
+const CANCEL_DEADLINE: Duration = Duration::from_secs(1);
+
+#[test]
+fn a_cancelled_wait_stops_its_command_and_gets_no_answer_while_the_job_goes_on() {
+    let procly = Procly::new();
+    let mut server = McpServer::start(&procly);
+    let job = procly.run(&["sleep 4"]);
+
+    let waiting = server.start_call("wait", json!({ "job": job }));
+    eventually("the command of the call to run", || {
+        !server.cli_children("wait").is_empty()
+    });
+    server.cancel(waiting);
+
+    eventually_within(
+        CANCEL_DEADLINE,
+        "the command of the cancelled call to stop",
+        || server.cli_children("wait").is_empty(),
+        || format!("still running: {:?}", server.cli_children("wait")),
+    );
+    let messages = server.messages_within(Duration::from_millis(500));
+    assert!(
+        messages.iter().all(|message| message["id"] != json!(waiting)),
+        "the cancelled request was answered: {messages:?}"
+    );
+
+    // Only the client side was cancelled: the Job ends on its own and reports its end as it always does.
+    let waited = procly.procly(&["wait", "--json", &job]);
+    assert_success(&waited);
+    assert!(stdout(&waited).contains("\"exit_code\":0"), "{}", stdout(&waited));
+    assert!(server.text("status", json!({})).contains(&job));
+}
+
+#[test]
+fn a_cancelled_up_stops_its_command_and_stops_no_service() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    let health = "[services.web.health]\ntimeout = '1m'\n";
+    fs::write(
+        main.join("procly.toml"),
+        format!(
+            "[services.web]\nrun = 'echo $$ >> {}; exec sleep 60'\nports = {{ http = {} }}\n{health}",
+            starts.display(),
+            free_port()
+        ),
+    )
+    .expect("write procly.toml");
+    let mut server = McpServer::start_in(&procly, &main);
+
+    let starting = server.start_call("up", json!({ "service": "web" }));
+    eventually("the Service to start", || starts.exists());
+    eventually("the command of the call to run", || {
+        !server.cli_children("up").is_empty()
+    });
+    server.cancel(starting);
+
+    eventually_within(
+        CANCEL_DEADLINE,
+        "the command of the cancelled call to stop",
+        || server.cli_children("up").is_empty(),
+        || format!("still running: {:?}", server.cli_children("up")),
+    );
+    let messages = server.messages_within(Duration::from_millis(500));
+    assert!(
+        messages.iter().all(|message| message["id"] != json!(starting)),
+        "the cancelled request was answered: {messages:?}"
+    );
+
+    // The Daemon started the Service and goes on with it, `down` still finds it and stops it.
+    let pid = common::read_pid(&starts);
+    assert!(common::is_alive(pid), "the Service was stopped with the call");
+    let down = procly.procly_in(&main, &["down", "web", "--json"]);
+    assert_success(&down);
+    common::wait_until_gone(pid);
+}
+
+#[test]
+fn a_cancellation_for_an_unknown_or_answered_request_changes_nothing() {
+    let procly = Procly::new();
+    let mut server = McpServer::start(&procly);
+    let job = procly.run(&["echo done"]);
+    let waited = server.text("wait", json!({ "job": job }));
+    let answered = server.next_id - 1;
+
+    server.cancel(9999);
+    server.cancel(answered);
+
+    assert_eq!(server.messages_within(Duration::from_millis(300)), Vec::<Value>::new());
+    assert_eq!(server.text("wait", json!({ "job": job })), waited);
 }

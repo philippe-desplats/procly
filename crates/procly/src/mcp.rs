@@ -14,7 +14,8 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::schemars::{self, JsonSchema};
-use rmcp::{ErrorData, ServerHandler, ServiceExt as _, tool, tool_handler, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt as _, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -172,8 +173,13 @@ impl McpServer {
 
     /// Runs `procly <verb…> --json <flags…> -- <values…>` in `cwd` and turns what it printed into a tool result. The
     /// values follow `--` so that one starting with a dash, such as a shell command, is never read as a flag.
+    ///
+    /// When the client cancels the request, the command is killed and the call returns at once. Only this client side
+    /// stops: the Daemon owns the Jobs and Services, and goes on with them. The library sends no answer for a
+    /// cancelled request, so what the call returns then is dropped.
     async fn invoke(
         &self,
+        context: &RequestContext<RoleServer>,
         verb: &[&str],
         flags: Vec<String>,
         values: Vec<String>,
@@ -194,7 +200,13 @@ impl McpServer {
             command.current_dir(cwd);
         }
         let name = verb.join(" ");
-        let output = match command.output().await {
+        let output = tokio::select! {
+            () = context.ct.cancelled() => {
+                return Ok(failure(&name, EXIT_PROCLY_FAILURE, "the request was cancelled", ""));
+            }
+            output = command.output() => output,
+        };
+        let output = match output {
             Ok(output) => output,
             Err(source) => {
                 let place = cwd.map_or_else(|| "the current directory".to_owned(), |cwd| cwd.display().to_string());
@@ -249,12 +261,16 @@ impl McpServer {
                        or `reused` when the same command already runs in the same Worktree and directory. Same as \
                        `procly run --json`."
     )]
-    async fn run(&self, Parameters(arguments): Parameters<RunArguments>) -> Result<CallToolResult, ErrorData> {
+    async fn run(
+        &self,
+        Parameters(arguments): Parameters<RunArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
         let mut flags = Vec::new();
         if let Some(timeout) = arguments.timeout {
             flags.extend(["--timeout".to_owned(), timeout]);
         }
-        self.invoke(&["run"], flags, vec![arguments.command], arguments.cwd)
+        self.invoke(&context, &["run"], flags, vec![arguments.command], arguments.cwd)
             .await
     }
 
@@ -263,8 +279,12 @@ impl McpServer {
                        A Job that exits with a code other than 0 or times out is a tool error carrying that code. \
                        Same as `procly wait --json`."
     )]
-    async fn wait(&self, Parameters(arguments): Parameters<WaitArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["wait"], Vec::new(), vec![arguments.job], arguments.cwd)
+    async fn wait(
+        &self,
+        Parameters(arguments): Parameters<WaitArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.invoke(&context, &["wait"], Vec::new(), vec![arguments.job], arguments.cwd)
             .await
     }
 
@@ -272,9 +292,19 @@ impl McpServer {
         description = "Return the recent output of a running or ended Job, or of a Service of the Worktree, in one \
                        response. Same as `procly logs --json`."
     )]
-    async fn logs(&self, Parameters(arguments): Parameters<LogsArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["logs"], Vec::new(), vec![arguments.job_or_service], arguments.cwd)
-            .await
+    async fn logs(
+        &self,
+        Parameters(arguments): Parameters<LogsArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.invoke(
+            &context,
+            &["logs"],
+            Vec::new(),
+            vec![arguments.job_or_service],
+            arguments.cwd,
+        )
+        .await
     }
 
     #[tool(
@@ -282,22 +312,37 @@ impl McpServer {
                        return where to reach it. Without a Service, start every declared Service no Group covers. \
                        Same as `procly up --json`."
     )]
-    async fn up(&self, Parameters(arguments): Parameters<UpArguments>) -> Result<CallToolResult, ErrorData> {
+    async fn up(
+        &self,
+        Parameters(arguments): Parameters<UpArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
         let flags = if arguments.gitignore == Some(true) {
             vec!["--gitignore".to_owned()]
         } else {
             Vec::new()
         };
-        self.invoke(&["up"], flags, arguments.service.into_iter().collect(), arguments.cwd)
-            .await
+        self.invoke(
+            &context,
+            &["up"],
+            flags,
+            arguments.service.into_iter().collect(),
+            arguments.cwd,
+        )
+        .await
     }
 
     #[tool(
         description = "Stop a Service of the Worktree, or all of its Services without an argument, with their whole \
                        process trees. Same as `procly down --json`."
     )]
-    async fn down(&self, Parameters(arguments): Parameters<DownArguments>) -> Result<CallToolResult, ErrorData> {
+    async fn down(
+        &self,
+        Parameters(arguments): Parameters<DownArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.invoke(
+            &context,
             &["down"],
             Vec::new(),
             arguments.service.into_iter().collect(),
@@ -310,8 +355,12 @@ impl McpServer {
         description = "Return the variables Procly injects into a Service of the Worktree: its Leases, its Derived \
                        variables, `PROCLY=1` and `PROCLY_SERVICE`, without starting it. Same as `procly env --json`."
     )]
-    async fn env(&self, Parameters(arguments): Parameters<EnvArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["env"], Vec::new(), vec![arguments.service], arguments.cwd)
+    async fn env(
+        &self,
+        Parameters(arguments): Parameters<EnvArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.invoke(&context, &["env"], Vec::new(), vec![arguments.service], arguments.cwd)
             .await
     }
 
@@ -319,13 +368,18 @@ impl McpServer {
         description = "Return the Repository, the current Worktree, its Services and its Jobs. Same as `procly \
                        status --json`."
     )]
-    async fn status(&self, Parameters(arguments): Parameters<StatusArguments>) -> Result<CallToolResult, ErrorData> {
+    async fn status(
+        &self,
+        Parameters(arguments): Parameters<StatusArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
         let flags = if arguments.all == Some(true) {
             vec!["--all".to_owned()]
         } else {
             Vec::new()
         };
-        self.invoke(&["status"], flags, Vec::new(), arguments.cwd).await
+        self.invoke(&context, &["status"], flags, Vec::new(), arguments.cwd)
+            .await
     }
 
     #[tool(
@@ -336,13 +390,14 @@ impl McpServer {
     async fn worktree_init(
         &self,
         Parameters(arguments): Parameters<WorktreeInitArguments>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let values = arguments
             .path
             .map(|path| path.to_string_lossy().into_owned())
             .into_iter()
             .collect();
-        self.invoke(&["worktree", "init"], Vec::new(), values, arguments.cwd)
+        self.invoke(&context, &["worktree", "init"], Vec::new(), values, arguments.cwd)
             .await
     }
 
@@ -355,13 +410,14 @@ impl McpServer {
     async fn worktree_release(
         &self,
         Parameters(arguments): Parameters<WorktreeReleaseArguments>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let values = arguments
             .path
             .map(|path| path.to_string_lossy().into_owned())
             .into_iter()
             .collect();
-        self.invoke(&["worktree", "release"], Vec::new(), values, arguments.cwd)
+        self.invoke(&context, &["worktree", "release"], Vec::new(), values, arguments.cwd)
             .await
     }
 
@@ -371,13 +427,17 @@ impl McpServer {
                        going on after a failure, which is a tool error with exit code 6 carrying the report. Without \
                        it nothing is deleted. Same as `procly gc --json`."
     )]
-    async fn gc(&self, Parameters(arguments): Parameters<GcArguments>) -> Result<CallToolResult, ErrorData> {
+    async fn gc(
+        &self,
+        Parameters(arguments): Parameters<GcArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
         let flags = if arguments.apply == Some(true) {
             vec!["--apply".to_owned()]
         } else {
             Vec::new()
         };
-        self.invoke(&["gc"], flags, Vec::new(), arguments.cwd).await
+        self.invoke(&context, &["gc"], flags, Vec::new(), arguments.cwd).await
     }
 
     #[tool(
@@ -385,8 +445,13 @@ impl McpServer {
                        fixes a problem. Nothing is changed or run. A check that found a problem is a tool error with \
                        exit code 7 carrying the document. Same as `procly doctor --json`."
     )]
-    async fn doctor(&self, Parameters(arguments): Parameters<DoctorArguments>) -> Result<CallToolResult, ErrorData> {
-        self.invoke(&["doctor"], Vec::new(), Vec::new(), arguments.cwd).await
+    async fn doctor(
+        &self,
+        Parameters(arguments): Parameters<DoctorArguments>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.invoke(&context, &["doctor"], Vec::new(), Vec::new(), arguments.cwd)
+            .await
     }
 }
 
