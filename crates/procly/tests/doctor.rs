@@ -1,0 +1,1013 @@
+//! `procly doctor`: checks that Procly can work here, tells the command that fixes each problem and changes nothing.
+//!
+//! Every run has a home directory, a state directory and a configuration directory of its own, and fake `docker`,
+//! `launchctl` and `systemctl` first in the `PATH`, so that no test reaches the Session unit, the agent configuration
+//! or the Docker engine of the developer.
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+
+use common::{
+    Procly, assert_success, eventually, free_port, git, git_repository, git_worktree_add, json_document,
+    json_schema_version, json_succeeded, stderr, stdout, test_server,
+};
+use serde_json::{Value, json};
+
+/// A fake `launchctl` or `systemctl` that remembers whether the unit is loaded in a file next to it, and logs its calls.
+const FAKE_MANAGER: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+echo "$(basename "$0") $*" >> "$dir/calls"
+if [ "$1" = "--user" ]; then shift; fi
+case "$1" in
+    print) [ -f "$dir/loaded" ] || exit 113; echo "state = running" ;;
+    bootstrap) touch "$dir/loaded" ;;
+    bootout) [ -f "$dir/loaded" ] || exit 3; rm "$dir/loaded" ;;
+    enable) touch "$dir/loaded" ;;
+    disable) rm -f "$dir/loaded" ;;
+    is-enabled) if [ -f "$dir/loaded" ]; then echo enabled; else echo disabled; exit 1; fi ;;
+    is-active) if [ -f "$dir/loaded" ]; then echo active; else echo inactive; exit 3; fi ;;
+esac
+"#;
+
+/// A fake `docker` whose `compose version` answers with the content of `compose-version` next to it, or fails when
+/// that file is missing. Any other command lists nothing.
+const FAKE_DOCKER: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+if [ "$1" = "compose" ] && [ "$2" = "version" ]; then
+    [ -f "$dir/compose-version" ] || { echo "docker: 'compose' is not a docker command." >&2; exit 1; }
+    cat "$dir/compose-version"
+    exit 0
+fi
+exit 0
+"#;
+
+/// A fake `portless` that logs its calls next to it, and fails to remove an alias while `fail-remove` is there.
+const FAKE_PORTLESS: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+echo "$*" >> "$dir/portless-calls"
+if [ "$2" = "--remove" ] && [ -f "$dir/fail-remove" ]; then echo "the proxy is not running" >&2; exit 1; fi
+exit 0
+"#;
+
+/// A healthy machine for `doctor`: the Main worktree of a Repository, a home directory and fake tools of its own.
+struct Setup {
+    procly: Procly,
+    home: PathBuf,
+    bin: PathBuf,
+    main_worktree: PathBuf,
+}
+
+impl Setup {
+    fn new() -> Self {
+        let procly = Procly::new();
+        let (home, bin) = (procly.scratch().join("home"), procly.scratch().join("bin"));
+        std::fs::create_dir_all(&home).expect("create the home directory");
+        std::fs::create_dir_all(&bin).expect("create the fake tools directory");
+        for (tool, script) in [
+            ("launchctl", FAKE_MANAGER),
+            ("systemctl", FAKE_MANAGER),
+            ("docker", FAKE_DOCKER),
+            ("portless", FAKE_PORTLESS),
+        ] {
+            let path = bin.join(tool);
+            std::fs::write(&path, script).expect("write a fake tool");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
+        }
+        std::fs::write(bin.join("compose-version"), "2.29.1\n").expect("write the fake compose version");
+        let main_worktree = git_repository(procly.scratch(), "app");
+        Self {
+            procly,
+            home,
+            bin,
+            main_worktree,
+        }
+    }
+
+    /// `procly` with `args` in `dir`, with the home directory and the fake tools of this setup.
+    fn run(&self, dir: &Path, args: &[&str]) -> Output {
+        self.command(dir).args(args).output().expect("the procly binary runs")
+    }
+
+    fn command(&self, dir: &Path) -> Command {
+        let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default());
+        let mut command = self.procly.command();
+        command
+            .current_dir(dir)
+            .env("HOME", &self.home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env("PATH", path);
+        command
+    }
+
+    /// `procly doctor --json` in the Repository.
+    fn doctor(&self) -> Output {
+        self.run(&self.main_worktree, &["doctor", "--json"])
+    }
+
+    /// Declares `web` in the Repository, listening on its leased port, declared as `port`.
+    fn declare_web(&self, port: u16) {
+        write(
+            &self.main_worktree,
+            "procly.toml",
+            &format!(
+                "[services.web]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {port} }}\n",
+                test_server().display()
+            ),
+        );
+    }
+
+    /// Installs the Session unit, which the fake session manager loads, and the Guard in the Repository.
+    fn install_unit_and_guard(&self) {
+        assert_success(&self.run(&self.main_worktree, &["unit", "install"]));
+        assert_success(&self.run(&self.main_worktree, &["agent", "install"]));
+    }
+
+    /// Makes every check pass.
+    fn healthy() -> Self {
+        let setup = Self::new();
+        setup.declare_web(free_port());
+        setup.turn_portless_on();
+        setup.install_unit_and_guard();
+        assert_success(&setup.run(&setup.main_worktree, &["worktree", "hooks"]));
+        setup
+    }
+
+    /// Turns Portless on in the `procly.toml` of the Repository.
+    fn turn_portless_on(&self) {
+        let file = self.main_worktree.join("procly.toml");
+        let declared = std::fs::read_to_string(&file).expect("read the configuration");
+        write(
+            &self.main_worktree,
+            "procly.toml",
+            &format!("[settings]\nportless = true\n{declared}"),
+        );
+    }
+
+    fn unit_calls(&self) -> String {
+        std::fs::read_to_string(self.bin.join("calls")).unwrap_or_default()
+    }
+}
+
+fn write(dir: &Path, name: &str, content: &str) {
+    std::fs::write(dir.join(name), content).expect("write the file");
+}
+
+/// The check `name` of a `doctor --json` document.
+fn check<'a>(document: &'a Value, name: &str) -> &'a Value {
+    document["checks"]
+        .as_array()
+        .and_then(|checks| checks.iter().find(|check| check["name"] == json!(name)))
+        .unwrap_or_else(|| panic!("no check {name} in {document}"))
+}
+
+fn status<'a>(document: &'a Value, name: &str) -> &'a str {
+    check(document, name)["status"].as_str().expect("a status is a string")
+}
+
+fn message<'a>(document: &'a Value, name: &str) -> &'a str {
+    check(document, name)["message"]
+        .as_str()
+        .expect("a message is a string")
+}
+
+/// The document of a `doctor --json` that found a problem: exit 7, and nothing on stderr.
+fn problems(output: &Output) -> Value {
+    assert_eq!(output.status.code(), Some(7), "stderr: {}", stderr(output));
+    assert_eq!(stderr(output), "", "--json prints nothing on stderr");
+    let document = json_document(output);
+    assert_eq!(document["result"], json!("problems"));
+    document
+}
+
+const ALL_CHECKS: [&str; 11] = [
+    "docker_compose",
+    "daemon",
+    "session_unit",
+    "state_documents",
+    "configuration",
+    "guard",
+    "portless",
+    "worktrunk_hooks",
+    "leased_ports",
+    "orphans",
+    "portless_aliases",
+];
+
+#[test]
+fn a_healthy_setup_passes_every_check_and_exits_0() {
+    let setup = Setup::healthy();
+
+    let output = setup.doctor();
+
+    let document = json_succeeded(&output);
+    assert_eq!(document["result"], json!("healthy"));
+    let names: Vec<&str> = document["checks"]
+        .as_array()
+        .expect("checks is a list")
+        .iter()
+        .map(|check| check["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, ALL_CHECKS);
+    for name in ALL_CHECKS {
+        assert_eq!(
+            status(&document, name),
+            "passed",
+            "{name}: {}",
+            message(&document, name)
+        );
+        assert_eq!(check(&document, name)["fix"], Value::Null, "{name}");
+    }
+    assert_eq!(document["schema_version"], json_schema_version(&setup.procly));
+}
+
+#[test]
+fn the_text_of_a_healthy_setup_lists_one_passed_line_per_check_and_exits_0() {
+    let setup = Setup::healthy();
+
+    let output = setup.run(&setup.main_worktree, &["doctor"]);
+
+    assert_success(&output);
+    assert_eq!(stderr(&output), "");
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), ALL_CHECKS.len(), "{text}");
+    for (line, name) in lines.iter().zip(ALL_CHECKS) {
+        assert!(line.starts_with(&format!("passed  {name}: ")), "{line}");
+    }
+}
+
+#[test]
+fn a_missing_docker_compose_is_a_problem_and_the_other_checks_still_run() {
+    let setup = Setup::healthy();
+    std::fs::remove_file(setup.bin.join("compose-version")).expect("remove the fake compose version");
+
+    let output = setup.doctor();
+
+    let document = problems(&output);
+    assert_eq!(status(&document, "docker_compose"), "failed");
+    assert!(message(&document, "docker_compose").contains("docker compose v2 is unavailable"));
+    let fix = &check(&document, "docker_compose")["fix"];
+    if cfg!(target_os = "macos") {
+        assert_eq!(fix, &json!("brew install --cask docker"));
+    } else {
+        assert_eq!(fix, &Value::Null);
+    }
+    assert_eq!(status(&document, "daemon"), "passed");
+    assert_eq!(status(&document, "orphans"), "passed");
+}
+
+#[test]
+fn docker_compose_v1_is_a_problem() {
+    let setup = Setup::healthy();
+    write(&setup.bin, "compose-version", "1.29.2\n");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "docker_compose"), "failed");
+    assert!(message(&document, "docker_compose").contains("found docker compose 1.29.2"));
+}
+
+/// A Daemon of another version, standing on the socket of `state_dir`: it answers the request of `doctor` with
+/// `answer`, under the protocol version the request carried unless `speaks` says another one.
+fn fake_daemon(state_dir: &Path, answer: Value, speaks: Option<u64>) -> std::thread::JoinHandle<()> {
+    let listener = UnixListener::bind(state_dir.join("procly.sock")).expect("bind the fake Daemon socket");
+    std::thread::spawn(move || {
+        // `doctor` asks once, a second connection ends the thread with the test.
+        let Ok((stream, _)) = listener.accept() else { return };
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line).expect("read the request");
+        let request: Value = serde_json::from_str(&line).expect("the request is JSON");
+        let mut response = answer;
+        response["version"] = speaks.map_or_else(|| request["version"].clone(), |version| json!(version));
+        let mut stream = &stream;
+        writeln!(stream, "{response}").expect("write the response");
+    })
+}
+
+#[test]
+fn a_daemon_of_another_version_is_a_problem_and_the_fix_restarts_it() {
+    let setup = Setup::new();
+    let daemon = fake_daemon(
+        setup.procly.state_dir(),
+        json!({ "response": "doctor", "procly_version": "0.0.1", "checks": [] }),
+        None,
+    );
+
+    let document = problems(&setup.doctor());
+
+    daemon.join().expect("the fake Daemon ends");
+    assert_eq!(status(&document, "daemon"), "failed");
+    assert!(
+        message(&document, "daemon").contains("the Daemon runs procly 0.0.1"),
+        "{}",
+        message(&document, "daemon")
+    );
+    assert_eq!(
+        check(&document, "daemon")["fix"],
+        json!(format!(
+            "kill \"$(cat {})\"",
+            setup.procly.state_dir().join("daemon.pid").display()
+        ))
+    );
+}
+
+#[test]
+fn a_daemon_speaking_another_protocol_version_is_a_problem_and_its_checks_are_skipped() {
+    let setup = Setup::new();
+    let daemon = fake_daemon(
+        setup.procly.state_dir(),
+        json!({ "response": "error", "message": "no" }),
+        Some(1),
+    );
+
+    let document = problems(&setup.doctor());
+
+    daemon.join().expect("the fake Daemon ends");
+    assert_eq!(status(&document, "daemon"), "failed");
+    assert!(message(&document, "daemon").contains("speaks protocol version 1"));
+    assert!(check(&document, "daemon")["fix"].is_string());
+    assert_eq!(status(&document, "leased_ports"), "skipped");
+    assert_eq!(status(&document, "orphans"), "skipped");
+}
+
+#[test]
+fn doctor_reports_a_daemon_that_does_not_run_and_never_starts_one() {
+    let setup = Setup::new();
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "daemon"), "failed");
+    assert!(
+        message(&document, "daemon").starts_with("no Daemon runs"),
+        "{}",
+        message(&document, "daemon")
+    );
+    assert_eq!(check(&document, "daemon")["fix"], json!("procly status"));
+    assert_eq!(status(&document, "leased_ports"), "skipped");
+    assert_eq!(status(&document, "orphans"), "skipped");
+    assert_eq!(status(&document, "state_documents"), "passed");
+    // Starting a Daemon would reconcile what the last one left: nothing was created, no socket, no pid, no log.
+    let left: Vec<_> = std::fs::read_dir(setup.procly.state_dir())
+        .expect("read the state directory")
+        .map(|entry| entry.expect("read the entry").file_name())
+        .collect();
+    assert!(left.is_empty(), "doctor wrote into the state directory: {left:?}");
+}
+
+#[test]
+fn a_daemon_that_answers_with_an_error_is_a_problem_and_its_checks_are_skipped() {
+    let setup = Setup::new();
+    let daemon = fake_daemon(
+        setup.procly.state_dir(),
+        json!({ "response": "error", "message": "the checks could not run" }),
+        None,
+    );
+
+    let document = problems(&setup.doctor());
+
+    daemon.join().expect("the fake Daemon ends");
+    assert_eq!(status(&document, "daemon"), "failed");
+    assert!(message(&document, "daemon").contains("the checks could not run"));
+    assert_eq!(status(&document, "orphans"), "skipped");
+}
+
+#[test]
+fn a_settings_file_that_is_not_json_is_a_guard_problem() {
+    let setup = Setup::healthy();
+    write(&setup.main_worktree.join(".claude"), "settings.json", "{ not json");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "guard"), "failed");
+    assert!(
+        message(&document, "guard").contains("cannot parse"),
+        "{}",
+        message(&document, "guard")
+    );
+}
+
+#[test]
+fn a_daemon_that_cannot_start_is_a_problem_and_the_checks_that_need_none_still_run() {
+    let setup = Setup::healthy();
+    // A state directory that is a file: the Daemon can neither be reached nor started in it.
+    let state = setup.procly.scratch().join("not-a-directory");
+    write(setup.procly.scratch(), "not-a-directory", "");
+
+    let output = setup
+        .command(&setup.main_worktree)
+        .env("PROCLY_STATE_DIR", &state)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("the procly binary runs");
+
+    let document = problems(&output);
+    assert_eq!(status(&document, "daemon"), "failed");
+    assert_eq!(status(&document, "leased_ports"), "skipped");
+    assert_eq!(status(&document, "orphans"), "skipped");
+    assert_eq!(status(&document, "docker_compose"), "passed");
+    assert_eq!(status(&document, "configuration"), "passed");
+}
+
+#[test]
+fn a_session_unit_that_is_not_installed_is_a_warning_with_its_fix_and_the_exit_code_stays_0() {
+    let setup = Setup::healthy();
+    assert_success(&setup.run(&setup.main_worktree, &["unit", "remove"]));
+    std::fs::remove_file(setup.bin.join("calls")).expect("forget the calls of the removal");
+
+    let output = setup.doctor();
+
+    let document = json_succeeded(&output);
+    assert_eq!(document["result"], json!("healthy"));
+    assert_eq!(status(&document, "session_unit"), "warning");
+    assert!(message(&document, "session_unit").contains("is not installed"));
+    assert_eq!(check(&document, "session_unit")["fix"], json!("procly unit install"));
+    assert_eq!(
+        setup.unit_calls(),
+        "",
+        "no unit of this home exists, so the manager has nothing to say about it"
+    );
+    let text = setup.run(&setup.main_worktree, &["doctor"]);
+    assert_success(&text);
+    assert_eq!(stderr(&text), "");
+    assert!(stdout(&text).contains("warning session_unit: "), "{}", stdout(&text));
+    assert!(
+        stdout(&text).contains("        fix: procly unit install"),
+        "{}",
+        stdout(&text)
+    );
+}
+
+#[test]
+fn a_missing_session_unit_does_not_hide_a_failed_check() {
+    let setup = Setup::new();
+    write(setup.procly.state_dir(), "leases.json", "this is not json");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "session_unit"), "warning");
+    assert_eq!(status(&document, "state_documents"), "failed");
+}
+
+#[test]
+fn a_session_unit_that_is_not_loaded_is_a_problem() {
+    let setup = Setup::healthy();
+    std::fs::remove_file(setup.bin.join("loaded")).expect("unload the fake unit");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "session_unit"), "failed");
+    assert!(message(&document, "session_unit").contains("installed but not loaded"));
+    assert_eq!(check(&document, "session_unit")["fix"], json!("procly unit install"));
+}
+
+#[test]
+fn an_unreadable_state_document_is_a_problem_with_the_command_that_moves_it_aside() {
+    let setup = Setup::healthy();
+    let leases = setup.procly.state_dir().join("leases.json");
+    write(setup.procly.state_dir(), "leases.json", "this is not json");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "state_documents"), "failed");
+    assert!(
+        message(&document, "state_documents").contains(&format!("cannot parse {}", leases.display())),
+        "{}",
+        message(&document, "state_documents")
+    );
+    assert_eq!(
+        check(&document, "state_documents")["fix"],
+        json!(format!("mv {0} {0}.broken", leases.display()))
+    );
+    // What the Daemon cannot read is no Daemon problem, and the checks that need it say so.
+    assert_eq!(status(&document, "daemon"), "passed");
+    assert_eq!(status(&document, "leased_ports"), "skipped");
+    assert_eq!(status(&document, "orphans"), "skipped");
+}
+
+#[test]
+fn a_state_document_of_a_newer_procly_is_a_problem_without_a_command_that_would_lose_it() {
+    let setup = Setup::healthy();
+    write(
+        setup.procly.state_dir(),
+        "indexes.json",
+        r#"{"version":99,"indexes":[]}"#,
+    );
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "state_documents"), "failed");
+    assert!(message(&document, "state_documents").contains("written by a newer procly"));
+    assert_eq!(check(&document, "state_documents")["fix"], Value::Null);
+}
+
+#[test]
+fn an_invalid_procly_toml_is_a_problem_with_the_command_that_opens_it() {
+    let setup = Setup::healthy();
+    write(&setup.main_worktree, "procly.toml", "[services.web]\nbogus = 1\n");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "configuration"), "failed");
+    assert!(
+        message(&document, "configuration").contains("bogus"),
+        "{}",
+        message(&document, "configuration")
+    );
+    assert_eq!(
+        check(&document, "configuration")["fix"],
+        json!(format!(
+            "${{EDITOR:-vi}} {}",
+            setup.main_worktree.join("procly.toml").display()
+        ))
+    );
+}
+
+#[test]
+fn a_driver_that_does_not_load_is_a_problem_naming_its_service() {
+    let setup = Setup::healthy();
+    write(
+        &setup.main_worktree,
+        "procly.toml",
+        "[services.db]\ncompose = 'postgres'\ndriver = 'nowhere'\nresources = { dev = { name = 'app' } }\n",
+    );
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "configuration"), "failed");
+    assert!(
+        message(&document, "configuration").starts_with("service db: "),
+        "{}",
+        message(&document, "configuration")
+    );
+    assert!(message(&document, "configuration").contains("nowhere"));
+    assert_eq!(
+        check(&document, "configuration")["fix"],
+        json!(format!(
+            "${{EDITOR:-vi}} {}",
+            setup.main_worktree.join(".procly/drivers/nowhere.toml").display()
+        ))
+    );
+}
+
+#[test]
+fn a_worktree_without_a_procly_toml_and_a_directory_outside_git_skip_the_checks_that_need_them() {
+    let setup = Setup::new();
+    assert_success(&setup.run(&setup.main_worktree, &["unit", "install"]));
+    assert_success(&setup.run(&setup.main_worktree, &["status"]));
+
+    let in_repository = json_succeeded(&setup.doctor());
+    let outside = json_succeeded(&setup.run(setup.procly.scratch(), &["doctor", "--json"]));
+
+    assert_eq!(status(&in_repository, "configuration"), "skipped");
+    assert!(message(&in_repository, "configuration").contains("has no procly.toml"));
+    assert_eq!(status(&in_repository, "guard"), "skipped");
+    for name in ["configuration", "guard"] {
+        assert_eq!(status(&outside, name), "skipped", "{name}");
+        assert!(
+            message(&outside, name).contains("no git Repository"),
+            "{}",
+            message(&outside, name)
+        );
+    }
+    assert_eq!(status(&outside, "orphans"), "passed");
+}
+
+#[test]
+fn a_guard_that_left_the_settings_is_a_problem_with_the_command_that_writes_it_again() {
+    let setup = Setup::healthy();
+    write(&setup.main_worktree.join(".claude"), "settings.json", "{}\n");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "guard"), "failed");
+    assert!(message(&document, "guard").contains("no longer registers the Guard"));
+    assert_eq!(check(&document, "guard")["fix"], json!("procly agent install"));
+}
+
+#[test]
+fn a_guard_the_user_edited_is_a_problem_that_names_no_command_since_install_leaves_it_alone() {
+    let setup = Setup::healthy();
+    let settings = setup.main_worktree.join(".claude/settings.json");
+    let text = std::fs::read_to_string(&settings).expect("read the settings");
+    std::fs::write(&settings, text.replace("\"Bash\"", "\"Bash|Edit\"")).expect("edit the Guard");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "guard"), "failed");
+    assert!(message(&document, "guard").contains("is not the one Procly recorded"));
+    assert_eq!(check(&document, "guard")["fix"], Value::Null);
+}
+
+#[test]
+fn a_service_that_ended_on_a_port_mismatch_is_a_problem_with_the_command_that_prints_its_lease() {
+    let setup = Setup::healthy();
+    let (port, actual) = (free_port(), free_port());
+    write(
+        &setup.main_worktree,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = '{} --port {actual}'\nports = {{ http = {port} }}\nhealth = {{ timeout = '10s' }}\n",
+            test_server().display()
+        ),
+    );
+    assert_eq!(setup.run(&setup.main_worktree, &["up", "web"]).status.code(), Some(4));
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "leased_ports"), "failed");
+    assert!(
+        message(&document, "leased_ports").contains(&format!(
+            "service web of {} listened on port {actual} instead of its Lease, port {port} (Port mismatch)",
+            setup.main_worktree.display()
+        )),
+        "{}",
+        message(&document, "leased_ports")
+    );
+    assert_eq!(
+        check(&document, "leased_ports")["fix"],
+        json!(format!("cd {} && procly env web", setup.main_worktree.display()))
+    );
+}
+
+/// A dev server started outside Procly, killed when the test ends.
+struct ForeignServer(Child);
+
+impl ForeignServer {
+    fn start(dir: &Path, port: u16) -> Self {
+        let child = Command::new(test_server())
+            .args(["--port", &port.to_string()])
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("the test server starts");
+        eventually("the dev server to listen", || {
+            TcpStream::connect(("127.0.0.1", port)).is_ok()
+        });
+        Self(child)
+    }
+}
+
+impl Drop for ForeignServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_foreign_process_on_a_leased_port_is_a_problem_with_the_command_that_stops_it() {
+    let setup = Setup::healthy();
+    let port = free_port();
+    setup.declare_web(port);
+    assert_success(&setup.run(&setup.main_worktree, &["up", "web"]));
+    assert_success(&setup.run(&setup.main_worktree, &["down", "web"]));
+    let server = ForeignServer::start(&setup.main_worktree, port);
+
+    let document = problems(&setup.doctor());
+
+    let pid = server.0.id();
+    assert_eq!(status(&document, "leased_ports"), "failed");
+    assert!(
+        message(&document, "leased_ports").contains(&format!(
+            "lease web.http port {port} of {} is held by process {pid} procly-test-server, which Procly did not start",
+            setup.main_worktree.display()
+        )),
+        "{}",
+        message(&document, "leased_ports")
+    );
+    assert_eq!(check(&document, "leased_ports")["fix"], json!(format!("kill {pid}")));
+}
+
+#[test]
+fn a_service_listening_on_its_own_lease_is_no_foreign_process() {
+    let setup = Setup::healthy();
+    assert_success(&setup.run(&setup.main_worktree, &["up", "web"]));
+
+    let document = json_succeeded(&setup.doctor());
+
+    assert_eq!(status(&document, "leased_ports"), "passed");
+}
+
+#[test]
+fn the_orphans_of_a_removed_worktree_are_a_problem_with_the_gc_command_that_lists_them() {
+    let setup = Setup::healthy();
+    let port = free_port();
+    setup.declare_web(port);
+    git(&setup.main_worktree, &["add", "procly.toml"]);
+    git(&setup.main_worktree, &["commit", "--quiet", "--message", "declare web"]);
+    let feature = git_worktree_add(&setup.main_worktree, "app-feature");
+    assert_success(&setup.run(&feature, &["up", "web"]));
+    assert_success(&setup.run(&feature, &["down", "web"]));
+    git(
+        &setup.main_worktree,
+        &["worktree", "remove", "--force", &feature.to_string_lossy()],
+    );
+
+    let output = setup.doctor();
+
+    let document = problems(&output);
+    assert_eq!(status(&document, "orphans"), "failed");
+    assert!(
+        message(&document, "orphans").ends_with("left by removed Worktrees"),
+        "{}",
+        message(&document, "orphans")
+    );
+    assert_eq!(check(&document, "orphans")["fix"], json!("procly gc"));
+    // Doctor lists, it does not collect: the Orphans are still there for the command it named.
+    let gc = setup.run(&setup.main_worktree, &["gc"]);
+    assert_success(&gc);
+    assert!(stdout(&gc).contains("lease web.http"), "{}", stdout(&gc));
+}
+
+#[test]
+fn portless_is_skipped_unless_the_settings_turn_it_on() {
+    let setup = Setup::healthy();
+    setup.declare_web(free_port());
+
+    let document = json_succeeded(&setup.doctor());
+
+    assert_eq!(status(&document, "portless"), "skipped");
+    assert_eq!(
+        message(&document, "portless"),
+        "settings.portless is not on, nothing calls portless"
+    );
+}
+
+#[test]
+fn a_missing_portless_is_a_problem_when_portless_is_on_with_the_command_that_installs_it() {
+    let setup = Setup::healthy();
+    std::fs::remove_file(setup.bin.join("portless")).expect("remove the fake portless");
+    // The directories of a real portless are left out, so that the check does not find the developer's.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let usual = std::env::split_paths(&path).filter(|dir| !dir.join("portless").exists());
+    let path = std::env::join_paths(std::iter::once(setup.bin.clone()).chain(usual)).expect("join the PATH");
+
+    let output = setup
+        .command(&setup.main_worktree)
+        .env("PATH", path)
+        .args(["doctor", "--json"])
+        .output()
+        .expect("the procly binary runs");
+
+    let document = problems(&output);
+    assert_eq!(status(&document, "portless"), "failed");
+    assert_eq!(
+        message(&document, "portless"),
+        "settings.portless is on and portless is not on the PATH, `procly up` makes no alias"
+    );
+    assert_eq!(
+        check(&document, "portless")["fix"],
+        json!("npm install --global portless")
+    );
+}
+
+#[test]
+fn a_portless_alias_no_lease_holds_is_a_problem_with_the_command_that_removes_it() {
+    let setup = Setup::healthy();
+    let feature = git_worktree_add(&setup.main_worktree, "app-feature");
+    write(
+        &feature,
+        "procly.toml",
+        &std::fs::read_to_string(setup.main_worktree.join("procly.toml")).expect("read"),
+    );
+    assert_success(&setup.run(&feature, &["up", "web"]));
+    assert_success(&setup.run(&feature, &["down", "web"]));
+    // The proxy is down when the Worktree is released: the Lease goes and the alias stays.
+    write(&setup.bin, "fail-remove", "");
+    assert_success(&setup.run(&feature, &["worktree", "release"]));
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "portless_aliases"), "failed");
+    assert!(
+        message(&document, "portless_aliases").starts_with("the Portless alias app-feature.web points to port "),
+        "{}",
+        message(&document, "portless_aliases")
+    );
+    assert_eq!(
+        check(&document, "portless_aliases")["fix"],
+        json!("portless alias --remove app-feature.web")
+    );
+    // Doctor ran none of it.
+    let calls = std::fs::read_to_string(setup.bin.join("portless-calls")).expect("the fake portless was called");
+    assert_eq!(calls.matches("--remove").count(), 1, "{calls}");
+}
+
+#[test]
+fn the_text_of_a_problem_gives_its_fix_and_the_exit_code_is_7() {
+    let setup = Setup::healthy();
+    write(setup.procly.state_dir(), "leases.json", "this is not json");
+
+    let output = setup.run(&setup.main_worktree, &["doctor"]);
+
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("failed  state_documents: cannot parse "), "{text}");
+    assert!(text.contains("        fix: mv "), "{text}");
+    assert!(text.contains("skipped orphans: "), "{text}");
+    assert!(
+        stderr(&output).starts_with("procly: 1 check failed, the commands above fix them and doctor ran none"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// Every file under `dir` with its content, but for the sockets, locks and logs of a running Daemon and the log of
+/// the fake session manager.
+fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read the directory") {
+            let path = entry.expect("read the entry").path();
+            if path.is_dir() {
+                if path.file_name().is_none_or(|name| name != ".git") {
+                    pending.push(path);
+                }
+            } else if path.file_name().is_some_and(|name| name != "calls")
+                && !matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("sock" | "lock" | "log" | "pid")
+                )
+            {
+                files.insert(path.clone(), std::fs::read(&path).unwrap_or_default());
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn doctor_changes_nothing_in_the_repository_the_state_directory_or_the_home() {
+    let setup = Setup::healthy();
+    write(setup.procly.state_dir(), "off.json", "this is not json");
+    // Setup::healthy starts the Daemon, so that the runs below find it running and doctor has nothing to start.
+    problems(&setup.doctor());
+    let scratch = setup.procly.scratch();
+    std::fs::remove_file(setup.bin.join("calls")).expect("forget the calls of the installation");
+    let before = (snapshot(scratch), snapshot(setup.procly.state_dir()));
+
+    problems(&setup.doctor());
+    setup.run(&setup.main_worktree, &["doctor"]);
+
+    assert_eq!(before, (snapshot(scratch), snapshot(setup.procly.state_dir())));
+    // It asks the session manager whether the unit is loaded, and never to load or unload it.
+    let calls = setup.unit_calls();
+    assert!(!calls.is_empty(), "doctor asked the session manager about the unit");
+    for write in ["bootstrap", "bootout", "enable ", "disable"] {
+        assert!(!calls.contains(write), "doctor ran {write}: {calls}");
+    }
+}
+
+/// A fake `claude` first in the `PATH` of the setup, which logs its directory and the arguments it got to `agent-calls`
+/// next to it, prints a line on its standard output and exits with `code`.
+fn fake_agent(setup: &Setup, code: i32) -> PathBuf {
+    let calls = setup.bin.join("agent-calls");
+    let script = format!(
+        "#!/bin/sh\nprintf 'directory=%s\\nflag=%s\\nprompt=%s\\n' \"$(pwd)\" \"$1\" \"$2\" >> '{}'\n\
+         echo the agent talks\nexit {code}\n",
+        calls.display()
+    );
+    let path = setup.bin.join("claude");
+    std::fs::write(&path, script).expect("write the fake agent");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
+    calls
+}
+
+/// A setup with one failed check, the corrupt `leases.json`, whose fix is the `mv` command that moves it aside.
+fn setup_with_a_problem() -> Setup {
+    let setup = Setup::healthy();
+    write(setup.procly.state_dir(), "leases.json", "this is not json");
+    setup
+}
+
+#[test]
+fn no_agent_runs_without_the_flag_and_the_json_document_carries_the_prompt() {
+    let setup = setup_with_a_problem();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.doctor();
+
+    let document = problems(&output);
+    assert!(!calls.exists(), "an agent ran without --agent");
+    assert_eq!(document["agent"], json!(null));
+    let prompt = document["prompt"].as_str().expect("the document carries the prompt");
+    assert!(prompt.contains("state_documents: cannot parse "), "{prompt}");
+    assert!(prompt.contains("- mv "), "{prompt}");
+    let text = setup.run(&setup.main_worktree, &["doctor"]);
+    assert!(!calls.exists(), "an agent ran without --agent");
+    assert!(!stdout(&text).contains("Commands:"), "{}", stdout(&text));
+}
+
+#[test]
+fn the_agent_gets_the_failed_checks_and_their_fixes_in_its_non_interactive_mode_from_the_current_directory() {
+    let setup = setup_with_a_problem();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.run(&setup.main_worktree, &["doctor", "--agent", "claude"]);
+
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+    let calls = std::fs::read_to_string(calls).expect("the agent ran");
+    let (directory, rest) = calls.split_once('\n').expect("the agent wrote its directory");
+    assert_eq!(
+        Path::new(directory.strip_prefix("directory=").expect("a directory line"))
+            .canonicalize()
+            .expect("canonicalize"),
+        setup.main_worktree.canonicalize().expect("canonicalize")
+    );
+    let (flag, prompt) = rest.split_once('\n').expect("the agent wrote its arguments");
+    assert_eq!(flag, "flag=-p");
+    assert!(prompt.contains("state_documents: cannot parse "), "{prompt}");
+    assert!(prompt.contains("- mv "), "{prompt}");
+    // Only the failed check is in the prompt, and the prompt is not printed as well.
+    assert!(!prompt.contains("docker_compose"), "{prompt}");
+    assert!(!stdout(&output).contains("Commands:"), "{}", stdout(&output));
+    // What the agent prints goes to stderr, the checks stay alone on stdout.
+    assert!(!stdout(&output).contains("the agent talks"), "{}", stdout(&output));
+    assert!(stderr(&output).contains("the agent talks"), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("failed  state_documents: "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn no_agent_is_started_when_every_check_passes() {
+    let setup = Setup::healthy();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.run(&setup.main_worktree, &["doctor", "--agent", "claude"]);
+
+    assert_success(&output);
+    assert!(!calls.exists(), "an agent ran with nothing to fix");
+    assert!(
+        stderr(&output).contains("nothing to hand to claude"),
+        "{}",
+        stderr(&output)
+    );
+
+    let json = setup.run(&setup.main_worktree, &["doctor", "--json", "--agent", "claude"]);
+    assert_success(&json);
+    assert!(!calls.exists(), "an agent ran with nothing to fix");
+    let document = json_document(&json);
+    assert_eq!(document["prompt"], json!(null));
+    assert_eq!(document["agent"], json!(null));
+}
+
+#[test]
+fn with_json_the_prompt_goes_to_the_agent_and_the_document_names_it_and_stdout_holds_the_document_alone() {
+    let setup = setup_with_a_problem();
+    let calls = fake_agent(&setup, 0);
+
+    let output = setup.run(&setup.main_worktree, &["doctor", "--json", "--agent", "claude"]);
+
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+    let document = json_document(&output);
+    assert_eq!(document["result"], json!("problems"));
+    assert_eq!(document["prompt"], json!(null));
+    assert_eq!(document["agent"], json!("claude"));
+    assert!(
+        std::fs::read_to_string(calls)
+            .expect("the agent ran")
+            .contains("prompt=")
+    );
+    assert!(stderr(&output).contains("the agent talks"), "{}", stderr(&output));
+}
+
+#[test]
+fn an_agent_that_fails_or_is_missing_exits_125() {
+    let setup = setup_with_a_problem();
+    fake_agent(&setup, 3);
+
+    let failing = setup.run(&setup.main_worktree, &["doctor", "--agent", "claude"]);
+    assert_eq!(failing.status.code(), Some(125), "{}", stderr(&failing));
+    assert!(stderr(&failing).contains("claude exited with"), "{}", stderr(&failing));
+
+    // Nothing named codex is on this PATH, whatever the developer installed.
+    let nowhere = setup.procly.scratch().join("no-bin");
+    let missing = setup
+        .command(&setup.main_worktree)
+        .env("PATH", &nowhere)
+        .args(["doctor", "--agent", "codex"])
+        .output()
+        .expect("the procly binary runs");
+    assert_eq!(missing.status.code(), Some(125), "{}", stderr(&missing));
+    assert!(stderr(&missing).contains("cannot run codex"), "{}", stderr(&missing));
+}
+
+#[test]
+fn an_unknown_agent_is_a_usage_error() {
+    let setup = Setup::healthy();
+
+    let output = setup.run(&setup.main_worktree, &["doctor", "--agent", "emacs"]);
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}

@@ -58,8 +58,12 @@ impl IsolatedRecord {
 pub(crate) type Key = (PathBuf, String, PathBuf);
 
 #[derive(Debug, Serialize, Deserialize)]
-struct IsolatedDocument {
+pub(super) struct IsolatedDocument {
     containers: Vec<IsolatedRecord>,
+}
+
+impl store::Stored for IsolatedDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// The records of the Isolated containers, read from their document on first use and written on every change.

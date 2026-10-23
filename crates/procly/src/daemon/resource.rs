@@ -46,8 +46,12 @@ pub(crate) struct LogicalResource {
 type Table = BTreeMap<ResourceKey, LogicalResource>;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ResourceDocument {
+pub(super) struct ResourceDocument {
     resources: Vec<LogicalResource>,
+}
+
+impl store::Stored for ResourceDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// Every Logical resource recorded, across all Repositories.

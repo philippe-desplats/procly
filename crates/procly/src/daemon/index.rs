@@ -46,8 +46,12 @@ struct Index {
 
 /// The document holding every index.
 #[derive(Debug, Serialize, Deserialize)]
-struct IndexDocument {
+pub(super) struct IndexDocument {
     indexes: Vec<Index>,
+}
+
+impl store::Stored for IndexDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// Every index the Daemon handed out, across all Repositories, so that no 2 resources of one container share one.

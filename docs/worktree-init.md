@@ -74,3 +74,30 @@ exec procly worktree init "$@"
 Called as `scripts/setup-worktree.sh /path/to/worktree` from anywhere, or as `scripts/setup-worktree.sh` from inside the Worktree, it prepares the right one. Move what the old script did into `copy` and `setup`.
 
 Before the Worktree is removed, `procly worktree release` stops its work and releases its Leases, see [Releasing a Worktree](worktree-release.md).
+
+## Worktrunk
+
+Worktrunk runs the hooks of its project config, `.config/wt.toml`, when it creates and removes a Worktree. `procly worktree hooks` writes the 2 hooks that call Procly, so that Worktrunk drives it with no script of yours:
+
+```console
+$ procly worktree hooks
+written /home/me/app/.config/wt.toml
+$ cat .config/wt.toml
+# >>> procly managed block: worktrunk >>>
+pre-start = "procly worktree init"
+pre-remove = "procly worktree release"
+# <<< procly managed block: worktrunk <<<
+```
+
+`pre-start` prepares the new Worktree with `worktree init`, and `pre-remove` runs `worktree release` before Worktrunk removes it. The command runs in the Worktree you are in, creates the file when it is missing, and is idempotent: a second run prints `unchanged` and leaves one block.
+
+The block is a Managed block (ADR 0008), delimited by TOML comment markers and recorded with the fingerprint of its content. Procly puts it at the top of the file, since a key written after a table header such as `[post-start]` would belong to that table. The rest of the file stays as it was, byte for byte.
+
+- Procly never overwrites a hook of yours. When `pre-start` or `pre-remove` is already set outside the block, as a key or as a table, it writes nothing, prints on stdout the lines of both hooks and exits with 5, see [exit codes](exit-codes.md). Add the Procly command to the hook that is set, or replace it, and add the line of the hook that is not set as it is: stderr says which one it is, and without it `worktree release` never runs on removal.
+- A block you edited, or moved under a table header where its keys belong to that table and hook nothing, is left as it is, the command prints `edited` on stdout and a note on stderr, and exits with 0.
+- A `.config/wt.toml` that is not valid TOML is not touched, and the command exits with 125.
+- `procly eject` takes an intact block out and gives the file back as it was, and deletes the file and its directory when only the block created them. A block you edited stays and is described in the prompt, see [Removing Procly from a Repository](eject.md).
+- `procly init` suggests the command on stderr when the Worktree has a `.config/wt.toml` without the block, and writes nothing into it.
+- `procly doctor` reports a block that is not the one Procly recorded, see [Checking the installation](doctor.md).
+
+Worktrunk asks you to approve the project hooks the first time it runs them, and Procly does not bypass that approval: answer it in Worktrunk. `--json` prints `file`, the `outcome` (`written`, `unchanged`, `edited` or `conflict`), the hooks already `set` outside the block for a conflict, and the `lines` of the block, see [JSON output](json.md#worktree-hooks). `worktree hooks` writes into your Repository, so the MCP server does not offer it, see [The MCP server](mcp.md).

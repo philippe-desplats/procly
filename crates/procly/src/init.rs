@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::config::VERSIONED_FILE;
+use crate::daemon::worktrunk;
 use crate::proposal::{self, ProposalError};
 use crate::topology::{self, Topology, TopologyError};
 
@@ -53,11 +54,13 @@ pub(crate) fn propose(cwd: &Path) -> Result<ProposalReport, InitError> {
     let file = worktree.join(VERSIONED_FILE);
     let proposed = proposal::propose(&worktree, &repository)?;
     let written = write_new(&file, &proposed.toml)?;
+    let mut notes = proposed.notes;
+    notes.extend(worktrunk::suggestion(&worktree));
     Ok(ProposalReport {
         file,
         toml: proposed.toml,
         written,
-        notes: proposed.notes,
+        notes,
     })
 }
 

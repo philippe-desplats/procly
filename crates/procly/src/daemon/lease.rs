@@ -41,7 +41,7 @@ pub(crate) enum LeaseError {
 /// Lease survives the Worktree being removed and recreated.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Scope {
+pub(super) enum Scope {
     /// The root of the Worktree, for a branch that is not pinned, so that 2 Worktrees never share a Lease.
     Worktree(PathBuf),
     /// The name of the Pinned branch, so that whichever Worktree checks it out gets its Leases.
@@ -50,13 +50,13 @@ enum Scope {
 
 /// What a Lease binds: one Port name of one Service in one Worktree, or one Pinned branch, of one Repository.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct LeaseKey {
+pub(super) struct LeaseKey {
     /// The common git directory identifying the Repository.
-    repository: PathBuf,
+    pub(super) repository: PathBuf,
     #[serde(flatten)]
-    scope: Scope,
-    service: String,
-    port_name: String,
+    pub(super) scope: Scope,
+    pub(super) service: String,
+    pub(super) port_name: String,
 }
 
 /// A granted port, and when a Service last used it, read on [`Clock::since_epoch`].
@@ -82,8 +82,12 @@ struct Lease {
 
 /// The document holding every Lease.
 #[derive(Debug, Serialize, Deserialize)]
-struct LeaseDocument {
+pub(super) struct LeaseDocument {
     leases: Vec<Lease>,
+}
+
+impl store::Stored for LeaseDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// A Lease bound to a Worktree rather than to a Pinned branch, as `procly gc` lists it.
@@ -236,6 +240,35 @@ impl Leases {
                 Scope::Branch(_) => None,
             })
             .collect())
+    }
+
+    /// What binds the Lease on `port` in the Repository `repository`, `None` when no Lease holds it. A port is held by
+    /// one Lease at most. Blocking: it reads the document on the first request.
+    pub(super) fn bound_to(&self, repository: &Path, port: u16) -> Result<Option<LeaseKey>, StoreError> {
+        self.with_table(|table| {
+            table
+                .iter()
+                .find(|(key, granted)| key.repository == repository && granted.port == port)
+                .map(|(key, _)| key.clone())
+        })
+    }
+
+    /// Whether the Lease `key` is granted `port` right now. Blocking: it reads the document on the first request.
+    pub(super) fn holds(&self, key: &LeaseKey, port: u16) -> Result<bool, StoreError> {
+        self.with_table(|table| table.get(key).map(|granted| granted.port) == Some(port))
+    }
+
+    /// Runs `read` on the Leases, reading the document first if no request did.
+    fn with_table<T>(&self, read: impl FnOnce(&Table) -> T) -> Result<T, StoreError> {
+        let mut table = self
+            .table
+            .lock()
+            .expect("the lease table mutex is never poisoned, no code panics while holding it");
+        let table = match &mut *table {
+            Some(table) => table,
+            None => table.insert(self.read(self.clock.since_epoch())?),
+        };
+        Ok(read(table))
     }
 
     /// Releases `lease`, so that its port returns to the Range, and stores the Leases left before it returns. A Lease

@@ -128,16 +128,21 @@ Setting up a Repository and its Worktrees:
 procly init                # propose a procly.toml from the dev scripts and the compose file
 procly worktree init       # prepare a fresh Worktree: copy untracked files, run setup commands
 procly worktree release    # before removing a Worktree: stop its work, release its Leases, keep its data
+procly worktree hooks      # make Worktrunk run worktree init and release, in .config/wt.toml
 procly agent install       # write the Rules block and the Guard, nothing is written without it
 procly off                 # make the Guard and the Rules block stand aside (procly on reverts)
 procly eject               # remove everything Procly wrote into this Repository
 procly gc                  # list the Orphans removed Worktrees left behind (--apply deletes them)
+procly doctor              # check the installation and this Repository, with the command that fixes each problem
 procly unit install        # start the Daemon with your session (launchd or systemd)
+procly mcp                 # serve run, wait, logs, up, down, env, status, worktree init and release, gc and doctor as MCP tools (docs/mcp.md)
 ```
 
-Every command but `guard` accepts `--json` and then prints one document carrying a `schema_version`. Exit codes are stable, so an agent can branch on them without parsing the output: 0 on success, 3 when a Service ended before it was healthy, 4 on a Port mismatch, 5 on a conflict with something running outside Procly, 6 when `gc --apply` could not delete every Orphan, 124 on a timeout, 125 when Procly itself fails. See [Exit codes](docs/exit-codes.md) and [JSON output](docs/json.md).
+Every command but `guard` and `mcp` accepts `--json` and then prints one document carrying a `schema_version`. Exit codes are stable, so an agent can branch on them without parsing the output: 0 on success, 3 when a Service ended before it was healthy, 4 on a Port mismatch, 5 on a conflict with something running outside Procly, 6 when `gc --apply` could not delete every Orphan, 7 when `doctor` found a problem, 124 on a timeout, 125 when Procly itself fails. See [Exit codes](docs/exit-codes.md) and [JSON output](docs/json.md).
 
 To point your agents at Procly, run `procly agent install` once and commit what it writes. The Guard covers Claude Code: it reads each Bash call through a `PreToolUse` hook, lets unknown commands through without asking the Daemon, and denies a known dev-server or `docker compose up` command with the equivalent Procly command. See [Steering agents to Procly](docs/agents.md).
+
+Agents that prefer MCP to a shell can use `procly mcp`, a stdio MCP server whose tools return the `--json` document of `run`, `wait`, `logs`, `up`, `down`, `env`, `status`, `worktree init`, `worktree release`, `gc` and `doctor`. You register it with your agent yourself, for example `claude mcp add procly -- procly mcp`, and Procly writes no agent configuration. See [The MCP server](docs/mcp.md).
 
 ## Try it without touching your setup
 
@@ -201,7 +206,7 @@ An unknown key is an error, so a typo never goes unnoticed. [Configuration](docs
 - Stopping a Service sends `SIGTERM` to its whole process group, then `SIGKILL`, so nothing it forked survives it.
 - Compose services go through the `docker compose` v2 CLI and the compose file of the Repository, which Procly never modifies.
 
-The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Releasing a Worktree](docs/worktree-release.md), [Proposing a configuration](docs/init.md) and [Removing Procly from a Repository](docs/eject.md).
+The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Releasing a Worktree](docs/worktree-release.md), [Checking the installation](docs/doctor.md), [Proposing a configuration](docs/init.md), [Removing Procly from a Repository](docs/eject.md) and [The MCP server](docs/mcp.md).
 
 ## Development
 

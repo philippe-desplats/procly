@@ -77,6 +77,7 @@ web = { http = 3200 }
 | `setup_timeout` | `"30m"` | How long each setup command of `procly worktree init` may run before its whole process tree is killed and `worktree init` exits with 124, long enough for a cold install. See [Worktree init](worktree-init.md). |
 | `setup_progress_interval` | `"1m"` | How often a setup command of `procly worktree init` that is still running prints its elapsed time and the path of its log on stderr, at most once per second. See [Worktree init](worktree-init.md#a-long-setup). |
 | `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125, or `procly gc --apply` reports the resource it was dropping as not deleted. |
+| `portless` | `false` | Whether each Lease `procly up` prints as an `http://` URL is aliased to a stable [Portless](https://github.com/vercel-labs/portless) name, see [Portless aliases](#portless-aliases). |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
@@ -348,6 +349,84 @@ Commands run in the container of the Compose service with `docker compose exec`,
 
 The bundled Postgres Driver creates one database per resource with `createdb`, as the user `${POSTGRES_USER:-postgres}` of the container, and builds `postgresql://postgres:postgres@localhost:{port}/{resource}`. A Repository whose container uses other credentials copies the file to `.procly/drivers/postgres.toml` and edits the URL.
 
+### Example: a Driver for an S3-compatible store
+
+Procly bundles no Driver for an S3-compatible object store. This one creates one bucket per resource and Worktree. Save it as `.procly/drivers/s3.toml` at the root of the Repository, or in `drivers/` next to the user settings, and set `driver = "s3"` on the Compose service that runs your store.
+
+```toml
+# One bucket per resource in an S3-compatible store.
+#
+# It expects, inside the container:
+#   - the MinIO client, `mc`, on the PATH,
+#   - the store listening on port 9000 of the container, the port the commands below reach,
+#   - the variables S3_ACCESS_KEY and S3_SECRET_KEY, set by the `environment` of the service in the compose file. The secret must
+#     not hold a character that is special in a URL.
+
+# The endpoint, not a bucket: a bucket name holds no underscore, and the name of a resource does in every Worktree but
+# the Main one. The application reads the bucket name from {services.<service>.resources.<key>.name}, see below.
+url = "http://localhost:{port}"
+
+# The longest bucket name S3 accepts. The commands turn each underscore into a hyphen, which keeps the length.
+max_length = 63
+
+ready = 'MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc ls local'
+
+check = '''
+bucket=$(printf %s '{resource}' | tr _ -)
+MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc stat "local/$bucket"
+'''
+create = '''
+bucket=$(printf %s '{resource}' | tr _ -)
+MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc mb "local/$bucket"
+'''
+drop = '''
+bucket=$(printf %s '{resource}' | tr _ -)
+MC_HOST_local="http://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@localhost:9000" mc rb --force "local/$bucket"
+'''
+```
+
+The compose file publishes the Lease and defines the 2 variables, with the image you run in place of the comment:
+
+```yaml
+services:
+  store:
+    # image: the S3-compatible image you run, with `mc` inside
+    ports:
+      - "${PORT_API}:9000"
+    environment:
+      S3_ACCESS_KEY: dev-access-key
+      S3_SECRET_KEY: dev-secret-key
+```
+
+The Service that uses it declares the bucket as a resource, and hands the application the endpoint and the bucket name:
+
+```toml
+[services.store]
+compose = "store"
+driver = "s3"
+ports = { api = 9000 }
+
+[services.store.resources.assets]
+name = "assets"
+
+[services.web]
+run = "pnpm --filter web dev"
+needs = ["store"]
+
+[services.web.env]
+S3_ENDPOINT = "{services.store.resources.assets.url}"
+S3_BUCKET_NAME = "{services.store.resources.assets.name}"
+```
+
+Things to know before you rely on it:
+
+- It is not tested in CI beyond the fact that the file loads as a Driver. Nothing checks that the commands work against your image, so run `procly up` once against it and read the result.
+- The name Procly gives a resource holds underscores in every Worktree but the Main one, `assets` there and `assets__app_other` in a Worktree in `app-other`, and a bucket name cannot. The commands replace each underscore with a hyphen, so that Worktree gets the bucket `assets--app-other`. The application makes the same replacement on `S3_BUCKET_NAME`, since the URL cannot carry the bucket for the reason given in its comment.
+- A bucket name holds 3 to 63 characters, so `name` has at least 3 in the Main worktree. The `max_length` of 63 refuses a longer name instead of cutting it. Some stores also reserve a few suffixes such as `-s3alias`, which a Worktree slug can reach, so check the rules of yours.
+- `drop` removes the bucket with every object in it.
+- The Driver has no `copy`, so a resource cannot use the Seed `template`. `empty` and a command Seed work, and the command receives the name with its underscores in `PROCLY_RESOURCE_NAME`, so it applies the same replacement before it addresses the bucket.
+- For another client, such as the AWS CLI with `--endpoint-url`, keep the structure and change the 4 commands.
+
 ### Numbered resources
 
 The bundled `redis` Driver gives each Worktree its own database index in the one Redis container, with 16 of them, the databases a Redis server starts with. It builds `redis://localhost:{port}/{resource}` and has `index = true`, so the URL of each Worktree ends with its own index.
@@ -423,6 +502,37 @@ The scheme of a Lease is the first of these that applies:
 - `http` for the Lease the health check of a Process service probes, and for the Lease of an HTTP health check, one that sets `health.path` or `health.status`.
 
 Up to v0.1, `procly up` printed an `http` URL and the port of the health check alone, whatever that port spoke. Since v0.2 the line names every Lease. Since the CLI output is public interface (ADR 0009), the change is recorded here: a Process service with a single Port name prints the same line as before unless that name is `https`, `smtp`, `redis` or `amqp`, in which case its URL has that scheme instead of `http`, a Service with several Port names gets one more `, <lease>` for each of the others, and a Compose service whose port has no known scheme, such as a MySQL, prints `mysql started db port 3306` where it printed `mysql started http://localhost:3306 port 3306`. A script that reads the port of the health check reads the number before the first comma. With `--json`, `url` and `urls` carry the same URLs, see [JSON output](json.md#up).
+
+### Portless aliases
+
+With `portless = true` in `[settings]`, `procly up` runs `portless alias <name> <port>` for each Lease it prints as an `http://` URL, so that you reach the Service by a name that does not change from one Worktree to the next. The setting is off by default, and nothing calls `portless` while it is.
+
+The name of a Lease is:
+
+| Where | The Service has 1 HTTP Lease | The Service has several |
+| --- | --- | --- |
+| The Main worktree | `<service>` | `<port-name>.<service>` |
+| Any other Worktree | `<branch>.<service>` | `<branch>.<port-name>.<service>` |
+
+The branch is the one the Worktree has checked out, or the Worktree slug on a detached `HEAD`. The Lease of a Pinned branch is named after that branch. Each part is a DNS label, so it is lowercase, and any run of characters other than a letter or a digit becomes one `-`: the branch `feature/E-59` gives `feature-e-59.web`. Portless adds its own suffix, `.localhost` by default, to the name.
+
+```console
+$ cd ../app-login
+$ procly up web
+web started http://localhost:24001 port 24001
+$ portless list
+http://login.web.localhost -> 24001
+```
+
+An alias lives as long as its Lease:
+
+- `procly up` makes it again each time, whether the Service started or was already running.
+- `procly down` keeps it, since the Lease stays with the Worktree (ADR 0006).
+- `procly worktree release`, the expiry of the Lease and `procly gc --apply` remove it with `portless alias --remove <name>`. The Lease of a Pinned branch is not released by any of them, so its alias stays too.
+
+Procly records each alias it makes, in the state directory, with the Lease that holds it. An alias is removed whatever the setting is when its Lease goes, so that turning Portless off never leaves a name pointing at a port another Worktree may get. A name is not scoped to a Repository, so 2 Repositories that both have a `web` in their Main worktree compete for `web`, and the last `procly up` wins.
+
+Portless stays optional. Procly never starts the Portless proxy, and never runs `sudo`: it only runs `portless alias`, so the proxy is yours to start. When `portless` is not on the `PATH` of the Daemon, or a call fails, `procly up` prints one warning on stderr, `procly: warning: ...`, makes no more alias in that command and exits as it would without Portless. A removal that fails in `procly worktree release` or `procly gc --apply` is told the same way, once per command, and is in the `warnings` of their `--json` document. The grant of a Lease only logs it in the Daemon log. A call that does not answer within 10 seconds is a failed call: Procly kills `portless` with everything it started, makes no further call in that command, and the grant of a Lease never waits for a call under way. A removal that fails leaves the alias recorded and is tried again by the next removal, unless Portless answers that the alias does not exist, in which case the alias is gone and the record is dropped. `procly doctor` names the aliases no Lease holds with the command that removes each, see [Checking the installation](doctor.md). It also reports a missing `portless` when the setting is on.
 
 ## Derived variables
 

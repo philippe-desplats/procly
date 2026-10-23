@@ -16,7 +16,7 @@ use super::compose::ComposeError;
 use super::environment::{ENV_BLOCK, ENV_FILE, EXCLUDE_FILE, EXCLUSIONS, GITIGNORE_FILE, exclusion_lines};
 use super::hook::{self, HookError};
 use super::managed::{self, ManagedBlocks, ManagedError, Removal};
-use super::{Registry, failure, requester};
+use super::{Registry, failure, requester, worktrunk};
 use crate::config;
 use crate::envfile;
 use crate::protocol::{EjectReport, Left, Removed, Response, Stopped, Written};
@@ -141,6 +141,13 @@ fn remove_written(
     for file in places.files(&registry.managed, hook::BLOCK, |worktree| vec![worktree.join(SETTINGS)])? {
         let removal = hook::remove(&registry.managed, &file)?;
         outcome.record(&places, Written::Guard, file, removal);
+    }
+
+    for file in places.files(&registry.managed, worktrunk::BLOCK, |worktree| {
+        vec![worktree.join(worktrunk::CONFIG)]
+    })? {
+        let removal = registry.managed.remove(&file, worktrunk::BLOCK, &worktrunk::known())?;
+        outcome.record(&places, Written::WorktrunkHooks, file, removal);
     }
 
     let known_exclusions = [managed::joined(&exclusion_lines())];
@@ -307,6 +314,19 @@ fn undo(item: &Left) -> String {
                  yours."
             )
         }
+        Written::WorktrunkHooks => {
+            let (open, close) = markers(worktrunk::BLOCK);
+            let hooks = worktrunk::lines()
+                .iter()
+                .map(|line| format!("`{line}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            format!(
+                "the Worktrunk hooks block. Delete the line `{open}`, the line `{close}` and the lines {hooks} \
+                 between them, which make Worktrunk run Procly when it creates and removes a Worktree. Keep every \
+                 line that is yours."
+            )
+        }
         Written::EnvFile => format!(
             "the Env file Procly generated, which no longer starts with its header. Delete the variables Procly \
              injected, which are the Derived variables declared under `env` in `{}`, and delete the file when \
@@ -369,6 +389,7 @@ mod tests {
             left(Written::Guard, "/a/.claude/settings.json"),
             left(Written::Exclusions, "/a/.gitignore"),
             left(Written::EnvFile, "/a/.env.procly"),
+            left(Written::WorktrunkHooks, "/a/.config/wt.toml"),
         ];
 
         let text = prompt(Path::new("/a/.git"), &items).expect("items were left");

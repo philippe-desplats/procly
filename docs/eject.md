@@ -27,7 +27,7 @@ $ procly eject --json
 {"schema_version":1,"stopped":[],"removed":[{"kind":"rules","file":"/home/me/app/AGENTS.md","deleted":true},{"kind":"guard","file":"/home/me/app/.claude/settings.json","deleted":true}],"left":[],"prompt":null,"agent":null}
 ```
 
-A Service in `stopped` has the `worktree` it ran for, `null` for a Compose service whose container serves every Worktree. An Isolated Compose service has the Worktree of its container and `"isolated":true`, a key left out for every other Service, and its text line reads `stopped cache of /home/me/app-login (Isolated Compose service, its container and volumes are kept)`. A `kind` is `rules`, `guard`, `exclusions` or `env_file`. The fixed lines about what eject never touches are not in the document.
+A Service in `stopped` has the `worktree` it ran for, `null` for a Compose service whose container serves every Worktree. An Isolated Compose service has the Worktree of its container and `"isolated":true`, a key left out for every other Service, and its text line reads `stopped cache of /home/me/app-login (Isolated Compose service, its container and volumes are kept)`. A `kind` is `rules`, `guard`, `exclusions`, `env_file` or `worktrunk_hooks`, and its text line names it `worktrunk hooks`. The fixed lines about what eject never touches are not in the document.
 
 ## What it does
 
@@ -38,6 +38,7 @@ It acts on the whole Repository, whatever Worktree it runs in.
 3. It removes the Guard from `.claude/settings.json`. The other hooks and settings stay, in their order, but the file is written again in JSON with 2 spaces of indentation, as `agent install` did.
 4. It removes the exclusion block from the shared git exclude file and from the `.gitignore` files that hold it.
 5. It removes the Env file, `.env.procly`, of every Worktree.
+6. It removes the Worktrunk hooks block that `procly worktree hooks` wrote into `.config/wt.toml`, see [Worktrunk](worktree-init.md#worktrunk). The rest of the file stays as it was, and a file and a directory that only the block created are deleted.
 
 A file that held nothing else once its block was gone is deleted, since only Procly can have created it, and so are the directories that leaves empty inside the Worktree. Every other byte of a file stays as it was. A file that links out of the Repository is never written, as for `agent install`.
 

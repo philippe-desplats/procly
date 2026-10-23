@@ -65,6 +65,17 @@ pub(crate) enum Removal {
     Edited,
 }
 
+/// What a file holds for a block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Content {
+    /// The file does not exist or holds no marker of the block.
+    Absent,
+    /// The block opens and never closes, so its end is unknown.
+    Unclosed,
+    /// The block opens and closes: what sits between its markers.
+    Closed(String),
+}
+
 /// The fingerprint of the content of every block Procly wrote, by file and block name, kept in a document of the
 /// state directory so that it survives restarts of the Daemon.
 #[derive(Debug)]
@@ -110,8 +121,12 @@ struct Record {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ManagedDocument {
+pub(super) struct ManagedDocument {
     blocks: Vec<Record>,
+}
+
+impl store::Stored for ManagedDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 impl ManagedBlocks {
@@ -147,7 +162,8 @@ impl ManagedBlocks {
                 // A block added to the file as it is now. One updated in place keeps how the file looked before it.
                 let origin = appended.then(|| Origin {
                     existed: existing.is_some(),
-                    newline_added: !text.is_empty() && !text.ends_with('\n'),
+                    // A block put first leaves the end of the file as it was.
+                    newline_added: syntax != Syntax::Toml && !text.is_empty() && !text.ends_with('\n'),
                     original: None,
                 });
                 self.remember(table, key, fingerprint(&content), origin)?;
@@ -207,6 +223,30 @@ impl ManagedBlocks {
     /// took the block out by its own means.
     pub(crate) fn forget_block(&self, file: &Path, block: &str) -> Result<(), ManagedError> {
         self.with_table(|table| self.forget(table, &(file.to_owned(), block.to_owned())))
+    }
+
+    /// What `file` holds for the block `block`, read without writing anything.
+    pub(crate) fn content(file: &Path, block: &str) -> Result<Content, ManagedError> {
+        Ok(match locate(Syntax::of(file), &read_text(file)?, block) {
+            Located::Absent => Content::Absent,
+            Located::Broken => Content::Unclosed,
+            Located::Found { content, .. } => Content::Closed(content),
+        })
+    }
+
+    /// The text of `file` without the block `block`, markers included, which is all of it when the file lacks the block
+    /// or when the block never closes. `None` when the file does not exist.
+    pub(crate) fn outside(file: &Path, block: &str) -> Result<Option<String>, ManagedError> {
+        Ok(
+            read_existing(file)?.map(|text| match locate(Syntax::of(file), &text, block) {
+                Located::Found { range, .. } => {
+                    let mut outside = text;
+                    outside.replace_range(range, "");
+                    outside
+                }
+                Located::Absent | Located::Broken => text,
+            }),
+        )
     }
 
     /// Whether `file` holds the block `block`, whatever its content.
@@ -347,7 +387,7 @@ fn read_text(file: &Path) -> Result<String, ManagedError> {
 }
 
 /// The text of `file`, `None` when it does not exist.
-fn read_existing(file: &Path) -> Result<Option<String>, ManagedError> {
+pub(super) fn read_existing(file: &Path) -> Result<Option<String>, ManagedError> {
     match fs::read_to_string(file) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -374,6 +414,10 @@ pub(super) fn write_text(file: &Path, text: &str) -> Result<(), ManagedError> {
 /// `recorded` is the fingerprint stored for the block when Procly last wrote it.
 fn plan(syntax: Syntax, text: &str, block: &str, content: &str, recorded: Option<&str>) -> (Outcome, Option<String>) {
     match locate(syntax, text, block) {
+        Located::Absent if syntax == Syntax::Toml => (
+            Outcome::Written,
+            Some(format!("{}{text}", render(syntax, block, content))),
+        ),
         Located::Absent => {
             let mut appended = text.to_owned();
             if !appended.is_empty() && !appended.ends_with('\n') {
@@ -460,6 +504,9 @@ enum Syntax {
     Hash,
     /// `<!-- … -->` lines, for Markdown, where a `#` line would render as a heading.
     Html,
+    /// `# …` lines, for TOML. A key written after a table header belongs to that table, so a block of root keys goes
+    /// first in the file instead of last.
+    Toml,
 }
 
 impl Syntax {
@@ -467,13 +514,14 @@ impl Syntax {
     fn of(file: &Path) -> Self {
         match file.extension().and_then(|extension| extension.to_str()) {
             Some("md" | "mdc" | "markdown") => Self::Html,
+            Some("toml") => Self::Toml,
             _ => Self::Hash,
         }
     }
 
     fn comment(self, text: &str) -> String {
         match self {
-            Self::Hash => format!("# {text}"),
+            Self::Hash | Self::Toml => format!("# {text}"),
             Self::Html => format!("<!-- {text} -->"),
         }
     }
@@ -556,6 +604,60 @@ mod tests {
         let (change, text) = plan(Syntax::Hash, "node_modules\n", "exclusions", "/a\n", None);
         assert_eq!(change, Outcome::Written);
         assert_eq!(text.unwrap(), format!("node_modules\n{}", block("/a\n")));
+    }
+
+    #[test]
+    fn a_block_of_a_toml_file_goes_first_so_that_its_keys_stay_at_the_root() {
+        let (change, text) = plan(Syntax::Toml, "a = 1\n[table]\nb = 2", "worktrunk", "c = 3\n", None);
+        assert_eq!(change, Outcome::Written);
+        assert_eq!(
+            text.unwrap(),
+            format!("{}a = 1\n[table]\nb = 2", render(Syntax::Toml, "worktrunk", "c = 3\n"))
+        );
+        assert_eq!(Syntax::of(Path::new("/p/.config/wt.toml")), Syntax::Toml);
+    }
+
+    #[test]
+    fn a_toml_block_is_removed_and_the_file_comes_back_byte_for_byte() {
+        let original = "a = 1\n[table]\nb = 2";
+        let (_, written) = plan(Syntax::Toml, original, "worktrunk", "c = 3\n", None);
+        let recorded = fingerprint("c = 3\n");
+        let origin = Origin {
+            existed: true,
+            newline_added: false,
+            original: None,
+        };
+
+        let planned = plan_removal(
+            Syntax::Toml,
+            &written.unwrap(),
+            "worktrunk",
+            &[],
+            Some(&recorded),
+            Some(&origin),
+        );
+
+        assert_eq!(planned, Planned::Remove(original.to_owned()));
+    }
+
+    #[test]
+    fn the_text_outside_a_block_is_the_file_without_its_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wt.toml");
+        assert_eq!(ManagedBlocks::outside(&file, "worktrunk").unwrap(), None);
+        fs::write(
+            &file,
+            format!("a = 1\n{}b = 2\n", render(Syntax::Toml, "worktrunk", "c = 3\n")),
+        )
+        .unwrap();
+        assert_eq!(
+            ManagedBlocks::outside(&file, "worktrunk").unwrap().as_deref(),
+            Some("a = 1\nb = 2\n")
+        );
+        assert_eq!(
+            ManagedBlocks::outside(&file, "other").unwrap().as_deref().map(str::len),
+            Some(fs::read_to_string(&file).unwrap().len())
+        );
     }
 
     #[test]

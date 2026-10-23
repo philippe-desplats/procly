@@ -7,8 +7,9 @@ use std::path::Path;
 use anyhow::Context as _;
 use serde::{Serialize, Serializer};
 
+use crate::doctor::Report;
 use crate::protocol::{
-    Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
+    Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
     ServiceEnd, StartOutcome, Stopped, UpService,
 };
 
@@ -138,6 +139,8 @@ pub(crate) struct WorktreeRelease<'a> {
     stopped: ReleaseStopped<'a>,
     released: ReleaseReleased<'a>,
     kept: ReleaseKept<'a>,
+    /// What went wrong without failing the release, such as a Portless alias that could not be removed.
+    warnings: &'a [String],
 }
 
 /// The Services and Jobs a Worktree release stopped.
@@ -177,6 +180,30 @@ impl<'a> WorktreeRelease<'a> {
                 leases: &report.kept_leases,
                 logical_resources: &report.logical_resources,
             },
+            warnings: &report.warnings,
+        }
+    }
+}
+
+/// What `doctor` prints: whether every check passed, then each check.
+#[derive(Debug, Serialize)]
+pub(crate) struct Doctor<'a> {
+    result: &'static str,
+    checks: &'a [Check],
+    /// What to tell a coding agent to fix the problems, `None` when no check failed or when it was handed to the
+    /// `agent`.
+    prompt: Option<&'a str>,
+    /// The coding agent CLI the prompt was handed to.
+    agent: Option<&'a str>,
+}
+
+impl<'a> Doctor<'a> {
+    pub(crate) fn new(report: &'a Report, prompt: Option<&'a str>, agent: Option<&'a str>) -> Self {
+        Self {
+            result: if report.failed() { "problems" } else { "healthy" },
+            checks: &report.checks,
+            prompt,
+            agent,
         }
     }
 }
@@ -354,6 +381,7 @@ mod tests {
             r#"{"kind":"unknown","find":"lsof"}"#
         );
         assert_eq!(json(&Written::EnvFile), r#""env_file""#);
+        assert_eq!(json(&Written::WorktrunkHooks), r#""worktrunk_hooks""#);
         assert_eq!(json(&BlockOutcome::Edited), r#""edited""#);
         assert_eq!(json(&StartOutcome::Reused), r#""reused""#);
     }

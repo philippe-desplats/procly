@@ -499,7 +499,7 @@ fn grant(
     let project_dir = &topology.worktree.path;
     let held_by_container =
         |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, project_dir, compose));
-    Ok(registry.leases.grant(&LeaseRequest {
+    let granted = registry.leases.grant(&LeaseRequest {
         topology,
         service,
         ports,
@@ -510,7 +510,11 @@ fn grant(
         running: &registry.running(),
         keep: leasing == Leasing::AsGranted,
         claimed: compose.map(|_| Claimed(&held_by_container)),
-    })?)
+    })?;
+    // The grant drops the Leases that expired, and their Portless aliases go with them, unless a call of `portless`
+    // is under way: the grant never waits for it, and the next removal takes what is left.
+    registry.portless.prune_if_idle(&registry.leases);
+    Ok(granted)
 }
 
 /// Replaces the Env file in one step, readable by the user only since a Derived variable may carry a credential,

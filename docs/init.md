@@ -28,6 +28,8 @@ $ procly init --json
 {"schema_version":1,"file":"/home/me/code/acme/procly.toml","toml":"# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.\n\n[services.app]\nrun = \"npm run dev\"\n","written":true}
 ```
 
+When the Worktree has a `.config/wt.toml`, the Worktrunk config, that holds no Procly block yet, stderr also suggests `procly worktree hooks`, which makes Worktrunk run `procly worktree init` and `procly worktree release`, see [Worktrunk](worktree-init.md#worktrunk). Init writes nothing into that file.
+
 A `procly.toml` that exists is never overwritten. The proposal is still printed, stderr says that the file was left as it is, and the command exits with 0. The file is created exclusively, so even one that appears while the proposal is made is kept. A Worktree with no `dev` script and no compose file gets nothing written and exits with 125, see [exit codes](exit-codes.md).
 
 The proposal declares what the Worktree states and leaves out what it would have to invent. Read it, then run `procly up`. Procly reads nothing else, so a Repository that starts its servers through a `Procfile` or a `Makefile` gets no proposal for them.

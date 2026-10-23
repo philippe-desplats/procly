@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 18;
+pub(crate) const PROTOCOL_VERSION: u32 = 21;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -78,6 +78,11 @@ pub(crate) enum Request {
     /// Runs the Worktree release of the Worktree holding `path`: stops its Services and Jobs, lets go of its Compose
     /// services and releases its Leases, apart from those of a Pinned branch, and answers once their trees are gone.
     WorktreeRelease { path: PathBuf },
+    /// Runs the checks only the Daemon can answer, and tells which version it is.
+    Doctor,
+    /// Writes the Worktrunk hooks block into the `.config/wt.toml` of the Worktree holding `cwd`, unless a hook is
+    /// already set outside it.
+    WorktreeHooks { cwd: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -109,6 +114,8 @@ pub(crate) enum Response {
         needs: Vec<UpService>,
         /// Where to reach each Lease whose scheme Procly knows, by Port name.
         urls: BTreeMap<String, String>,
+        /// What went wrong without failing `up`, such as a Portless alias that could not be made.
+        warnings: Vec<String>,
     },
     /// Every Service `up` without a Service brought up or found running, in the order it brought them up.
     UpAll {
@@ -172,6 +179,10 @@ pub(crate) enum Response {
     Gc(GcReport),
     /// The Worktree is released.
     WorktreeRelease(ReleaseReport),
+    /// What the Daemon found when it ran its checks.
+    Doctor(DaemonChecks),
+    /// What became of the Worktrunk hooks block.
+    WorktreeHooks(HooksReport),
     Error {
         message: String,
     },
@@ -298,6 +309,8 @@ pub(crate) enum Written {
     Exclusions,
     /// The Env file of a Worktree.
     EnvFile,
+    /// The Managed block of the Worktrunk config that runs `worktree init` and `worktree release`.
+    WorktrunkHooks,
 }
 
 impl Written {
@@ -307,6 +320,7 @@ impl Written {
             Self::Guard => "guard",
             Self::Exclusions => "exclusions",
             Self::EnvFile => "env file",
+            Self::WorktrunkHooks => "worktrunk hooks",
         }
     }
 }
@@ -362,6 +376,8 @@ pub(crate) struct UpService {
     pub(crate) ports: BTreeMap<String, u16>,
     /// Where to reach each Lease whose scheme Procly knows, by Port name, the one `url` is among them.
     pub(crate) urls: BTreeMap<String, String>,
+    /// What went wrong without failing `up`, such as a Portless alias that could not be made.
+    pub(crate) warnings: Vec<String>,
 }
 
 /// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.
@@ -390,6 +406,8 @@ pub(crate) struct ReleaseReport {
     pub(crate) kept_leases: Vec<KeptLease>,
     /// The Logical resources of the Worktree, which a Worktree release never drops.
     pub(crate) logical_resources: Vec<KeptResource>,
+    /// What went wrong without failing the release, such as a Portless alias that could not be removed.
+    pub(crate) warnings: Vec<String>,
 }
 
 impl ReleaseReport {
@@ -673,6 +691,9 @@ pub(crate) struct GcReport {
     pub(crate) orphans: Vec<Orphan>,
     /// The Repositories whose Worktrees git could not list, nothing of which is an Orphan.
     pub(crate) skipped: Vec<SkippedRepository>,
+    /// What went wrong without failing `gc`, such as a Portless alias that could not be removed. One for all the
+    /// Orphans, not one for each.
+    pub(crate) warnings: Vec<String>,
 }
 
 impl GcReport {
@@ -772,6 +793,144 @@ pub(crate) struct SkippedRepository {
     pub(crate) error: String,
 }
 
+/// What a `doctor` check found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CheckStatus {
+    /// Nothing is wrong.
+    Passed,
+    /// A problem, which makes `doctor` exit with 7.
+    Failed,
+    /// The check does not apply here, or could not run.
+    Skipped,
+    /// Something is missing that Procly can do without, so `doctor` still exits with 0.
+    Warning,
+}
+
+impl CheckStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+/// One check of `procly doctor`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Check {
+    /// What is checked, the same in every run so that a script can match it.
+    pub(crate) name: String,
+    pub(crate) status: CheckStatus,
+    pub(crate) message: String,
+    /// The command that fixes the problem, which `doctor` never runs. `None` when nothing is wrong, or when no command
+    /// fixes it.
+    pub(crate) fix: Option<String>,
+}
+
+impl Check {
+    /// A check that found nothing wrong.
+    pub(crate) fn passed(name: &str, message: impl Into<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Passed,
+            message: message.into(),
+            fix: None,
+        }
+    }
+
+    /// A problem, with the command that fixes it when one does.
+    pub(crate) fn failed(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Failed,
+            message: message.into(),
+            fix,
+        }
+    }
+
+    /// Something missing that Procly can do without, with the command that adds it, which `doctor` never runs.
+    pub(crate) fn warning(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Warning,
+            message: message.into(),
+            fix,
+        }
+    }
+
+    /// A check that does not apply here or could not run, `why` telling which.
+    pub(crate) fn skipped(name: &str, why: impl Into<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status: CheckStatus::Skipped,
+            message: why.into(),
+            fix: None,
+        }
+    }
+}
+
+/// What `worktree hooks` did to the Worktrunk config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HooksOutcome {
+    /// The block was added or updated.
+    Written,
+    /// The file already held exactly this block.
+    Unchanged,
+    /// The block holds something Procly did not write, so it was left as it is.
+    Edited,
+    /// A hook is already set outside the block, so nothing was written.
+    Conflict,
+}
+
+impl HooksOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Unchanged => "unchanged",
+            Self::Edited => "edited",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// What `worktree hooks` wrote, or why it wrote nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HooksReport {
+    /// The `.config/wt.toml` of the Worktree.
+    pub(crate) file: PathBuf,
+    pub(crate) outcome: HooksOutcome,
+    /// The hooks already set outside the block, for a `conflict`, empty otherwise.
+    pub(crate) set: Vec<String>,
+    /// The lines the block holds, which are the ones to add by hand after a `conflict`.
+    pub(crate) lines: Vec<String>,
+}
+
+impl HooksReport {
+    /// The hooks of the block that are not set outside it, whose lines a `conflict` leaves for the person to add as
+    /// they are.
+    pub(crate) fn unset(&self) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter_map(|line| line.split_once(" = ").map(|(hook, _)| hook))
+            .filter(|hook| !self.set.iter().any(|set| set == hook))
+            .collect()
+    }
+}
+
+/// What the Daemon answers a `Doctor` request with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DaemonChecks {
+    /// The version of the procly executable the Daemon runs, which the client compares with its own. Not `version`,
+    /// which the envelope of every message already carries.
+    pub(crate) procly_version: String,
+    /// The checks only the Daemon can answer.
+    pub(crate) checks: Vec<Check>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,7 +941,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":18,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":21,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 
@@ -803,6 +962,7 @@ mod tests {
             applied: false,
             orphans: vec![orphan.clone()],
             skipped: Vec::new(),
+            warnings: Vec::new(),
         }))
         .unwrap();
         assert!(line.contains(

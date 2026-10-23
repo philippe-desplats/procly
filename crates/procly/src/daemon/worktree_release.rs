@@ -80,7 +80,7 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
     }
 
     // Once the Services are gone, so that only a container still running keeps a Lease of the Worktree.
-    let (leases, kept_leases, logical_resources) = {
+    let (leases, kept_leases, logical_resources, warning) = {
         let registry = Arc::clone(&registry);
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let running = registry.running();
@@ -90,6 +90,8 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
                 branch.as_deref(),
                 &running,
             )?;
+            // The aliases of the Leases just released go with them.
+            let warning = registry.portless.prune(&registry.leases);
             // The Leases are released whatever the configuration says, a broken one only hides the resources.
             let resources = logical_resources(&registry, &topology).unwrap_or_else(|error| {
                 eprintln!(
@@ -98,7 +100,7 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
                 );
                 Vec::new()
             });
-            Ok((leases, kept, resources))
+            Ok((leases, kept, resources, warning))
         })
         .await
         .context("the leases could not be released")??
@@ -106,6 +108,7 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
     report.leases = leases;
     report.kept_leases = kept_leases;
     report.logical_resources = logical_resources;
+    report.warnings.extend(warning);
     log(&report);
     Ok(report)
 }

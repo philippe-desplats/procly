@@ -1,6 +1,6 @@
 # JSON output
 
-Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, and `daemon`, which prints nothing.
+Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, `mcp`, which speaks JSON-RPC and returns these documents as tool results, and `daemon`, which prints nothing.
 
 **The schema version is 1.** It is the `schema_version` of every document, the one `procly status --json` prints. This page is where it is defined, the examples in the other docs repeat the value. It is bumped on any incompatible change to any document, independently of the socket protocol between the CLI and the Daemon. Adding a key or a document is not incompatible, so a reader ignores the keys it does not know. Removing a key, renaming one or changing what it means bumps the version.
 
@@ -26,10 +26,13 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `init` | the proposal and whether it was written | [Proposing a configuration](init.md) |
 | `worktree init` | what was copied and what ran | [Preparing a Worktree](worktree-init.md) |
 | `worktree release` | what the Worktree release stopped, released and kept | [Releasing a Worktree](worktree-release.md#json) |
+| `worktree hooks` | what became of the Worktrunk hooks block | [below](#worktree-hooks), and [Preparing a Worktree](worktree-init.md#worktrunk) |
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
 | `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
 | `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
+| `doctor` | every check with its status, message and fix | below, and [Checking the installation](doctor.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |
+| `mcp` | none, it serves the documents above as MCP tools | [The MCP server](mcp.md) |
 
 ## `run`
 
@@ -95,18 +98,40 @@ $ procly down --json
 
 `service` is the Service asked for, or `null` for all of them. `stopped` also lists the Isolated Compose services whose container of the Worktree was stopped. `released` lists the Shared and Logical Compose services the Worktree let go of, each with `service`, `others` (how many other Worktrees still need the container) and `grace_ms` (how long it keeps running once none does).
 
+## `worktree hooks`
+
+```console
+$ procly worktree hooks --json
+{"schema_version":1,"file":"/home/me/app/.config/wt.toml","outcome":"written","set":[],"lines":["pre-start = \"procly worktree init\"","pre-remove = \"procly worktree release\""]}
+```
+
+`file` is the Worktrunk config of the Worktree. `outcome` is `written`, `unchanged` when the block was in place, `edited` when you edited the block, or moved it under a table header where its keys no longer are the hooks, and Procly left it, or `conflict` when a hook is already set outside the block and nothing was written. `set` names those hooks (`pre-start`, `pre-remove`) for a `conflict` and is empty otherwise. `lines` holds the lines of the block, which the text output prints after a `conflict` as well: the line of a hook in `set` is to wire into that hook, the other is to add as it is. A `conflict` exits with 5, as without `--json`.
+
 ## `gc`
 
 ```console
 $ procly gc --json
-{"schema_version":1,"applied":false,"orphans":[{"kind":"lease","service":"web","port_name":"http","port":24081,"repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null},{"kind":"logical_resource","service":"db","resource":"dev","name":"app__app_login","driver":"postgres","repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null},{"kind":"setup_directory","path":"/home/me/.local/state/procly/setup/app_login-5c2e0d6b8a41f7e3","repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null}],"skipped":[]}
+{"schema_version":1,"applied":false,"orphans":[{"kind":"lease","service":"web","port_name":"http","port":24081,"repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null},{"kind":"logical_resource","service":"db","resource":"dev","name":"app__app_login","driver":"postgres","repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null},{"kind":"setup_directory","path":"/home/me/.local/state/procly/setup/app_login-5c2e0d6b8a41f7e3","repository":"/home/me/app/.git","worktree":"/home/me/app-login","deleted":false,"error":null}],"skipped":[],"warnings":[]}
 ```
 
-`applied` is `true` for `gc --apply`. `orphans` lists every Orphan in the order `--apply` deletes them, the Leases, then the Logical resources, then the output directories, the setup directories, the Isolated containers and their volumes. Each one has a `kind` of `lease` (with `service`, `port_name` and `port`), `logical_resource` (with `service`, `resource`, the key of the resource in the configuration, `name`, its name or index in the container, and `driver`), `output_directory` or `setup_directory` (with `path`), `isolated_container` (with the `service`, its compose `project` and the `compose` service) or `isolated_volume` (with the compose `project` and the `volume`), the `repository` and the removed `worktree` it belongs to, whether it was `deleted`, always `false` without `--apply`, and the `error` that kept it from being deleted, or `null`. `skipped` lists the Repositories whose Worktrees git could not list, each with its `repository` and the `error` of git, nothing of which is an Orphan.
+`applied` is `true` for `gc --apply`. `orphans` lists every Orphan in the order `--apply` deletes them, the Leases, then the Logical resources, then the output directories, the setup directories, the Isolated containers and their volumes. Each one has a `kind` of `lease` (with `service`, `port_name` and `port`), `logical_resource` (with `service`, `resource`, the key of the resource in the configuration, `name`, its name or index in the container, and `driver`), `output_directory` or `setup_directory` (with `path`), `isolated_container` (with the `service`, its compose `project` and the `compose` service) or `isolated_volume` (with the compose `project` and the `volume`), the `repository` and the removed `worktree` it belongs to, whether it was `deleted`, always `false` without `--apply`, and the `error` that kept it from being deleted, or `null`. `skipped` lists the Repositories whose Worktrees git could not list, each with its `repository` and the `error` of git, nothing of which is an Orphan. `warnings` lists what went wrong without failing `gc`, such as a [Portless alias](configuration.md#portless-aliases) that could not be removed, once for all the Orphans and not once for each, and is empty when nothing did. `worktree release --json` has the same `warnings`. Without `--json` each warning is on stderr as `procly: warning: ...`.
 
 The kinds `isolated_container` and `isolated_volume` were added without a change of the schema version: a reader that does not know a `kind` should skip that Orphan.
 
 `gc --apply --json` exits with 6 when some `error` is not `null`, as without `--json`, and prints none of the lines of stderr, which the document carries.
+
+## `doctor`
+
+```console
+$ procly doctor --json
+{"schema_version":1,"result":"problems","checks":[{"name":"docker_compose","status":"passed","message":"docker compose 2.29.1","fix":null},{"name":"daemon","status":"passed","message":"the Daemon answers and runs procly 0.4.0","fix":null},{"name":"session_unit","status":"warning","message":"the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session","fix":"procly unit install"},{"name":"state_documents","status":"passed","message":"every state document can be read","fix":null},{"name":"configuration","status":"passed","message":"/home/me/app/procly.toml is valid and its Drivers load","fix":null},{"name":"guard","status":"skipped","message":"/home/me/app/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered","fix":null},{"name":"portless","status":"skipped","message":"settings.portless is not on, nothing calls portless","fix":null},{"name":"worktrunk_hooks","status":"skipped","message":"/home/me/app/.config/wt.toml holds no Worktrunk hooks, `procly worktree hooks` writes them if you use Worktrunk","fix":null},{"name":"leased_ports","status":"failed","message":"lease web.http port 24081 of /home/me/app-login is held by process 4812 node, which Procly did not start","fix":"kill 4812"},{"name":"orphans","status":"failed","message":"3 Orphans left by removed Worktrees","fix":"procly gc"},{"name":"portless_aliases","status":"passed","message":"every Portless alias Procly made is held by a Lease","fix":null}],"prompt":"`procly doctor` checked this machine and found 2 problems listed below. [...]","agent":null}
+```
+
+`result` is `healthy` when no check failed, whatever the `warning` and `skipped` ones, and `problems` otherwise, and `doctor --json` exits with 7 in that case, as without `--json`. `checks` lists every check in the order the text prints them: `docker_compose`, `daemon`, `session_unit`, `state_documents`, `configuration`, `guard`, `portless`, `worktrunk_hooks`, `leased_ports`, `orphans` and `portless_aliases`, see [Checking the installation](doctor.md#the-checks). Each one has a `name`, a `status` of `passed`, `failed`, `skipped` or `warning`, a `message` and a `fix`. A `warning` is something missing that Procly can do without, such as a Session unit that is not installed: it carries its `fix` like a `failed` check and changes neither the `result` nor the exit code. A reader that does not know a `status` should treat it as no problem. The `message` of a check with several problems holds one per line. The `fix` is the command that fixes the problem, or `null` when nothing is wrong or no command fixes it, and holds one command per line when there are several. Doctor runs none of them.
+
+`prompt` is what `procly doctor --agent` would hand to a coding agent for the failed checks, so that your own agent can act on it, and `null` when no check failed. With `--agent <cli>` the prompt is handed to that CLI, `prompt` is `null` and `agent` names the CLI, `null` otherwise. What the agent prints on its standard output goes to stderr. See [Checking the installation](doctor.md#handing-the-problems-to-your-coding-agent).
+
+A later version of procly may add a check. A reader that does not know a `name` should skip that check, and the schema version stays 1.
 
 ## `status`
 

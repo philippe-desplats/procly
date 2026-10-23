@@ -19,7 +19,7 @@ Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it on
 
 1. It stops every Service and every running Job of the Worktree with their whole process trees, `SIGTERM` to each process group, then `SIGKILL` once the stop timeout has passed.
 2. It lets go of the Compose services of the Worktree as `procly down` does: a Shared or Logical container keeps running while another Worktree needs it, then stops after its Grace period. The Isolated container of the Worktree stops at once and is printed as `<service> stopped`, kept with its volumes, see [Isolated mode](configuration.md#isolated-mode).
-3. It releases the Leases of the Worktree, so that the next Worktree can be granted their ports at once, without waiting for them to expire.
+3. It releases the Leases of the Worktree, so that the next Worktree can be granted their ports at once, without waiting for them to expire. With `portless = true`, it removes their [Portless alias](configuration.md#portless-aliases) too.
 
 It also applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers of the Worktrees already removed, of every Repository: those set to `"delete"` are removed, and those set to a duration are removed once it has passed. The Worktree being released still exists, so its own container is kept until a later release, or the next start of the Daemon, finds it removed.
 
@@ -40,11 +40,11 @@ $ procly worktree release ../app-feature
 
 ## JSON
 
-With `--json`, stdout holds 1 document with the `worktree`, then what was `stopped` (`services` by name, the Isolated Compose services included, and `jobs` by identifier), what was `released` (the `compose_services` let go of, each with `service`, `others` and `grace_ms` as for [`down`](json.md#down), and the `leases`, each with `service`, `port_name` and `port`) and what was `kept`. A kept Lease carries a `reason` of `pinned_branch`, with its `branch`, or `container_running`. A kept Logical resource carries its `service`, its `driver`, the key of the `resource` in the configuration and its `name`. The schema version is 1, see [JSON output](json.md).
+With `--json`, stdout holds 1 document with the `worktree`, then what was `stopped` (`services` by name, the Isolated Compose services included, and `jobs` by identifier), what was `released` (the `compose_services` let go of, each with `service`, `others` and `grace_ms` as for [`down`](json.md#down), and the `leases`, each with `service`, `port_name` and `port`) and what was `kept`. A kept Lease carries a `reason` of `pinned_branch`, with its `branch`, or `container_running`. A kept Logical resource carries its `service`, its `driver`, the key of the `resource` in the configuration and its `name`. `warnings` lists what went wrong without failing the release, such as a [Portless alias](configuration.md#portless-aliases) that could not be removed, and is empty when nothing did. Without `--json` each warning is on stderr as `procly: warning: ...`. The schema version is 1, see [JSON output](json.md).
 
 ```console
 $ procly worktree release --json
-{"schema_version":1,"worktree":"/home/me/app-feature","stopped":{"services":["web"],"jobs":["3f9a1c2e"]},"released":{"compose_services":[{"service":"db","others":1,"grace_ms":600000}],"leases":[{"service":"web","port_name":"http","port":24001}]},"kept":{"leases":[],"logical_resources":[{"service":"db","driver":"postgres","resource":"dev","name":"app__app_feature"}]}}
+{"schema_version":1,"worktree":"/home/me/app-feature","stopped":{"services":["web"],"jobs":["3f9a1c2e"]},"released":{"compose_services":[{"service":"db","others":1,"grace_ms":600000}],"leases":[{"service":"web","port_name":"http","port":24001}]},"kept":{"leases":[],"logical_resources":[{"service":"db","driver":"postgres","resource":"dev","name":"app__app_feature"}]},"warnings":[]}
 ```
 
 ## Calling it from a worktree manager

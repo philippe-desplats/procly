@@ -57,8 +57,12 @@ pub(crate) type Key = (PathBuf, String, Option<PathBuf>);
 
 /// The document holding every record.
 #[derive(Debug, Serialize, Deserialize)]
-struct ContainerDocument {
+pub(super) struct ContainerDocument {
     containers: Vec<ContainerRecord>,
+}
+
+impl store::Stored for ContainerDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// The records of the running containers, written to their document on every change.

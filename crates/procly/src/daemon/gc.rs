@@ -82,6 +82,20 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
         }
         collected.report.orphans = orphans;
     }
+    // The aliases of the Leases just deleted go with them, in one pass so that a Portless that fails warns once.
+    if collected
+        .report
+        .orphans
+        .iter()
+        .any(|orphan| orphan.deleted && matches!(orphan.kind, OrphanKind::Lease { .. }))
+    {
+        let registry = Arc::clone(registry);
+        // Running `portless` and writing the aliases are blocking.
+        match tokio::task::spawn_blocking(move || registry.portless.prune(&registry.leases)).await {
+            Ok(warning) => collected.report.warnings.extend(warning),
+            Err(error) => eprintln!("cannot remove the Portless aliases of the Leases gc deleted: {error}"),
+        }
+    }
     if apply {
         let (registry, found, orphans) = (
             Arc::clone(registry),
@@ -191,11 +205,18 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
             applied: apply,
             orphans,
             skipped,
+            warnings: Vec::new(),
         },
         requester,
         driver_timeouts,
         found: Arc::new(found),
     })
+}
+
+/// The Orphans of every Repository as they are now, deleting nothing: what `procly doctor` reports. Blocking.
+pub(super) fn orphans(registry: &Registry) -> anyhow::Result<GcReport> {
+    // The directory only names the requester of a deletion, and nothing is deleted.
+    collect(registry, Path::new("/"), false, None).map(|collected| collected.report)
 }
 
 /// The Worktrees git no longer lists, as it lists them now, with nothing in use in them.
@@ -716,13 +737,17 @@ pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orp
             service,
             port_name,
             port,
-        } => Ok(registry.leases.release(&WorktreeLease {
-            repository: orphan.repository.clone(),
-            worktree: orphan.worktree.clone(),
-            service: service.clone(),
-            port_name: port_name.clone(),
-            port: *port,
-        })?),
+        } => {
+            // Its alias goes with it, once for all the Leases, see [`run`].
+            registry.leases.release(&WorktreeLease {
+                repository: orphan.repository.clone(),
+                worktree: orphan.worktree.clone(),
+                service: service.clone(),
+                port_name: port_name.clone(),
+                port: *port,
+            })?;
+            Ok(())
+        }
         OrphanKind::LogicalResource { .. } => unreachable!("a Logical resource is deleted under its container"),
         OrphanKind::OutputDirectory { path } | OrphanKind::SetupDirectory { path } => worktree_dir::remove(path)
             .map_err(|source| DeleteError::Remove {

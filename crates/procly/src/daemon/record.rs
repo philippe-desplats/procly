@@ -62,8 +62,12 @@ type Key = (PathBuf, String);
 
 /// The document holding every record.
 #[derive(Debug, Serialize, Deserialize)]
-struct ServiceDocument {
+pub(super) struct ServiceDocument {
     services: Vec<ServiceRecord>,
+}
+
+impl store::Stored for ServiceDocument {
+    const VERSION: u32 = DOCUMENT_VERSION;
 }
 
 /// The records of the running Services, written to their document on every change.

@@ -6,6 +6,7 @@ pub(crate) mod clock;
 mod compose;
 mod container_record;
 mod cpu;
+pub(crate) mod doctor;
 mod eject;
 mod environment;
 mod foreign;
@@ -21,6 +22,7 @@ mod listeners;
 mod managed;
 mod off;
 mod output_file;
+mod portless;
 #[cfg(unix)]
 mod process_group;
 mod reconcile;
@@ -35,6 +37,7 @@ mod up;
 mod worktree_dir;
 mod worktree_init;
 mod worktree_release;
+pub(crate) mod worktrunk;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, Permissions, TryLockError};
@@ -53,6 +56,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use self::clock::Clock;
 use self::compose::Composes;
+pub(crate) use self::compose::major as compose_major;
 use self::container_record::ContainerRecords;
 use self::index::Indexes;
 use self::isolated_record::IsolatedRecords;
@@ -61,6 +65,7 @@ use self::lease::Leases;
 use self::managed::ManagedBlocks;
 use self::off::Offs;
 use self::output_file::OutputFiles;
+use self::portless::Portless;
 use self::record::ServiceRecords;
 use self::resource::LogicalResources;
 use self::retention::Retentions;
@@ -86,7 +91,10 @@ struct Registry {
     resources: LogicalResources,
     managed: ManagedBlocks,
     offs: Offs,
-    /// Held while the Rules block and the Guard are written or switched, so that an install and `off` never cross.
+    /// The Portless aliases of the Leases, which go with their Lease.
+    portless: Portless,
+    /// Held while the Rules block, the Guard and the Worktrunk hooks are written or switched, so that an install, a
+    /// hooks write and `off` never cross.
     agent: Mutex<()>,
     /// Held while the generated files of a Worktree are written, so that 2 starts never write them at once.
     mirroring: Mutex<()>,
@@ -205,6 +213,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         resources: LogicalResources::new(state.resources()),
         managed: ManagedBlocks::new(state.managed_blocks()),
         offs: Offs::new(state.off()),
+        portless: Portless::new(state.portless_aliases()),
         agent: Mutex::default(),
         mirroring: Mutex::default(),
         initializing: Mutex::default(),
@@ -387,6 +396,7 @@ async fn dispatch(
             .await
             .unwrap_or_else(failure),
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
+        Request::Doctor => doctor::run(registry).await,
         Request::Gc { cwd, apply } => gc::run(registry, cwd, apply, peer).await,
         Request::WorktreeRelease { path } => answer(
             worktree_release::run(Arc::clone(registry), path, peer)
@@ -397,6 +407,7 @@ async fn dispatch(
         request @ (Request::AgentInstall { .. } | Request::Switch { .. } | Request::Guard { .. }) => {
             agent::answer(registry, request).await
         }
+        Request::WorktreeHooks { cwd } => worktrunk::answer(registry, cwd).await,
     }
 }
 

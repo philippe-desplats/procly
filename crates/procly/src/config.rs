@@ -186,6 +186,9 @@ pub(crate) struct Settings {
     /// How long one command of a Driver may run in the container.
     #[serde(default = "default_driver_timeout", deserialize_with = "duration")]
     pub(crate) driver_timeout: Duration,
+    /// Whether each Lease `up` prints as an `http://` URL is aliased to a stable Portless name.
+    #[serde(default)]
+    pub(crate) portless: bool,
 }
 
 impl Default for Settings {
@@ -203,6 +206,7 @@ impl Default for Settings {
             setup_timeout: default_setup_timeout(),
             setup_progress_interval: default_setup_progress_interval(),
             driver_timeout: default_driver_timeout(),
+            portless: false,
         }
     }
 }
@@ -1324,6 +1328,13 @@ mod tests {
             config.idle_timeout(&config.services["web"]),
             Some(Duration::from_mins(30))
         );
+    }
+
+    #[test]
+    fn portless_is_off_unless_the_settings_turn_it_on() {
+        assert!(!parsed("[services.web]\nrun = 'x'\n").settings.portless);
+        assert!(!parsed("[settings]\nportless = false\n").settings.portless);
+        assert!(parsed("[settings]\nportless = true\n").settings.portless);
     }
 
     #[test]
