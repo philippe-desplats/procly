@@ -202,7 +202,7 @@ impl McpServer {
         let name = verb.join(" ");
         let output = tokio::select! {
             () = context.ct.cancelled() => {
-                return Ok(failure(&name, EXIT_PROCLY_FAILURE, "the request was cancelled", ""));
+                return Err(ErrorData::internal_error("the request was cancelled", None));
             }
             output = command.output() => output,
         };
