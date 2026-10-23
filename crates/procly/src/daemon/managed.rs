@@ -387,7 +387,7 @@ fn read_text(file: &Path) -> Result<String, ManagedError> {
 }
 
 /// The text of `file`, `None` when it does not exist.
-pub(crate) fn read_existing(file: &Path) -> Result<Option<String>, ManagedError> {
+pub(super) fn read_existing(file: &Path) -> Result<Option<String>, ManagedError> {
     match fs::read_to_string(file) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),

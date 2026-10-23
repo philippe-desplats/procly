@@ -910,11 +910,14 @@ pub(crate) struct HooksReport {
 }
 
 impl HooksReport {
-    /// The lines of the hooks already set outside the block, which a `conflict` leaves for the person to wire by hand.
-    pub(crate) fn conflicting_lines(&self) -> impl Iterator<Item = &String> {
+    /// The hooks of the block that are not set outside it, whose lines a `conflict` leaves for the person to add as
+    /// they are.
+    pub(crate) fn unset(&self) -> Vec<&str> {
         self.lines
             .iter()
-            .filter(|line| self.set.iter().any(|hook| line.starts_with(&format!("{hook} = "))))
+            .filter_map(|line| line.split_once(" = ").map(|(hook, _)| hook))
+            .filter(|hook| !self.set.iter().any(|set| set == hook))
+            .collect()
     }
 }
 

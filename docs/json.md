@@ -105,7 +105,7 @@ $ procly worktree hooks --json
 {"schema_version":1,"file":"/home/me/app/.config/wt.toml","outcome":"written","set":[],"lines":["pre-start = \"procly worktree init\"","pre-remove = \"procly worktree release\""]}
 ```
 
-`file` is the Worktrunk config of the Worktree. `outcome` is `written`, `unchanged` when the block was in place, `edited` when you edited the block, or moved it under a table header where its keys no longer are the hooks, and Procly left it, or `conflict` when a hook is already set outside the block and nothing was written. `set` names those hooks (`pre-start`, `pre-remove`) for a `conflict` and is empty otherwise. `lines` holds the lines of the block, of which the text output prints after a `conflict` only those of the hooks in `set`. A `conflict` exits with 5, as without `--json`.
+`file` is the Worktrunk config of the Worktree. `outcome` is `written`, `unchanged` when the block was in place, `edited` when you edited the block, or moved it under a table header where its keys no longer are the hooks, and Procly left it, or `conflict` when a hook is already set outside the block and nothing was written. `set` names those hooks (`pre-start`, `pre-remove`) for a `conflict` and is empty otherwise. `lines` holds the lines of the block, which the text output prints after a `conflict` as well: the line of a hook in `set` is to wire into that hook, the other is to add as it is. A `conflict` exits with 5, as without `--json`.
 
 ## `gc`
 

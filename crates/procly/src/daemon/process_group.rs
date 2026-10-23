@@ -156,7 +156,8 @@ pub(super) fn lead_group_blocking(command: &mut Command) {
 }
 
 /// Kills the whole tree of a child spawned after [`lead_group_blocking`] and reaps it: the group first, so that no
-/// descendant outlives it, the leader so that it can be waited for, then whatever the leader forked meanwhile. Blocking.
+/// descendant outlives it, the leader so that it can be waited for, then whatever the leader forked meanwhile.
+/// Blocking.
 pub(super) fn kill_tree_blocking(child: &mut Child) {
     let group = i32::try_from(child.id()).map(Pid::from_raw).ok();
     if let Some(group) = group {

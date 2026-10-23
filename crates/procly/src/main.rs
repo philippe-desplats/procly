@@ -379,7 +379,7 @@ enum WorktreeCommand {
     #[command(
         after_help = "Exit codes: 0 when the block is written, also when it already was or was left as it is because \
                       you edited it, 5 when `pre-start` or `pre-remove` is already set outside the block, in which \
-                      case nothing is written and the lines to add are printed on stdout, 125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
+                      case nothing is written and the lines of both hooks are printed on stdout, 125 when Procly itself fails, such as for a `.config/wt.toml` that is not TOML or a directory \
                       that is not in a git Repository. Worktrunk asks you to approve project hooks the first time \
                       it runs them. See docs/worktree-init.md and docs/exit-codes.md."
     )]
@@ -1408,15 +1408,21 @@ fn worktree_hooks(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
                     report.file.display()
                 );
             }
-            // Stdout holds only the lines, so that they can be pasted or appended as they are.
+            // Stdout holds only the lines, so that they can be pasted or appended as they are: the line of a hook
+            // that is set goes into that hook, the line of a hook that is not set is added.
             HooksOutcome::Conflict => {
-                eprintln!(
+                let unset = report.unset();
+                let mut advice = format!(
                     "procly: {} already sets {}, nothing was written. Make the hook that is set already run the \
-                     Procly command, which the lines below name:",
+                     Procly command, which the lines below name.",
                     report.file.display(),
                     report.set.join(" and ")
                 );
-                for line in report.conflicting_lines() {
+                if !unset.is_empty() {
+                    let _ = write!(advice, " {} is not set, add its line as it is.", unset.join(" and "));
+                }
+                eprintln!("{advice}");
+                for line in &report.lines {
                     println!("{line}");
                 }
             }

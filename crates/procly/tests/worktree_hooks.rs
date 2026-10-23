@@ -88,25 +88,16 @@ fn running_it_twice_leaves_one_block_and_changes_nothing() {
 }
 
 #[test]
-fn a_hook_already_set_outside_the_block_writes_nothing_prints_only_its_line_and_exits_5() {
-    for (existing, printed, not_printed) in [
-        ("pre-start = \"npm ci\"\n", vec![PRE_START], vec![PRE_REMOVE]),
-        ("pre-remove = \"npm run clean\"\n", vec![PRE_REMOVE], vec![PRE_START]),
+fn a_hook_already_set_outside_the_block_writes_nothing_prints_the_lines_of_both_hooks_and_exits_5() {
+    for (existing, unset) in [
+        ("pre-start = \"npm ci\"\n", Some("pre-remove")),
+        ("pre-remove = \"npm run clean\"\n", Some("pre-start")),
         (
             "post-create = \"npm ci\"\n\n[pre-start]\nnpm = \"npm ci\"\n",
-            vec![PRE_START],
-            vec![PRE_REMOVE],
+            Some("pre-remove"),
         ),
-        (
-            "\"pre-remove\" = \"npm run clean\"\n",
-            vec![PRE_REMOVE],
-            vec![PRE_START],
-        ),
-        (
-            "pre-start = \"npm ci\"\npre-remove = \"npm run clean\"\n",
-            vec![PRE_START, PRE_REMOVE],
-            vec![],
-        ),
+        ("\"pre-remove\" = \"npm run clean\"\n", Some("pre-start")),
+        ("pre-start = \"npm ci\"\npre-remove = \"npm run clean\"\n", None),
     ] {
         let procly = Procly::new();
         let main = repository(&procly);
@@ -117,20 +108,21 @@ fn a_hook_already_set_outside_the_block_writes_nothing_prints_only_its_line_and_
         assert_eq!(output.status.code(), Some(CONFLICT), "{existing}: {}", stderr(&output));
         assert_eq!(read(&config(&main)), existing, "nothing is written");
         let lines = stdout(&output);
-        for line in printed {
-            assert!(
-                lines.contains(line),
-                "stdout holds the line of a hook that is set: {lines}"
-            );
-        }
-        for line in not_printed {
-            assert!(
-                !lines.contains(line),
-                "stdout holds only the hooks that are set: {lines}"
-            );
-        }
+        assert_eq!(
+            lines.lines().collect::<Vec<_>>(),
+            [PRE_START, PRE_REMOVE],
+            "stdout holds the line of each hook, the one to wire and the one to add"
+        );
         assert!(!lines.contains(OPEN), "the lines are not a block: {lines}");
-        assert!(stderr(&output).contains("wt.toml"), "{}", stderr(&output));
+        let stderr = stderr(&output);
+        assert!(stderr.contains("wt.toml"), "{stderr}");
+        match unset {
+            Some(hook) => assert!(
+                stderr.contains(&format!("{hook} is not set, add its line as it is")),
+                "stderr tells to add the line of the hook that is not set: {stderr}"
+            ),
+            None => assert!(!stderr.contains("is not set"), "both hooks are set: {stderr}"),
+        }
     }
 }
 
