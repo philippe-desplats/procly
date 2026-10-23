@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::topology::Worktree;
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 19;
+pub(crate) const PROTOCOL_VERSION: u32 = 20;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
@@ -80,6 +80,9 @@ pub(crate) enum Request {
     WorktreeRelease { path: PathBuf },
     /// Runs the checks only the Daemon can answer, and tells which version it is.
     Doctor,
+    /// Writes the Worktrunk hooks block into the `.config/wt.toml` of the Worktree holding `cwd`, unless a hook is
+    /// already set outside it.
+    WorktreeHooks { cwd: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -176,6 +179,8 @@ pub(crate) enum Response {
     WorktreeRelease(ReleaseReport),
     /// What the Daemon found when it ran its checks.
     Doctor(DaemonChecks),
+    /// What became of the Worktrunk hooks block.
+    WorktreeHooks(HooksReport),
     Error {
         message: String,
     },
@@ -302,6 +307,8 @@ pub(crate) enum Written {
     Exclusions,
     /// The Env file of a Worktree.
     EnvFile,
+    /// The Managed block of the Worktrunk config that runs `worktree init` and `worktree release`.
+    WorktrunkHooks,
 }
 
 impl Written {
@@ -311,6 +318,7 @@ impl Written {
             Self::Guard => "guard",
             Self::Exclusions => "exclusions",
             Self::EnvFile => "env file",
+            Self::WorktrunkHooks => "worktrunk hooks",
         }
     }
 }
@@ -855,6 +863,43 @@ impl Check {
     }
 }
 
+/// What `worktree hooks` did to the Worktrunk config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HooksOutcome {
+    /// The block was added or updated.
+    Written,
+    /// The file already held exactly this block.
+    Unchanged,
+    /// The block holds something Procly did not write, so it was left as it is.
+    Edited,
+    /// A hook is already set outside the block, so nothing was written.
+    Conflict,
+}
+
+impl HooksOutcome {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Written => "written",
+            Self::Unchanged => "unchanged",
+            Self::Edited => "edited",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
+/// What `worktree hooks` wrote, or why it wrote nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HooksReport {
+    /// The `.config/wt.toml` of the Worktree.
+    pub(crate) file: PathBuf,
+    pub(crate) outcome: HooksOutcome,
+    /// The hooks already set outside the block, for a `conflict`, empty otherwise.
+    pub(crate) set: Vec<String>,
+    /// The lines the block holds, which are the ones to add by hand after a `conflict`.
+    pub(crate) lines: Vec<String>,
+}
+
 /// What the Daemon answers a `Doctor` request with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DaemonChecks {
@@ -875,7 +920,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":19,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":20,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

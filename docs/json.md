@@ -26,6 +26,7 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `init` | the proposal and whether it was written | [Proposing a configuration](init.md) |
 | `worktree init` | what was copied and what ran | [Preparing a Worktree](worktree-init.md) |
 | `worktree release` | what the Worktree release stopped, released and kept | [Releasing a Worktree](worktree-release.md#json) |
+| `worktree hooks` | what became of the Worktrunk hooks block | [below](#worktree-hooks), and [Preparing a Worktree](worktree-init.md#worktrunk) |
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
 | `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
 | `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
@@ -97,6 +98,15 @@ $ procly down --json
 
 `service` is the Service asked for, or `null` for all of them. `stopped` also lists the Isolated Compose services whose container of the Worktree was stopped. `released` lists the Shared and Logical Compose services the Worktree let go of, each with `service`, `others` (how many other Worktrees still need the container) and `grace_ms` (how long it keeps running once none does).
 
+## `worktree hooks`
+
+```console
+$ procly worktree hooks --json
+{"schema_version":1,"file":"/home/me/app/.config/wt.toml","outcome":"written","set":[],"lines":["pre-start = \"procly worktree init\"","pre-remove = \"procly worktree release\""]}
+```
+
+`file` is the Worktrunk config of the Worktree. `outcome` is `written`, `unchanged` when the block was in place, `edited` when you edited the block and Procly left it, or `conflict` when a hook is already set outside the block and nothing was written. `set` names those hooks (`pre-start`, `pre-remove`) for a `conflict` and is empty otherwise. `lines` holds the lines of the block, which are the ones to add by hand after a `conflict`. A `conflict` exits with 5, as without `--json`.
+
 ## `gc`
 
 ```console
@@ -114,10 +124,10 @@ The kinds `isolated_container` and `isolated_volume` were added without a change
 
 ```console
 $ procly doctor --json
-{"schema_version":1,"result":"problems","checks":[{"name":"docker_compose","status":"passed","message":"docker compose 2.29.1","fix":null},{"name":"daemon","status":"passed","message":"the Daemon answers and runs procly 0.4.0","fix":null},{"name":"session_unit","status":"warning","message":"the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session","fix":"procly unit install"},{"name":"state_documents","status":"passed","message":"every state document can be read","fix":null},{"name":"configuration","status":"passed","message":"/home/me/app/procly.toml is valid and its Drivers load","fix":null},{"name":"guard","status":"skipped","message":"/home/me/app/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered","fix":null},{"name":"leased_ports","status":"failed","message":"lease web.http port 24081 of /home/me/app-login is held by process 4812 node, which Procly did not start","fix":"kill 4812"},{"name":"orphans","status":"failed","message":"3 Orphans left by removed Worktrees","fix":"procly gc"}]}
+{"schema_version":1,"result":"problems","checks":[{"name":"docker_compose","status":"passed","message":"docker compose 2.29.1","fix":null},{"name":"daemon","status":"passed","message":"the Daemon answers and runs procly 0.4.0","fix":null},{"name":"session_unit","status":"warning","message":"the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session","fix":"procly unit install"},{"name":"state_documents","status":"passed","message":"every state document can be read","fix":null},{"name":"configuration","status":"passed","message":"/home/me/app/procly.toml is valid and its Drivers load","fix":null},{"name":"guard","status":"skipped","message":"/home/me/app/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered","fix":null},{"name":"worktrunk_hooks","status":"skipped","message":"/home/me/app/.config/wt.toml holds no Worktrunk hooks, `procly worktree hooks` writes them if you use Worktrunk","fix":null},{"name":"leased_ports","status":"failed","message":"lease web.http port 24081 of /home/me/app-login is held by process 4812 node, which Procly did not start","fix":"kill 4812"},{"name":"orphans","status":"failed","message":"3 Orphans left by removed Worktrees","fix":"procly gc"}]}
 ```
 
-`result` is `healthy` when no check failed, whatever the `warning` and `skipped` ones, and `problems` otherwise, and `doctor --json` exits with 7 in that case, as without `--json`. `checks` lists every check in the order the text prints them: `docker_compose`, `daemon`, `session_unit`, `state_documents`, `configuration`, `guard`, `leased_ports` and `orphans`, see [Checking the installation](doctor.md#the-checks). Each one has a `name`, a `status` of `passed`, `failed`, `skipped` or `warning`, a `message` and a `fix`. A `warning` is something missing that Procly can do without, such as a Session unit that is not installed: it carries its `fix` like a `failed` check and changes neither the `result` nor the exit code. A reader that does not know a `status` should treat it as no problem. The `message` of a check with several problems holds one per line. The `fix` is the command that fixes the problem, or `null` when nothing is wrong or no command fixes it, and holds one command per line when there are several. Doctor runs none of them.
+`result` is `healthy` when no check failed, whatever the `warning` and `skipped` ones, and `problems` otherwise, and `doctor --json` exits with 7 in that case, as without `--json`. `checks` lists every check in the order the text prints them: `docker_compose`, `daemon`, `session_unit`, `state_documents`, `configuration`, `guard`, `worktrunk_hooks`, `leased_ports` and `orphans`, see [Checking the installation](doctor.md#the-checks). Each one has a `name`, a `status` of `passed`, `failed`, `skipped` or `warning`, a `message` and a `fix`. A `warning` is something missing that Procly can do without, such as a Session unit that is not installed: it carries its `fix` like a `failed` check and changes neither the `result` nor the exit code. A reader that does not know a `status` should treat it as no problem. The `message` of a check with several problems holds one per line. The `fix` is the command that fixes the problem, or `null` when nothing is wrong or no command fixes it, and holds one command per line when there are several. Doctor runs none of them.
 
 A later version of procly may add a check. A reader that does not know a `name` should skip that check, and the schema version stays 1.
 

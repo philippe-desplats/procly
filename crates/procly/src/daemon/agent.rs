@@ -217,7 +217,7 @@ pub(super) fn contained(worktree: &Path, requested: &Path) -> Result<PathBuf, Ag
 }
 
 /// The Repository and the Worktree holding `cwd`, which must be in a git Repository.
-fn topology_in(cwd: &Path) -> Result<Topology, AgentError> {
+pub(super) fn topology_in(cwd: &Path) -> Result<Topology, AgentError> {
     let cwd = topology::canonicalize(cwd)?;
     topology::resolve(&cwd)?.ok_or(AgentError::Topology(TopologyError::NotARepository { dir: cwd }))
 }

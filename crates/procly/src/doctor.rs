@@ -60,6 +60,7 @@ pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
         daemon::doctor::state_documents(state),
         configuration(worktree, &placement.unplaced),
         daemon::doctor::guard(state, worktree, &placement.unplaced),
+        daemon::doctor::worktrunk_hooks(state, worktree, &placement.unplaced),
     ];
     checks.extend(daemon_checks);
     Report { checks }

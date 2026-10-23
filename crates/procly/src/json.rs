@@ -371,6 +371,7 @@ mod tests {
             r#"{"kind":"unknown","find":"lsof"}"#
         );
         assert_eq!(json(&Written::EnvFile), r#""env_file""#);
+        assert_eq!(json(&Written::WorktrunkHooks), r#""worktrunk_hooks""#);
         assert_eq!(json(&BlockOutcome::Edited), r#""edited""#);
         assert_eq!(json(&StartOutcome::Reused), r#""reused""#);
     }

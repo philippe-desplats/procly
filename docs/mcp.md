@@ -34,7 +34,7 @@ Each tool takes the arguments of its CLI verb, named like them, plus an optional
 | `status` | `procly status` | `all`, `cwd` |
 | `worktree_init` | `procly worktree init` | `path`, `cwd` |
 
-`init`, `unit`, `guard`, `agent`, `off`, `on` and `eject` have no tool. They write into the Repository or into the session configuration of the person, and an MCP client must not. A call to one of them is refused.
+`init`, `unit`, `guard`, `agent`, `off`, `on`, `eject` and `worktree hooks` have no tool. They write into the Repository or into the session configuration of the person, and an MCP client must not. A call to one of them is refused.
 
 `wait` and `logs` return in one response, when the Job has ended for `wait`. A client with a request timeout shorter than the Job should call `wait` on Jobs it expects to be short, or poll `logs`.
 
