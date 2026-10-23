@@ -141,7 +141,7 @@ Every command but `guard` and `mcp` accepts `--json` and then prints one documen
 
 To point your agents at Procly, run `procly agent install` once and commit what it writes. The Guard covers Claude Code: it reads each Bash call through a `PreToolUse` hook, lets unknown commands through without asking the Daemon, and denies a known dev-server or `docker compose up` command with the equivalent Procly command. See [Steering agents to Procly](docs/agents.md).
 
-Agents that prefer MCP to a shell can use `procly mcp`, a stdio MCP server whose tools return the `--json` document of `run`, `wait`, `logs`, `up`, `down`, `env`, `status` and `worktree init`. You register it with your agent yourself, for example `claude mcp add procly -- procly mcp`, and Procly writes no agent configuration. See [The MCP server](docs/mcp.md).
+Agents that prefer MCP to a shell can use `procly mcp`, a stdio MCP server whose tools return the `--json` document of `run`, `wait`, `logs`, `up`, `down`, `env`, `status`, `worktree init`, `worktree release`, `gc` and `doctor`. You register it with your agent yourself, for example `claude mcp add procly -- procly mcp`, and Procly writes no agent configuration. See [The MCP server](docs/mcp.md).
 
 ## Try it without touching your setup
 

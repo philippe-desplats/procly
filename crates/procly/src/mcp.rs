@@ -125,9 +125,36 @@ struct WorktreeInitArguments {
     cwd: Option<PathBuf>,
 }
 
+/// The arguments of `procly worktree release`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WorktreeReleaseArguments {
+    /// The Worktree to release, or any directory in it. Defaults to `cwd`.
+    path: Option<PathBuf>,
+    /// The directory to run in. Defaults to the directory `procly mcp` was started from.
+    cwd: Option<PathBuf>,
+}
+
+/// The arguments of `procly gc`.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GcArguments {
+    /// Delete the Orphans instead of listing them. Without it nothing is deleted.
+    apply: Option<bool>,
+    /// The directory to run in. Defaults to the directory `procly mcp` was started from.
+    cwd: Option<PathBuf>,
+}
+
+/// The arguments of `procly doctor`. It has no `agent`: the hand-off to a coding agent is the person's to ask for, and
+/// a call carrying it is refused.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DoctorArguments {
+    /// The directory to run in, whose Worktree is checked. Defaults to the directory `procly mcp` was started from.
+    cwd: Option<PathBuf>,
+}
+
 /// The server: one tool per verb the CLI exposes, and the executable they run.
 ///
-/// `init`, `unit`, `guard`, `agent`, `off`, `on` and `eject` have no tool: they write into the Repository or the
+/// `init`, `unit`, `guard`, `agent`, `off`, `on`, `eject` and `worktree hooks` have no tool: they write into the Repository or the
 /// session configuration of the person, which an MCP client must not do.
 #[derive(Debug, Clone)]
 struct McpServer {
@@ -317,6 +344,49 @@ impl McpServer {
             .collect();
         self.invoke(&["worktree", "init"], Vec::new(), values, arguments.cwd)
             .await
+    }
+
+    #[tool(
+        description = "Release a Worktree before it is removed: stop its Services and Jobs with their whole process \
+                       trees, let go of its Compose services as `down` does and release its Leases, except those of \
+                       a Pinned branch. Nothing is deleted, the Logical resources are kept. Releasing again returns \
+                       `nothing to release`. Same as `procly worktree release --json`."
+    )]
+    async fn worktree_release(
+        &self,
+        Parameters(arguments): Parameters<WorktreeReleaseArguments>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let values = arguments
+            .path
+            .map(|path| path.to_string_lossy().into_owned())
+            .into_iter()
+            .collect();
+        self.invoke(&["worktree", "release"], Vec::new(), values, arguments.cwd)
+            .await
+    }
+
+    #[tool(
+        description = "List the Orphans, what removed Worktrees left behind: Leases, Logical resources, Isolated \
+                       containers and volumes, and output and setup directories. With `apply`, delete them all, \
+                       going on after a failure, which is a tool error with exit code 6 carrying the report. Without \
+                       it nothing is deleted. Same as `procly gc --json`."
+    )]
+    async fn gc(&self, Parameters(arguments): Parameters<GcArguments>) -> Result<CallToolResult, ErrorData> {
+        let flags = if arguments.apply == Some(true) {
+            vec!["--apply".to_owned()]
+        } else {
+            Vec::new()
+        };
+        self.invoke(&["gc"], flags, Vec::new(), arguments.cwd).await
+    }
+
+    #[tool(
+        description = "Check that Procly can work here and return every check with its result and the command that \
+                       fixes a problem. Nothing is changed or run. A check that found a problem is a tool error with \
+                       exit code 7 carrying the document. Same as `procly doctor --json`."
+    )]
+    async fn doctor(&self, Parameters(arguments): Parameters<DoctorArguments>) -> Result<CallToolResult, ErrorData> {
+        self.invoke(&["doctor"], Vec::new(), Vec::new(), arguments.cwd).await
     }
 }
 
