@@ -28,7 +28,7 @@ no Orphans
 
 `gc` collects 6 kinds of Orphans:
 
-- A Lease of a removed Worktree. Deleting it returns its port to the Range at once, instead of after `settings.lease_expiry`.
+- A Lease of a removed Worktree. Deleting it returns its port to the Range at once, instead of after `settings.lease_expiry`, and removes its [Portless alias](configuration.md#portless-aliases) if it has one.
 - A Logical resource of a removed Worktree, such as its Postgres database or its Redis database index, listed with its Service, its key in the configuration, its name in the container and its Driver. Deleting it drops it in its container through the `drop` command of its Driver, then frees the index it held when the Driver numbers its resources, so that a new Worktree can be granted that index. A Redis container and its 16 indexes never run out because of removed Worktrees.
 - The output directory of a removed Worktree, in the `output` directory of the state directory, which held the output files of its Services.
 - The setup directory of a removed Worktree, in the `setup` directory of the state directory, which holds the log of a setup command that failed, see [Preparing a Worktree](worktree-init.md).

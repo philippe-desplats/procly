@@ -90,6 +90,8 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
                 branch.as_deref(),
                 &running,
             )?;
+            // The aliases of the Leases just released go with them.
+            registry.portless.prune(&registry.leases);
             // The Leases are released whatever the configuration says, a broken one only hides the resources.
             let resources = logical_resources(&registry, &topology).unwrap_or_else(|error| {
                 eprintln!(

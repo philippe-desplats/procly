@@ -77,6 +77,7 @@ web = { http = 3200 }
 | `setup_timeout` | `"30m"` | How long each setup command of `procly worktree init` may run before its whole process tree is killed and `worktree init` exits with 124, long enough for a cold install. See [Worktree init](worktree-init.md). |
 | `setup_progress_interval` | `"1m"` | How often a setup command of `procly worktree init` that is still running prints its elapsed time and the path of its log on stderr, at most once per second. See [Worktree init](worktree-init.md#a-long-setup). |
 | `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125, or `procly gc --apply` reports the resource it was dropping as not deleted. |
+| `portless` | `false` | Whether each Lease `procly up` prints as an `http://` URL is aliased to a stable [Portless](https://github.com/vercel-labs/portless) name, see [Portless aliases](#portless-aliases). |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
@@ -501,6 +502,37 @@ The scheme of a Lease is the first of these that applies:
 - `http` for the Lease the health check of a Process service probes, and for the Lease of an HTTP health check, one that sets `health.path` or `health.status`.
 
 Up to v0.1, `procly up` printed an `http` URL and the port of the health check alone, whatever that port spoke. Since v0.2 the line names every Lease. Since the CLI output is public interface (ADR 0009), the change is recorded here: a Process service with a single Port name prints the same line as before unless that name is `https`, `smtp`, `redis` or `amqp`, in which case its URL has that scheme instead of `http`, a Service with several Port names gets one more `, <lease>` for each of the others, and a Compose service whose port has no known scheme, such as a MySQL, prints `mysql started db port 3306` where it printed `mysql started http://localhost:3306 port 3306`. A script that reads the port of the health check reads the number before the first comma. With `--json`, `url` and `urls` carry the same URLs, see [JSON output](json.md#up).
+
+### Portless aliases
+
+With `portless = true` in `[settings]`, `procly up` runs `portless alias <name> <port>` for each Lease it prints as an `http://` URL, so that you reach the Service by a name that does not change from one Worktree to the next. The setting is off by default, and nothing calls `portless` while it is.
+
+The name of a Lease is:
+
+| Where | The Service has 1 HTTP Lease | The Service has several |
+| --- | --- | --- |
+| The Main worktree | `<service>` | `<port-name>.<service>` |
+| Any other Worktree | `<branch>.<service>` | `<branch>.<port-name>.<service>` |
+
+The branch is the one the Worktree has checked out, or the name of the Worktree directory on a detached `HEAD`. The Lease of a Pinned branch is named after that branch. Each part is a DNS label, so it is lowercase, and any run of characters other than a letter or a digit becomes one `-`: the branch `feature/E-59` gives `feature-e-59.web`. Portless adds its own suffix, `.localhost` by default, to the name.
+
+```console
+$ cd ../app-login
+$ procly up web
+web started http://localhost:24001 port 24001
+$ portless list
+http://login.web.localhost -> 24001
+```
+
+An alias lives as long as its Lease:
+
+- `procly up` makes it again each time, whether the Service started or was already running.
+- `procly down` keeps it, since the Lease stays with the Worktree (ADR 0006).
+- `procly worktree release`, the expiry of the Lease and `procly gc --apply` remove it with `portless alias --remove <name>`. The Lease of a Pinned branch is not released by any of them, so its alias stays too.
+
+Procly records each alias it makes, in the state directory, with the Lease that holds it. An alias is removed whatever the setting is when its Lease goes, so that turning Portless off never leaves a name pointing at a port another Worktree may get. A name is not recorded again once it points to another Lease.
+
+Portless stays optional. Procly never starts the Portless proxy, and never runs `sudo`: it only runs `portless alias`, so the proxy is yours to start. When `portless` is not on the `PATH` of the Daemon, or a call fails, `procly up` prints one warning on stderr, `procly: warning: ...`, makes no more alias in that command and exits as it would without Portless. A removal that fails leaves the alias recorded and is tried again by the next removal, and `procly doctor` names the aliases no Lease holds with the command that removes each, see [Checking the installation](doctor.md). It also reports a missing `portless` when the setting is on.
 
 ## Derived variables
 

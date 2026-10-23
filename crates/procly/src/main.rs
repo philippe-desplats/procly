@@ -564,6 +564,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
             ports,
             needs,
             urls,
+            warnings,
         } => {
             let requested = UpService {
                 service,
@@ -573,6 +574,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
                 url,
                 ports,
                 urls,
+                warnings,
             };
             up_reached(&requested, &needs, json)
         }
@@ -604,6 +606,7 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
 
 /// Prints the Service `up` was asked for, healthy, after the `needs` it brought up first.
 fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow::Result<ExitCode> {
+    warn(needs.iter().chain([requested]));
     if json {
         let services = needs
             .iter()
@@ -623,6 +626,7 @@ fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow:
 
 /// Prints every Service `up` brought up or found running, since every Service was asked for, in the order they came up.
 fn up_all(services: &[UpService], json: bool) -> anyhow::Result<ExitCode> {
+    warn(services);
     if json {
         let services = services.iter().map(|up| json::Reached::new(up, None)).collect();
         json::print(&json::Up::Healthy { services })?;
@@ -784,6 +788,13 @@ fn env(state: &StateDir, service: &str, json: bool) -> anyhow::Result<ExitCode> 
             Ok(ExitCode::SUCCESS)
         }
         other => unexpected(other),
+    }
+}
+
+/// Tells on stderr what went wrong for the Services `up` reached without failing it.
+fn warn<'a>(services: impl IntoIterator<Item = &'a UpService>) {
+    for warning in services.into_iter().flat_map(|up| &up.warnings) {
+        eprintln!("procly: warning: {warning}");
     }
 }
 
@@ -1462,6 +1473,7 @@ mod tests {
                 .iter()
                 .map(|&(name, url)| (name.to_owned(), url.to_owned()))
                 .collect(),
+            warnings: Vec::new(),
         }
     }
 
