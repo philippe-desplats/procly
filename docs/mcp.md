@@ -43,6 +43,10 @@ Each tool takes the arguments of its CLI verb, named like them, plus an optional
 
 `wait` and `logs` return in one response, when the Job has ended for `wait`. A client with a request timeout shorter than the Job should call `wait` on Jobs it expects to be short, or poll `logs`.
 
+A client that cancels a call, with a `notifications/cancelled` for its request, stops the `procly` command that call started, and the server sends no answer for it. Only the client side stops. The Job a `wait` was about keeps running, and a Service an `up` had started keeps running too.
+
+The commands of the server stop with it too. When `procly mcp` ends for any reason, SIGKILL included, each command still running for a call stops at once, on macOS and on Linux. Again only the client side goes away: the Jobs and Services those calls were about keep running, and so does the Daemon.
+
 ## What a tool returns
 
 When the verb exits with 0, the tool returns one block of text, the document of `procly <verb> --json`, byte for byte. See [JSON output](json.md).

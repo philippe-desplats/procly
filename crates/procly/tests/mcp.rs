@@ -10,10 +10,11 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{
-    DEADLINE, Procly, assert_success, free_port, git, git_repository, git_worktree_add, stderr, stdout, test_server,
+    DEADLINE, Procly, assert_success, eventually, eventually_within, free_port, git, git_repository, git_worktree_add,
+    stderr, stdout, test_server,
 };
 use serde_json::{Value, json};
 
@@ -102,6 +103,70 @@ impl McpServer {
                 return message;
             }
         }
+    }
+
+    /// Sends a call of the tool `name` without waiting for its answer, and returns the id of the request.
+    fn start_call(&mut self, name: &str, arguments: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut params = json!({ "name": name });
+        params["arguments"] = arguments;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params }));
+        id
+    }
+
+    /// Tells the server that the client gave up on the request `id`.
+    fn cancel(&mut self, id: u64) {
+        self.send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": id, "reason": "the test gave up" }
+        }));
+    }
+
+    /// Every message the server writes within `duration`.
+    fn messages_within(&self, duration: Duration) -> Vec<Value> {
+        let deadline = Instant::now() + duration;
+        let mut messages = Vec::new();
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(line) = self.lines.recv_timeout(left) else {
+                break;
+            };
+            messages.push(serde_json::from_str(&line).expect("the server writes JSON on stdout"));
+        }
+        messages
+    }
+
+    /// The `procly <verb>` processes that are children of the server.
+    fn cli_children(&self, verb: &str) -> Vec<String> {
+        let table = Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid=,command="])
+            .output()
+            .expect("ps runs");
+        let own = self.child.id().to_string();
+        String::from_utf8_lossy(&table.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let (pid, parent) = (fields.next()?, fields.next()?);
+                let command: Vec<&str> = fields.collect();
+                (parent == own && command.contains(&verb)).then(|| format!("{pid} {}", command.join(" ")))
+            })
+            .collect()
+    }
+
+    /// The pids of the `procly <verb>` processes that are children of the server.
+    fn cli_child_pids(&self, verb: &str) -> Vec<u32> {
+        self.cli_children(verb)
+            .iter()
+            .filter_map(|child| child.split_whitespace().next()?.parse().ok())
+            .collect()
+    }
+
+    /// Kills the server with SIGKILL, so that nothing of it runs any more, and reaps it.
+    fn kill(&mut self) {
+        self.child.kill().expect("kill the server");
+        self.child.wait().expect("reap the server");
     }
 
     /// Calls the tool `name` and returns its `result`.
@@ -610,5 +675,232 @@ fn the_server_ends_when_the_client_closes_its_input() {
         }
         assert!(std::time::Instant::now() < deadline, "the server outlived its client");
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// How long a cancelled call may take to stop its command.
+const CANCEL_DEADLINE: Duration = Duration::from_secs(1);
+
+#[test]
+fn a_cancelled_wait_stops_its_command_and_gets_no_answer_while_the_job_goes_on() {
+    let procly = Procly::new();
+    let mut server = McpServer::start(&procly);
+    let job = procly.run(&["sleep 4"]);
+
+    let waiting = server.start_call("wait", json!({ "job": job }));
+    eventually("the command of the call to run", || {
+        !server.cli_children("wait").is_empty()
+    });
+    server.cancel(waiting);
+
+    eventually_within(
+        CANCEL_DEADLINE,
+        "the command of the cancelled call to stop",
+        || server.cli_children("wait").is_empty(),
+        || format!("still running: {:?}", server.cli_children("wait")),
+    );
+    let messages = server.messages_within(Duration::from_millis(500));
+    assert!(
+        messages.iter().all(|message| message["id"] != json!(waiting)),
+        "the cancelled request was answered: {messages:?}"
+    );
+
+    // Only the client side was cancelled: the Job ends on its own and reports its end as it always does.
+    let waited = procly.procly(&["wait", "--json", &job]);
+    assert_success(&waited);
+    assert!(stdout(&waited).contains("\"exit_code\":0"), "{}", stdout(&waited));
+    assert!(server.text("status", json!({})).contains(&job));
+}
+
+#[test]
+fn a_cancelled_up_stops_its_command_and_stops_no_service() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    let health = "[services.web.health]\ntimeout = '1m'\n";
+    fs::write(
+        main.join("procly.toml"),
+        format!(
+            "[services.web]\nrun = 'echo $$ >> {}; exec sleep 60'\nports = {{ http = {} }}\n{health}",
+            starts.display(),
+            free_port()
+        ),
+    )
+    .expect("write procly.toml");
+    let mut server = McpServer::start_in(&procly, &main);
+
+    let starting = server.start_call("up", json!({ "service": "web" }));
+    eventually("the Service to start", || starts.exists());
+    eventually("the command of the call to run", || {
+        !server.cli_children("up").is_empty()
+    });
+    server.cancel(starting);
+
+    eventually_within(
+        CANCEL_DEADLINE,
+        "the command of the cancelled call to stop",
+        || server.cli_children("up").is_empty(),
+        || format!("still running: {:?}", server.cli_children("up")),
+    );
+    let messages = server.messages_within(Duration::from_millis(500));
+    assert!(
+        messages.iter().all(|message| message["id"] != json!(starting)),
+        "the cancelled request was answered: {messages:?}"
+    );
+
+    // The Daemon started the Service and goes on with it, `down` still finds it and stops it.
+    let pid = common::read_pid(&starts);
+    assert!(common::is_alive(pid), "the Service was stopped with the call");
+    let down = procly.procly_in(&main, &["down", "web", "--json"]);
+    assert_success(&down);
+    common::wait_until_gone(pid);
+}
+
+#[test]
+fn a_cancellation_for_an_unknown_or_answered_request_changes_nothing() {
+    let procly = Procly::new();
+    let mut server = McpServer::start(&procly);
+    let job = procly.run(&["echo done"]);
+    let waited = server.text("wait", json!({ "job": job }));
+    let answered = server.next_id - 1;
+
+    server.cancel(9999);
+    server.cancel(answered);
+
+    assert_eq!(server.messages_within(Duration::from_millis(300)), Vec::<Value>::new());
+    assert_eq!(server.text("wait", json!({ "job": job })), waited);
+}
+
+/// How long a command may outlive the `procly mcp` that started it.
+const ORPHAN_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Whether the process `pid` still runs. A zombie is gone, whoever has yet to reap it.
+fn is_running(pid: u32) -> bool {
+    let table = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps runs");
+    let state = String::from_utf8_lossy(&table.stdout);
+    !state.trim().is_empty() && !state.trim_start().starts_with('Z')
+}
+
+/// Calls `wait` on `job` and returns the pids of the command it runs, once it runs.
+fn start_waiting(server: &mut McpServer, job: &str) -> Vec<u32> {
+    server.start_call("wait", json!({ "job": job }));
+    eventually("the command of the call to run", || {
+        !server.cli_children("wait").is_empty()
+    });
+    server.cli_child_pids("wait")
+}
+
+fn assert_commands_stop(commands: &[u32]) {
+    eventually_within(
+        ORPHAN_DEADLINE,
+        "the commands of the killed server to stop",
+        || commands.iter().all(|pid| !is_running(*pid)),
+        || {
+            format!(
+                "still running: {:?}",
+                commands.iter().filter(|pid| is_running(**pid)).collect::<Vec<_>>()
+            )
+        },
+    );
+}
+
+#[test]
+fn a_killed_server_leaves_no_command_running_while_the_job_goes_on() {
+    let procly = Procly::new();
+    let mut server = McpServer::start(&procly);
+    let job = procly.run(&["sleep 5"]);
+    let commands = start_waiting(&mut server, &job);
+
+    server.kill();
+
+    assert_commands_stop(&commands);
+    // Only the client side went away: the Job ends on its own and reports its end as it always does.
+    let waited = procly.procly(&["wait", "--json", &job]);
+    assert_success(&waited);
+    assert!(stdout(&waited).contains("\"exit_code\":0"), "{}", stdout(&waited));
+}
+
+/// How many pipes the process `pid` holds open, or `None` where this machine has no way to list them.
+fn pipes_held(pid: i32) -> Option<usize> {
+    if cfg!(target_os = "linux") {
+        let held = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+        let pipes = held
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                fs::read_link(entry.path()).is_ok_and(|target| target.to_string_lossy().starts_with("pipe:"))
+            })
+            .count();
+        return Some(pipes);
+    }
+    let listing = Command::new("lsof")
+        .args(["-n", "-P", "-a", "-p", &pid.to_string(), "-F", "t"])
+        .output()
+        .ok()?;
+    listing.status.success().then(|| {
+        String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter(|line| *line == "tPIPE")
+            .count()
+    })
+}
+
+/// A Daemon with a Job of `sleep 30` running in it, and the pid of the Daemon.
+fn daemon_pid(procly: &Procly) -> i32 {
+    common::read_pid(&procly.state_dir().join("daemon.pid")).as_raw()
+}
+
+#[test]
+fn a_daemon_started_by_a_command_of_the_server_outlives_it_and_holds_no_end_of_its_pipe() {
+    // The Daemon of this one is started by the first command of the server, the `run` of a Job.
+    let procly = Procly::new();
+    let mut server = McpServer::start(&procly);
+    assert!(!procly.state_dir().join("daemon.pid").exists());
+    let started = server.text("run", json!({ "command": "sleep 30" }));
+    let job = serde_json::from_str::<Value>(&started).expect("run prints a document")["job"]
+        .as_str()
+        .expect("a job")
+        .to_owned();
+    let daemon = daemon_pid(&procly);
+    let commands = start_waiting(&mut server, &job);
+
+    // The Daemon of this one is started by the CLI, for the pipes it holds anyway.
+    let reference = Procly::new();
+    reference.run(&["sleep 30"]);
+    let reference_daemon = daemon_pid(&reference);
+
+    server.kill();
+
+    assert_commands_stop(&commands);
+    assert!(
+        common::is_alive(nix::unistd::Pid::from_raw(daemon)),
+        "the Daemon went with the server"
+    );
+    assert!(procly.procly(&["status", "--json"]).status.success());
+    assert!(stdout(&procly.procly(&["status", "--json"])).contains(&job));
+    if let (Some(held), Some(expected)) = (pipes_held(daemon), pipes_held(reference_daemon)) {
+        assert_eq!(held, expected, "the Daemon inherited an end of the pipe of the server");
+    } else {
+        eprintln!("skipped: this machine cannot list the pipes of a process");
+    }
+}
+
+#[test]
+fn a_lifeline_naming_a_descriptor_that_is_not_open_or_not_a_pipe_is_ignored() {
+    let procly = Procly::new();
+    let plain = procly.procly(&["status", "--json"]);
+    assert_success(&plain);
+
+    for named in ["999", "-1", "not-a-number", "", "0", "1", "2"] {
+        let output = procly
+            .command()
+            .env("PROCLY_LIFELINE_FD", named)
+            .args(["status", "--json"])
+            .output()
+            .expect("the procly binary runs");
+        assert_success(&output);
+        assert_eq!(stdout(&output), stdout(&plain), "with the lifeline naming {named:?}");
     }
 }
