@@ -148,6 +148,8 @@ fn start_daemon(state: &StateDir) -> Result<(), ClientError> {
     // short-lived command has exited, which is why the child handle is not waited for.
     Command::new(&exe)
         .arg("daemon")
+        // The lifeline of a `procly mcp` is the business of its commands, not of the Daemon that outlives it.
+        .env_remove(crate::lifeline::FD_ENV)
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(log)

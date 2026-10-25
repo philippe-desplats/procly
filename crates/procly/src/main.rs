@@ -9,6 +9,7 @@ mod envfile;
 mod guard;
 mod init;
 mod json;
+mod lifeline;
 mod mcp;
 mod output;
 mod placeholder;
@@ -413,6 +414,10 @@ enum UnitCommand {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // A command of `procly mcp` stops with it. The Daemon outlives everything, and a server watches no server.
+    if !matches!(cli.command, Command::Daemon | Command::Mcp) {
+        lifeline::watch();
+    }
     match execute(cli.command) {
         Ok(code) => code,
         Err(error) => {

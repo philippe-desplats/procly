@@ -5,9 +5,11 @@
 //! printed. Behaviour cannot diverge between the 2 surfaces because there is one implementation, and the Daemon
 //! starts on demand on the first tool call like for any other command.
 
+use std::io;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -18,6 +20,8 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt as _, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::json;
+
+use crate::lifeline::Lifeline;
 
 /// What `initialize` tells the client about using the tools.
 const INSTRUCTIONS: &str = "Procly supervises the dev processes and containers of a Worktree, so that parallel \
@@ -31,12 +35,13 @@ const EXIT_PROCLY_FAILURE: i32 = crate::EXIT_PROCLY_FAILURE as i32;
 /// Starts the server on the standard input and output, and returns when the client closes its input.
 pub(crate) fn serve() -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("cannot locate the procly executable")?;
+    let lifeline = Lifeline::open().context("cannot open the lifeline of the commands")?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("cannot start the async runtime")?;
     let result = runtime.block_on(async {
-        let running = McpServer::new(exe)
+        let running = McpServer::new(exe, lifeline)
             .serve(rmcp::transport::stdio())
             .await
             .context("cannot start the MCP server")?;
@@ -153,20 +158,22 @@ struct DoctorArguments {
     cwd: Option<PathBuf>,
 }
 
-/// The server: one tool per verb the CLI exposes, and the executable they run.
+/// The server: one tool per verb the CLI exposes, the executable they run and the lifeline that stops them with it.
 ///
 /// `init`, `unit`, `guard`, `agent`, `off`, `on`, `eject` and `worktree hooks` have no tool: they write into the
 /// Repository or the session configuration of the person, which an MCP client must not do.
 #[derive(Debug, Clone)]
 struct McpServer {
     exe: PathBuf,
+    lifeline: Arc<Lifeline>,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpServer {
-    fn new(exe: PathBuf) -> Self {
+    fn new(exe: PathBuf, lifeline: Lifeline) -> Self {
         Self {
             exe,
+            lifeline: Arc::new(lifeline),
             tool_router: Self::tool_router(),
         }
     }
@@ -177,6 +184,8 @@ impl McpServer {
     /// When the client cancels the request, the command is killed and the call returns at once. Only this client side
     /// stops: the Daemon owns the Jobs and Services, and goes on with them. The library sends no answer for a
     /// cancelled request, so what the call returns then is dropped.
+    ///
+    /// When the server itself ends, however it ends, the command stops too, through the lifeline it inherits.
     async fn invoke(
         &self,
         context: &RequestContext<RoleServer>,
@@ -200,6 +209,9 @@ impl McpServer {
             command.current_dir(cwd);
         }
         let name = verb.join(" ");
+        if let Err(source) = self.lifeline.attach(&mut command) {
+            return Ok(cannot_run(&name, cwd.as_deref(), &source));
+        }
         let output = tokio::select! {
             () = context.ct.cancelled() => {
                 return Err(ErrorData::internal_error("the request was cancelled", None));
@@ -208,15 +220,7 @@ impl McpServer {
         };
         let output = match output {
             Ok(output) => output,
-            Err(source) => {
-                let place = cwd.map_or_else(|| "the current directory".to_owned(), |cwd| cwd.display().to_string());
-                return Ok(failure(
-                    &name,
-                    EXIT_PROCLY_FAILURE,
-                    &format!("cannot run procly in {place}: {source}"),
-                    "",
-                ));
-            }
+            Err(source) => return Ok(cannot_run(&name, cwd.as_deref(), &source)),
         };
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
@@ -225,6 +229,17 @@ impl McpServer {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Ok(failure(&name, exit_code(output.status), &stderr, &stdout))
     }
+}
+
+/// The tool error of the verb `name` that could not be run in `cwd`, or in the current directory without one.
+fn cannot_run(name: &str, cwd: Option<&Path>, source: &io::Error) -> CallToolResult {
+    let place = cwd.map_or_else(|| "the current directory".to_owned(), |cwd| cwd.display().to_string());
+    failure(
+        name,
+        EXIT_PROCLY_FAILURE,
+        &format!("cannot run procly in {place}: {source}"),
+        "",
+    )
 }
 
 /// The exit code of a command that ended with `status`, as a shell reports it: its own, or 128 plus the signal that
