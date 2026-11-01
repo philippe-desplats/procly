@@ -882,6 +882,10 @@ fn pipe_ends(pid: i32) -> Option<Vec<PipeEnd>> {
         match (tag, record.as_mut()) {
             ("f", _) => {
                 if let Some(done) = record.take().filter(|done| done.is_pipe) {
+                    // Without its own address, the 2 ends of a pipe cannot be told from those of another.
+                    if done.own.is_empty() {
+                        return None;
+                    }
                     let mut both = [done.own.as_str(), done.peer.as_str()];
                     both.sort_unstable();
                     ends.push(PipeEnd {
@@ -1046,8 +1050,9 @@ fn a_process_started_by_a_command_of_the_server_is_not_stopped_by_an_unrelated_p
     let procly = Procly::new();
     let (main, worktree, script) = worktree_whose_setup_runs(&procly);
     let mut server = McpServer::start_in(&procly, &main);
-    // Started last, so that it still runs when the script gets to wait for it.
-    let job = procly.run(&["sleep 3"]);
+    // Started last and long enough that it still runs when the script gets to wait for it, however slow the machine:
+    // had it ended by then, `wait` would return 0 even without the fix.
+    let job = procly.run(&["sleep 10"]);
     let outcome = procly.scratch().join("wait.exit");
     // Opens a pipe of its own on the very descriptor the variable names, where there is one, and closes its write end
     // at once. `procly wait` then inherits a pipe that is at end of file, and must not take it for a lifeline.
