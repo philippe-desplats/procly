@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
@@ -823,28 +823,116 @@ fn a_killed_server_leaves_no_command_running_while_the_job_goes_on() {
     assert!(stdout(&waited).contains("\"exit_code\":0"), "{}", stdout(&waited));
 }
 
-/// How many pipes the process `pid` holds open, or `None` where this machine has no way to list them.
-fn pipes_held(pid: i32) -> Option<usize> {
+/// One end of a pipe held by a process.
+struct PipeEnd {
+    fd: u32,
+    /// What both ends of the pipe have in common: the inode on Linux, the pair of kernel addresses of the 2 ends on
+    /// macOS.
+    pipe: String,
+    /// What tells this end from the other one: the descriptor number on Linux, where 2 descriptors of one process are 2
+    /// ends, the address of the end on macOS, where a duplicated descriptor is the same end.
+    end: String,
+}
+
+/// One descriptor in the output of `lsof -F ftdn`.
+struct LsofRecord {
+    fd: u32,
+    is_pipe: bool,
+    /// The address of the end this descriptor is.
+    own: String,
+    /// The address of the other end.
+    peer: String,
+}
+
+/// The pipes the process `pid` holds open, or `None` where this machine has no way to list them.
+fn pipe_ends(pid: i32) -> Option<Vec<PipeEnd>> {
     if cfg!(target_os = "linux") {
         let held = fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
-        let pipes = held
+        let ends = held
             .filter_map(Result::ok)
-            .filter(|entry| {
-                fs::read_link(entry.path()).is_ok_and(|target| target.to_string_lossy().starts_with("pipe:"))
+            .filter_map(|entry| {
+                let fd = entry.file_name().to_str()?.parse().ok()?;
+                let target = fs::read_link(entry.path()).ok()?.to_string_lossy().into_owned();
+                target.starts_with("pipe:").then(|| PipeEnd {
+                    fd,
+                    pipe: target,
+                    end: fd.to_string(),
+                })
             })
-            .count();
-        return Some(pipes);
+            .collect();
+        return Some(ends);
     }
+    // One record per descriptor: `f` the descriptor, `t` its type, `d` the address of the pipe end and `n` the address
+    // of the other end, as `->0x...`.
     let listing = Command::new("lsof")
-        .args(["-n", "-P", "-a", "-p", &pid.to_string(), "-F", "t"])
+        .args(["-n", "-P", "-a", "-p", &pid.to_string(), "-F", "ftdn"])
         .output()
         .ok()?;
-    listing.status.success().then(|| {
-        String::from_utf8_lossy(&listing.stdout)
-            .lines()
-            .filter(|line| *line == "tPIPE")
-            .count()
-    })
+    if !listing.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&listing.stdout);
+    let mut ends = Vec::new();
+    let mut record: Option<LsofRecord> = None;
+    // The sentinel line closes the last record.
+    for line in text.lines().chain(std::iter::once("f")) {
+        let Some((tag, value)) = line.split_at_checked(1) else {
+            continue;
+        };
+        match (tag, record.as_mut()) {
+            ("f", _) => {
+                if let Some(done) = record.take().filter(|done| done.is_pipe) {
+                    // Without its own address, the 2 ends of a pipe cannot be told from those of another.
+                    if done.own.is_empty() {
+                        return None;
+                    }
+                    let mut both = [done.own.as_str(), done.peer.as_str()];
+                    both.sort_unstable();
+                    ends.push(PipeEnd {
+                        fd: done.fd,
+                        pipe: both.join("|"),
+                        end: done.own,
+                    });
+                }
+                record = value.parse().ok().map(|fd| LsofRecord {
+                    fd,
+                    is_pipe: false,
+                    own: String::new(),
+                    peer: String::new(),
+                });
+            }
+            ("t", Some(open)) => open.is_pipe = value == "PIPE",
+            ("d", Some(open)) => open.own = value.into(),
+            ("n", Some(open)) => open.peer = value.trim_start_matches("->").into(),
+            _ => {}
+        }
+    }
+    Some(ends)
+}
+
+/// The distinct ends of each pipe in `held`.
+fn ends_by_pipe(held: &[PipeEnd]) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut by_pipe: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for end in held {
+        by_pipe.entry(&end.pipe).or_default().insert(&end.end);
+    }
+    by_pipe
+}
+
+/// The identity of the lifeline pipe of the server `server`, as seen from its command `command`: the pipe whose 2 ends
+/// the server holds and whose read end alone the command holds, beyond its standard streams. A pipe that a concurrent
+/// test leaked into the server is held with both of its ends by the server and by every one of its commands, so it is
+/// not in it, and neither is a pipe of anything else.
+fn lifeline_pipes(server: i32, command: i32) -> Option<BTreeSet<String>> {
+    let held_by_server = pipe_ends(server)?;
+    let held_by_command: Vec<PipeEnd> = pipe_ends(command)?.into_iter().filter(|end| end.fd > 2).collect();
+    let server_ends = ends_by_pipe(&held_by_server);
+    let pipes = ends_by_pipe(&held_by_command)
+        .into_iter()
+        .filter(|(pipe, ends)| ends.len() == 1 && server_ends.get(pipe).is_some_and(|held| held.len() >= 2))
+        .map(|(pipe, _)| pipe.to_owned())
+        .collect();
+    Some(pipes)
 }
 
 /// A Daemon with a Job of `sleep 30` running in it, and the pid of the Daemon.
@@ -866,10 +954,28 @@ fn a_daemon_started_by_a_command_of_the_server_outlives_it_and_holds_no_end_of_i
     let daemon = daemon_pid(&procly);
     let commands = start_waiting(&mut server, &job);
 
-    // The Daemon of this one is started by the CLI, for the pipes it holds anyway.
-    let reference = Procly::new();
-    reference.run(&["sleep 30"]);
-    let reference_daemon = daemon_pid(&reference);
+    // The pipe is told apart while the server and its command both run, then looked for in the Daemon.
+    let lifeline = lifeline_pipes(
+        server.child.id().try_into().expect("a pid fits an i32"),
+        commands[0].try_into().expect("a pid fits an i32"),
+    );
+    let held_by_daemon = pipe_ends(daemon);
+    match (lifeline, held_by_daemon) {
+        (Some(lifeline), Some(held)) => {
+            assert!(!lifeline.is_empty(), "the lifeline pipe of the server was not found");
+            let leaked: Vec<u32> = held
+                .iter()
+                .filter(|end| lifeline.contains(&end.pipe))
+                .map(|end| end.fd)
+                .collect();
+            assert_eq!(
+                leaked,
+                Vec::<u32>::new(),
+                "the Daemon inherited an end of the pipe of the server"
+            );
+        }
+        _ => eprintln!("skipped: this machine cannot list the pipes of a process"),
+    }
 
     server.kill();
 
@@ -880,11 +986,6 @@ fn a_daemon_started_by_a_command_of_the_server_outlives_it_and_holds_no_end_of_i
     );
     assert!(procly.procly(&["status", "--json"]).status.success());
     assert!(stdout(&procly.procly(&["status", "--json"])).contains(&job));
-    if let (Some(held), Some(expected)) = (pipes_held(daemon), pipes_held(reference_daemon)) {
-        assert_eq!(held, expected, "the Daemon inherited an end of the pipe of the server");
-    } else {
-        eprintln!("skipped: this machine cannot list the pipes of a process");
-    }
 }
 
 #[test]
@@ -903,4 +1004,81 @@ fn a_lifeline_naming_a_descriptor_that_is_not_open_or_not_a_pipe_is_ignored() {
         assert_success(&output);
         assert_eq!(stdout(&output), stdout(&plain), "with the lifeline naming {named:?}");
     }
+}
+
+/// A Repository whose `worktree init` runs the script at the returned path through `bash`, and its Worktree. The script
+/// is written by the caller. The Daemon runs it as a Job with the environment of the `procly worktree init` that asked,
+/// itself a command of the server.
+fn worktree_whose_setup_runs(procly: &Procly) -> (PathBuf, PathBuf, PathBuf) {
+    let script = procly.scratch().join("setup.sh");
+    let config = format!("[worktree]\nsetup = ['bash {}']\n", script.display());
+    let (main, worktree) = repository_with_worktree(procly, &config);
+    (main, worktree, script)
+}
+
+#[test]
+fn a_process_started_by_a_command_of_the_server_does_not_see_the_lifeline() {
+    let procly = Procly::new();
+    let (main, worktree, script) = worktree_whose_setup_runs(&procly);
+    let seen = procly.scratch().join("seen.env");
+    fs::write(
+        &script,
+        format!(
+            "env > '{seen}'\n'{procly_bin}' status --json > /dev/null || exit 1\n",
+            seen = seen.display(),
+            procly_bin = env!("CARGO_BIN_EXE_procly")
+        ),
+    )
+    .expect("write the setup script");
+    let mut server = McpServer::start_in(&procly, &main);
+
+    server.text("worktree_init", json!({ "cwd": worktree }));
+
+    let environment = fs::read_to_string(&seen).expect("the setup command ran");
+    assert!(
+        environment.contains("PROCLY_STATE_DIR="),
+        "the setup command did not record its environment"
+    );
+    assert!(
+        !environment.contains("PROCLY_LIFELINE_FD"),
+        "the setup command of a command of the server saw the lifeline"
+    );
+}
+
+#[test]
+fn a_process_started_by_a_command_of_the_server_is_not_stopped_by_an_unrelated_pipe() {
+    let procly = Procly::new();
+    let (main, worktree, script) = worktree_whose_setup_runs(&procly);
+    let mut server = McpServer::start_in(&procly, &main);
+    // Started last and long enough that it still runs when the script gets to wait for it, however slow the machine:
+    // had it ended by then, `wait` would return 0 even without the fix.
+    let job = procly.run(&["sleep 10"]);
+    let outcome = procly.scratch().join("wait.exit");
+    // Opens a pipe of its own on the very descriptor the variable names, where there is one, and closes its write end
+    // at once. `procly wait` then inherits a pipe that is at end of file, and must not take it for a lifeline.
+    fs::write(
+        &script,
+        format!(
+            "fifo='{fifo}'\n\
+             mkfifo \"$fifo\"\n\
+             (: > \"$fifo\") &\n\
+             eval \"exec ${{PROCLY_LIFELINE_FD:-9}}< \\\"$fifo\\\"\"\n\
+             '{procly_bin}' wait --json '{job}' > /dev/null\n\
+             echo $? > '{outcome}'\n",
+            fifo = procly.scratch().join("unrelated.fifo").display(),
+            procly_bin = env!("CARGO_BIN_EXE_procly"),
+            outcome = outcome.display(),
+        ),
+    )
+    .expect("write the setup script");
+
+    server.text("worktree_init", json!({ "cwd": worktree }));
+
+    assert_eq!(
+        fs::read_to_string(&outcome)
+            .expect("the setup command ran to its end")
+            .trim(),
+        "0",
+        "`procly wait` was stopped by a pipe that is not the lifeline"
+    );
 }

@@ -416,7 +416,15 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     // A command of `procly mcp` stops with it. The Daemon outlives everything, and a server watches no server.
     if !matches!(cli.command, Command::Daemon | Command::Mcp) {
-        lifeline::watch();
+        #[expect(
+            unsafe_code,
+            reason = "`watch` edits the environment, which is only sound before any thread starts"
+        )]
+        // SAFETY: nothing above started a thread. `Cli::parse` reads the arguments and the environment on the one
+        // thread of the process, and only the Daemon and the server build a Tokio runtime, both excluded here.
+        unsafe {
+            lifeline::watch();
+        }
     }
     match execute(cli.command) {
         Ok(code) => code,

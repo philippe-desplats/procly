@@ -5,6 +5,10 @@
 //! in a variable of its environment, which is no part of the documented CLI. The read end reaches end of file when the
 //! server ends for any reason, SIGKILL included, and the command then exits at once. macOS has nothing like
 //! `PR_SET_PDEATHSIG`, and a pipe works the same on both systems.
+//!
+//! Only the direct children of the server see the variable: a command removes it from its own environment as it starts,
+//! so that no process it starts, directly or through the Daemon, takes an unrelated pipe that happens to get that
+//! number for the lifeline.
 
 use std::fs::File;
 use std::io::{self, PipeReader, PipeWriter, Read as _};
@@ -64,8 +68,21 @@ fn keep_across_exec(command: &mut tokio::process::Command, reader: PipeReader) {
 
 /// The command side: exits as soon as the server is gone. Does nothing without a lifeline, or when the descriptor the
 /// variable names is not an open pipe, so a `procly` started any other way behaves as it always did.
-pub(crate) fn watch() {
-    let Some(fd) = std::env::var(FD_ENV)
+///
+/// # Safety
+///
+/// Must be called before the process starts any thread: it edits the environment of the process, which no other thread
+/// may read or write meanwhile.
+#[expect(
+    unsafe_code,
+    reason = "the caller must guarantee that the process is still single-threaded, as removing a variable requires"
+)]
+pub(crate) unsafe fn watch() {
+    let named = std::env::var(FD_ENV);
+    // SAFETY: the caller guarantees that the process starts no thread before this call returns, which is the whole
+    // contract of `forget_env`. The thread of the lifeline is started after it.
+    unsafe { forget_env() };
+    let Some(fd) = named
         .ok()
         .and_then(|number| number.parse::<RawFd>().ok())
         // The standard streams are never the lifeline.
@@ -93,6 +110,24 @@ pub(crate) fn watch() {
             }
         }
     });
+}
+
+/// Removes the variable from the environment of this process, so that only the direct children of `procly mcp` ever see
+/// it. Whatever this process starts, directly or through the Daemon, would otherwise find a variable naming a
+/// descriptor it does not hold. A pipe that later gets that number there would be taken for the lifeline, and stop the
+/// process at its end of file.
+///
+/// # Safety
+///
+/// No other thread may read or write the environment while this runs, so the process must not have started any thread.
+#[expect(
+    unsafe_code,
+    reason = "removing a variable from the environment of the process is unsafe in edition 2024"
+)]
+unsafe fn forget_env() {
+    // SAFETY: the caller guarantees that the process is single-threaded, so nothing else reads or writes the
+    // environment while it is edited.
+    unsafe { std::env::remove_var(FD_ENV) };
 }
 
 /// Takes the ownership of the descriptor `fd` if it is open and is a pipe.
