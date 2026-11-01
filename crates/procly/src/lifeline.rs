@@ -5,6 +5,10 @@
 //! in a variable of its environment, which is no part of the documented CLI. The read end reaches end of file when the
 //! server ends for any reason, SIGKILL included, and the command then exits at once. macOS has nothing like
 //! `PR_SET_PDEATHSIG`, and a pipe works the same on both systems.
+//!
+//! Only the direct children of the server see the variable: a command removes it from its own environment as it starts,
+//! so that no process it starts, directly or through the Daemon, takes an unrelated pipe that happens to get that
+//! number for the lifeline.
 
 use std::fs::File;
 use std::io::{self, PipeReader, PipeWriter, Read as _};
@@ -64,8 +68,12 @@ fn keep_across_exec(command: &mut tokio::process::Command, reader: PipeReader) {
 
 /// The command side: exits as soon as the server is gone. Does nothing without a lifeline, or when the descriptor the
 /// variable names is not an open pipe, so a `procly` started any other way behaves as it always did.
+///
+/// Must be called before the process starts any thread: it edits the environment of the process.
 pub(crate) fn watch() {
-    let Some(fd) = std::env::var(FD_ENV)
+    let named = std::env::var(FD_ENV);
+    forget_env();
+    let Some(fd) = named
         .ok()
         .and_then(|number| number.parse::<RawFd>().ok())
         // The standard streams are never the lifeline.
@@ -93,6 +101,21 @@ pub(crate) fn watch() {
             }
         }
     });
+}
+
+/// Removes the variable from the environment of this process, so that only the direct children of `procly mcp` ever see
+/// it. Whatever this process starts, directly or through the Daemon, would otherwise find a variable naming a descriptor
+/// it does not hold. A pipe that later gets that number there would be taken for the lifeline, and stop the process at
+/// its end of file.
+#[expect(
+    unsafe_code,
+    reason = "removing a variable from the environment of the process is unsafe in edition 2024"
+)]
+fn forget_env() {
+    // SAFETY: `watch` is documented to run before the process starts any thread, and `main` calls it right after the
+    // argument parsing, which starts none, so nothing else reads or writes the environment while it is edited. The
+    // thread of the lifeline is started after it.
+    unsafe { std::env::remove_var(FD_ENV) };
 }
 
 /// Takes the ownership of the descriptor `fd` if it is open and is a pipe.
