@@ -69,10 +69,19 @@ fn keep_across_exec(command: &mut tokio::process::Command, reader: PipeReader) {
 /// The command side: exits as soon as the server is gone. Does nothing without a lifeline, or when the descriptor the
 /// variable names is not an open pipe, so a `procly` started any other way behaves as it always did.
 ///
-/// Must be called before the process starts any thread: it edits the environment of the process.
-pub(crate) fn watch() {
+/// # Safety
+///
+/// Must be called before the process starts any thread: it edits the environment of the process, which no other thread
+/// may read or write meanwhile.
+#[expect(
+    unsafe_code,
+    reason = "the caller must guarantee that the process is still single-threaded, as removing a variable requires"
+)]
+pub(crate) unsafe fn watch() {
     let named = std::env::var(FD_ENV);
-    forget_env();
+    // SAFETY: the caller guarantees that the process starts no thread before this call returns, which is the whole
+    // contract of `forget_env`. The thread of the lifeline is started after it.
+    unsafe { forget_env() };
     let Some(fd) = named
         .ok()
         .and_then(|number| number.parse::<RawFd>().ok())
@@ -104,17 +113,20 @@ pub(crate) fn watch() {
 }
 
 /// Removes the variable from the environment of this process, so that only the direct children of `procly mcp` ever see
-/// it. Whatever this process starts, directly or through the Daemon, would otherwise find a variable naming a descriptor
-/// it does not hold. A pipe that later gets that number there would be taken for the lifeline, and stop the process at
-/// its end of file.
+/// it. Whatever this process starts, directly or through the Daemon, would otherwise find a variable naming a
+/// descriptor it does not hold. A pipe that later gets that number there would be taken for the lifeline, and stop the
+/// process at its end of file.
+///
+/// # Safety
+///
+/// No other thread may read or write the environment while this runs, so the process must not have started any thread.
 #[expect(
     unsafe_code,
     reason = "removing a variable from the environment of the process is unsafe in edition 2024"
 )]
-fn forget_env() {
-    // SAFETY: `watch` is documented to run before the process starts any thread, and `main` calls it right after the
-    // argument parsing, which starts none, so nothing else reads or writes the environment while it is edited. The
-    // thread of the lifeline is started after it.
+unsafe fn forget_env() {
+    // SAFETY: the caller guarantees that the process is single-threaded, so nothing else reads or writes the
+    // environment while it is edited.
     unsafe { std::env::remove_var(FD_ENV) };
 }
 
