@@ -14,7 +14,6 @@ use std::sync::mpsc;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::kill;
 use nix::unistd::Pid;
 
 /// How long a lookup may run, so that a stuck `lsof` or file system never holds up a failing suite.
@@ -42,33 +41,52 @@ fn was_handed_out(port: u16) -> bool {
 
 /// A Daemon a test started, as much of it as is needed to ask it for its Leases.
 #[derive(Debug, Clone)]
-struct Isolated {
+struct StartedDaemon {
     state_dir: PathBuf,
     config_dir: PathBuf,
+    /// The file the Daemon reads its clock from, when the test gave it one.
+    clock: Option<PathBuf>,
 }
 
 thread_local! {
     /// The Daemons the current test started, a test running on its own thread.
-    static DAEMONS: std::cell::RefCell<Vec<Isolated>> = const { std::cell::RefCell::new(Vec::new()) };
+    static DAEMONS: std::cell::RefCell<Vec<StartedDaemon>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Remembers that the current test runs `procly` with these directories.
-pub fn remember_daemon(state_dir: &Path, config_dir: &Path) {
+pub fn remember_daemon(state_dir: &Path, config_dir: &Path, clock: Option<&Path>) {
     DAEMONS.with_borrow_mut(|daemons| {
         if daemons.iter().all(|daemon| daemon.state_dir != state_dir) {
-            daemons.push(Isolated {
+            daemons.push(StartedDaemon {
                 state_dir: state_dir.to_owned(),
                 config_dir: config_dir.to_owned(),
+                clock: clock.map(Path::to_owned),
             });
         }
     });
 }
 
-/// How the lookup tools are called. A candidate is a program followed by the arguments that go before the ones of
-/// the lookup, `lsof` itself in practice.
+/// A program that lists listeners the way `lsof` does, with the arguments that go before the ones of the lookup.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl Candidate {
+    /// `program` called with no argument of its own.
+    fn plain(program: &str) -> Self {
+        Self {
+            program: program.to_owned(),
+            args: Vec::new(),
+        }
+    }
+}
+
+/// How the lookup tools are called.
 #[derive(Debug, Clone)]
 pub struct Lookup {
-    pub candidates: Vec<Vec<String>>,
+    pub candidates: Vec<Candidate>,
     pub timeout: Duration,
 }
 
@@ -77,7 +95,7 @@ impl Default for Lookup {
     fn default() -> Self {
         Self {
             candidates: ["lsof", "/usr/sbin/lsof", "/usr/bin/lsof"]
-                .map(|program| vec![program.to_owned()])
+                .map(Candidate::plain)
                 .to_vec(),
             timeout: LOOKUP_TIMEOUT,
         }
@@ -160,14 +178,15 @@ fn listeners(port: u16, lookup: &Lookup) -> Result<Vec<Listener>, String> {
     let arguments = ["+c", "0", "-nP", &address, "-sTCP:LISTEN", "-Fpcn"];
     let mut reasons = Vec::new();
     for candidate in &lookup.candidates {
-        let mut command = Command::new(&candidate[0]);
-        command.args(&candidate[1..]).args(arguments);
+        let program = &candidate.program;
+        let mut command = Command::new(program);
+        command.args(&candidate.args).args(arguments);
         match run_bounded(&mut command, lookup.timeout) {
             // lsof exits with 1 when no file matches.
             Ok((status, stdout)) if status.success() || status.code() == Some(1) => return Ok(parse(&stdout)),
-            Ok((status, _)) => reasons.push(format!("{} exited with {status}", candidate[0])),
-            Err(Bounded::Missing) => reasons.push(format!("{} was not found", candidate[0])),
-            Err(failure) => return Err(format!("{} {failure}", candidate[0])),
+            Ok((status, _)) => reasons.push(format!("{program} exited with {status}")),
+            Err(Bounded::Missing) => reasons.push(format!("{program} was not found")),
+            Err(failure) => return Err(format!("{program} {failure}")),
         }
     }
     Err(reasons.join(", "))
@@ -216,20 +235,19 @@ fn command_line(pid: u32, lookup: &Lookup) -> Result<String, String> {
     match run_bounded(&mut command, lookup.timeout) {
         Ok((status, stdout)) if status.success() && !stdout.trim().is_empty() => Ok(stdout.trim().to_owned()),
         Ok(_) => Err("the process has exited".to_owned()),
-        Err(Bounded::Missing) => Err("ps was not found".to_owned()),
         Err(failure) => Err(format!("ps {failure}")),
     }
 }
 
 /// The Lease of `daemon` on `port` as a line, when its Daemon runs and one of its Services holds it.
-fn lease_on(daemon: &Isolated, port: u16) -> Option<String> {
+fn lease_on(daemon: &StartedDaemon, port: u16) -> Option<String> {
     // Asking a Daemon that is not running would start one, and change what the failure is about.
     let pid = std::fs::read_to_string(daemon.state_dir.join("daemon.pid")).ok()?;
-    kill(Pid::from_raw(pid.trim().parse().ok()?), None).ok()?;
-    let mut command = Command::new(env!("CARGO_BIN_EXE_procly"));
+    if !super::is_alive(Pid::from_raw(pid.trim().parse().ok()?)) {
+        return None;
+    }
+    let mut command = super::procly_binary(&daemon.state_dir, &daemon.config_dir, daemon.clock.as_deref());
     command
-        .env("PROCLY_STATE_DIR", &daemon.state_dir)
-        .env("PROCLY_CONFIG_DIR", &daemon.config_dir)
         .current_dir(&daemon.state_dir)
         .args(["status", "--all", "--json"]);
     let (status, stdout) = run_bounded(&mut command, LOOKUP_TIMEOUT).ok()?;
@@ -256,11 +274,12 @@ fn lease_on(daemon: &Isolated, port: u16) -> Option<String> {
 
 /// Why a bounded run gave no output.
 #[derive(Debug)]
-pub enum Bounded {
+enum Bounded {
     /// The program does not exist at this place.
     Missing,
     /// The program ran past the time it had and was killed.
     TimedOut(Duration),
+    /// The program could not be started, or its end could not be awaited.
     Failed(std::io::Error),
 }
 
@@ -275,7 +294,7 @@ impl std::fmt::Display for Bounded {
 }
 
 /// Runs `command` and returns its exit status and what it printed on stdout, killing it once `timeout` has passed.
-pub fn run_bounded(command: &mut Command, timeout: Duration) -> Result<(ExitStatus, String), Bounded> {
+fn run_bounded(command: &mut Command, timeout: Duration) -> Result<(ExitStatus, String), Bounded> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
