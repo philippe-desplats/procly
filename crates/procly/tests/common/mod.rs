@@ -19,6 +19,8 @@ use nix::unistd::Pid;
 use tempfile::TempDir;
 use tokio::net::TcpSocket;
 
+pub mod port_holders;
+
 /// How long a test waits for an asynchronous effect before failing.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -125,6 +127,7 @@ impl Procly {
 
     /// The `procly` binary, pointed at this test's state directory and run from the scratch directory.
     pub fn command(&self) -> Command {
+        port_holders::remember_daemon(self.state_dir(), self.config_dir());
         let mut command = Command::new(env!("CARGO_BIN_EXE_procly"));
         command
             .env("PROCLY_STATE_DIR", self.state_dir())
@@ -200,13 +203,20 @@ pub fn stderr(output: &Output) -> String {
 }
 
 pub fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
+    assert!(output.status.success(), "{}", failure_message(output));
+}
+
+/// What a failing command printed, followed by what held the ports `free_port()` handed out that its Port mismatch
+/// is about.
+pub fn failure_message(output: &Output) -> String {
+    let report = format!(
         "exit status: {}\nstdout: {}\nstderr: {}",
         output.status,
         stdout(output),
         stderr(output)
     );
+    let holders = port_holders::for_port_mismatch(&report);
+    format!("{report}{holders}")
 }
 
 /// Polls `condition` until it holds, failing the test after [`DEADLINE`].
@@ -318,6 +328,7 @@ pub fn free_port() -> u16 {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(reservation);
+            port_holders::handed_out(port);
             return port;
         }
     }
@@ -530,4 +541,24 @@ pub fn json_succeeded(output: &Output) -> serde_json::Value {
 /// The `schema_version` that `procly status --json` prints, which every other document must repeat.
 pub fn json_schema_version(procly: &Procly) -> serde_json::Value {
     json_succeeded(&procly.procly(&["status", "--json"]))["schema_version"].clone()
+}
+
+/// Compares what a command reported about the Lease of a Service with what a test expects when the Lease is on the
+/// `declared` port, which [`free_port`] gave the test. Returns the failure message when they differ, which says what
+/// held the declared port, and why the Lease may have gone to the Range instead.
+pub fn check_declared_port(declared: u16, reported: &str, expected: &str) -> Result<(), String> {
+    if reported == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "left: {reported:?}\nright: {expected:?}\n{}",
+        port_holders::diagnose(declared)
+    ))
+}
+
+/// Like [`check_declared_port`], failing the test with its message.
+pub fn assert_declared_port(declared: u16, reported: &str, expected: &str) {
+    if let Err(message) = check_declared_port(declared, reported, expected) {
+        panic!("{message}");
+    }
 }
