@@ -126,17 +126,13 @@ impl Procly {
     }
 
     /// The `procly` binary, pointed at this test's state directory and run from the scratch directory.
+    ///
+    /// Side effect: it records this test's directories in a thread-local registry, so that a failure diagnostic can
+    /// ask the Daemon of the test which Service holds a port, see [`port_holders`].
     pub fn command(&self) -> Command {
-        port_holders::remember_daemon(self.state_dir(), self.config_dir());
-        let mut command = Command::new(env!("CARGO_BIN_EXE_procly"));
-        command
-            .env("PROCLY_STATE_DIR", self.state_dir())
-            .env("PROCLY_CONFIG_DIR", self.config_dir())
-            .current_dir(self.scratch());
-        if let Some(clock) = &self.clock {
-            // Set on every command: the Daemon takes the environment of the one that starts it.
-            command.env("PROCLY_TEST_CLOCK", clock);
-        }
+        port_holders::remember_daemon(self.state_dir(), self.config_dir(), self.clock.as_deref());
+        let mut command = procly_binary(self.state_dir(), self.config_dir(), self.clock.as_deref());
+        command.current_dir(self.scratch());
         command
     }
 
@@ -169,6 +165,20 @@ impl Procly {
         let pid = std::fs::read_to_string(self.state_dir().join("daemon.pid")).ok()?;
         Some(Pid::from_raw(pid.trim().parse().ok()?))
     }
+}
+
+/// The `procly` binary with the environment every command of the harness carries, shared by [`Procly::command`] and
+/// the lookups of [`port_holders`], which must not record a Daemon a second time.
+fn procly_binary(state_dir: &Path, config_dir: &Path, clock: Option<&Path>) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_procly"));
+    command
+        .env("PROCLY_STATE_DIR", state_dir)
+        .env("PROCLY_CONFIG_DIR", config_dir);
+    if let Some(clock) = clock {
+        // Set on every command: the Daemon takes the environment of the one that starts it.
+        command.env("PROCLY_TEST_CLOCK", clock);
+    }
+    command
 }
 
 impl Drop for Procly {
