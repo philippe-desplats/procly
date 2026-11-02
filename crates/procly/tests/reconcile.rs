@@ -215,9 +215,10 @@ fn a_service_running_when_the_daemon_was_killed_is_reattached_and_reused_not_sta
 
     let output = procly.procly_in(&main, &["up", "web"]);
     assert_success(&output);
-    assert_eq!(
-        stdout(&output),
-        format!("web reused http://localhost:{port} port {port}\n")
+    common::assert_declared_port(
+        port,
+        &stdout(&output),
+        &format!("web reused http://localhost:{port} port {port}\n"),
     );
     assert_eq!(lines(&starts), ["start"]);
     assert!(common::is_alive(server));
