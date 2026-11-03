@@ -264,11 +264,22 @@ pub fn wait_until_gone(pid: Pid) {
 
 /// Reads a pid a Job wrote into a file, waiting for the file to appear.
 pub fn read_pid(path: &Path) -> Pid {
+    read_pid_within(path, DEADLINE, String::new)
+}
+
+/// Like [`read_pid`], waiting up to `deadline` and printing what `context` tells when the file never comes, for a test
+/// whose pid file is written by a process that may start slowly.
+pub fn read_pid_within(path: &Path, deadline: Duration, context: impl Fn() -> String) -> Pid {
     let mut pid = None;
-    eventually(&format!("pid file {}", path.display()), || {
-        pid = std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse().ok());
-        pid.is_some()
-    });
+    eventually_within(
+        deadline,
+        &format!("pid file {}", path.display()),
+        || {
+            pid = std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse().ok());
+            pid.is_some()
+        },
+        context,
+    );
     Pid::from_raw(pid.expect("the pid was read"))
 }
 

@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
+use nix::unistd::Pid;
+
 use common::{Procly, assert_success, free_port, git, git_repository, git_worktree_add, stderr, stdout, test_server};
 
 /// The `[settings]` table turning Portless on.
@@ -234,6 +236,14 @@ impl Machine {
         let in_output: Vec<&str> = seen.lines().filter(is_warning).collect();
         let in_log: Vec<&str> = daemon_log.lines().filter(is_warning).collect();
         format!("warnings in the output of the commands: {in_output:?}\nwarnings in the Daemon log: {in_log:?}")
+    }
+
+    /// The pid the fake `portless` wrote into the file `name` next to itself. The fake is a shell that has to start
+    /// first, which takes as long as the machine is busy, so the wait is as long as an answering fake is given.
+    fn read_pid(&self, name: &str) -> Pid {
+        common::read_pid_within(&self.bin.join(name), Duration::from_millis(ANSWER_TIMEOUT_MS), || {
+            self.warnings()
+        })
     }
 
     /// A Repository declaring `web`, which listens on its `http` Lease, and `settings` before it.
@@ -730,7 +740,7 @@ fn a_descendant_of_portless_holding_stderr_open_does_not_hold_up_the_call() {
     assert_eq!(stderr(&output), "");
     // The call went through while the descendant still ran: it did not wait for it, and did not kill it either, since
     // what the call left running is not Procly's to kill once the call went through.
-    let grandchild = common::read_pid(&machine.bin.join("grandchild"));
+    let grandchild = machine.read_pid("grandchild");
     assert!(
         common::is_alive(grandchild),
         "the descendant is gone, so the call waited for it or killed it"
@@ -756,8 +766,8 @@ fn a_portless_that_never_answers_is_a_warning_and_none_of_its_processes_survive(
         stderr(&output),
         format!("procly: warning: `portless alias web {port}` did not answer within 3s\n")
     );
-    let leader = common::read_pid(&machine.bin.join("leader"));
-    let grandchild = common::read_pid(&machine.bin.join("grandchild"));
+    let leader = machine.read_pid("leader");
+    let grandchild = machine.read_pid("grandchild");
     common::wait_until_gone(leader);
     common::wait_until_gone(grandchild);
 }
@@ -780,7 +790,7 @@ fn a_lease_grant_does_not_wait_for_a_portless_that_hangs_in_another_worktree() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start up");
-    let leader = common::read_pid(&machine.bin.join("leader"));
+    let leader = machine.read_pid("leader");
 
     let start = Instant::now();
     let output = machine.run(&login, &["up", "web"]);
