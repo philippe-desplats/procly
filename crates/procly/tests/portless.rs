@@ -6,23 +6,34 @@
 
 mod common;
 
+use std::cell::RefCell;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::{Procly, assert_success, free_port, git, git_repository, git_worktree_add, stderr, stdout, test_server};
 
 /// The `[settings]` table turning Portless on.
 const ON: &str = "[settings]\nportless = true\n";
 
+/// The milliseconds the Daemon gives a call of a `portless` that is meant to answer. Far past what a loaded machine
+/// takes to start a shell script, so that no test about an answer depends on how fast the fake starts.
+const ANSWER_TIMEOUT_MS: u64 = 60_000;
+
 /// A machine whose `PATH` holds a fake `portless`, or none.
 struct Machine {
     procly: Procly,
     /// The directory first in the `PATH`.
     bin: PathBuf,
-    /// The milliseconds the Daemon gives a call of `portless`, when the test shortens them.
-    timeout_ms: Option<u64>,
+    /// The milliseconds the Daemon gives a call of `portless`.
+    timeout_ms: u64,
+    /// The file that must hold something before the timeout starts to count, when the test is about a `portless` that
+    /// hangs. The fake writes it as its first act.
+    timeout_after: Option<PathBuf>,
+    /// What the commands run through [`Machine::run`] printed on stderr, to show where a call log is not what it
+    /// should be.
+    stderr_seen: RefCell<String>,
 }
 
 impl Machine {
@@ -63,23 +74,40 @@ impl Machine {
         Self {
             procly,
             bin,
-            timeout_ms: None,
+            timeout_ms: ANSWER_TIMEOUT_MS,
+            timeout_after: None,
+            stderr_seen: RefCell::default(),
         }
     }
 
-    /// A machine whose `portless` logs its arguments, then runs the shell commands `body`, and whose calls the Daemon
-    /// gives `timeout_ms` milliseconds.
-    fn scripted(body: &str, timeout_ms: u64) -> Self {
+    /// A machine whose `portless` logs its arguments, then runs the shell commands `body`, and answers however long
+    /// the machine takes to start it.
+    fn scripted(body: &str) -> Self {
+        let machine = Self::from(Procly::new(), 0, 0, false);
+        machine.install(body);
+        machine
+    }
+
+    /// A machine whose `portless` logs its arguments, then runs the shell commands `body`, which hang. The Daemon gives
+    /// a call `timeout_ms` milliseconds from the moment `body` has written the file `armed_by` of the fake tools
+    /// directory, and not from the spawn: a machine too busy to start the fake in time then does not fail the test.
+    fn hanging(body: &str, timeout_ms: u64, armed_by: &str) -> Self {
         let mut machine = Self::from(Procly::new(), 0, 0, false);
+        machine.install(body);
+        machine.timeout_ms = timeout_ms;
+        machine.timeout_after = Some(machine.bin.join(armed_by));
+        machine
+    }
+
+    /// Writes the fake `portless`, which logs its arguments and then runs `body`.
+    fn install(&self, body: &str) {
         let script = format!(
             "#!/bin/sh\necho \"$*\" >> '{}'\n{body}\n",
-            machine.bin.join("calls").display()
+            self.bin.join("calls").display()
         );
-        let path = machine.bin.join("portless");
+        let path = self.bin.join("portless");
         std::fs::write(&path, script).expect("write the fake portless");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make it executable");
-        machine.timeout_ms = Some(timeout_ms);
-        machine
     }
 
     /// The `PATH`: the fake tools first, then the usual one without a directory holding a real `portless`.
@@ -91,15 +119,21 @@ impl Machine {
 
     /// `procly` with `args` in `dir`.
     fn run(&self, dir: &Path, args: &[&str]) -> Output {
-        self.command(dir, args).output().expect("the procly binary runs")
+        let output = self.command(dir, args).output().expect("the procly binary runs");
+        self.stderr_seen.borrow_mut().push_str(&stderr(&output));
+        output
     }
 
     /// The command of [`Machine::run`], not started. The Daemon takes the environment of the command that starts it.
     fn command(&self, dir: &Path, args: &[&str]) -> std::process::Command {
         let mut command = self.procly.command();
-        command.current_dir(dir).env("PATH", self.path()).args(args);
-        if let Some(timeout_ms) = self.timeout_ms {
-            command.env("PROCLY_TEST_PORTLESS_TIMEOUT_MS", timeout_ms.to_string());
+        command
+            .current_dir(dir)
+            .env("PATH", self.path())
+            .env("PROCLY_TEST_PORTLESS_TIMEOUT_MS", self.timeout_ms.to_string())
+            .args(args);
+        if let Some(armed_by) = &self.timeout_after {
+            command.env("PROCLY_TEST_PORTLESS_TIMEOUT_AFTER", armed_by);
         }
         command
     }
@@ -111,6 +145,32 @@ impl Machine {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// Asserts that the fake `portless` was called with exactly `expected`, in that order. When it was not, the message
+    /// carries the warnings the Daemon gave: a call that timed out leaves nothing in the call log, and the warning is
+    /// the only place that says so.
+    #[track_caller]
+    fn assert_calls(&self, expected: &[String]) {
+        assert_eq!(self.calls(), expected, "{}", self.warnings());
+    }
+
+    /// Asserts that the fake `portless` was called `count` times, with the warnings of the Daemon in the message
+    /// otherwise.
+    #[track_caller]
+    fn assert_call_count(&self, count: usize, what: &str) {
+        let calls = self.calls();
+        assert_eq!(calls.len(), count, "{what}: {calls:?}\n{}", self.warnings());
+    }
+
+    /// The warnings the Daemon gave, from what the commands printed and from its log.
+    fn warnings(&self) -> String {
+        let daemon_log = self.procly.daemon_log();
+        let in_log: Vec<&str> = daemon_log.lines().filter(|line| line.contains("warning")).collect();
+        format!(
+            "warnings in the output of the commands: {:?}\nwarnings in the Daemon log: {in_log:?}",
+            self.stderr_seen.borrow()
+        )
     }
 
     /// A Repository declaring `web`, which listens on its `http` Lease, and `settings` before it.
@@ -173,7 +233,7 @@ fn nothing_calls_portless_unless_the_settings_turn_it_on() {
     remove_worktree(&main, &other);
     assert_success(&machine.run(&main, &["gc", "--apply"]));
 
-    assert_eq!(machine.calls(), Vec::<String>::new());
+    machine.assert_calls(&[]);
 }
 
 #[test]
@@ -184,7 +244,7 @@ fn up_aliases_the_http_lease_of_the_main_worktree_to_the_name_of_its_service() {
     let output = machine.run(&main, &["up", "web"]);
 
     let port = port_of(&output);
-    assert_eq!(machine.calls(), [format!("alias web {port}")]);
+    machine.assert_calls(&[format!("alias web {port}")]);
     assert_eq!(stderr(&output), "", "an alias made says nothing");
 }
 
@@ -197,7 +257,7 @@ fn up_prefixes_the_name_with_the_branch_outside_the_main_worktree() {
 
     let port = port_of(&machine.run(&login, &["up", "web"]));
 
-    assert_eq!(machine.calls(), [format!("alias app-login.web {port}")]);
+    machine.assert_calls(&[format!("alias app-login.web {port}")]);
 }
 
 #[test]
@@ -220,7 +280,7 @@ fn a_branch_with_a_slash_becomes_one_dns_label() {
 
     let port = port_of(&machine.run(&path, &["up", "web"]));
 
-    assert_eq!(machine.calls(), [format!("alias feature-e-59.web {port}")]);
+    machine.assert_calls(&[format!("alias feature-e-59.web {port}")]);
 }
 
 #[test]
@@ -236,7 +296,7 @@ fn a_pinned_branch_is_named_after_its_branch_and_keeps_its_name_in_the_worktree_
 
     let port = port_of(&machine.run(&path, &["up", "web"]));
 
-    assert_eq!(machine.calls(), [format!("alias develop.web {port}")]);
+    machine.assert_calls(&[format!("alias develop.web {port}")]);
 }
 
 #[test]
@@ -274,7 +334,7 @@ fn a_service_with_several_http_leases_names_each_one_after_its_port_name() {
         format!("alias app-login.web.api {login_web}"),
     ];
     expected.sort();
-    assert_eq!(calls, expected);
+    assert_eq!(calls, expected, "{}", machine.warnings());
 }
 
 #[test]
@@ -290,7 +350,7 @@ fn a_lease_that_is_not_an_http_url_gets_no_alias() {
 
     assert_success(&machine.run(&main, &["up", "mail"]));
 
-    assert_eq!(machine.calls(), Vec::<String>::new());
+    machine.assert_calls(&[]);
 }
 
 #[test]
@@ -303,9 +363,9 @@ fn up_makes_the_alias_again_on_a_service_that_runs_and_the_down_keeps_it() {
     let port = port_of(&machine.run(&login, &["up", "web"]));
     assert_success(&machine.run(&login, &["down", "web"]));
 
-    assert_eq!(machine.calls(), [format!("alias app-login.web {port}")]);
+    machine.assert_calls(&[format!("alias app-login.web {port}")]);
     assert_eq!(port_of(&machine.run(&login, &["up", "web"])), port);
-    assert_eq!(machine.calls().len(), 2, "{:?}", machine.calls());
+    machine.assert_call_count(2, "the Lease is aliased again");
     assert_only_aliases(&machine);
 }
 
@@ -319,16 +379,13 @@ fn worktree_release_removes_the_alias_of_the_leases_it_releases() {
 
     assert_success(&machine.run(&login, &["worktree", "release"]));
 
-    assert_eq!(
-        machine.calls(),
-        [
-            format!("alias app-login.web {port}"),
-            "alias --remove app-login.web".to_owned()
-        ]
-    );
+    machine.assert_calls(&[
+        format!("alias app-login.web {port}"),
+        "alias --remove app-login.web".to_owned(),
+    ]);
     // Released once: the alias is no longer recorded.
     assert_success(&machine.run(&login, &["worktree", "release"]));
-    assert_eq!(machine.calls().len(), 2);
+    machine.assert_call_count(2, "the alias is released once");
 }
 
 #[test]
@@ -345,7 +402,7 @@ fn worktree_release_keeps_the_alias_of_a_pinned_branch() {
 
     assert_success(&machine.run(&path, &["worktree", "release"]));
 
-    assert_eq!(machine.calls(), [format!("alias develop.web {port}")]);
+    machine.assert_calls(&[format!("alias develop.web {port}")]);
 }
 
 #[test]
@@ -358,19 +415,21 @@ fn an_expired_lease_loses_its_alias() {
     assert_success(&machine.run(&login, &["down", "web"]));
     machine.procly.advance_clock(Duration::from_hours(29 * 24));
     assert_success(&machine.run(&main, &["up", "web"]));
-    assert_eq!(
-        machine.calls().len(),
-        2,
-        "the Lease has not expired yet: {:?}",
-        machine.calls()
-    );
+    machine.assert_call_count(2, "the Lease has not expired yet");
 
     machine.procly.advance_clock(Duration::from_hours(2 * 24));
     assert_success(&machine.run(&main, &["up", "web"]));
 
     let calls = machine.calls();
-    assert!(calls.contains(&format!("alias app-login.web {port}")), "{calls:?}");
-    assert!(calls.contains(&"alias --remove app-login.web".to_owned()), "{calls:?}");
+    let warnings = machine.warnings();
+    assert!(
+        calls.contains(&format!("alias app-login.web {port}")),
+        "{calls:?}\n{warnings}"
+    );
+    assert!(
+        calls.contains(&"alias --remove app-login.web".to_owned()),
+        "{calls:?}\n{warnings}"
+    );
     assert_only_aliases(&machine);
 }
 
@@ -385,17 +444,14 @@ fn gc_apply_removes_the_alias_of_the_orphan_leases_it_deletes() {
     remove_worktree(&main, &login);
 
     assert_success(&machine.run(&main, &["gc"]));
-    assert_eq!(
-        machine.calls().len(),
-        1,
-        "gc without --apply deletes nothing: {:?}",
-        machine.calls()
-    );
+    machine.assert_call_count(1, "gc without --apply deletes nothing");
     assert_success(&machine.run(&main, &["gc", "--apply"]));
 
     assert_eq!(
         machine.calls().last().map(String::as_str),
-        Some("alias --remove app-login.web")
+        Some("alias --remove app-login.web"),
+        "{}",
+        machine.warnings()
     );
     assert_only_aliases(&machine);
 }
@@ -450,8 +506,9 @@ fn gc_apply_tells_a_failing_portless_once_whatever_the_number_of_leases_it_delet
     assert_eq!(
         removals,
         1,
-        "the next call would fail the same way: {:?}",
-        machine.calls()
+        "the next call would fail the same way: {:?}\n{}",
+        machine.calls(),
+        machine.warnings()
     );
 }
 
@@ -556,7 +613,7 @@ fn a_failing_removal_leaves_the_alias_recorded_and_the_next_release_tries_again(
         stderr(&output),
         "procly: warning: `portless alias --remove app-login.web` failed with exit status: 1\n"
     );
-    assert_eq!(machine.calls().len(), 2);
+    machine.assert_call_count(2, "the alias and its failing removal");
     let log = machine.procly.daemon_log();
     assert!(
         log.contains("warning: `portless alias --remove app-login.web` failed"),
@@ -565,13 +622,16 @@ fn a_failing_removal_leaves_the_alias_recorded_and_the_next_release_tries_again(
 
     // Any grant in the Repository removes what no Lease holds.
     assert_success(&machine.run(&main, &["up", "web"]));
+    let removals = machine
+        .calls()
+        .iter()
+        .filter(|call| call.as_str() == "alias --remove app-login.web")
+        .count();
     assert!(
-        machine
-            .calls()
-            .iter()
-            .filter(|call| call.as_str() == "alias --remove app-login.web")
-            .count()
-            >= 2
+        removals >= 2,
+        "the grant did not try the removal again: {:?}\n{}",
+        machine.calls(),
+        machine.warnings()
     );
     assert_only_aliases(&machine);
 }
@@ -587,7 +647,12 @@ fn a_recorded_alias_is_still_removed_once_portless_is_turned_off() {
 
     assert_success(&machine.run(&login, &["worktree", "release"]));
 
-    assert!(machine.calls().contains(&"alias --remove app-login.web".to_owned()));
+    assert!(
+        machine.calls().contains(&"alias --remove app-login.web".to_owned()),
+        "{:?}\n{}",
+        machine.calls(),
+        machine.warnings()
+    );
 }
 
 #[test]
@@ -636,33 +701,37 @@ fn aliases_check(machine: &Machine, dir: &Path) -> String {
 
 #[test]
 fn a_descendant_of_portless_holding_stderr_open_does_not_hold_up_the_call() {
-    let machine = Machine::scripted("sleep 8 &\necho $! > \"$(dirname \"$0\")/grandchild\"\nexit 0", 10_000);
+    let machine = Machine::scripted("sleep 60 &\necho $! > \"$(dirname \"$0\")/grandchild\"\nexit 0");
     let main = machine.repository(ON);
 
-    let start = Instant::now();
     let output = machine.run(&main, &["up", "web"]);
 
     port_of(&output);
-    assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
     assert_eq!(stderr(&output), "");
-    // What the call left running is not Procly's to kill once the call went through.
+    // The call went through while the descendant still ran: it did not wait for it, and did not kill it either, since
+    // what the call left running is not Procly's to kill once the call went through.
     let grandchild = common::read_pid(&machine.bin.join("grandchild"));
+    assert!(
+        common::is_alive(grandchild),
+        "the descendant is gone, so the call waited for it or killed it"
+    );
     nix::sys::signal::kill(grandchild, nix::sys::signal::Signal::SIGKILL).expect("stop the descendant");
 }
 
 #[test]
 fn a_portless_that_never_answers_is_a_warning_and_none_of_its_processes_survive() {
-    let machine = Machine::scripted(
+    // The fake writes `grandchild` last, so the 3 seconds count from a fake that has its descendant. It waits for
+    // nothing, so a call that was not bounded would never end and the test would hang rather than pass.
+    let machine = Machine::hanging(
         "echo $$ > \"$(dirname \"$0\")/leader\"\nsleep 300 &\necho $! > \"$(dirname \"$0\")/grandchild\"\nwait",
         3_000,
+        "grandchild",
     );
     let main = machine.repository(ON);
 
-    let start = Instant::now();
     let output = machine.run(&main, &["up", "web"]);
 
     let port = port_of(&output);
-    assert!(start.elapsed() < Duration::from_secs(8), "{:?}", start.elapsed());
     assert_eq!(
         stderr(&output),
         format!("procly: warning: `portless alias web {port}` did not answer within 3s\n")
@@ -675,7 +744,13 @@ fn a_portless_that_never_answers_is_a_warning_and_none_of_its_processes_survive(
 
 #[test]
 fn a_lease_grant_does_not_wait_for_a_portless_that_hangs_in_another_worktree() {
-    let machine = Machine::scripted("echo $$ > \"$(dirname \"$0\")/leader\"\nsleep 300 &\nwait", 4_000);
+    // The 20 seconds count from the moment the fake wrote `leader`. The bound of a call is the other test's business,
+    // so this one stops the fake itself once the grant is done, rather than waiting for the Daemon to.
+    let machine = Machine::hanging(
+        "echo $$ > \"$(dirname \"$0\")/leader\"\nsleep 300 &\nwait",
+        20_000,
+        "leader",
+    );
     let main = machine.repository(ON);
     let login = git_worktree_add(&main, "app-login");
     write_config(&login, "");
@@ -685,16 +760,21 @@ fn a_lease_grant_does_not_wait_for_a_portless_that_hangs_in_another_worktree() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("start up");
-    common::read_pid(&machine.bin.join("leader"));
+    let leader = common::read_pid(&machine.bin.join("leader"));
 
-    let start = Instant::now();
     let output = machine.run(&login, &["up", "web"]);
 
     assert_success(&output);
-    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
-    let hanging = hanging.wait_with_output().expect("the first up ends");
     assert!(
-        stderr(&hanging).contains("did not answer within 4s"),
+        common::is_alive(leader),
+        "the grant came back after the hanging call ended, so it waited behind it"
+    );
+    // The fake leads its process group, which also holds its `sleep`.
+    nix::sys::signal::killpg(leader, nix::sys::signal::Signal::SIGKILL).expect("stop the hanging call");
+    let hanging = hanging.wait_with_output().expect("the first up ends");
+    assert_success(&hanging);
+    assert!(
+        stderr(&hanging).contains("`portless alias web "),
         "{}",
         stderr(&hanging)
     );
@@ -704,7 +784,6 @@ fn a_lease_grant_does_not_wait_for_a_portless_that_hangs_in_another_worktree() {
 fn a_removal_of_an_alias_portless_does_not_have_is_done_and_forgotten() {
     let machine = Machine::scripted(
         "if [ \"$2\" = \"--remove\" ]; then echo \"Error: No alias found for \\\"$3\\\".\" >&2; exit 1; fi",
-        5_000,
     );
     let main = machine.repository(ON);
     let login = git_worktree_add(&main, "app-login");
@@ -714,13 +793,10 @@ fn a_removal_of_an_alias_portless_does_not_have_is_done_and_forgotten() {
     let output = machine.run(&login, &["worktree", "release"]);
 
     assert_success(&output);
-    assert_eq!(
-        machine.calls(),
-        [
-            format!("alias app-login.web {port}"),
-            "alias --remove app-login.web".to_owned()
-        ]
-    );
+    machine.assert_calls(&[
+        format!("alias app-login.web {port}"),
+        "alias --remove app-login.web".to_owned(),
+    ]);
     assert!(
         !machine.procly.daemon_log().contains("warning"),
         "{}",
@@ -729,7 +805,7 @@ fn a_removal_of_an_alias_portless_does_not_have_is_done_and_forgotten() {
     // No record is left, so no grant tries the removal again and the check passes.
     assert_success(&machine.run(&main, &["up", "web"]));
     let removals = machine.calls().iter().filter(|call| call.contains("--remove")).count();
-    assert_eq!(removals, 1, "{:?}", machine.calls());
+    assert_eq!(removals, 1, "{:?}\n{}", machine.calls(), machine.warnings());
     assert_eq!(aliases_check(&machine, &main), "passed");
 }
 
@@ -744,11 +820,8 @@ fn the_alias_record_survives_a_daemon_that_was_killed_and_the_next_release_remov
     machine.procly.kill_daemon();
     assert_success(&machine.run(&login, &["worktree", "release"]));
 
-    assert_eq!(
-        machine.calls(),
-        [
-            format!("alias app-login.web {port}"),
-            "alias --remove app-login.web".to_owned()
-        ]
-    );
+    machine.assert_calls(&[
+        format!("alias app-login.web {port}"),
+        "alias --remove app-login.web".to_owned(),
+    ]);
 }

@@ -26,8 +26,17 @@ pub(crate) const BINARY: &str = "portless";
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Set to a number of milliseconds, it replaces [`CALL_TIMEOUT`] in the Daemon that reads it, so that tests do not wait
-/// 10 seconds for a `portless` that never answers.
+/// 10 seconds for a `portless` that never answers, and can give a `portless` that answers all the time a loaded machine
+/// needs to start it.
 const TEST_TIMEOUT_ENV: &str = "PROCLY_TEST_PORTLESS_TIMEOUT_MS";
+
+/// Set to a path, it makes the timeout of [`TEST_TIMEOUT_ENV`] count from the moment that file exists and holds
+/// something, instead of from the spawn. A test of a `portless` that hangs has it write that file as its first act, so
+/// that a machine too busy to start it before the timeout does not fail the test.
+const TEST_TIMEOUT_AFTER_ENV: &str = "PROCLY_TEST_PORTLESS_TIMEOUT_AFTER";
+
+/// How long a call that waits for the file of [`TEST_TIMEOUT_AFTER_ENV`] may run if the file never appears.
+const AFTER_CEILING: Duration = Duration::from_mins(1);
 
 /// How much of what a failed `portless` printed on stderr is read.
 const OUTPUT_LIMIT: u64 = 8192;
@@ -330,15 +339,46 @@ fn remove(name: &str) -> Result<(), CallError> {
     }
 }
 
-/// How long a call may run: [`CALL_TIMEOUT`], or what the tests set.
-fn call_timeout() -> Duration {
-    std::env::var(TEST_TIMEOUT_ENV)
-        .ok()
-        .and_then(|milliseconds| milliseconds.parse().ok())
-        .map_or(CALL_TIMEOUT, Duration::from_millis)
+/// How long a call may run, and since when: [`CALL_TIMEOUT`] since the spawn, or what the tests set.
+struct CallLimit {
+    timeout: Duration,
+    deadline: Instant,
+    /// The file the deadline waits for, `None` once it appeared or when the tests set none.
+    after: Option<PathBuf>,
 }
 
-/// Runs `portless` with `args`, in a process group of its own that is killed past [`call_timeout`], so that no
+impl CallLimit {
+    /// The limit of a call spawned just now.
+    fn start() -> Self {
+        let timeout = std::env::var(TEST_TIMEOUT_ENV)
+            .ok()
+            .and_then(|milliseconds| milliseconds.parse().ok())
+            .map_or(CALL_TIMEOUT, Duration::from_millis);
+        let after = std::env::var_os(TEST_TIMEOUT_AFTER_ENV).map(PathBuf::from);
+        let wait = if after.is_some() { AFTER_CEILING } else { timeout };
+        Self {
+            timeout,
+            deadline: Instant::now() + wait,
+            after,
+        }
+    }
+
+    /// Whether the call may still run. Moves the deadline to the timeout past now the first time the file it waits for
+    /// holds something.
+    fn holds(&mut self) -> bool {
+        if self
+            .after
+            .as_ref()
+            .is_some_and(|path| path.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        {
+            self.after = None;
+            self.deadline = Instant::now() + self.timeout;
+        }
+        Instant::now() < self.deadline
+    }
+}
+
+/// Runs `portless` with `args`, in a process group of its own that is killed past its [`CallLimit`], so that no
 /// descendant outlives a call that hung. The call ends with the process it started: a descendant that keeps its
 /// stderr open past that is left alone, and what it prints later is not read. Never `proxy`, never `sudo`.
 fn call(args: &[&str]) -> Result<(), CallError> {
@@ -363,15 +403,17 @@ fn call(args: &[&str]) -> Result<(), CallError> {
         io::ErrorKind::NotFound => CallError::Missing,
         _ => failed(format!("cannot run: {error}")),
     })?;
-    let timeout = call_timeout();
-    let deadline = Instant::now() + timeout;
+    let mut limit = CallLimit::start();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if limit.holds() => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 kill_tree_blocking(&mut child);
-                return Err(CallError::TimedOut { args: joined, timeout });
+                return Err(CallError::TimedOut {
+                    args: joined,
+                    timeout: limit.timeout,
+                });
             }
             Err(error) => {
                 kill_tree_blocking(&mut child);
