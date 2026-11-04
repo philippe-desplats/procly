@@ -34,12 +34,16 @@ Procly is a single per-user Daemon that owns every Service, port and container a
 - **Restart and idle stop**: a Service that crashes after it was healthy is restarted with backoff, and one that stays silent and idle for 30 minutes is stopped, so forgotten dev servers do not pile up.
 - **Jobs**: `procly run` starts a bounded command deduplicated by its Fingerprint, and `procly wait` returns its real exit code.
 - **Compose services**: Procly drives the compose file you already have through `docker compose` v2, never modifies it, and shares one container between Worktrees, counted by Worktree and stopped after a Grace period.
-- **Logical resources**: a Driver gives each Worktree its own Postgres database or Redis index inside that one container. Postgres and Redis Drivers ship with Procly, and a new technology is a TOML file.
+- **Logical resources**: a Driver gives each Worktree its own Postgres database or Redis index inside that one container. Postgres and Redis Drivers ship with Procly, and a new technology is a TOML file, such as the [Driver for an S3-compatible store](docs/configuration.md#example-a-driver-for-an-s3-compatible-store) in the docs.
+- **Isolated mode, opt-in**: a Compose service set to `isolation = "isolated"` runs one container per Worktree instead, for an application that cannot share one, and its Retention policy declares what happens to that container and its volumes once the Worktree is removed.
+- **Worktree lifecycle**: `procly worktree release` stops a Worktree's work and releases its Leases before you remove it, and `procly gc` lists the Orphans removed Worktrees left behind, which `gc --apply` deletes.
 - **Groups**: keep your monorepo-wide dev command as one unit that covers several Services.
 - **Agent steering, opt-in**: `procly agent install` writes a Rules block into `AGENTS.md` and a Guard into `.claude/settings.json`, a Claude Code hook that blocks a dev-server command and answers with the Procly command to run.
 - **Reversible**: `procly off` makes the Guard and the Rules block stand aside, and `procly eject` removes everything Procly wrote into a Repository.
 - **Crash tolerant**: Services run in process groups of their own and outlive a crashed Daemon, which the next Daemon re-attaches. A launchd agent or systemd user unit can start the Daemon with your session.
-- **Built for agents to parse**: stable exit codes, and a versioned `--json` document on every command but the Guard.
+- **Self-check**: `procly doctor` checks the installation and the Repository, and gives the command that fixes each problem.
+- **Integrations**: `procly mcp` serves the Daemon verbs as MCP tools, `procly worktree hooks` makes Worktrunk run `worktree init` and `worktree release`, and with `portless = true` each HTTP Lease gets a Portless alias that does not change from one Worktree to the next.
+- **Built for agents to parse**: stable exit codes, and a versioned `--json` document on every command but `guard` and `mcp`.
 
 ## Installation
 
@@ -92,6 +96,8 @@ Leave out `--tag` to install the head of `main`. From a clone, `rustup` uses the
 
 - `docker compose` v2, only for Compose services.
 - `lsof` and a running Docker engine, for `procly status` to list Foreign processes and containers.
+- [Portless](https://github.com/vercel-labs/portless), only with `portless = true` in `[settings]`, see [Portless aliases](docs/configuration.md#portless-aliases).
+- [Worktrunk](https://github.com/max-sixty/worktrunk), only for `procly worktree hooks`, see [Worktrunk](docs/worktree-init.md#worktrunk).
 
 ## Usage
 
@@ -138,7 +144,7 @@ procly unit install        # start the Daemon with your session (launchd or syst
 procly mcp                 # serve run, wait, logs, up, down, env, status, worktree init and release, gc and doctor as MCP tools (docs/mcp.md)
 ```
 
-Every command but `guard` and `mcp` accepts `--json` and then prints one document carrying a `schema_version`. Exit codes are stable, so an agent can branch on them without parsing the output: 0 on success, 3 when a Service ended before it was healthy, 4 on a Port mismatch, 5 on a conflict with something running outside Procly, 6 when `gc --apply` could not delete every Orphan, 7 when `doctor` found a problem, 124 on a timeout, 125 when Procly itself fails. See [Exit codes](docs/exit-codes.md) and [JSON output](docs/json.md).
+Every command but `guard` and `mcp` accepts `--json` and then prints one document carrying a `schema_version`. Exit codes are stable, so an agent can branch on them without parsing the output: 0 on success, 2 on a usage error, 3 when a Service ended before it was healthy, 4 on a Port mismatch, 5 on a conflict with something running outside Procly, 6 when `gc --apply` could not delete every Orphan, 7 when `doctor` found a problem, 124 on a timeout, 125 when Procly itself fails. See [Exit codes](docs/exit-codes.md) and [JSON output](docs/json.md).
 
 To point your agents at Procly, run `procly agent install` once and commit what it writes. The Guard covers Claude Code: it reads each Bash call through a `PreToolUse` hook, lets unknown commands through without asking the Daemon, and denies a known dev-server or `docker compose up` command with the equivalent Procly command. See [Steering agents to Procly](docs/agents.md).
 
@@ -206,7 +212,7 @@ An unknown key is an error, so a typo never goes unnoticed. [Configuration](docs
 - Stopping a Service sends `SIGTERM` to its whole process group, then `SIGKILL`, so nothing it forked survives it.
 - Compose services go through the `docker compose` v2 CLI and the compose file of the Repository, which Procly never modifies.
 
-The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Releasing a Worktree](docs/worktree-release.md), [Checking the installation](docs/doctor.md), [Proposing a configuration](docs/init.md), [Removing Procly from a Repository](docs/eject.md) and [The MCP server](docs/mcp.md).
+The structuring decisions are recorded in [`docs/adr/`](docs/adr), the vocabulary in [`GLOSSARY.md`](GLOSSARY.md). See also [The Daemon across crashes and sessions](docs/daemon.md), [Preparing a Worktree](docs/worktree-init.md), [Releasing a Worktree](docs/worktree-release.md), [Collecting Orphans](docs/gc.md), [Checking the installation](docs/doctor.md), [Proposing a configuration](docs/init.md), [Removing Procly from a Repository](docs/eject.md) and [The MCP server](docs/mcp.md).
 
 ## Development
 
