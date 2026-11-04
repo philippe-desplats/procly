@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::atomic_file::{self, Mode};
+use super::fnv;
 use super::store::{self, StoreError};
 
 /// The version of the format of the document of fingerprints, bumped when a field changes meaning or disappears.
@@ -570,16 +571,10 @@ fn locate(syntax: Syntax, text: &str, block: &str) -> Located {
     }
 }
 
-/// FNV-1a over the bytes of `content`, 64 bits, in hexadecimal. It is written out instead of taken from the standard
-/// library, whose hashers change between releases, because a fingerprint stored today is compared by a later Procly.
-/// It tells an edit from no edit and is no defense against someone crafting a collision.
+/// FNV-1a 64 of `content`, in hexadecimal, since a fingerprint stored today is compared by a later Procly. It tells an
+/// edit from no edit.
 fn fingerprint(content: &str) -> String {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let hash = content
-        .bytes()
-        .fold(OFFSET_BASIS, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(PRIME));
-    format!("fnv1a64:{hash:016x}")
+    format!("fnv1a64:{:016x}", fnv::fnv1a64(content.as_bytes()))
 }
 
 #[cfg(test)]

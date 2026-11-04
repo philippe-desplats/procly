@@ -3,14 +3,15 @@
 //! directory it cannot place, which it never deletes (ADR 0004).
 
 use std::fs::{self, DirBuilder};
-use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::atomic_file::{self, Mode};
+use super::fnv;
 use super::store::{self, StoreError};
 use crate::topology::Topology;
 
@@ -128,12 +129,10 @@ pub(crate) fn remove(path: &Path) -> io::Result<()> {
     })
 }
 
-/// The name of the directory of the Worktree at `worktree`: its slug, for whoever browses the state directory, then a
-/// hash of its root, so that 2 Worktrees with the same slug never share one.
+/// The name of the directory of the Worktree at `worktree`: its slug, for whoever browses the state directory, then
+/// FNV-1a 64 of its root, so that 2 Worktrees with the same slug never share one and every later Procly finds it again.
 fn name(worktree: &Path, slug: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    worktree.hash(&mut hasher);
-    format!("{slug}-{:016x}", hasher.finish())
+    format!("{slug}-{:016x}", fnv::fnv1a64(worktree.as_os_str().as_bytes()))
 }
 
 #[cfg(test)]
@@ -151,6 +150,12 @@ mod tests {
                 main: false,
             },
         }
+    }
+
+    #[test]
+    fn the_name_of_a_directory_is_the_slug_then_fnv_1a_64_of_the_worktree_root() {
+        // A later Procly must find the directory again, whatever toolchain built it.
+        assert_eq!(name(Path::new("/src/app-a"), "app-a"), "app-a-e28808b1d210e342");
     }
 
     #[test]

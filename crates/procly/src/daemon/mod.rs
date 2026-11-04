@@ -9,6 +9,7 @@ mod cpu;
 pub(crate) mod doctor;
 mod eject;
 mod environment;
+mod fnv;
 mod foreign;
 mod gc;
 mod health;
