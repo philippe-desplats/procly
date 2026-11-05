@@ -543,15 +543,7 @@ impl Composes {
     /// writes the record.
     pub(crate) fn release(&self, repository: &Path, worktree: &Path, name: Option<&str>) -> Vec<Released> {
         let mut released = Vec::new();
-        let containers: Vec<_> = self
-            .table()
-            .iter()
-            .filter(|((path, service, isolated), _)| {
-                path == repository && isolated.is_none() && name.is_none_or(|name| name == service)
-            })
-            .map(|(key, container)| (key.clone(), Arc::clone(container)))
-            .collect();
-        for (key, container) in containers {
+        for (key, container) in self.shared(repository, name) {
             let let_go = {
                 let mut state = container.state();
                 let Some(grace) = state.alive.as_ref().map(|alive| alive.grace) else {
@@ -588,6 +580,39 @@ impl Composes {
         released
     }
 
+    /// What [`Composes::release`] would answer for the same arguments, without letting go of anything: no Worktree is
+    /// forgotten, no stop is scheduled, nothing is recorded. Blocking, it reads the disk.
+    pub(crate) fn would_release(&self, repository: &Path, worktree: &Path, name: Option<&str>) -> Vec<Released> {
+        let mut released: Vec<_> = self
+            .shared(repository, name)
+            .into_iter()
+            .filter_map(|(key, container)| {
+                let state = container.state();
+                let grace = state.alive.as_ref()?.grace;
+                // The Worktrees whose directory is gone stop counting, the one asking included.
+                let mut worktrees: BTreeSet<_> = state.worktrees.iter().filter(|path| path.exists()).cloned().collect();
+                worktrees.remove(worktree).then(|| Released {
+                    service: key.1.clone(),
+                    others: worktrees.len(),
+                    grace_ms: millis(grace),
+                })
+            })
+            .collect();
+        released.sort_by(|a, b| a.service.cmp(&b.service));
+        released
+    }
+
+    /// The containers the Worktrees of the Repository `repository` share, of the Compose service `name` only when given.
+    fn shared(&self, repository: &Path, name: Option<&str>) -> Vec<(ComposeKey, Arc<Container>)> {
+        self.table()
+            .iter()
+            .filter(|((path, service, isolated), _)| {
+                path == repository && isolated.is_none() && name.is_none_or(|name| name == service)
+            })
+            .map(|(key, container)| (key.clone(), Arc::clone(container)))
+            .collect()
+    }
+
     /// The Isolated containers of the Repository `repository` that `worktree` lets go of: its own, of the Compose
     /// service `name` only when given, and those of every Worktree whose directory no longer exists, removed without
     /// `procly down`. Blocking, it reads the disk.
@@ -604,6 +629,22 @@ impl Composes {
                 (isolated == worktree && name.is_none_or(|name| name == service)) || !isolated.exists()
             })
             .collect()
+    }
+
+    /// The keys among `keys` whose Isolated container runs, which [`Composes::stop_isolated`] would stop, without
+    /// stopping any.
+    pub(crate) fn would_stop_isolated(&self, keys: Vec<ComposeKey>) -> Vec<ComposeKey> {
+        let table = self.table();
+        let mut running: Vec<_> = keys
+            .into_iter()
+            .filter(|key| {
+                table
+                    .get(key)
+                    .is_some_and(|container| container.state().alive.is_some())
+            })
+            .collect();
+        running.sort();
+        running
     }
 
     /// Stops the Isolated containers `keys` at once, and returns the keys of those that were running.

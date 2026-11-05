@@ -323,6 +323,33 @@ fn docker_a_worktree_release_stops_the_container_of_the_worktree_at_once_and_rel
 }
 
 #[test]
+fn docker_a_dry_run_of_a_worktree_release_names_the_isolated_container_it_would_stop_and_stops_nothing() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+
+    let output = fixture
+        .procly
+        .procly_in(&fixture.other, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db would stop\nlease db.db port {other_port} would release\n")
+    );
+    assert!(fixture.other_project.is_running(), "a dry run stopped the container");
+    assert!(listens(other_port));
+    let real = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+    assert_eq!(
+        stdout(&real),
+        format!("db stopped\nlease db.db port {other_port} released\n")
+    );
+}
+
+#[test]
 fn docker_status_shows_the_containers_of_the_worktree_and_its_json_lists_them() {
     let Some(_docker) = require_docker() else {
         return;

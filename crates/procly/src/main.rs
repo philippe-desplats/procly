@@ -362,16 +362,21 @@ enum WorktreeCommand {
     /// Run the Worktree release, before the Worktree is removed: stop its Services and Jobs with their whole process
     /// trees, let go of its Compose services as `down` does, and release its Leases so that another Worktree can be
     /// granted their ports at once. The Leases of a Pinned branch are kept, and so is every Logical resource, which
-    /// `procly gc` lists once the Worktree is removed. Nothing is deleted. The Daemon logs who asked.
+    /// `procly gc` lists once the Worktree is removed. Nothing is deleted. The Daemon logs who asked. With `--dry-run`,
+    /// print what the release would stop, let go of and release, and change nothing.
     #[command(
         after_help = "Run it from the pre-remove hook of a worktree manager. Running it again, or in a Worktree Procly \
-                      never saw, prints `nothing to release`. Exit codes: 0 when the Worktree is released, also when \
+                      never saw, prints `nothing to release`. `--dry-run` prints the same report with `would stop` \
+                      and `would release`, and stops and releases nothing. Exit codes: 0 when the Worktree is released, also when \
                       there was nothing to release, 125 when Procly itself fails, such as for a directory that is not \
                       in a git Repository. See docs/worktree-release.md and docs/exit-codes.md."
     )]
     Release {
         #[command(flatten)]
         json: JsonFlag,
+        /// Print what the release would do instead of doing it: nothing is stopped, released or written.
+        #[arg(long)]
+        dry_run: bool,
         /// The Worktree to release, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
     },
@@ -519,8 +524,8 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             command: WorktreeCommand::Init { json, path },
         } => worktree_init(&state, path, json.json),
         Command::Worktree {
-            command: WorktreeCommand::Release { json, path },
-        } => worktree_release(&state, path, json.json),
+            command: WorktreeCommand::Release { json, dry_run, path },
+        } => worktree_release(&state, path, dry_run, json.json),
         Command::Worktree {
             command: WorktreeCommand::Hooks { json },
         } => worktree_hooks(&state, json.json),
@@ -892,7 +897,7 @@ fn down(state: &StateDir, service: Option<String>, json: bool) -> anyhow::Result
                         println!("{service} stopped");
                     }
                     for released in &released {
-                        println!("{}", let_go(released));
+                        println!("{}", let_go(released, false));
                     }
                 }
             }
@@ -953,20 +958,25 @@ fn unit(state: &StateDir, command: &UnitCommand) -> anyhow::Result<ExitCode> {
 }
 
 /// What `down` tells about a Compose service the Worktree let go of: whether its container keeps running for others,
-/// or when it stops.
-fn let_go(released: &Released) -> String {
+/// or when it stops. With `dry_run` it tells what the release would do instead.
+fn let_go(released: &Released, dry_run: bool) -> String {
     let Released {
         service,
         others,
         grace_ms,
     } = released;
+    let (release, stops) = if dry_run {
+        ("would release", "it would stop")
+    } else {
+        ("released", "it stops")
+    };
     match others {
         0 => format!(
-            "{service} released, it stops after {} unless a Worktree needs it again",
+            "{service} {release}, {stops} after {} unless a Worktree needs it again",
             duration::format(Duration::from_millis(*grace_ms))
         ),
-        1 => format!("{service} released, 1 other Worktree still needs it"),
-        _ => format!("{service} released, {others} other Worktrees still need it"),
+        1 => format!("{service} {release}, 1 other Worktree still needs it"),
+        _ => format!("{service} {release}, {others} other Worktrees still need it"),
     }
 }
 
@@ -1383,17 +1393,17 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
 }
 
 /// Runs `worktree release`, printing one line per Service, Job, Compose service and Lease it released, then one per
-/// Lease and Logical resource it kept.
-fn worktree_release(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow::Result<ExitCode> {
+/// Lease and Logical resource it kept. With `dry_run` the lines say what it would do.
+fn worktree_release(state: &StateDir, path: Option<PathBuf>, dry_run: bool, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let path = path.map_or(cwd.clone(), |path| cwd.join(path));
-    match client::send(state, &Request::WorktreeRelease { path })? {
+    match client::send(state, &Request::WorktreeRelease { path, dry_run })? {
         Response::WorktreeRelease(report) if json => {
             json::print(&json::WorktreeRelease::new(&report))?;
             Ok(ExitCode::SUCCESS)
         }
         Response::WorktreeRelease(report) => {
-            print(&release_summary(&report))?;
+            print(&release_summary(&report, dry_run))?;
             warn_all(&report.warnings);
             Ok(ExitCode::SUCCESS)
         }
@@ -1450,19 +1460,25 @@ fn worktree_hooks(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
 }
 
 /// What `worktree release` prints: what it stopped, let go of and released, or `nothing to release`, then what it kept.
-fn release_summary(report: &ReleaseReport) -> String {
+/// With `dry_run` it says what it would stop and would release.
+fn release_summary(report: &ReleaseReport, dry_run: bool) -> String {
+    let (stopped, released) = if dry_run {
+        ("would stop", "would release")
+    } else {
+        ("stopped", "released")
+    };
     let mut text = String::new();
     if report.released_nothing() {
         text.push_str("nothing to release\n");
     }
     for service in &report.services {
-        let _ = writeln!(text, "{service} stopped");
+        let _ = writeln!(text, "{service} {stopped}");
     }
     for job in &report.jobs {
-        let _ = writeln!(text, "job {job} stopped");
+        let _ = writeln!(text, "job {job} {stopped}");
     }
     for released in &report.compose_services {
-        let _ = writeln!(text, "{}", let_go(released));
+        let _ = writeln!(text, "{}", let_go(released, dry_run));
     }
     for LeaseHeld {
         service,
@@ -1470,7 +1486,7 @@ fn release_summary(report: &ReleaseReport) -> String {
         port,
     } in &report.leases
     {
-        let _ = writeln!(text, "lease {service}.{port_name} port {port} released");
+        let _ = writeln!(text, "lease {service}.{port_name} port {port} {released}");
     }
     for KeptLease { lease, reason } in &report.kept_leases {
         let LeaseHeld {
@@ -1580,11 +1596,17 @@ mod tests {
             grace_ms: 300_000,
         };
         assert_eq!(
-            let_go(&released(0)),
+            let_go(&released(0), false),
             "db released, it stops after 5m unless a Worktree needs it again"
         );
-        assert_eq!(let_go(&released(1)), "db released, 1 other Worktree still needs it");
-        assert_eq!(let_go(&released(2)), "db released, 2 other Worktrees still need it");
+        assert_eq!(
+            let_go(&released(1), false),
+            "db released, 1 other Worktree still needs it"
+        );
+        assert_eq!(
+            let_go(&released(2), false),
+            "db released, 2 other Worktrees still need it"
+        );
     }
 
     fn reached(port: Option<u16>, ports: &[(&str, u16)], urls: &[(&str, &str)]) -> UpService {

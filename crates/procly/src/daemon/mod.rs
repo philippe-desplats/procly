@@ -399,8 +399,8 @@ async fn dispatch(
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
         Request::Doctor => doctor::run(registry).await,
         Request::Gc { cwd, apply } => gc::run(registry, cwd, apply, peer).await,
-        Request::WorktreeRelease { path } => answer(
-            worktree_release::run(Arc::clone(registry), path, peer)
+        Request::WorktreeRelease { path, dry_run } => answer(
+            worktree_release::run(Arc::clone(registry), path, dry_run, peer)
                 .await
                 .map_err(message),
             Response::WorktreeRelease,
