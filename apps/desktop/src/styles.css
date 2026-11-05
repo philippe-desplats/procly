@@ -451,3 +451,16 @@ body {
   gap: 8px;
   margin-top: 16px;
 }
+
+.actions-row {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+/* An item that states more than one line: what it is, then what it drops or why it failed. */
+.item-block {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}

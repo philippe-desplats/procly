@@ -7,6 +7,7 @@ import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore }
 import { DoctorScreen, ReleaseBanner, WorktreeChecks } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey, isSeen } from "./needs-you";
+import { OrphansScreen } from "./OrphansScreen";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
 import { State } from "./StateMark";
@@ -18,12 +19,14 @@ import { jobEndWord, jobWord, serviceEndWord, serviceWord } from "./state";
 import { formatMoment } from "./time";
 
 /**
- * What the center shows: the Overview of every Service, one Worktree, Doctor, or Settings, which hides the
- * inspector. `focusEditor` sends the developer to the editor field, because "Open in editor" found none set.
+ * What the center shows: the Overview of every Service, one Worktree, the Orphans, Doctor, or Settings. Orphans and
+ * Settings hide the inspector. `focusEditor` sends the developer to the editor field, because "Open in editor" found
+ * none set.
  */
 type View =
   | { kind: "overview" }
   | { kind: "worktree"; path: string }
+  | { kind: "orphans" }
   | { kind: "doctor" }
   | { kind: "settings"; focusEditor: boolean };
 
@@ -88,9 +91,12 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
 
   const settings = view.kind === "settings";
   const checking = view.kind === "doctor";
+  const orphans = view.kind === "orphans";
+  // A screen that is not about one Worktree has no inspector.
+  const wide = settings || orphans;
 
   return (
-    <div className={settings ? "window window-settings" : "window"}>
+    <div className={wide ? "window window-settings" : "window"}>
       <nav className="pane sidebar" aria-label="Worktrees">
         <h1 className="pane-title">Procly</h1>
         <Sidebar
@@ -99,11 +105,15 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
           current={current}
           settings={settings}
           checking={checking}
+          orphans={orphans}
           onSelect={(path) => {
             setView({ kind: "worktree", path });
           }}
           onOverview={() => {
             setView({ kind: "overview" });
+          }}
+          onOrphans={() => {
+            setView({ kind: "orphans" });
           }}
           onDoctor={() => {
             setView({ kind: "doctor" });
@@ -116,6 +126,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
       <main className="pane center">
         {view.kind === "settings" ? (
           <SettingsScreen focusEditor={view.focusEditor} />
+        ) : view.kind === "orphans" && snapshot.kind === "status" ? (
+          <OrphansScreen />
         ) : (
           <>
             <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
@@ -135,7 +147,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
           </>
         )}
       </main>
-      {settings ? null : (
+      {wide ? null : (
         <aside className="pane inspector" aria-label="Inspector">
           <Inspector
             current={current}
@@ -183,8 +195,10 @@ function Sidebar({
   current,
   settings,
   checking,
+  orphans,
   onSelect,
   onOverview,
+  onOrphans,
   onDoctor,
   onSettings,
 }: {
@@ -193,8 +207,10 @@ function Sidebar({
   current: WorktreeStatus | null;
   settings: boolean;
   checking: boolean;
+  orphans: boolean;
   onSelect: (path: string) => void;
   onOverview: () => void;
+  onOrphans: () => void;
   onDoctor: () => void;
   onSettings: () => void;
 }) {
@@ -203,7 +219,7 @@ function Sidebar({
       <button
         type="button"
         className="row"
-        aria-current={current === null && !settings && !checking ? "true" : undefined}
+        aria-current={current === null && !settings && !orphans && !checking ? "true" : undefined}
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
@@ -222,6 +238,9 @@ function Sidebar({
         onClick={onDoctor}
       >
         <span className="row-name">Doctor</span>
+      </button>
+      <button type="button" className="row" aria-current={orphans ? "true" : undefined} onClick={onOrphans}>
+        <span className="row-name">Orphans</span>
       </button>
       <button type="button" className="row" aria-current={settings ? "true" : undefined} onClick={onSettings}>
         <span className="row-name">Settings</span>

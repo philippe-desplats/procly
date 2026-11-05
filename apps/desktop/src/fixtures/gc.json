@@ -1,0 +1,66 @@
+{
+  "response": "gc",
+  "applied": false,
+  "orphans": [
+    {
+      "kind": "lease",
+      "service": "web",
+      "port_name": "http",
+      "port": 24081,
+      "repository": "/p/work/acme/web/.git",
+      "worktree": "/p/work/acme/web-login",
+      "deleted": false,
+      "error": null
+    },
+    {
+      "kind": "logical_resource",
+      "service": "db",
+      "resource": "dev",
+      "name": "web__web_login",
+      "driver": "postgres",
+      "repository": "/p/work/acme/web/.git",
+      "worktree": "/p/work/acme/web-login",
+      "deleted": false,
+      "error": null
+    },
+    {
+      "kind": "output_directory",
+      "path": "/p/state/output/web_login-5c2e0d6b8a41f7e3",
+      "repository": "/p/work/acme/web/.git",
+      "worktree": "/p/work/acme/web-login",
+      "deleted": false,
+      "error": null
+    },
+    {
+      "kind": "isolated_container",
+      "service": "cache",
+      "project": "web-web_login",
+      "compose": "redis",
+      "repository": "/p/work/acme/web/.git",
+      "worktree": "/p/work/acme/web-login",
+      "deleted": false,
+      "error": null
+    },
+    {
+      "kind": "isolated_volume",
+      "project": "web-web_login",
+      "volume": "web-web_login_data",
+      "repository": "/p/work/acme/web/.git",
+      "worktree": "/p/work/acme/web-login",
+      "deleted": false,
+      "error": null
+    },
+    {
+      "kind": "lease",
+      "service": "api",
+      "port_name": "http",
+      "port": 24090,
+      "repository": "/p/work/acme/web/.git",
+      "worktree": "/p/work/acme/web-search",
+      "deleted": false,
+      "error": null
+    }
+  ],
+  "skipped": [],
+  "warnings": []
+}

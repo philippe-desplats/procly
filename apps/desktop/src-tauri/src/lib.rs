@@ -11,6 +11,7 @@ mod lifecycle;
 mod menu;
 mod needs_you;
 mod opening;
+mod orphans;
 mod poller;
 mod settings;
 
@@ -172,6 +173,8 @@ pub fn run() {
             apps::detected_apps,
             opening::open_worktree,
             opening::reveal_worktree,
+            orphans::list_orphans,
+            orphans::delete_orphans,
             settings::get_settings,
             settings::save_settings,
         ])
