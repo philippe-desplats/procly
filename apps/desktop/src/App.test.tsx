@@ -238,7 +238,7 @@ describe("the sidebar", () => {
     const labels = within(sidebar)
       .getAllByRole("button")
       .map((button) => button.textContent)
-      .filter((text) => text !== "Overview⌘0" && text !== "Settings⌘,");
+      .filter((text) => text !== "Overview⌘0" && text !== "Orphans" && text !== "Settings⌘,");
     expect(labels).toEqual([
       "mainmain",
       "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
