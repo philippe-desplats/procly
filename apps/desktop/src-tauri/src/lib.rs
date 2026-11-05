@@ -5,16 +5,19 @@
 
 mod daemon;
 mod menu;
+mod needs_you;
 mod poller;
 
-use std::sync::Arc;
-
 use daemon::DaemonClient;
-use poller::{Poller, Update, WindowState};
-use tauri::{Emitter as _, Manager as _, State, Window, WindowEvent};
+use needs_you::{Attention, FailureKey, Presented, SeenError};
+use poller::{Poller, WindowState};
+use tauri::{AppHandle, Emitter as _, Manager as _, State, Window, WindowEvent};
 
 /// The event that carries each answer of the poller to the window.
 const DAEMON_UPDATE: &str = "daemon-update";
+
+/// The file the Seen failures survive a restart in, inside the data directory of the app.
+const SEEN_FILE: &str = "seen.json";
 
 /// The last answer of the poller, so that a window that opens or reloads does not wait for the next tick.
 #[tauri::command]
@@ -22,8 +25,39 @@ const DAEMON_UPDATE: &str = "daemon-update";
     clippy::needless_pass_by_value,
     reason = "Tauri hands managed state to a command as a `State`"
 )]
-fn last_update(poller: State<'_, Poller>) -> Option<Arc<Update>> {
-    poller.last()
+fn last_update(poller: State<'_, Poller>, attention: State<'_, Attention>) -> Option<Presented> {
+    poller.last().map(|update| attention.present_update(update))
+}
+
+/// Marks an ended failure as Seen: it leaves "Needs you" and the count, and the window is told at once rather than
+/// at the next tick. A key the last answer holds no failure for is ignored. It changes nothing in the Daemon.
+///
+/// # Errors
+///
+/// When the Seen set cannot be written. The mark holds until the app quits, and the window is told of it anyway.
+#[tauri::command]
+async fn mark_seen(
+    key: FailureKey,
+    app: AppHandle,
+    poller: State<'_, Poller>,
+    attention: State<'_, Attention>,
+) -> Result<(), SeenError> {
+    let Some(last) = poller.last() else {
+        return Ok(());
+    };
+    let attention = attention.inner().clone();
+    // Writing the file blocks, so it leaves the task that serves the window.
+    let (presented, saved) = tauri::async_runtime::spawn_blocking(move || attention.mark(key, last))
+        .await
+        .map_err(|error| SeenError::task(&error))?;
+    publish(&app, &presented);
+    saved
+}
+
+/// Tells the window about an answer.
+fn publish(app: &AppHandle, presented: &Presented) {
+    // A window that is gone has nothing to be told, the next one asks `last_update`.
+    let _ = app.emit(DAEMON_UPDATE, presented);
 }
 
 /// Asks the poller for a tick now. It never starts, stops or restarts anything.
@@ -72,20 +106,32 @@ pub fn run() {
             let opened = app
                 .get_webview_window("main")
                 .map_or(WindowState::Front, |window| window_state(&window.as_ref().window()));
+            let attention = Attention::open(app.path().app_data_dir()?.join(SEEN_FILE));
             let poller = Poller::start(client.clone(), opened);
             let mut updates = poller.subscribe();
             let handle = app.handle().clone();
+            let seen = attention.clone();
             tauri::async_runtime::spawn(async move {
                 while updates.changed().await.is_ok() {
                     let update = updates.borrow_and_update().clone();
                     if let Some(update) = update {
-                        // A window that is gone has nothing to be told, the next one asks `last_update`.
-                        let _ = handle.emit(DAEMON_UPDATE, &*update);
+                        let seen = seen.clone();
+                        // Pruning the Seen set may write its file, which blocks.
+                        let Ok((presented, saved)) =
+                            tauri::async_runtime::spawn_blocking(move || seen.on_answer(update)).await
+                        else {
+                            continue;
+                        };
+                        if let Err(error) = saved {
+                            eprintln!("procly: {error}");
+                        }
+                        publish(&handle, &presented);
                     }
                 }
             });
             app.manage(client);
             app.manage(poller);
+            app.manage(attention);
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())
         })
@@ -97,7 +143,7 @@ pub fn run() {
             }
         })
         .on_window_event(follow_window)
-        .invoke_handler(tauri::generate_handler![last_update, refresh])
+        .invoke_handler(tauri::generate_handler![last_update, mark_seen, refresh])
         .run(tauri::generate_context!())
         .expect("the Tauri application runs");
 }
