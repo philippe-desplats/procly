@@ -43,3 +43,5 @@ jobs:
       - run: make fmt-check
       - run: make lint
       - run: make test
+      # The scripts of the release workflow, which only a tag would otherwise run.
+      - run: make test-release-scripts
