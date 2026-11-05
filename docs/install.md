@@ -12,6 +12,22 @@ procly 0.4.0
 
 The formula lives in the tap `philippe-desplats/homebrew-procly` and installs the binary of the matching GitHub release. `brew upgrade procly` moves to a newer release.
 
+## The desktop app
+
+On macOS 13 or newer, the desktop app is a cask of the same tap:
+
+```console
+$ brew install --cask philippe-desplats/procly/procly-app
+$ procly --version
+procly <version>
+```
+
+The cask installs `Procly.app` in `/Applications` and links `procly` to the command line the app carries, the one it starts the Daemon with. Both are one release. The formula installs the same command line, so Homebrew refuses the cask while the formula is installed: `brew uninstall procly` first. The formula stays for Linux and for the command line alone.
+
+Each release carries one signed and notarized disk image per architecture, `Procly-<version>-aarch64-apple-darwin.dmg` for Apple silicon and `Procly-<version>-x86_64-apple-darwin.dmg` for Intel, with their checksums in `SHA256SUMS`, to install the app without Homebrew. There is no updater: `brew upgrade --cask procly-app` moves to a newer release.
+
+A Daemon started before an upgrade keeps running the older release until it is restarted. The app says so and offers the restart, or run `procly daemon stop`. See [A Daemon that outlives an upgrade](releasing.md#a-daemon-that-outlives-an-upgrade).
+
 ## GitHub Releases
 
 Each release carries one archive per platform and a `SHA256SUMS` file:

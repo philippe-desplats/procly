@@ -5,31 +5,83 @@ A release is a tag. The workflow in `.github/workflows/release.yml` does the res
 ## Cutting a release
 
 1. Set `version` under `[workspace.package]` in the root `Cargo.toml`, run `cargo build --workspace` so `Cargo.lock` follows, and merge both on `main` once `make check` and the CI are green.
-2. Tag that commit `v<version>` and push the tag:
+2. Run the [manual checklist](#manual-checklist) on the signed `.dmg` of the release candidate. Nothing automated proves the native surfaces of the app.
+3. Tag that commit `v<version>` and push the tag:
 
    ```console
    $ git tag v0.1.0
    $ git push origin v0.1.0
    ```
 
-The workflow then runs 4 jobs in order:
+The workflow then runs 5 jobs. `app` runs beside `build`, and `release` waits for both:
 
 | Job | What it does |
 | --- | --- |
 | `version` | Fails unless the tag is `v` followed by the version of `crates/procly/Cargo.toml`. |
 | `build` | Builds `procly` in release mode on a native runner for each of the 4 targets, fails unless `procly --version` prints `procly <version>`, then packs the binary in `procly-<version>-<target>.tar.gz` with its SHA-256. |
-| `release` | Gathers the 4 checksums in `SHA256SUMS` and creates the GitHub release with the 4 archives, the checksum file and generated notes. |
-| `homebrew` | Renders `Formula/procly.rb` with `scripts/render-formula.sh` and pushes it to the tap. |
+| `app` | Runs on the 2 macOS runners. Fails at once, naming every missing secret, unless the [Apple secrets](#one-time-setup-of-the-apple-signing) are set. Otherwise builds the bundle with `make bundle`, signs and notarizes it, checks it and packs `Procly-<version>-<target>.dmg` with its SHA-256. |
+| `release` | Gathers the checksums in `SHA256SUMS` and creates the GitHub release with the 4 archives, the 2 disk images when the app was built, the checksum file and generated notes. |
+| `homebrew` | Renders `Formula/procly.rb` with `scripts/render-formula.sh` and `Casks/procly-app.rb` with `scripts/render-cask.sh` and pushes both to the tap. |
 
-A version with a hyphen, such as `0.2.0-rc.1`, is published as a prerelease and never reaches the tap.
+A version with a hyphen, such as `0.2.0-rc.1`, is published as a prerelease with its archives and its disk images, and never reaches the tap: the `homebrew` job does not run, so neither the formula nor the cask moves. `scripts/render-cask.sh` refuses a prerelease version as well.
 
 The Linux arm64 build runs on a hosted arm runner, which GitHub provides for free to public repositories only.
 
-A failed `build` publishes nothing. A failed `homebrew` leaves the GitHub release in place: fix the cause and run the job again from the Actions page, it only rewrites the formula. A failed `release` after the GitHub release was created cannot be run again: delete the release and its tag on GitHub, then push the tag again.
+A failed `build` publishes nothing. A failed `app` job does not stop the command line: `release` publishes the 4 archives without the disk images, the cask stays on the version before, and the run ends red with the cause in the log. A release never carries one disk image without the other, nor a bundle that is not signed and notarized, since the build does not start without the credentials. A failed `homebrew` leaves the GitHub release in place: fix the cause and run the job again from the Actions page, it only rewrites the formula and the cask. A failed `release` after the GitHub release was created cannot be run again: delete the release and its tag on GitHub, then push the tag again.
+
+To publish the disk images after the secrets were fixed, delete the release and its tag on GitHub and push the tag again, the `release` job cannot add files to a release that exists.
+
+## The app bundle
+
+`make bundle PROFILE=release TAURI_ARGS="--bundles app,dmg"` builds the bundle, once per architecture, each on the native runner of the command line. The command line is embedded as the sidecar of the app, `Procly.app/Contents/MacOS/procly`, so the bundle must come from `make bundle`: the sidecar is declared in `apps/desktop/src-tauri/tauri.bundle.conf.json` and a plain `tauri build` yields a bundle without it. There is no universal bundle, `bundle.macOS.minimumSystemVersion` is `13.0`, and the hardened runtime is the one Tauri enables, with no entitlements file until notarization or the first signed launch asks for one.
+
+Before the disk image is published, the `app` job checks the bundle:
+
+- `scripts/check-bundle.sh` fails when the executable carries the end-to-end test driver. The `e2e` feature of the app is off by default, the build never asks for it, and the job also fails if a manifest ever makes it a default feature. A release must never open a WebDriver channel on the window of every user.
+- The sidecar reports `procly <version>`.
+- `codesign --verify --deep --strict`, `xcrun stapler validate` and `spctl --assess` accept the bundle, so it is signed with the Developer ID certificate, notarized and stapled.
+
+The disk image is named `Procly-<version>-<target>.dmg` and its SHA-256 goes in `SHA256SUMS` beside the 4 archives. There is no updater: no updater key, no `latest.json`, and updates go through `brew upgrade`.
+
+## One-time setup of the Apple signing
+
+The app jobs need an Apple Developer account, individual or organization, and its Developer ID Application certificate. Until the secrets exist, the `app` jobs fail on their first step with a message naming every secret they lack, and the rest of the release is unaffected.
+
+The signing needs 3 secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | The Developer ID Application certificate exported from Keychain Access as a `.p12` file, base64 encoded. |
+| `APPLE_CERTIFICATE_PASSWORD` | The password chosen when the `.p12` file was exported. |
+| `KEYCHAIN_PASSWORD` | Any password, it protects the temporary keychain the job creates and deletes. |
+
+The job imports the certificate into that temporary keychain and finds the identity by its `Developer ID Application` prefix, so the secrets do not carry the name of the team.
+
+Notarization needs one of 2 complete sets. The API key set is the first choice, and the Apple ID set is used only when the API key set is incomplete:
+
+| Set | Secrets |
+| --- | --- |
+| App Store Connect Team Key | `APPLE_API_ISSUER`, the issuer id shown above the keys table. `APPLE_API_KEY`, the Key ID of the key. `APPLE_API_KEY_CONTENT`, the text of the downloaded `AuthKey_<id>.p8` file. |
+| Apple ID | `APPLE_ID`, the email of the account. `APPLE_PASSWORD`, an app-specific password of that account. `APPLE_TEAM_ID`, the Team ID of the membership page. |
+
+Tauri reads the private key of the first set from a file named by `APPLE_API_KEY_PATH`. A secret cannot be a path, so the job writes `APPLE_API_KEY_CONTENT` to a file in the runner temporary directory, sets `APPLE_API_KEY_PATH` to it and deletes it at the end. Only the variables of the chosen set reach the build.
+
+```console
+$ base64 -i certificate.p12 | gh secret set APPLE_CERTIFICATE --repo philippe-desplats/procly
+$ gh secret set APPLE_CERTIFICATE_PASSWORD --repo philippe-desplats/procly
+$ openssl rand -base64 24 | gh secret set KEYCHAIN_PASSWORD --repo philippe-desplats/procly
+$ gh secret set APPLE_API_ISSUER --repo philippe-desplats/procly
+$ gh secret set APPLE_API_KEY --repo philippe-desplats/procly
+$ gh secret set APPLE_API_KEY_CONTENT --repo philippe-desplats/procly < AuthKey_ABC123DEFG.p8
+```
+
+For the Apple ID set, set `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID` the same way. Delete the local `.p12` and `.p8` files once the secrets are stored. To check the secrets without a release, run the `app` job logic by hand: `scripts/check-apple-secrets.sh` prints the missing names when run with the secrets in the environment.
 
 ## One-time setup of the tap
 
-The tap is the repository `philippe-desplats/homebrew-procly`, with the formula at `Formula/procly.rb`. Homebrew resolves `brew install philippe-desplats/procly/procly` to it by name.
+The tap is the repository `philippe-desplats/homebrew-procly`, with the formula at `Formula/procly.rb` and the cask of the app at `Casks/procly-app.rb`. Homebrew resolves `brew install philippe-desplats/procly/procly` to the formula by name, and `brew install --cask philippe-desplats/procly/procly-app` to the cask. The cask has a token of its own because how Homebrew resolves `procly` when a formula and a cask share a tap is not confirmed.
+
+The formula stays for Linux and for the command line alone on macOS. The cask installs `Procly.app` and links the command line it carries, so it declares `conflicts_with formula: "procly"`: install one or the other.
 
 1. Create the repository, public and initialised with a README, since the workflow cannot check out a repository that has no commit.
 2. Generate an SSH key pair without a passphrase, and add the public key to the tap as a deploy key with write access. A deploy key reaches that one repository only and does not expire.
@@ -46,6 +98,43 @@ To rotate the key, run the same commands and delete the old deploy key from the 
 
 Until the secret exists, the `homebrew` job fails with a message saying so, and the rest of the release is unaffected.
 
-## Previewing the formula
+## Previewing the formula and the cask
 
-`scripts/render-formula.sh <version> <SHA256SUMS>` prints the formula a release would publish and writes nothing. Download `SHA256SUMS` from a release to see the real one.
+`scripts/render-formula.sh <version> <SHA256SUMS>` prints the formula a release would publish and `scripts/render-cask.sh <version> <SHA256SUMS>` prints the cask, and neither writes anything. Download `SHA256SUMS` from a release to see the real ones. The cask needs the 2 `.dmg` lines in the file and refuses a prerelease version.
+
+`scripts/test-release-scripts.sh` tests the scripts the release workflow runs, the cask rendering, the check of the bundle and the check of the Apple secrets. It needs nothing but bash, and `make test-release-scripts` runs it.
+
+## Manual checklist
+
+Nothing automated drives the native surfaces of the app: the menu bar, the notifications, the Dock and the native sheets. Run this checklist on the signed `.dmg` of the release candidate, on the architecture of the machine, before each tag. Mount the image, copy the app to `/Applications` and open it from there, the way a user does.
+
+1. Gatekeeper opens the app with no warning and no right click, and `spctl --assess --type execute --verbose=2 /Applications/Procly.app` says `accepted` with the source `Notarized Developer ID`.
+2. The menu bar icon shows the mark when the Daemon answers and nothing needs you, the mark with a bite and a dot when a Service needs you, and the outline when the Daemon cannot be reached. Each glyph reads well in the light and the dark menu bar. The icon height is the one the design asks for on the first run.
+3. The native menu lists only what needs you, a Copy Port submenu, Open Procly, Settings and Quit, one line per item, with the last known state and its absolute time.
+4. A notification reaches the screen end to end with banners allowed in the macOS notification settings: turning on "Notify on failure" in Settings asks for the permission, then with the window in the background a Service that fails makes a banner, and clicking it opens the window on the item. The first answer after launch makes no banner. With the setting off nothing is asked at launch and no banner appears.
+5. The Dock icon is absent at launch, shown while the window is open, hidden when the last window closes, and never shown when "Show in Dock while the window is open" is off. Clicking the app again, with the window closed, reopens the window (Reopen).
+6. Open at login adds the login item. After a login, or a launch with `--hidden`, the app opens no window, shows only the menu bar glyph and does not start the Daemon. Turning the setting off removes the item.
+7. Open with opens a Worktree in the editor, the terminal and the Finder, and `open -a <terminal> <Worktree path>` opens a shell in that directory for Terminal, iTerm and Ghostty.
+8. The window opens again where it was left after a quit and a launch.
+9. The accent colour follows the system accent colour in the window, which proves `-apple-system-control-accent` in the web view.
+10. The confirmed Daemon restart: with a Daemon of another version running, the app names both versions, a click on Restart asks for confirmation, Cancel restarts nothing, and a confirmation stops the Daemon through the sidecar and starts the one of the bundle. The window recovers on its own.
+11. The launch from Homebrew: on a machine without the app, `brew install --cask philippe-desplats/procly/procly-app` installs `Procly.app` and links the command line, `procly --version` prints `procly <version>`, the app opens from Launchpad, and `brew uninstall --cask procly-app` removes both. Installing the cask while the formula `procly` is installed is refused, which proves `conflicts_with`.
+12. The upgrade from the previous release through `brew upgrade --cask procly-app`, with a Daemon started from the previous bundle and one running Service: the app shows the Daemon of another version, `procly logs` of a Service started after the upgrade still shows its output, and the restart brings the window back, see the next section.
+
+Tick the list in the release pull request or the ticket of the release, and fix before tagging whatever fails. A tag whose bundle fails an item is deleted and cut again.
+
+## A Daemon that outlives an upgrade
+
+The Daemon spawns `std::env::current_exe()` each time a Service starts, to run its output writer, `procly output-file <path>` (`start_writer` in `crates/procly/src/daemon/output_file.rs`). Inside the app, the Daemon is the sidecar `Procly.app/Contents/MacOS/procly`, so what that call answers matters once a cask upgrade replaces the bundle.
+
+The finding, measured on macOS 26 with a probe program: on macOS `current_exe()` answers the path a process was started from and not the file it runs. A process started from `app/probe`, whose file was then removed and replaced by a different executable the way a cask upgrade replaces `Procly.app`, answered the same path afterwards, and the file at that path was the replacement. So a Daemon started from the bundle of version N keeps running after `brew upgrade --cask procly-app`, and every writer it starts from then on is the executable of version N+1. The Daemon itself and the writers already running are not affected, since the replaced file stays mapped for as long as they run. The probe was not run on Linux, where the formula installs a binary the same way and `current_exe()` reads `/proc/self/exe`, which names a replaced file with a `(deleted)` suffix.
+
+What can go wrong: the Daemon of version N reads the output files that the writer of version N+1 appends to. They agree as long as the interface of `procly output-file` does not change between the 2 releases: its argument (the path of the output file), the output of the Service on its standard input, and the layout of the output file with its `.prev` file. A release that changes one of them breaks `procly logs` for the Services started after the upgrade and before the Daemon restarts, or stops those Services from starting at all.
+
+The mitigation:
+
+1. The interface of `procly output-file` is a contract between 2 releases, and a change to it ships only with a bump of `PROTOCOL_VERSION` and a line in the release notes saying that the Daemon must be restarted. The bump makes the app show the Daemon of another version, and `procly doctor` report it with the command that fixes it, so the mismatch is visible and not silent.
+2. Restart the Daemon after the upgrade. The app offers it from the confirmed sheet, and `procly daemon stop` does it from a shell. The cask does not stop the Daemon itself, since that would stop every Service of every Worktree on a package upgrade, which nobody asked for.
+3. Checklist item 12 proves the path of an upgrade with a Daemon of the previous release.
+
+Not done here, and worth a ticket of its own: the Daemon could pin its own executable at startup, for example by copying it under the state directory, and spawn its writers from that copy. The writer would then always match the Daemon whatever replaces the bundle.
