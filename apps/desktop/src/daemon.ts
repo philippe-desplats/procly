@@ -3,13 +3,27 @@ import { listen } from "@tauri-apps/api/event";
 
 import type { ClientFailure } from "./protocol/ClientFailure";
 import type { ClientFailureKind } from "./protocol/ClientFailureKind";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
+import type { JobEnd } from "./protocol/JobEnd";
 import type { Response } from "./protocol/Response";
+import type { ServiceEnd } from "./protocol/ServiceEnd";
 import type { StatusReport } from "./protocol/StatusReport";
+
+/** What identifies a failure, so that one that happens again is not taken for the one already seen. */
+export type FailureKey =
+  | { kind: "service"; worktree: string; service: string; started_at: number }
+  | { kind: "job"; id: string };
+
+/** One line of "Needs you", derived in Rust: a failure that is not Seen, or a Foreign process. */
+export type NeedsYou =
+  | { kind: "service"; worktree: string; service: string; started_at: number; end: ServiceEnd }
+  | { kind: "job"; worktree: string | null; id: string; command: string; end: JobEnd }
+  | { kind: "foreign"; worktree: string; process: ForeignProcess };
 
 /** What the window knows of the Daemon: the last answer of the poller, or why there is none. `at` is when it was read. */
 export type DaemonSnapshot =
   | { kind: "loading" }
-  | { kind: "status"; report: StatusReport; at: number }
+  | { kind: "status"; report: StatusReport; at: number; needsYou: NeedsYou[]; seen: FailureKey[] }
   | { kind: "no-daemon"; at: number }
   | { kind: "protocol-mismatch"; daemon: number; app: number; at: number }
   | { kind: "failure"; message: string; at: number };
@@ -46,8 +60,14 @@ export function failureMessage(error: unknown): string {
   return "unknown error";
 }
 
-/** One tick of the poller, as the Rust side emits it: the time it was read, and the `Response` unchanged or why there is none. */
-export type Update = { at_ms: number } & ({ response: Response } | { failure: Failure });
+/**
+ * One tick of the poller, as the Rust side emits it: the time it was read, and the `Response` unchanged or why there is
+ * none. "Needs you" and the Seen keys come next to it, derived once in Rust so the window and the menu agree.
+ */
+export type Update = { at_ms: number; needs_you: NeedsYou[]; seen: FailureKey[] } & (
+  | { response: Response }
+  | { failure: Failure }
+);
 
 /** The event the poller emits on each tick. */
 export const DAEMON_UPDATE = "daemon-update";
@@ -60,6 +80,8 @@ export interface DaemonStore {
   start(): () => void;
   /** Asks the poller for a tick now. It changes nothing in the Daemon, and the answer comes back as any other tick. */
   refresh(): Promise<void>;
+  /** Marks an ended failure as Seen. The app answers with a new update, and the Daemon is not asked anything. */
+  markSeen(key: FailureKey): Promise<void>;
   /** Starts the Daemon with the `procly` the app embeds. Only the developer's click calls it. Rejects with why it failed. */
   startDaemon(): Promise<void>;
   /** Stops the Daemon of another version, then starts the embedded one. Only a confirmed sheet calls it. Rejects with why it failed. */
@@ -68,10 +90,11 @@ export interface DaemonStore {
 
 const NO_DAEMON: ClientFailureKind = "unreachable";
 
-function fromResponse(response: Response, at: number): DaemonSnapshot {
+function fromResponse(update: Update, response: Response): DaemonSnapshot {
+  const at = update.at_ms;
   switch (response.response) {
     case "status":
-      return { kind: "status", report: response, at };
+      return { kind: "status", report: response, at, needsYou: update.needs_you, seen: update.seen };
     case "error":
       return { kind: "failure", message: response.message, at };
     default:
@@ -81,7 +104,7 @@ function fromResponse(response: Response, at: number): DaemonSnapshot {
 
 function fromUpdate(update: Update): DaemonSnapshot {
   if ("response" in update) {
-    return fromResponse(update.response, update.at_ms);
+    return fromResponse(update, update.response);
   }
   const { failure } = update;
   if (failure.kind === "protocol_mismatch") {
@@ -143,6 +166,7 @@ export function createDaemonStore(): DaemonStore {
       };
     },
     refresh: () => invoke("refresh"),
+    markSeen: (key) => invoke("mark_seen", { key }),
     startDaemon: () => invoke("start_daemon"),
     restartDaemon: () => invoke("restart_daemon"),
   };

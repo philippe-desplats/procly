@@ -26,8 +26,12 @@ function mismatch(daemon: number, app = 22): Failure {
   };
 }
 
+function answered(at = AT): Update {
+  return { at_ms: at, response: status, needs_you: [], seen: [] };
+}
+
 function failed(failure: Failure): Update {
-  return { at_ms: AT, failure };
+  return { at_ms: AT, failure, needs_you: [], seen: [] };
 }
 
 /**
@@ -102,7 +106,7 @@ describe("a Daemon that does not run", () => {
     });
     expect(commands).toEqual(["last_update", "start_daemon"]);
 
-    await tick({ at_ms: AT, response: status });
+    await tick(answered());
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
   });
@@ -124,14 +128,14 @@ describe("a Daemon that does not run", () => {
   });
 
   it("follows the Daemon down when it is stopped from the CLI, and back once it runs again", async () => {
-    rust({ at_ms: AT, response: status });
+    rust(answered());
     render(<App store={createDaemonStore()} />);
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
 
     await tick(failed(NOT_RUNNING));
     expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
 
-    await tick({ at_ms: AT + 5000, response: status });
+    await tick(answered(AT + 5000));
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
   });
@@ -206,7 +210,7 @@ describe("a Daemon of another protocol version", () => {
     });
     expect(commands).toEqual(["last_update", "restart_daemon"]);
 
-    await tick({ at_ms: AT, response: status });
+    await tick(answered());
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
