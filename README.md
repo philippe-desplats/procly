@@ -124,6 +124,7 @@ procly status              # the Services and Jobs of this Worktree
 procly status --all        # every Worktree of every Repository the Daemon knows
 procly down web            # stop web with its whole process tree
 procly down                # stop every Service of this Worktree
+procly restart web         # stop web and start it again with the environment of its last up, on the same Lease
 
 job=$(procly run "npm test")   # start a Job, or find the same one running
 procly wait "$job"             # print its output and exit with its exit code

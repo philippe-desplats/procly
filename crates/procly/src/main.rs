@@ -83,9 +83,10 @@ struct JsonFlag {
     name = "procly",
     version,
     about,
-    after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
-                  healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
-                  every Orphan, 7 when `doctor` found a problem, 124 when `wait` finds the Job timed out or `up` \
+    after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` or `restart` finds the Service ended \
+                  before it was healthy, 4 when `up` or `restart` finds a Port mismatch, 5 when `up` or `restart` finds \
+                  a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
+                  every Orphan, 7 when `doctor` found a problem, 124 when `wait` finds the Job timed out or `up` or `restart` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
                   docs/exit-codes.md."
@@ -151,6 +152,22 @@ enum Command {
         #[command(flatten)]
         json: JsonFlag,
         service: Option<String>,
+    },
+    /// Restart a Service of the current Worktree with the environment of its last `up`, which the Daemon holds in
+    /// memory, not the environment of this shell: stop it if it runs, start the Services it needs that do not run,
+    /// start it again on the same Lease and wait until it is healthy. Prints what `up` of the Service prints. A Service
+    /// covered by a Group that runs is restarted through its Group.
+    #[command(
+        after_help = "The Daemon holds no environment for a Service a previous Daemon started, nor after a Worktree \
+                      release: run `procly up <service>` from a shell in the Worktree first. Exit codes: those of \
+                      `procly up`, 0 when the Service is healthy, 3 when it stopped before it became healthy, 4 on a \
+                      Port mismatch, 5 on a conflict, 124 past its health timeout, 125 when Procly itself fails, such \
+                      as for a Service with no environment to restart with. See docs/exit-codes.md."
+    )]
+    Restart {
+        #[command(flatten)]
+        json: JsonFlag,
+        service: String,
     },
     /// Wait for a Job to end, print its output and exit with its exit code (124 on timeout).
     Wait {
@@ -501,6 +518,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         } => up(&state, service, gitignore, json.json),
         Command::Env { json, service } => env(&state, &service, json.json),
         Command::Down { json, service } => down(&state, service, json.json),
+        Command::Restart { json, service } => restart(&state, service, json.json),
         Command::Wait { json, job } => match client::send(&state, &Request::Wait { job: job.clone() })? {
             Response::Ended { output, end } => {
                 if json.json {
@@ -518,20 +536,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             other => unexpected(other),
         },
         Command::Logs(args) => logs(&state, &args),
-        Command::Status { all, json } => {
-            let cwd = std::env::current_dir().context("cannot read the current directory")?;
-            match client::send(&state, &Request::Status { cwd, all })? {
-                Response::Status(report) => {
-                    print(&if json {
-                        status::json(&report)
-                    } else {
-                        status::text(&report)
-                    })?;
-                    Ok(ExitCode::SUCCESS)
-                }
-                other => unexpected(other),
-            }
-        }
+        Command::Status { all, json } => status_report(&state, all, json),
         Command::Worktree {
             command: WorktreeCommand::Init { json, path },
         } => worktree_init(&state, path, json.json),
@@ -616,7 +621,34 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
         env: caller_env(),
         gitignore,
     };
-    match client::send(state, &request)? {
+    answer_up(state, &request, json)
+}
+
+/// Runs `status`, printing the report as text or as one JSON document.
+fn status_report(state: &StateDir, all: bool, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    match client::send(state, &Request::Status { cwd, all })? {
+        Response::Status(report) => {
+            print(&if json {
+                status::json(&report)
+            } else {
+                status::text(&report)
+            })?;
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
+/// Runs `restart`, printing what `up` of the Service prints.
+fn restart(state: &StateDir, service: String, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    answer_up(state, &Request::Restart { service, cwd }, json)
+}
+
+/// Sends `request`, an `up` or a Restart, and prints where to reach the healthy Service, or why it is not.
+fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<ExitCode> {
+    match client::send(state, request)? {
         Response::Up {
             service,
             outcome,

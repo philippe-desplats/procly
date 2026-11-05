@@ -11,11 +11,12 @@ use crate::driver::{self, Driver};
 use crate::protocol::{KeptResource, ReleaseReport};
 use crate::topology::{self, Topology};
 
-/// Releases the Worktree holding `path`, logging who asked: stops its Services and Jobs with their whole trees, lets
-/// go of its Compose services, then releases its Leases, apart from those of its Pinned branch and those a container
-/// still runs on. The Daemon then forgets every ended Job and ended Service of the Worktree. Its Logical resources are
-/// kept and named. Running it again, or in a Worktree Procly never saw, releases nothing. It then applies the
-/// Retention policy of the Isolated containers of the Worktrees already removed.
+/// Releases the Worktree holding `path`, logging who asked: stops its Services and Jobs with their whole trees, drops
+/// the held environment of every Service of it, lets go of its Compose services, then releases its Leases, apart
+/// from those of its Pinned branch and those a container still runs on. The Daemon then forgets every ended Job and
+/// ended Service of the Worktree. Its Logical resources are kept and named. Running it again, or in a Worktree Procly
+/// never saw, releases nothing. It then applies the Retention policy of the Isolated containers of the Worktrees
+/// already removed.
 ///
 /// With `dry_run` it answers with the report the same release would give and changes nothing, so it forgets no Job or
 /// Service and applies no Retention policy.
@@ -45,6 +46,9 @@ pub(super) async fn run(
     }
     eprintln!("worktree release of {} requested by {who}", worktree.display());
 
+    // Before anything is stopped, so that a Restart under way starts nothing the release would miss, and a Restart
+    // after it has no environment to start with.
+    registry.held.release(&worktree).await;
     let services = registry.services.stop(&worktree, None);
     let jobs: Vec<_> = registry
         .jobs

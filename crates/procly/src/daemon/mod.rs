@@ -14,6 +14,7 @@ mod follow;
 mod foreign;
 mod gc;
 mod health;
+mod held;
 mod hook;
 mod idle;
 mod index;
@@ -31,6 +32,7 @@ mod reconcile;
 mod record;
 mod requester;
 mod resource;
+mod restart;
 mod retention;
 mod service;
 mod status;
@@ -60,6 +62,7 @@ use self::clock::Clock;
 pub(crate) use self::compose::major as compose_major;
 use self::compose::{Composes, Isolated};
 use self::container_record::ContainerRecords;
+use self::held::HeldEnvironments;
 use self::index::Indexes;
 use self::isolated_record::IsolatedRecords;
 use self::job::{Fingerprint, JobSpec, Jobs};
@@ -84,6 +87,8 @@ struct Registry {
     services: Services,
     composes: Composes,
     leases: Arc<Leases>,
+    /// The environment of the last `up` of each Service, which a Restart replays.
+    held: HeldEnvironments,
     /// Every Isolated container, running or stopped, which `gc` removes once its Worktree is.
     isolated: Arc<IsolatedRecords>,
     /// The delayed deletions of Isolated containers whose Retention policy is a duration.
@@ -209,6 +214,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
             Arc::clone(&isolated),
         ),
         isolated,
+        held: HeldEnvironments::default(),
         retentions: Retentions::new(clock.clone()),
         leases,
         indexes: Indexes::new(state.indexes()),
@@ -336,6 +342,7 @@ async fn dispatch(
             | Request::Eject { .. }
             | Request::Gc { .. }
             | Request::WorktreeRelease { .. }
+            | Request::Restart { .. }
     ) && let Err(message) = registry.reconciled().await
     {
         return Response::Error { message };
@@ -396,7 +403,7 @@ async fn dispatch(
             let registry = Arc::clone(registry);
             answer(
                 blocking("the status could not be read", move || {
-                    status::report(&registry.jobs, &registry.services, &registry.composes, &cwd, all)
+                    status::report(&registry, &cwd, all)
                 })
                 .await,
                 Response::Status,
@@ -418,6 +425,7 @@ async fn dispatch(
             agent::answer(registry, request).await
         }
         Request::WorktreeHooks { cwd } => worktrunk::answer(registry, cwd).await,
+        Request::Restart { service, cwd } => restart::run(registry, service, cwd, peer).await,
     }
 }
 
@@ -549,7 +557,8 @@ fn declared<'a>(config: &'a config::Config, worktree: &Path, name: &str) -> anyh
 
 /// The recent output of the Service `name` of the Worktree holding `cwd`, once the Services of the previous Daemon
 /// are reconciled, so that a re-attached Service shows its output from before the restart. The output of a Compose
-/// service is the one of its container, which `docker compose logs` reads in `env`.
+/// service is the one of its container, which `docker compose logs` reads in the environment held from the last `up`
+/// of the Service, else in `env`, the one of the caller, and never in a `PATH` completed with guessed directories.
 async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<(String, String)>) -> Response {
     if let Err(message) = registry.reconciled().await {
         return Response::Error { message };
@@ -564,6 +573,7 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
     if let Some(output) = registry.services.output_of(&topology.worktree.path, &name) {
         return Response::Logs { output };
     }
+    let env = registry.held.get(&topology.worktree.path, &name).unwrap_or(env);
     let compose = {
         let name = name.clone();
         blocking("the logs could not be read", move || {

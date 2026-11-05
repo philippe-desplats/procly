@@ -33,6 +33,8 @@ It keeps the rest, and deletes no data (ADR 0004):
 
 The Daemon logs who asked for the release, with what it stopped and released, as it does for `procly down`. Running it again, or in a Worktree Procly never saw, prints `nothing to release` and exits with 0, see [exit codes](exit-codes.md).
 
+A release that meets a `procly restart` in the same Worktree wins: the Restart starts nothing more, takes back no Lease and exits with 125. While that Restart is starting a Compose service, the release waits for the start to finish before it stops anything. The wait lasts as long as the start of the container: up to the health timeout of the service, plus the time its Driver takes to be ready and to apply any Seed of its Logical resources, each Driver command bounded by `driver_timeout`. A Restart of a Process service holds the release only for the milliseconds its spawn takes. A release of another Worktree, and a plain `procly up`, never wait for a Restart.
+
 `procly worktree release` releases the Worktree holding the current directory. Pass a path to release another one, or any directory inside it:
 
 ```console

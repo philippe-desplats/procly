@@ -10,4 +10,9 @@ reattached: boolean,
  * When the Service last started, in milliseconds since the Unix epoch. An automatic restart sets it again. For
  * a Service a previous Daemon started, it is when this Daemon found it running.
  */
-started_at: number, } & ({ "state": "starting" } | { "state": "healthy" } | { "state": "restarting" } | { "state": "ended", end: ServiceEnd, });
+started_at: number, 
+/**
+ * Whether the Daemon holds the environment of the last `up` of the Service, which a `Restart` replays. The
+ * environment itself is never part of the status.
+ */
+restartable: boolean, } & ({ "state": "starting" } | { "state": "healthy" } | { "state": "restarting" } | { "state": "ended", end: ServiceEnd, });

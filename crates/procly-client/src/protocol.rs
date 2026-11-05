@@ -116,6 +116,11 @@ pub enum Request {
     /// Writes the Worktrunk hooks block into the `.config/wt.toml` of the Worktree holding `cwd`, unless a hook is
     /// already set outside it.
     WorktreeHooks { cwd: PathBuf },
+    /// Restarts the Service `service` of the Worktree holding `cwd` with the environment of its last `Up`, which the
+    /// Daemon holds in memory, and answers as `Up` does for one Service. It stops the Service if it runs, starts the
+    /// Services it needs that do not run, and restarts a Service a Group covers through its Group. Without a held
+    /// environment, answers `Error`.
+    Restart { service: String, cwd: PathBuf },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -652,6 +657,9 @@ pub struct ServiceStatus {
     /// When the Service last started, in milliseconds since the Unix epoch. An automatic restart sets it again. For
     /// a Service a previous Daemon started, it is when this Daemon found it running.
     pub started_at: u64,
+    /// Whether the Daemon holds the environment of the last `up` of the Service, which a `Restart` replays. The
+    /// environment itself is never part of the status.
+    pub restartable: bool,
     #[serde(flatten)]
     pub state: ServiceState,
 }
@@ -1070,6 +1078,23 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_names_the_service_and_the_directory_it_was_asked_from() {
+        let line = encode(Request::Restart {
+            service: "web".to_owned(),
+            cwd: PathBuf::from("/src/app"),
+        })
+        .unwrap();
+        assert_eq!(
+            line,
+            "{\"version\":22,\"request\":\"restart\",\"service\":\"web\",\"cwd\":\"/src/app\"}\n"
+        );
+        assert!(matches!(
+            decode::<Request>(&line),
+            Ok(Request::Restart { service, cwd }) if service == "web" && cwd.as_os_str() == "/src/app"
+        ));
+    }
+
+    #[test]
     fn a_worktree_release_asks_for_a_dry_run_only_when_it_says_so() {
         let line = encode(Request::WorktreeRelease {
             path: PathBuf::from("/src/app"),
@@ -1189,6 +1214,7 @@ mod tests {
                 port: Some(24000),
                 reattached: false,
                 started_at: 1_793_900_000_123,
+                restartable: true,
                 state: ServiceState::Healthy,
             }],
             jobs: Vec::new(),
@@ -1211,7 +1237,7 @@ mod tests {
     #[test]
     fn the_branch_the_listed_flag_and_the_start_time_round_trip_through_a_line() {
         let line = status_line(worktree_status(Some("feature/login"), true));
-        assert!(line.contains(r#""branch":"feature/login","listed":true,"services":[{"service":"web","port":24000,"reattached":false,"started_at":1793900000123,"state":"healthy"}]"#));
+        assert!(line.contains(r#""branch":"feature/login","listed":true,"services":[{"service":"web","port":24000,"reattached":false,"started_at":1793900000123,"restartable":true,"state":"healthy"}]"#));
         let Ok(Response::Status(report)) = decode::<Response>(&line) else {
             panic!("the line decodes to a status report: {line}");
         };
