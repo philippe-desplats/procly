@@ -272,7 +272,7 @@ fn the_status_after_a_daemon_crash_tells_which_service_was_reattached_and_which_
     assert_eq!(
         stdout(&output),
         format!(
-            "repository {git}\n  worktree app (main) {main}\n\
+            "repository {git}\n  worktree app (main) {main} on main\n\
              \x20   service api ended: exit code unknown, a previous Daemon started it\n\
              \x20   service web healthy port {web}, re-attached after a restart of the Daemon\n\
              \x20   no jobs\n",
@@ -281,10 +281,16 @@ fn the_status_after_a_daemon_crash_tells_which_service_was_reattached_and_which_
         )
     );
     let json = stdout(&procly.procly_in(&main, &["status", "--json"]));
+    let status: serde_json::Value = serde_json::from_str(&json).expect("status prints JSON");
+    let service = status["repositories"][0]["worktrees"][0]["services"]
+        .as_array()
+        .and_then(|services| services.iter().find(|service| service["service"] == "web"))
+        .unwrap_or_else(|| panic!("the web Service is reported: {json}"));
+    assert_eq!(service["port"], web, "{json}");
+    assert_eq!(service["reattached"], true, "{json}");
+    assert_eq!(service["state"], "healthy", "{json}");
     assert!(
-        json.contains(&format!(
-            r#"{{"service":"web","port":{web},"reattached":true,"state":"healthy"}}"#
-        )),
+        service["started_at"].as_u64().is_some_and(|started_at| started_at > 0),
         "{json}"
     );
     // The api that ended starts again, on the same Lease.

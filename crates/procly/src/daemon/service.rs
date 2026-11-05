@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -115,6 +116,9 @@ pub(crate) struct Service {
     covers: Vec<String>,
     /// Whether a previous Daemon started the Service, and this one found it running when it started.
     reattached: bool,
+    /// When the Service last started, in milliseconds since the Unix epoch on the clock of the Daemon. Set again by
+    /// each automatic restart. For a Service a previous Daemon started, when this Daemon found it.
+    started_at: AtomicU64,
     /// The output of every run of the Service, restarts included.
     output: Arc<Mutex<OutputBuffer>>,
     state: watch::Sender<ServiceState>,
@@ -351,6 +355,7 @@ impl Services {
             topology: record.topology(),
             covers: record.covers.clone(),
             reattached: true,
+            started_at: AtomicU64::new(epoch_millis(&self.clock)),
             output,
             state: watch::Sender::new(ServiceState::Healthy),
             stop: watch::Sender::new(None),
@@ -376,6 +381,7 @@ impl Services {
             topology: record.topology(),
             covers: record.covers.clone(),
             reattached: false,
+            started_at: AtomicU64::new(epoch_millis(&self.clock)),
             output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
             state: watch::Sender::new(ServiceState::Ended(end)),
             stop: watch::Sender::new(None),
@@ -400,6 +406,7 @@ impl Services {
                     service: name.clone(),
                     port: service.port,
                     reattached: service.reattached,
+                    started_at: service.started_at.load(Ordering::Relaxed),
                     state,
                 };
                 ((worktree.clone(), name.clone()), service.topology.clone(), status)
@@ -498,6 +505,7 @@ fn spawn(
         topology: spec.topology.clone(),
         covers: spec.covers.clone(),
         reattached: false,
+        started_at: AtomicU64::new(epoch_millis(&clock)),
         output,
         state: watch::Sender::new(ServiceState::Starting),
         stop: watch::Sender::new(None),
@@ -731,8 +739,14 @@ async fn supervise(
             }
         };
         process = next;
+        service.started_at.store(epoch_millis(&clock), Ordering::Relaxed);
         service.state.send_replace(ServiceState::Starting);
     }
+}
+
+/// The reading of `clock` as milliseconds since the Unix epoch, saturating far beyond any date a clock shows.
+fn epoch_millis(clock: &Clock) -> u64 {
+    u64::try_from(clock.since_epoch().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What a process did, for the Daemon log.

@@ -22,7 +22,18 @@ pub(crate) fn text(report: &StatusReport) -> String {
         for status in &repository.worktrees {
             let worktree = &status.worktree;
             let main = if worktree.main { " (main)" } else { "" };
-            let _ = writeln!(text, "  worktree {}{main} {}", worktree.slug, worktree.path.display());
+            let branch = status
+                .branch
+                .as_ref()
+                .map(|branch| format!(" on {branch}"))
+                .unwrap_or_default();
+            let removed = if status.listed { "" } else { " (removed)" };
+            let _ = writeln!(
+                text,
+                "  worktree {}{main} {}{branch}{removed}",
+                worktree.slug,
+                worktree.path.display()
+            );
             for service in &status.services {
                 service_line(&mut text, service);
             }
@@ -198,6 +209,8 @@ mod tests {
                             slug: "app".to_owned(),
                             main: true,
                         },
+                        branch: Some("feature/login".to_owned()),
+                        listed: true,
                         services: vec![],
                         jobs: vec![
                             job("3f9a1c2e", "sleep 30", "/src/app", JobState::Running),
@@ -231,6 +244,8 @@ mod tests {
                             slug: "app_login".to_owned(),
                             main: false,
                         },
+                        branch: None,
+                        listed: true,
                         services: vec![],
                         jobs: vec![],
                         foreign: vec![],
@@ -266,7 +281,7 @@ mod tests {
         assert_eq!(
             text(&report),
             "repository /src/app/.git\n\
-             \x20 worktree app (main) /src/app\n\
+             \x20 worktree app (main) /src/app on feature/login\n\
              \x20   foreign process 4242 node port 5173, started outside Procly\n\
              \x20   foreign container app-db-1 (compose project app, service db) ports 5432, 5433, started outside \
              Procly\n\
@@ -278,6 +293,34 @@ mod tests {
              outside any repository\n\
              \x20 job 77aa88bb killed by signal 15 in /tmp/scratch: make\n\
              \x20 job 99cc00dd timed out after 90s in /tmp/scratch: sleep 99\n"
+        );
+    }
+
+    #[test]
+    fn text_marks_a_worktree_git_no_longer_lists_as_removed() {
+        let report = StatusReport {
+            repositories: vec![RepositoryStatus {
+                git_common_dir: PathBuf::from("/src/app/.git"),
+                worktrees: vec![WorktreeStatus {
+                    worktree: Worktree {
+                        path: PathBuf::from("/src/app-gone"),
+                        slug: "app_gone".to_owned(),
+                        main: false,
+                    },
+                    branch: None,
+                    listed: false,
+                    services: vec![],
+                    jobs: vec![],
+                    foreign: vec![],
+                    containers: vec![],
+                }],
+            }],
+            jobs_outside_repositories: vec![],
+        };
+
+        assert_eq!(
+            text(&report),
+            "repository /src/app/.git\n  worktree app_gone /src/app-gone (removed)\n    no jobs\n"
         );
     }
 

@@ -548,6 +548,13 @@ pub struct RepositoryStatus {
 pub struct WorktreeStatus {
     #[serde(flatten)]
     pub worktree: Worktree,
+    /// The branch checked out in the Worktree, as the short name git lists it under. Left out on a detached `HEAD`,
+    /// for a Worktree git no longer lists, and in a Repository without a branch to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Whether `git worktree list` still lists the Worktree. A Worktree the Daemon ran something in, and that git
+    /// no longer lists, is reported with `false`.
+    pub listed: bool,
     pub services: Vec<ServiceStatus>,
     pub jobs: Vec<JobStatus>,
     /// What runs in the Worktree without Procly having started it. Left out when empty, so that the status of a
@@ -579,6 +586,9 @@ pub struct ServiceStatus {
     pub port: Option<u16>,
     /// Whether a previous Daemon started the Service, and this one found it running when it started.
     pub reattached: bool,
+    /// When the Service last started, in milliseconds since the Unix epoch. An automatic restart sets it again. For
+    /// a Service a previous Daemon started, it is when this Daemon found it running.
+    pub started_at: u64,
     #[serde(flatten)]
     pub state: ServiceState,
 }
@@ -995,6 +1005,65 @@ mod tests {
             r#"{"kind":"lease","service":"web","port_name":"http","port":24000,"repository":"/src/app/.git","#
         ));
         assert!(matches!(decode::<Response>(&line), Ok(Response::Gc(report)) if report.orphans == [orphan]));
+    }
+
+    fn worktree_status(branch: Option<&str>, listed: bool) -> WorktreeStatus {
+        WorktreeStatus {
+            worktree: Worktree {
+                path: PathBuf::from("/src/app"),
+                slug: "app".to_owned(),
+                main: true,
+            },
+            branch: branch.map(str::to_owned),
+            listed,
+            services: vec![ServiceStatus {
+                service: "web".to_owned(),
+                port: Some(24000),
+                reattached: false,
+                started_at: 1_793_900_000_123,
+                state: ServiceState::Healthy,
+            }],
+            jobs: Vec::new(),
+            foreign: Vec::new(),
+            containers: Vec::new(),
+        }
+    }
+
+    fn status_line(worktree: WorktreeStatus) -> String {
+        encode(Response::Status(StatusReport {
+            repositories: vec![RepositoryStatus {
+                git_common_dir: PathBuf::from("/src/app/.git"),
+                worktrees: vec![worktree],
+            }],
+            jobs_outside_repositories: Vec::new(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_branch_the_listed_flag_and_the_start_time_round_trip_through_a_line() {
+        let line = status_line(worktree_status(Some("feature/login"), true));
+        assert!(line.contains(r#""branch":"feature/login","listed":true,"services":[{"service":"web","port":24000,"reattached":false,"started_at":1793900000123,"state":"healthy"}]"#));
+        let Ok(Response::Status(report)) = decode::<Response>(&line) else {
+            panic!("the line decodes to a status report: {line}");
+        };
+        let status = &report.repositories[0].worktrees[0];
+        assert_eq!(status.branch.as_deref(), Some("feature/login"));
+        assert!(status.listed);
+        assert_eq!(status.services[0].started_at, 1_793_900_000_123);
+    }
+
+    #[test]
+    fn a_worktree_without_a_branch_leaves_the_key_out_and_a_removed_one_says_it_is_not_listed() {
+        let line = status_line(worktree_status(None, false));
+        assert!(!line.contains("branch"));
+        assert!(line.contains(r#""listed":false"#));
+        let Ok(Response::Status(report)) = decode::<Response>(&line) else {
+            panic!("the line decodes to a status report: {line}");
+        };
+        let status = &report.repositories[0].worktrees[0];
+        assert_eq!(status.branch, None);
+        assert!(!status.listed);
     }
 
     #[test]
