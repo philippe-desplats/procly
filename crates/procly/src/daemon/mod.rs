@@ -10,6 +10,7 @@ pub(crate) mod doctor;
 mod eject;
 mod environment;
 mod fnv;
+mod follow;
 mod foreign;
 mod gc;
 mod health;
@@ -56,8 +57,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use self::clock::Clock;
-use self::compose::Composes;
 pub(crate) use self::compose::major as compose_major;
+use self::compose::{Composes, Isolated};
 use self::container_record::ContainerRecords;
 use self::index::Indexes;
 use self::isolated_record::IsolatedRecords;
@@ -268,10 +269,18 @@ async fn handle(stream: UnixStream, registry: Arc<Registry>) {
     // Read from the kernel, so the Daemon log names the real requester whatever the request claims.
     let peer = stream.peer_cred().ok().and_then(|credentials| credentials.pid());
     let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
     let mut line = String::new();
     let (progress, mut progressing) = mpsc::unbounded_channel();
-    let response = match BufReader::new(reader).read_line(&mut line).await {
+    let response = match reader.read_line(&mut line).await {
         Ok(_) => match protocol::decode::<Request>(&line) {
+            // A stream of answers rather than one, which reads the connection to learn when the client is gone.
+            Ok(Request::Logs {
+                name,
+                cwd,
+                env,
+                follow: true,
+            }) => return follow::run(&registry, name, cwd, env, reader, writer).await,
             Ok(request) => {
                 let dispatching = dispatch(request, &registry, peer, &progress);
                 tokio::pin!(dispatching);
@@ -358,7 +367,7 @@ async fn dispatch(
             }
             None => unknown_job(&id),
         },
-        Request::Logs { name, cwd, env } => match jobs.get(&name) {
+        Request::Logs { name, cwd, env, .. } => match jobs.get(&name) {
             Some(job) => Response::Logs { output: job.output() },
             None => service_logs(registry, name, cwd, env).await,
         },
@@ -557,22 +566,8 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
     }
     let compose = {
         let name = name.clone();
-        // Reading the configuration is blocking, and finding the Main worktree runs git.
         blocking("the logs could not be read", move || {
-            let scope = up::Scope::of(&topology.worktree.path)?;
-            match scope
-                .config()
-                .services
-                .get(&name)
-                .map(|declared| declared.kind(&name))
-                .transpose()?
-            {
-                Some(config::ServiceKind::Compose { service }) => {
-                    let (project_dir, isolated) = scope.project(&name)?;
-                    Ok(Some((service.to_owned(), project_dir, isolated)))
-                }
-                Some(config::ServiceKind::Process { .. } | config::ServiceKind::Group { .. }) | None => Ok(None),
-            }
+            compose_service(&topology.worktree.path, &name)
         })
         .await
     };
@@ -584,6 +579,26 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
             .map_or_else(failure, |output| Response::Logs { output }),
         Ok(None) => unknown(),
         Err(message) => Response::Error { message },
+    }
+}
+
+/// The service of the compose file, the project directory and the Isolation of the Compose service `name` of
+/// `worktree`, `None` when `name` is declared as no Compose service. Blocking, as reading the configuration is and
+/// finding the Main worktree runs git.
+fn compose_service(worktree: &Path, name: &str) -> anyhow::Result<Option<(String, PathBuf, Option<Isolated>)>> {
+    let scope = up::Scope::of(worktree)?;
+    match scope
+        .config()
+        .services
+        .get(name)
+        .map(|declared| declared.kind(name))
+        .transpose()?
+    {
+        Some(config::ServiceKind::Compose { service }) => {
+            let (project_dir, isolated) = scope.project(name)?;
+            Ok(Some((service.to_owned(), project_dir, isolated)))
+        }
+        Some(config::ServiceKind::Process { .. } | config::ServiceKind::Group { .. }) | None => Ok(None),
     }
 }
 

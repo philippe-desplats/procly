@@ -4,7 +4,7 @@
 use anyhow::Context as _;
 use procly_client::protocol::{Request, Response};
 use procly_client::state_dir::StateDir;
-use procly_client::{ClientError, connect, connect_or_start};
+use procly_client::{ClientError, Connection, Responses, connect, connect_or_start};
 
 /// Sends one request to the Daemon, starting it first if it is not running.
 pub(crate) fn send(state: &StateDir, request: &Request) -> anyhow::Result<Response> {
@@ -21,14 +21,23 @@ pub(crate) fn send_with_progress(
     request: &Request,
     on_progress: impl FnMut(&Response),
 ) -> anyhow::Result<Response> {
+    Ok(connection(state)?.send(request)?.answer(on_progress)?)
+}
+
+/// Sends one request to the Daemon, starting it first if it is not running, and returns every response to it, for a
+/// request answered by a stream such as a followed `Logs`.
+pub(crate) fn stream(state: &StateDir, request: &Request) -> anyhow::Result<Responses> {
+    Ok(connection(state)?.send(request)?)
+}
+
+/// A connection to the Daemon, started first if it is not running.
+fn connection(state: &StateDir) -> anyhow::Result<Connection> {
     // The executable is located only when a Daemon has to be started, as it always was.
-    let connection = if let Ok(connection) = connect(state) {
-        connection
-    } else {
-        let exe = std::env::current_exe().context("cannot locate the procly executable to start the daemon")?;
-        connect_or_start(state, &exe)?
-    };
-    Ok(connection.send(request)?.answer(on_progress)?)
+    if let Ok(connection) = connect(state) {
+        return Ok(connection);
+    }
+    let exe = std::env::current_exe().context("cannot locate the procly executable to start the daemon")?;
+    Ok(connect_or_start(state, &exe)?)
 }
 
 /// Sends one request to the Daemon only if one runs, and never starts it.

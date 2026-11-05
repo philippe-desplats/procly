@@ -119,6 +119,7 @@ procly up web              # start web and what it needs, wait until healthy, pr
 procly up                  # start every declared Service, each after what it needs
 procly env web             # print the variables Procly injects into web, without starting it
 procly logs web            # the recent output of web
+procly logs --follow web   # the output of web as it arrives, until it ends or Ctrl-C
 procly status              # the Services and Jobs of this Worktree
 procly status --all        # every Worktree of every Repository the Daemon knows
 procly down web            # stop web with its whole process tree

@@ -2,6 +2,8 @@
 
 Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, `mcp`, which speaks JSON-RPC and returns these documents as tool results, and `daemon`, which prints nothing.
 
+The one exception to 1 document is `logs --follow`, which streams and prints 1 JSON document per line, see [`logs --follow`](#logs---follow).
+
 **The schema version is 1.** It is the `schema_version` of every document, the one `procly status --json` prints. This page is where it is defined, the examples in the other docs repeat the value. It is bumped on any incompatible change to any document, independently of the socket protocol between the CLI and the Daemon. Adding a key or a document is not incompatible, so a reader ignores the keys it does not know. Removing a key, renaming one or changing what it means bumps the version.
 
 ## What `--json` changes
@@ -19,6 +21,7 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `run` | the Job and the outcome | below |
 | `wait` | how the Job ended, its exit code and its output | below |
 | `logs` | the recent output | below |
+| `logs --follow` | 1 document per line: the backlog, the output as it arrives, what was dropped, the end | below |
 | `status` | the Repositories, Worktrees, Services and Jobs | below |
 | `up` | the Services reached, or why one was not | below, and [Configuration](configuration.md#procly-up-without-arguments) |
 | `down` | the Services stopped and the Compose services let go of | below |
@@ -60,6 +63,25 @@ $ procly logs --json 3f9a1c2e
 ```
 
 `name` is the Job or the Service asked for. The `output` of a Compose service is the last 1000 lines of its container, as `docker compose logs` prints them.
+
+## `logs --follow`
+
+With `--follow`, `logs` prints NDJSON: 1 JSON document per line, the one exception to 1 document per command. Every line is self-contained, it carries `schema_version`, `name` and `event`, and a reader parses each line on its own as it arrives.
+
+```console
+$ procly logs --follow --json api
+{"schema_version":1,"name":"api","event":"backlog","output":"listening on 4100\n"}
+{"schema_version":1,"name":"api","event":"output","output":"GET /health 200\n"}
+{"schema_version":1,"name":"api","event":"dropped","bytes":4096}
+{"schema_version":1,"name":"api","event":"ended"}
+```
+
+- `backlog` comes first, once, with the recent output as `logs --json` gives it.
+- `output` carries what the Job or the Service printed since the line before. A Service that crashes goes on in the same stream through its automatic restart, the note of the restart included.
+- `dropped` tells how many bytes of output this reader missed because it read too slowly. The Daemon never waits for a reader, it drops what does not fit in the queue of the connection instead.
+- `ended` comes last, once the Job or the Service has ended and all of its output was printed, and `logs` then exits with 0.
+
+Ctrl-C also exits with 0 but prints no `ended` line, so a reader tells a real end from an interruption. A Compose service cannot be followed: `logs --follow` prints no document, exits with 125 and names the `docker compose logs -f` command to run on stderr.
 
 ## `up`
 

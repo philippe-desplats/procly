@@ -6,6 +6,7 @@ mod doctor;
 mod driver;
 mod duration;
 mod envfile;
+mod follow;
 mod guard;
 mod init;
 mod json;
@@ -56,6 +57,17 @@ const EXIT_GC_FAILED: u8 = 6;
 const EXIT_DOCTOR_FAILED: u8 = 7;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
+
+/// The arguments of `logs`.
+#[derive(Debug, Args)]
+struct LogsArgs {
+    #[command(flatten)]
+    json: JsonFlag,
+    /// Stream the output as it arrives, until the Job or the Service ends or Ctrl-C.
+    #[arg(long)]
+    follow: bool,
+    job_or_service: String,
+}
 
 /// The flag that turns the text of a command into one JSON document.
 #[derive(Debug, Clone, Copy, Args)]
@@ -150,15 +162,15 @@ enum Command {
     #[command(
         after_help = "A Job identifier printed by `procly run` names that Job, any other name a Service of the current \
                       Worktree, whose output is kept across a restart of the Daemon. The output of a Compose service \
-                      is the last 1000 lines of its container, read with `docker compose logs`. Exit codes: 0 on \
-                      success, 125 when Procly itself fails, such as for a name that is neither a Job nor a Service. \
-                      See docs/exit-codes.md."
+                      is the last 1000 lines of its container, read with `docker compose logs`. With `--follow` the \
+                      output streams as it arrives, through the automatic restarts of a Service, until the Job or the Service \
+                      ends or Ctrl-C, and `--json` then prints one JSON object per line, ended by an `ended` line \
+                      that Ctrl-C never prints. A Compose service cannot be followed, the error gives the \
+                      `docker compose logs -f` command to run. Exit codes: 0 on success, also on Ctrl-C, 125 when \
+                      Procly itself fails, such as for a name that is neither a Job nor a Service. See \
+                      docs/exit-codes.md and docs/json.md."
     )]
-    Logs {
-        #[command(flatten)]
-        json: JsonFlag,
-        job_or_service: String,
-    },
+    Logs(LogsArgs),
     /// Print the Repository, the current Worktree and its Jobs.
     Status {
         /// Report every Worktree of every Repository the Daemon knows, not only the current one.
@@ -500,7 +512,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             other => unexpected(other),
         },
-        Command::Logs { json, job_or_service } => logs(&state, &job_or_service, json.json),
+        Command::Logs(args) => logs(&state, &args),
         Command::Status { all, json } => {
             let cwd = std::env::current_dir().context("cannot read the current directory")?;
             match client::send(&state, &Request::Status { cwd, all })? {
@@ -544,13 +556,18 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
     }
 }
 
-/// Prints the recent output of the Job or the Service `job_or_service`.
-fn logs(state: &StateDir, job_or_service: &str, json: bool) -> anyhow::Result<ExitCode> {
+/// Prints the recent output of the Job or the Service `job_or_service`, or with `follow` its output as it arrives.
+fn logs(state: &StateDir, args: &LogsArgs) -> anyhow::Result<ExitCode> {
+    let (job_or_service, json) = (args.job_or_service.as_str(), args.json.json);
+    if args.follow {
+        return follow::run(state, job_or_service, json);
+    }
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Logs {
         name: job_or_service.to_owned(),
         cwd,
         env: caller_env(),
+        follow: false,
     };
     match client::send(state, &request)? {
         Response::Logs { output } => {

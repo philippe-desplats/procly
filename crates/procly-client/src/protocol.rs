@@ -35,11 +35,21 @@ pub enum Request {
     Wait { job: String },
     /// Answers the recent output of the Job `name`, or else of the Service `name` of the Worktree holding `cwd`. The
     /// output of a Compose service is the one of its container, read with `docker compose` in `env`.
+    ///
+    /// With `follow`, the answer is a stream: [`Response::Logs`] with the backlog, then [`Response::Output`] as output
+    /// arrives, through the automatic restarts of a Service that crashed, then [`Response::LogsEnded`] once the Job
+    /// or the Service has ended. A reader too slow to keep up gets [`Response::OutputDropped`] in place of what it
+    /// missed, the Daemon never waits for it. The client sends nothing after its request, and cancels by closing the
+    /// connection, or only its writing half. A Compose service cannot be followed, and answers [`Response::Error`]
+    /// with the `docker compose logs -f` command to run instead.
     Logs {
         name: String,
         cwd: PathBuf,
         /// The environment of the requesting command, as for `Up`.
         env: Vec<(String, String)>,
+        /// False when absent.
+        #[serde(default)]
+        follow: bool,
     },
     /// Starts a declared Service of the Worktree holding `cwd`, or finds it running, and answers once it is healthy.
     /// Without `service`, starts every declared Service that no Group covers.
@@ -201,6 +211,16 @@ pub enum Response {
         /// The Service that needs this one, when `up` was asked for that one instead.
         needed_by: Option<String>,
     },
+    /// Output the Job or the Service printed after the backlog of a followed [`Request::Logs`].
+    Output {
+        text: String,
+    },
+    /// Output a followed [`Request::Logs`] did not carry, as its reader was too slow to keep up.
+    OutputDropped {
+        bytes: u64,
+    },
+    /// The Job or the Service of a followed [`Request::Logs`] has ended, and every line of its output was sent.
+    LogsEnded,
 }
 
 /// Something started outside Procly that holds what a Service needs.
@@ -1064,6 +1084,40 @@ mod tests {
         let status = &report.repositories[0].worktrees[0];
         assert_eq!(status.branch, None);
         assert!(!status.listed);
+    }
+
+    #[test]
+    fn a_logs_request_without_follow_asks_for_the_backlog_only() {
+        let line = r#"{"version":22,"request":"logs","name":"api","cwd":"/src/app","env":[]}"#;
+        assert!(matches!(
+            decode::<Request>(line),
+            Ok(Request::Logs { follow: false, .. })
+        ));
+    }
+
+    #[test]
+    fn the_responses_of_a_follow_round_trip_through_a_line() {
+        let output = encode(Response::Output {
+            text: "ready\n".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            output,
+            "{\"version\":22,\"response\":\"output\",\"text\":\"ready\\n\"}\n"
+        );
+        assert!(matches!(decode::<Response>(&output), Ok(Response::Output { text }) if text == "ready\n"));
+        let dropped = encode(Response::OutputDropped { bytes: 4096 }).unwrap();
+        assert_eq!(
+            dropped,
+            "{\"version\":22,\"response\":\"output_dropped\",\"bytes\":4096}\n"
+        );
+        assert!(matches!(
+            decode::<Response>(&dropped),
+            Ok(Response::OutputDropped { bytes: 4096 })
+        ));
+        let ended = encode(Response::LogsEnded).unwrap();
+        assert_eq!(ended, "{\"version\":22,\"response\":\"logs_ended\"}\n");
+        assert!(matches!(decode::<Response>(&ended), Ok(Response::LogsEnded)));
     }
 
     #[test]
