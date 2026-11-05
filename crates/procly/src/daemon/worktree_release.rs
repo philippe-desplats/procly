@@ -12,7 +12,7 @@ use crate::protocol::{KeptResource, ReleaseReport};
 use crate::topology::{self, Topology};
 
 /// Releases the Worktree holding `path`, logging who asked: stops its Services and Jobs with their whole trees, lets
-/// go of its Compose services, then releases its Leases, apart from those of its Pinned branch and those a container
+/// go of its Compose services and drops their held environments, then releases its Leases, apart from those of its Pinned branch and those a container
 /// still runs on. Its Logical resources are kept and named. Running it again, or in a Worktree Procly never saw,
 /// releases nothing. It then applies the Retention policy of the Isolated containers of the Worktrees already removed.
 pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32>) -> anyhow::Result<ReleaseReport> {
@@ -33,6 +33,8 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
     eprintln!("worktree release of {} requested by {who}", worktree.display());
 
     let services = registry.services.stop(&worktree, None);
+    // A Restart after the release would start what the release just stopped.
+    registry.held.drop_worktree(&worktree);
     let jobs: Vec<_> = registry
         .jobs
         .running_in(&worktree)

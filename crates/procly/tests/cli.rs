@@ -68,7 +68,25 @@ fn the_help_lists_every_exit_code() {
         .expect("the procly binary runs");
 
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("4 when `up` finds a Port mismatch"), "{help}");
+    assert!(
+        help.contains("4 when `up` or `restart` finds a Port mismatch"),
+        "{help}"
+    );
+}
+
+#[test]
+fn the_help_of_restart_says_it_exits_as_up_and_when_there_is_no_environment_to_restart_with() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .args(["restart", "--help"])
+        .output()
+        .expect("the procly binary runs");
+
+    assert!(output.status.success(), "exit status: {}", output.status);
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("Exit codes: those of `procly up`") && help.contains("no environment to restart with"),
+        "{help}"
+    );
 }
 
 #[test]

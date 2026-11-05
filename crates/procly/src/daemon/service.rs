@@ -421,6 +421,8 @@ impl Services {
                     port: service.port,
                     reattached: service.reattached,
                     started_at: service.started_at.load(Ordering::Relaxed),
+                    // The Services know nothing of the held environments, the status report tells.
+                    restartable: false,
                     state,
                 };
                 ((worktree.clone(), name.clone()), service.topology.clone(), status)

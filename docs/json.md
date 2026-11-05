@@ -25,6 +25,7 @@ The one exception to 1 document is `logs --follow`, which streams and prints 1 J
 | `status` | the Repositories, Worktrees, Services and Jobs | below |
 | `up` | the Services reached, or why one was not | below, and [Configuration](configuration.md#procly-up-without-arguments) |
 | `down` | the Services stopped and the Compose services let go of | below |
+| `restart` | the Services reached, or why one was not, as for `up` | [below](#restart) |
 | `env` | the variables of a Service | [`procly env`](configuration.md#procly-env) |
 | `init` | the proposal and whether it was written | [Proposing a configuration](init.md) |
 | `worktree init` | what was copied and what ran | [Preparing a Worktree](worktree-init.md) |
@@ -155,14 +156,23 @@ $ procly doctor --json
 
 A later version of procly may add a check. A reader that does not know a `name` should skip that check, and the schema version stays 1.
 
+## `restart`
+
+`procly restart --json <service>` prints the document of `procly up --json <service>`, with the same `result` values and exit codes. The Service restarted has an `outcome` of `started`, a Service it needs that was running is `reused`, and one that was not is `started`. A Service a Group covers is restarted through its Group, which is then the Service of the document.
+
+```console
+$ procly restart --json web
+{"schema_version":1,"result":"healthy","services":[{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"urls":{"http":"http://localhost:4101"},"needed_by":null}]}
+```
+
 ## `status`
 
 ```console
 $ procly status --json
-{"schema_version":1,"repositories":[{"git_common_dir":"/home/me/app/.git","worktrees":[{"path":"/home/me/app","slug":"app","main":true,"branch":"main","listed":true,"services":[{"service":"web","port":4101,"reattached":false,"started_at":1793900000123,"state":"healthy"}],"jobs":[{"id":"3f9a1c2e","command":"bun test","cwd":"/home/me/app","state":"ended","end":{"kind":"exited","code":3}}]}]}],"jobs_outside_repositories":[]}
+{"schema_version":1,"repositories":[{"git_common_dir":"/home/me/app/.git","worktrees":[{"path":"/home/me/app","slug":"app","main":true,"branch":"main","listed":true,"services":[{"service":"web","port":4101,"reattached":false,"started_at":1793900000123,"restartable":true,"state":"healthy"}],"jobs":[{"id":"3f9a1c2e","command":"bun test","cwd":"/home/me/app","state":"ended","end":{"kind":"exited","code":3}}]}]}],"jobs_outside_repositories":[]}
 ```
 
-`services` lists the Process services and Groups Procly started in the Worktree. A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Shared or Logical Compose service is not listed, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree carries the `branch` checked out in it, as the short name git lists it under, and `listed`, whether `git worktree list` still lists it. `branch` is left out on a detached `HEAD`, and for a Worktree git no longer lists, which has `listed` set to `false` and shows as `(removed)` in the text. A Service carries `started_at`, the time it last started in milliseconds since the Unix epoch, set again by each automatic restart. For a Service a previous Daemon started, it is the time the Daemon found it running. The 3 keys were added without a change of the schema version. In the text, `procly status` prints `  worktree app (main) /home/me/app on main`.
+`services` lists the Process services and Groups Procly started in the Worktree. A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Shared or Logical Compose service is not listed, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree carries the `branch` checked out in it, as the short name git lists it under, and `listed`, whether `git worktree list` still lists it. `branch` is left out on a detached `HEAD`, and for a Worktree git no longer lists, which has `listed` set to `false` and shows as `(removed)` in the text. A Service carries `started_at`, the time it last started in milliseconds since the Unix epoch, set again by each automatic restart. For a Service a previous Daemon started, it is the time the Daemon found it running. The 3 keys were added without a change of the schema version. A Service also carries `restartable`, whether the Daemon holds the environment of its last `up`, which `procly restart` replays. It is `false` for a Service a previous Daemon started and after a Worktree release, and the environment itself is never part of the status. The key was added without a change of the schema version. In the text, `procly status` prints `  worktree app (main) /home/me/app on main`.
 
 A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
 

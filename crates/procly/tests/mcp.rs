@@ -259,6 +259,8 @@ fn the_server_exposes_the_verbs_of_the_daemon_as_tools_and_nothing_else() {
         "doctor",
     ];
     assert_eq!(names, expected.into_iter().collect::<BTreeSet<_>>());
+    // A Restart replays the environment of a shell, an agent runs `up` from its own (ADR 0014).
+    assert!(!names.contains("restart"));
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], json!("object"), "{tool}");
         assert!(

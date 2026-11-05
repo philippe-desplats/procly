@@ -50,12 +50,12 @@ impl Scope {
         &self.config
     }
 
-    fn worktree(&self) -> &Path {
+    pub(super) fn worktree(&self) -> &Path {
         &self.topology.worktree.path
     }
 
     /// The declaration of the Service `name`, which must be declared.
-    fn declared(&self, name: &str) -> anyhow::Result<&ServiceConfig> {
+    pub(super) fn declared(&self, name: &str) -> anyhow::Result<&ServiceConfig> {
         super::declared(&self.config, self.worktree(), name)
     }
 
@@ -106,7 +106,7 @@ impl Scope {
     }
 
     /// The Services to bring up for `name`, needs first, or for every Service no Group covers without `name`.
-    fn start_order(&self, name: Option<&str>) -> anyhow::Result<Vec<String>> {
+    pub(super) fn start_order(&self, name: Option<&str>) -> anyhow::Result<Vec<String>> {
         match name {
             Some(name) => {
                 self.declared(name)?;
@@ -119,7 +119,7 @@ impl Scope {
 
 /// Brings up the Services `name` needs, each one healthy before the next starts, then `name`, and answers with
 /// where to reach it. Without `name`, brings up every Service no Group covers. Stops at the first Service that does
-/// not become healthy.
+/// not become healthy. `env` is held as the environment of the last `up` of every Service it reaches.
 pub(super) async fn up(
     registry: &Arc<Registry>,
     name: Option<String>,
@@ -141,11 +141,28 @@ pub(super) async fn up(
         Ok(planned) => planned,
         Err(message) => return Response::Error { message },
     };
+    // Before any start, so that a Service that does not become healthy can be restarted once its cause is fixed.
+    for current in &order {
+        registry.held.hold(scope.worktree(), current, &env);
+    }
+    reach(registry, &scope, name, &order, &env, gitignore).await
+}
+
+/// Brings up the Services of `order`, the start order of `name`, each one healthy before the next starts, in `env`,
+/// and answers as [`up`] does.
+pub(super) async fn reach(
+    registry: &Arc<Registry>,
+    scope: &Scope,
+    name: Option<String>,
+    order: &[String],
+    env: &[(String, String)],
+    gitignore: bool,
+) -> Response {
     let mut reached = Vec::new();
     // One warning is enough for a Portless that does not answer, the next call would fail the same way.
     let mut portless_warned = false;
-    for current in &order {
-        let (outcome, via, port, health) = match start(registry, &scope, current, &env, gitignore).await {
+    for current in order {
+        let (outcome, via, port, health) = match start(registry, scope, current, env, gitignore).await {
             Ok(Running::Process { service, outcome }) => {
                 let health = service.healthy().await.map_err(|end| (end, service.output()));
                 (outcome, None, service.port(), health)
@@ -186,7 +203,7 @@ pub(super) async fn up(
         };
         let mut warnings = Vec::new();
         if scope.config.settings.portless && !portless_warned {
-            warnings.extend(alias(registry, &scope, current, &ports, &urls).await);
+            warnings.extend(alias(registry, scope, current, &ports, &urls).await);
             portless_warned = !warnings.is_empty();
         }
         // The URL of the Lease the health check probes, among the URLs of every Lease.

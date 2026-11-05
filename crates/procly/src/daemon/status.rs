@@ -2,24 +2,22 @@
 
 use std::path::{Path, PathBuf};
 
-use super::compose::Composes;
-use super::foreign;
-use super::job::Jobs;
-use super::service::Services;
+use super::{Registry, foreign};
 use crate::protocol::{JobStatus, RepositoryStatus, ServiceStatus, StatusReport, WorktreeStatus};
 use crate::topology::{self, Topology, Worktree};
 
 /// The Worktree holding `cwd`, or with `all` every Worktree of every Repository the Daemon ran a Service or a Job
 /// in, plus the Repository holding `cwd`. Outside any Repository, the Jobs started in `cwd` stand in for the
 /// Worktree. Each Worktree also lists its Foreign processes, which every process group and container Procly runs
-/// is not.
-pub(super) fn report(
-    jobs: &Jobs,
-    services: &Services,
-    composes: &Composes,
-    cwd: &Path,
-    all: bool,
-) -> anyhow::Result<StatusReport> {
+/// is not. A Service is `restartable` when an environment is `held` for it.
+pub(super) fn report(registry: &Registry, cwd: &Path, all: bool) -> anyhow::Result<StatusReport> {
+    let Registry {
+        jobs,
+        services,
+        composes,
+        held,
+        ..
+    } = registry;
     let cwd = topology::canonicalize(cwd)?;
     let here = topology::resolve(&cwd)?;
     let owned_groups = services
@@ -28,7 +26,10 @@ pub(super) fn report(
         .chain(jobs.process_groups())
         .collect();
     let statuses = jobs.statuses();
-    let services = services.statuses();
+    let mut services = services.statuses();
+    for (topology, status) in &mut services {
+        status.restartable = held.holds(&topology.worktree.path, &status.service);
+    }
     let containers = composes.isolated();
     // Every Worktree the Daemon ran something in.
     let known: Vec<&Topology> = services
