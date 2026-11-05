@@ -537,6 +537,34 @@ impl Composes {
         Ok(docker.logs(RECENT_LOG_LINES).await)
     }
 
+    /// The command following the output of the container of the Compose service `name`, which Procly does not follow
+    /// itself: `docker compose logs -f` in `project_dir`, under the project name [`Composes::logs`] reads it with.
+    pub(crate) async fn follow_command(
+        &self,
+        name: &str,
+        compose: &str,
+        project_dir: PathBuf,
+        isolated: Option<&Isolated>,
+        env: Vec<(String, String)>,
+    ) -> Result<String, ComposeError> {
+        let mut docker = Docker {
+            service: name.to_owned(),
+            compose: compose.to_owned(),
+            project_dir,
+            project: String::new(),
+            env,
+            recorded_env: Vec::new(),
+        };
+        docker.check_available().await?;
+        docker.stack(isolated).await?;
+        Ok(format!(
+            "cd {} && docker compose --project-name {} logs -f {}",
+            shell_word(&docker.project_dir.to_string_lossy()),
+            shell_word(&docker.project),
+            shell_word(compose)
+        ))
+    }
+
     /// Lets `worktree` go of the containers every Worktree of the Repository `repository` shares, of the Compose
     /// service `name` only when given. A Worktree whose directory no longer exists stops counting too. A container no
     /// Worktree needs anymore stops once its Grace period has passed on the clock. Blocking, it reads the disk and
@@ -1756,6 +1784,19 @@ pub(crate) fn major(version: &str) -> Option<u32> {
 }
 
 /// The output of a command as trimmed text, an invalid UTF-8 sequence read as a replacement character.
+/// `text` as one word of a shell command, single quoted unless it holds only characters a shell reads as they are.
+fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_./-:@%+=,".contains(character))
+    {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
+}
+
 fn trimmed_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_owned()
 }
@@ -1763,6 +1804,14 @@ fn trimmed_output(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_word_of_the_follow_command_is_quoted_only_when_a_shell_would_misread_it() {
+        assert_eq!(shell_word("/src/app-feature"), "/src/app-feature");
+        assert_eq!(shell_word("/src/my app"), "'/src/my app'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word(""), "''");
+    }
 
     fn service(ports: &str) -> StackService {
         serde_json::from_str(&format!("{{\"ports\": {ports}}}")).unwrap()

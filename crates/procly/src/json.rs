@@ -61,6 +61,28 @@ pub(crate) struct Logs<'a> {
     pub(crate) output: &'a str,
 }
 
+/// One line of `logs --follow`: the Job or Service followed and what happened to its output.
+#[derive(Debug, Serialize)]
+pub(crate) struct Follow<'a> {
+    pub(crate) name: &'a str,
+    #[serde(flatten)]
+    pub(crate) event: FollowEvent<'a>,
+}
+
+/// What a line of `logs --follow` tells, told apart by `event`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub(crate) enum FollowEvent<'a> {
+    /// The recent output when the follow started.
+    Backlog { output: &'a str },
+    /// Output printed since the line before.
+    Output { output: &'a str },
+    /// Output the follow missed, as it was read too slowly.
+    Dropped { bytes: u64 },
+    /// The Job or the Service has ended, and every line of its output was printed.
+    Ended,
+}
+
 /// What `up` prints, told apart by `result`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]

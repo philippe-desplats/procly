@@ -19,7 +19,7 @@ use super::output_file::{self, OutputFiles, Tail};
 use super::process_group::{self, Pid, kill_group, stop_tree};
 use super::record::{ServiceRecord, ServiceRecords};
 use crate::config::RestartPolicy;
-use crate::output::{self, OutputBuffer};
+use crate::output::{self, Follow, OutputBuffer};
 use crate::protocol::{self, ServiceEnd, ServiceStatus, StartOutcome};
 use crate::topology::Topology;
 
@@ -231,6 +231,20 @@ impl Services {
     /// The recent output of the Service `name` of `worktree`, running or ended, or else of the running Group covering
     /// it, whose process prints for it. `None` when the Daemon knows no such Service.
     pub(crate) fn output_of(&self, worktree: &Path, name: &str) -> Option<String> {
+        self.find(worktree, name).map(|service| service.output())
+    }
+
+    /// Follows the output of the Service `name` of `worktree`, found as [`Services::output_of`] finds it, and returns
+    /// the Service whose end ends the follow.
+    pub(crate) fn follow(&self, worktree: &Path, name: &str) -> Option<(Arc<Service>, Follow)> {
+        self.find(worktree, name).map(|service| {
+            let follow = output::follow(&service.output);
+            (service, follow)
+        })
+    }
+
+    /// The Service `name` of `worktree`, running or ended, or else the running Group covering it.
+    fn find(&self, worktree: &Path, name: &str) -> Option<Arc<Service>> {
         let table = self.table();
         table
             .get(&(worktree.to_owned(), name.to_owned()))
@@ -242,7 +256,7 @@ impl Services {
                     })
                     .map(|(_, group)| group)
             })
-            .map(|service| service.output())
+            .map(Arc::clone)
     }
 
     /// Whether the Service `name` of `worktree` runs.

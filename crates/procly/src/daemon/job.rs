@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use nix::sys::signal::Signal;
 
 use super::process_group::{self, DRAIN_TIMEOUT, Pid, STOP_TIMEOUT, kill_group, signal_group};
-use crate::output::{self, OutputBuffer};
+use crate::output::{self, Follow, OutputBuffer};
 use crate::protocol::{JobEnd, JobState, JobStatus, StartOutcome};
 use crate::topology::Topology;
 
@@ -269,6 +269,11 @@ impl Job {
 
     pub(crate) fn output(&self) -> String {
         output::lock(&self.output).text()
+    }
+
+    /// Follows the output of the Job, from its backlog.
+    pub(crate) fn follow(&self) -> Follow {
+        output::follow(&self.output)
     }
 
     /// Stops the whole tree of the Job: `SIGTERM` to its process group, then `SIGKILL` once the stop timeout has passed
