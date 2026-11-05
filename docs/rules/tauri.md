@@ -28,6 +28,16 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
   - ADR 0009: these are the only 2 verbs the app reaches through the CLI. The checks of the installation must still report a Daemon that does not run, and stopping a Daemon of another protocol version cannot go through a socket it would refuse.
   - Example: the `restart_daemon` command runs `procly daemon stop --json`, then calls `connect_or_start`, and only after the developer confirmed that every running Service stops.
 
+- **NEVER** send `Request::Up` from the app, start a Service again only through `Request::Restart`, and only when its `ServiceStatus` says `restartable`.
+  - ADR 0014: a Service runs with the environment of the request that started it, and an app opened from the Dock only has the `PATH` of launchd. `Restart` replays the environment the Daemon holds from the last `up`, so the app never gives an environment of its own to start anything.
+  - Without a held environment, a re-attached Service or a Daemon that restarted, the inspector offers the command to copy instead, `(cd <path> && procly restart <service>)`. A Service a Group covers is restarted from the row of its Group.
+  - Example: `async fn restart(service: String, cwd: PathBuf, client: State<'_, DaemonClient>) -> Result<Response, ClientError>` sends `Request::Restart { service, cwd }`, and the button is drawn only when `restartable` is true.
+
+- **ALWAYS** send `gc --apply` from the app as `Request::Gc { apply: true, only }`, with `only` listing the Orphans of the dry run the developer confirmed, never as a bare apply.
+  - `gc --apply` deletes the Isolated containers that are Orphans and their volumes, from what it finds when it runs, so a bare apply could delete data the sheet never showed. The Daemon deletes only the listed Orphans that still are, and reports the others as not deleted with the reason.
+  - ADR 0009: `only` is the one request field the app sends that the CLI does not offer, and `procly gc --apply` keeps deleting every Orphan it finds.
+  - Example: the sheet keeps the `orphans` of the last `Gc { apply: false }`, and its Delete button sends them back unchanged as `only`.
+
 - **NEVER** let the app guess the `procly` executable, pass the sidecar it embeds explicitly to `connect_or_start` and to every CLI command.
   - Inside a Tauri bundle `current_exe()` is the app, and starting it with `daemon` would launch a second app instead of the Daemon. A `procly` found on the `PATH` may be another release, whose Daemon the app could not talk to.
   - Example: `DaemonClient::connect_or_start(socket_path, &procly_exe)`, where `procly_exe` is `Procly.app/Contents/MacOS/procly`.
@@ -106,4 +116,4 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 
 - **ALWAYS** test the frontend against `mockIPC` from `@tauri-apps/api/mocks`, and test the Rust side through the `procly-client` crate.
   - The commands hold no logic, so the frontend tests check rendering and the client tests check the protocol, without a running webview.
-  - Example: `mockIPC((cmd, args) => cmd === 'up' ? { response: 'up', service: 'web', outcome: 'reused', port: 5173 } : undefined)`.
+  - Example: `mockIPC((cmd, args) => cmd === 'restart' ? { response: 'up', service: 'web', outcome: 'started', port: 5173 } : undefined)`.
