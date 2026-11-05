@@ -95,7 +95,12 @@ pub enum Request {
     Gc { cwd: PathBuf, apply: bool },
     /// Runs the Worktree release of the Worktree holding `path`: stops its Services and Jobs, lets go of its Compose
     /// services and releases its Leases, apart from those of a Pinned branch, and answers once their trees are gone.
-    WorktreeRelease { path: PathBuf },
+    /// With `dry_run`, false when absent, it answers with what the release would do and changes nothing.
+    WorktreeRelease {
+        path: PathBuf,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Runs the checks only the Daemon can answer, and tells which version it is.
     Doctor,
     /// Writes the Worktrunk hooks block into the `.config/wt.toml` of the Worktree holding `cwd`, unless a hook is
@@ -1023,6 +1028,30 @@ mod tests {
         assert!(matches!(
             decode::<Request>(&line),
             Ok(Request::Restart { service, cwd }) if service == "web" && cwd.as_os_str() == "/src/app"
+        ));
+    }
+
+    #[test]
+    fn a_worktree_release_asks_for_a_dry_run_only_when_it_says_so() {
+        let line = encode(Request::WorktreeRelease {
+            path: PathBuf::from("/src/app"),
+            dry_run: true,
+        })
+        .unwrap();
+        assert_eq!(
+            line,
+            "{\"version\":22,\"request\":\"worktree_release\",\"path\":\"/src/app\",\"dry_run\":true}\n"
+        );
+        assert!(matches!(
+            decode::<Request>(&line),
+            Ok(Request::WorktreeRelease { dry_run: true, .. })
+        ));
+
+        // A request from a client that never heard of the flag is a real release.
+        let absent = "{\"version\":22,\"request\":\"worktree_release\",\"path\":\"/src/app\"}\n";
+        assert!(matches!(
+            decode::<Request>(absent),
+            Ok(Request::WorktreeRelease { dry_run: false, .. })
         ));
     }
 

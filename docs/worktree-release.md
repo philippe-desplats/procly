@@ -38,6 +38,21 @@ The Daemon logs who asked for the release, with what it stopped and released, as
 $ procly worktree release ../app-feature
 ```
 
+## Looking before releasing
+
+`procly worktree release --dry-run` prints what the release would do and changes nothing: no Service or Job is stopped, no Compose service is let go of, no Lease is released, no state file is written, and the Retention policy is not applied. The lines say `would stop` and `would release`:
+
+```console
+$ procly worktree release --dry-run
+web would stop
+job 3f9a1c2e would stop
+db would release, 1 other Worktree still needs it
+lease web.http port 24001 would release
+Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it once the Worktree is removed
+```
+
+A dry run followed by a real release on the same state gives the same report. The `warnings` of a dry run carry only what keeps Procly from reading the Worktree, such as a configuration it cannot parse, which hides the Logical resources. With `--json` it prints the document below.
+
 ## JSON
 
 With `--json`, stdout holds 1 document with the `worktree`, then what was `stopped` (`services` by name, the Isolated Compose services included, and `jobs` by identifier), what was `released` (the `compose_services` let go of, each with `service`, `others` and `grace_ms` as for [`down`](json.md#down), and the `leases`, each with `service`, `port_name` and `port`) and what was `kept`. A kept Lease carries a `reason` of `pinned_branch`, with its `branch`, or `container_running`. A kept Logical resource carries its `service`, its `driver`, the key of the `resource` in the configuration and its `name`. `warnings` lists what went wrong without failing the release, such as a [Portless alias](configuration.md#portless-aliases) that could not be removed, and is empty when nothing did. Without `--json` each warning is on stderr as `procly: warning: ...`. The schema version is 1, see [JSON output](json.md).
