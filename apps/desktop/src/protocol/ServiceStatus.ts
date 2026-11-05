@@ -5,4 +5,9 @@ export type ServiceStatus = { service: string, port: number | null,
 /**
  * Whether a previous Daemon started the Service, and this one found it running when it started.
  */
-reattached: boolean, } & ({ "state": "starting" } | { "state": "healthy" } | { "state": "restarting" } | { "state": "ended", end: ServiceEnd, });
+reattached: boolean, 
+/**
+ * When the Service last started, in milliseconds since the Unix epoch. An automatic restart sets it again. For
+ * a Service a previous Daemon started, it is when this Daemon found it running.
+ */
+started_at: number, } & ({ "state": "starting" } | { "state": "healthy" } | { "state": "restarting" } | { "state": "ended", end: ServiceEnd, });

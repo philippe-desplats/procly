@@ -69,4 +69,4 @@ root: string, services: Array<GuardService>, } | { "response": "eject" } & Eject
 /**
  * The Service that needs this one, when `up` was asked for that one instead.
  */
-needed_by: string | null, };
+needed_by: string | null, } | { "response": "output", text: string, } | { "response": "output_dropped", bytes: number, } | { "response": "logs_ended" };

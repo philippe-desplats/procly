@@ -8,7 +8,11 @@ env: Array<[string, string]>, timeout_ms: number, } | { "request": "wait", job: 
 /**
  * The environment of the requesting command, as for `Up`.
  */
-env: Array<[string, string]>, } | { "request": "up", service: string | null, cwd: string, 
+env: Array<[string, string]>, 
+/**
+ * False when absent.
+ */
+follow: boolean, } | { "request": "up", service: string | null, cwd: string, 
 /**
  * The environment of the requesting command, as for `Run`.
  */
@@ -25,4 +29,4 @@ env: Array<[string, string]>, } | { "request": "agent_install", cwd: string,
 /**
  * The instruction file for the Rules block, inside the Worktree. Without it, `AGENTS.md` or `CLAUDE.md`.
  */
-file: string | null, } | { "request": "switch", cwd: string, off: boolean, } | { "request": "guard", cwd: string, } | { "request": "eject", cwd: string, } | { "request": "gc", cwd: string, apply: boolean, } | { "request": "worktree_release", path: string, } | { "request": "doctor" } | { "request": "worktree_hooks", cwd: string, };
+file: string | null, } | { "request": "switch", cwd: string, off: boolean, } | { "request": "guard", cwd: string, } | { "request": "eject", cwd: string, } | { "request": "gc", cwd: string, apply: boolean, } | { "request": "worktree_release", path: string, dry_run: boolean, } | { "request": "doctor" } | { "request": "worktree_hooks", cwd: string, };

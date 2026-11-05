@@ -122,6 +122,8 @@ mod tests {
                 git_common_dir: PathBuf::from("/p/work/acme/web/.git"),
                 worktrees: vec![WorktreeStatus {
                     worktree: worktree.clone(),
+                    branch: Some("main".to_owned()),
+                    listed: true,
                     services: Vec::new(),
                     jobs: Vec::new(),
                     foreign: Vec::new(),

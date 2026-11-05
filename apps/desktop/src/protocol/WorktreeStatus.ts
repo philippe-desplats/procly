@@ -4,7 +4,17 @@ import type { ForeignProcess } from "./ForeignProcess";
 import type { JobStatus } from "./JobStatus";
 import type { ServiceStatus } from "./ServiceStatus";
 
-export type WorktreeStatus = { services: Array<ServiceStatus>, jobs: Array<JobStatus>, 
+export type WorktreeStatus = { 
+/**
+ * The branch checked out in the Worktree, as the short name git lists it under. Left out on a detached `HEAD`,
+ * for a Worktree git no longer lists, and in a Repository without a branch to report.
+ */
+branch?: string | null, 
+/**
+ * Whether `git worktree list` still lists the Worktree. A Worktree the Daemon ran something in, and that git
+ * no longer lists, is reported with `false`.
+ */
+listed: boolean, services: Array<ServiceStatus>, jobs: Array<JobStatus>, 
 /**
  * What runs in the Worktree without Procly having started it. Left out when empty, so that the status of a
  * Worktree without any reads as it did before Foreign processes were reported.
