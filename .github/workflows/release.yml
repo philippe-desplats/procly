@@ -1,7 +1,7 @@
 name: Release
 
-# A tag named v<version> builds the binaries, publishes them with their checksums to GitHub Releases
-# and updates the Homebrew tap. Nothing runs on a branch or a pull request.
+# A tag named v<version> builds the command line and the signed app bundles, publishes them with their checksums to
+# GitHub Releases and updates the Homebrew tap (the formula and the cask). Nothing runs on a branch or a pull request.
 on:
   push:
     tags: ["v*"]
@@ -94,16 +94,173 @@ jobs:
             dist/*.tar.gz.sha256
           if-no-files-found: error
 
+  # One signed and notarized bundle per architecture, each on the native runner the command line is built on. The
+  # bundle embeds the command line as its sidecar, so it goes through `make bundle`: a plain `tauri build` yields a
+  # bundle without the sidecar. Without the Apple secrets the job fails on its first step and the command line is
+  # released all the same, see the `release` job.
+  app:
+    name: Bundle the app ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      KEYCHAIN: ${{ runner.temp }}/procly-release.keychain-db
+    steps:
+      - uses: actions/checkout@v7
+      # Fails here, naming every missing secret, before anything is built.
+      - name: Check the Apple secrets
+        id: secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/check-apple-secrets.sh
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # The desktop app (ADR 0015): bun from `packageManager`, Node from `.node-version`, both read from the app.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: apps/desktop/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: apps/desktop/.node-version
+      - run: bun install --frozen-lockfile
+        working-directory: apps/desktop
+      # The Developer ID Application certificate goes in a keychain of its own, which the last step deletes, and is
+      # found by its prefix so that the secret does not have to carry the name of the team.
+      - name: Import the certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          certificate="${RUNNER_TEMP}/certificate.p12"
+          echo "${APPLE_CERTIFICATE}" | base64 --decode > "${certificate}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security import "${certificate}" -k "${KEYCHAIN}" -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          rm -f "${certificate}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          # The temporary keychain comes first, the login keychain stays so that the system trust is unchanged.
+          security list-keychains -d user -s "${KEYCHAIN}" login.keychain-db
+          identity="$(security find-identity -v -p codesigning "${KEYCHAIN}" | sed -n 's/.*"\(Developer ID Application:.*\)"$/\1/p' | head -n 1)"
+          if [ -z "${identity}" ]; then
+            echo "::error::the certificate in APPLE_CERTIFICATE holds no identity whose name starts with 'Developer ID Application', see docs/releasing.md"
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=${identity}" >> "${GITHUB_ENV}"
+      # Only the credentials of the method the secrets allow reach the build: Tauri notarizes with whichever it finds,
+      # and an empty variable of the other method would be found too.
+      - name: Prepare the notarization
+        env:
+          METHOD: ${{ steps.secrets.outputs.method }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          case "${METHOD}" in
+            api)
+              key="${RUNNER_TEMP}/AuthKey.p8"
+              printf '%s\n' "${APPLE_API_KEY_CONTENT}" > "${key}"
+              {
+                echo "APPLE_API_ISSUER=${APPLE_API_ISSUER}"
+                echo "APPLE_API_KEY=${APPLE_API_KEY}"
+                echo "APPLE_API_KEY_PATH=${key}"
+              } >> "${GITHUB_ENV}"
+              ;;
+            apple-id)
+              {
+                echo "APPLE_ID=${APPLE_ID}"
+                echo "APPLE_PASSWORD=${APPLE_PASSWORD}"
+                echo "APPLE_TEAM_ID=${APPLE_TEAM_ID}"
+              } >> "${GITHUB_ENV}"
+              ;;
+            *)
+              echo "::error::no notarization method, '${METHOD}'"
+              exit 1
+              ;;
+          esac
+      # The end-to-end driver is behind the `e2e` feature (ADR 0016), which is off by default and which the build
+      # below never asks for. This stops a default that someone turned on.
+      - name: Check that e2e is not a default feature
+        run: |
+          cargo metadata --no-deps --format-version 1 --locked \
+            | jq -e '.packages[] | select(.name == "procly-desktop") | (.features.default // []) | index("e2e") | not'
+      - name: Build the bundle
+        run: make bundle PROFILE=release TAURI_ARGS="--bundles app,dmg"
+      - name: Check the bundle
+        run: |
+          app="target/release/bundle/macos/Procly.app"
+          scripts/check-bundle.sh "${app}"
+          # The sidecar is the command line of the release.
+          reported="$("${app}/Contents/MacOS/procly" --version)"
+          if [ "${reported}" != "procly ${VERSION}" ]; then
+            echo "::error::the sidecar reports '${reported}', expected 'procly ${VERSION}'"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "${app}"
+          xcrun stapler validate "${app}"
+          spctl --assess --type execute --verbose=2 "${app}"
+      - name: Name the disk image and give it its checksum
+        run: |
+          images=(target/release/bundle/dmg/*.dmg)
+          if [ "${#images[@]}" -ne 1 ]; then
+            echo "::error::expected 1 disk image, found ${#images[@]}"
+            exit 1
+          fi
+          name="Procly-${VERSION}-${{ matrix.target }}.dmg"
+          mkdir -p dist
+          cp "${images[0]}" "dist/${name}"
+          cd dist
+          shasum -a 256 "${name}" > "${name}.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: procly-app-${{ matrix.target }}
+          path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+          if-no-files-found: error
+      - name: Delete the keychain and the keys
+        if: always()
+        run: |
+          security delete-keychain "${KEYCHAIN}" || true
+          rm -f "${RUNNER_TEMP}/certificate.p12" "${RUNNER_TEMP}/AuthKey.p8"
+
   release:
     name: Publish to GitHub Releases
-    needs: [version, build]
+    needs: [version, build, app]
+    # The command line is released even when the app jobs failed, for want of the Apple secrets say. The workflow
+    # run still ends red, naming what the app jobs lacked.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      app: ${{ steps.checksums.outputs.app }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
       GH_TOKEN: ${{ github.token }}
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
+      APP_RESULT: ${{ needs.app.result }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -111,13 +268,26 @@ jobs:
           path: dist
           pattern: procly-*
           merge-multiple: true
-      # One file holds the 4 checksums, so `sha256sum --check` verifies whatever the user downloaded.
+      # One file holds the checksums, so `sha256sum --check` verifies whatever the user downloaded: the 4 archives of
+      # the command line, and the 2 disk images of the app when both were built. One image without the other is
+      # dropped, a release never carries half of the app.
       - name: Gather the checksums
+        id: checksums
         working-directory: dist
         run: |
-          cat procly-*.tar.gz.sha256 | sort -k 2 > SHA256SUMS
-          rm procly-*.tar.gz.sha256
-          test "$(wc -l < SHA256SUMS)" -eq 4
+          shopt -s nullglob
+          if [ "${APP_RESULT}" = "success" ]; then
+            expected=6
+            echo "app=true" >> "${GITHUB_OUTPUT}"
+          else
+            expected=4
+            echo "app=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::the app was not built (${APP_RESULT}), the release carries the command line only"
+            rm -f Procly-*
+          fi
+          cat procly-*.tar.gz.sha256 Procly-*.dmg.sha256 | sort -k 2 > SHA256SUMS
+          rm -f procly-*.tar.gz.sha256 Procly-*.dmg.sha256
+          test "$(wc -l < SHA256SUMS)" -eq "${expected}"
           cat SHA256SUMS
       - name: Create the release
         run: |
@@ -126,7 +296,7 @@ jobs:
             --generate-notes \
             --verify-tag \
             --prerelease="${PRERELEASE}"
-      # Handed to the next job, which renders the Homebrew formula from the checksums.
+      # Handed to the next job, which renders the Homebrew formula and cask from the checksums.
       - uses: actions/upload-artifact@v7
         with:
           name: checksums
@@ -136,11 +306,12 @@ jobs:
   homebrew:
     name: Update the Homebrew tap
     needs: [version, release]
-    # A prerelease is never offered through `brew install`.
+    # A prerelease is never offered through `brew install`, neither the formula nor the cask.
     if: needs.version.outputs.prerelease == 'false'
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      APP: ${{ needs.release.outputs.app }}
       TAP_REPOSITORY: philippe-desplats/homebrew-procly
     steps:
       - uses: actions/checkout@v7
@@ -168,14 +339,24 @@ jobs:
           mkdir -p tap/Formula
           scripts/render-formula.sh "${VERSION}" dist/SHA256SUMS > tap/Formula/procly.rb
           cat tap/Formula/procly.rb
-      - name: Push the formula
+      # The cask follows the app: a release without the disk images leaves the cask on the version before.
+      - name: Render the cask
+        if: env.APP == 'true'
+        run: |
+          mkdir -p tap/Casks
+          scripts/render-cask.sh "${VERSION}" dist/SHA256SUMS > tap/Casks/procly-app.rb
+          cat tap/Casks/procly-app.rb
+      - name: Push the formula and the cask
         working-directory: tap
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/procly.rb
+          if [ "${APP}" = "true" ]; then
+            git add Casks/procly-app.rb
+          fi
           if git diff --cached --quiet; then
-            echo "the formula already is at ${VERSION}"
+            echo "the tap already is at ${VERSION}"
             exit 0
           fi
           git commit -m "procly ${VERSION}"

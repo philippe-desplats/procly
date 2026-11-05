@@ -54,3 +54,9 @@ sidecar:
 
 bundle: sidecar
 	cd $(APP) && $(BUN) run tauri build $(if $(filter debug,$(PROFILE)),--debug) --config src-tauri/tauri.bundle.conf.json $(TAURI_ARGS)
+
+# The scripts the release workflow runs, see docs/releasing.md. Needs nothing but bash.
+.PHONY: test-release-scripts
+
+test-release-scripts:
+	bash scripts/test-release-scripts.sh
