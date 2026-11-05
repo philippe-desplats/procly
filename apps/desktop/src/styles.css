@@ -152,6 +152,7 @@ body {
 }
 
 .row-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -233,4 +234,49 @@ body {
 .facts dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.toolbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 0 0 8px;
+}
+
+.toolbar .caption {
+  margin: 0;
+}
+
+.button {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: default;
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.subtitle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 12px 0 4px;
+  font-size: var(--size-body);
+  font-weight: 600;
+}
+
+.mark {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: var(--size-small);
 }

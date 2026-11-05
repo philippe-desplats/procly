@@ -1,30 +1,59 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 import type { DaemonSnapshot, DaemonStore } from "./daemon";
-import { repositoryLabel, worktreeLabel } from "./labels";
+import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
+import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { jobWord, serviceWord, type StateWord } from "./state";
+import { formatMoment } from "./time";
+
+/** What the center shows: the Overview of every Service, or one Worktree. */
+type View = { kind: "overview" } | { kind: "worktree"; path: string };
 
 export function App({ store }: { store: DaemonStore }) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  const [selectedPath, select] = useState<string | null>(null);
+  const [view, setView] = useState<View>({ kind: "overview" });
+
+  // The poller of the app keeps the snapshot current, the window only follows it.
+  useEffect(() => store.start(), [store]);
 
   useEffect(() => {
-    void store.refresh();
-  }, [store]);
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "0") {
+        setView({ kind: "overview" });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
 
   const repositories = snapshot.kind === "status" ? snapshot.report.repositories : [];
   const worktrees = repositories.flatMap((repository) => repository.worktrees);
-  const current = worktrees.find((worktree) => worktree.path === selectedPath) ?? worktrees[0] ?? null;
+  // A Worktree that is no longer reported leaves the Overview in its place.
+  const current =
+    view.kind === "worktree" ? (worktrees.find((worktree) => worktree.path === view.path) ?? null) : null;
 
   return (
     <div className="window">
       <nav className="pane sidebar" aria-label="Worktrees">
         <h1 className="pane-title">Procly</h1>
-        <Sidebar snapshot={snapshot} repositories={repositories} current={current} onSelect={select} />
+        <Sidebar
+          snapshot={snapshot}
+          repositories={repositories}
+          current={current}
+          onSelect={(path) => {
+            setView({ kind: "worktree", path });
+          }}
+          onOverview={() => {
+            setView({ kind: "overview" });
+          }}
+        />
       </nav>
       <main className="pane center">
+        <Toolbar snapshot={snapshot} store={store} />
         <Center snapshot={snapshot} current={current} />
       </main>
       <aside className="pane inspector" aria-label="Inspector">
@@ -34,7 +63,60 @@ export function App({ store }: { store: DaemonStore }) {
   );
 }
 
+function Toolbar({ snapshot, store }: { snapshot: DaemonSnapshot; store: DaemonStore }) {
+  return (
+    <header className="toolbar">
+      {snapshot.kind === "loading" ? null : (
+        <span className="caption">{`Updated ${formatMoment(snapshot.at, snapshot.at)}`}</span>
+      )}
+      <button
+        type="button"
+        className="button"
+        onClick={() => {
+          void store.refresh();
+        }}
+      >
+        Refresh
+      </button>
+    </header>
+  );
+}
+
 function Sidebar({
+  snapshot,
+  repositories,
+  current,
+  onSelect,
+  onOverview,
+}: {
+  snapshot: DaemonSnapshot;
+  repositories: RepositoryStatus[];
+  current: WorktreeStatus | null;
+  onSelect: (path: string) => void;
+  onOverview: () => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        className="row"
+        aria-current={current === null ? "true" : undefined}
+        onClick={onOverview}
+      >
+        <span className="row-name">Overview</span>
+        <span className="caption">⌘0</span>
+      </button>
+      <SidebarWorktrees
+        snapshot={snapshot}
+        repositories={repositories}
+        current={current}
+        onSelect={onSelect}
+      />
+    </>
+  );
+}
+
+function SidebarWorktrees({
   snapshot,
   repositories,
   current,
@@ -62,12 +144,14 @@ function Sidebar({
                 <button
                   type="button"
                   className="row"
+                  title={worktreeTooltip(worktree)}
                   aria-current={worktree.path === current?.path ? "true" : undefined}
                   onClick={() => {
                     onSelect(worktree.path);
                   }}
                 >
                   <span className="row-name">{worktreeLabel(worktree)}</span>
+                  <RemovedMark worktree={worktree} />
                   {worktree.main ? <span className="caption">main</span> : null}
                 </button>
               </li>
@@ -77,6 +161,11 @@ function Sidebar({
       ))}
     </>
   );
+}
+
+/** Git no longer lists the Worktree, though the Daemon still runs something in it. */
+function RemovedMark({ worktree }: { worktree: WorktreeStatus }) {
+  return worktree.listed ? null : <span className="mark">Removed</span>;
 }
 
 function Center({ snapshot, current }: { snapshot: DaemonSnapshot; current: WorktreeStatus | null }) {
@@ -99,12 +188,9 @@ function Center({ snapshot, current }: { snapshot: DaemonSnapshot; current: Work
       );
     case "status":
       return current === null ? (
-        <section>
-          <h2 className="title">Nothing to show</h2>
-          <p className="muted">The Daemon runs nothing yet.</p>
-        </section>
+        <Overview repositories={snapshot.report.repositories} at={snapshot.at} />
       ) : (
-        <WorktreeView worktree={current} />
+        <WorktreeView worktree={current} at={snapshot.at} />
       );
     default: {
       const unhandled: never = snapshot;
@@ -113,22 +199,69 @@ function Center({ snapshot, current }: { snapshot: DaemonSnapshot; current: Work
   }
 }
 
-function WorktreeView({ worktree }: { worktree: WorktreeStatus }) {
+/**
+ * Every Service of every Worktree, grouped under the Worktree, with its port. `at` is when the answer was read, the
+ * day the times are compared with.
+ */
+function Overview({ repositories, at }: { repositories: RepositoryStatus[]; at: number }) {
+  const groups = repositories
+    .map((repository) => ({
+      repository,
+      worktrees: repository.worktrees.filter((worktree) => worktree.services.length > 0),
+    }))
+    .filter((group) => group.worktrees.length > 0);
+  return (
+    <section aria-label="Overview">
+      <h2 className="title">Overview</h2>
+      {groups.length === 0 ? <p className="muted">No Service is known.</p> : null}
+      {groups.map(({ repository, worktrees }) => (
+        <div key={repository.git_common_dir} className="group">
+          <p className="caption">{repositoryLabel(repository.git_common_dir)}</p>
+          {worktrees.map((worktree) => (
+            <div key={worktree.path}>
+              <h3 className="subtitle" title={worktreeTooltip(worktree)}>
+                <span className="row-name">{worktreeLabel(worktree)}</span>
+                <RemovedMark worktree={worktree} />
+              </h3>
+              <ul className="list">
+                {worktree.services.map((service) => (
+                  <ServiceRow key={service.service} service={service} at={at} />
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function ServiceRow({ service, at }: { service: ServiceStatus; at: number }) {
+  return (
+    <li className="item">
+      <span className="item-name">{service.service}</span>
+      <State {...serviceWord(service)} />
+      {service.port === null ? null : <span className="caption">{`:${service.port}`}</span>}
+      <span className="caption">{formatMoment(service.started_at, at)}</span>
+    </li>
+  );
+}
+
+function WorktreeView({ worktree, at }: { worktree: WorktreeStatus; at: number }) {
   const empty = worktree.services.length === 0 && worktree.jobs.length === 0;
   return (
     <section>
-      <h2 className="title">{worktreeLabel(worktree)}</h2>
+      <h2 className="title">
+        <span title={worktreeTooltip(worktree)}>{worktreeLabel(worktree)}</span>{" "}
+        <RemovedMark worktree={worktree} />
+      </h2>
       {empty ? <p className="muted">Nothing runs in this Worktree.</p> : null}
       {worktree.services.length > 0 ? (
         <>
           <h3 className="caption">Services</h3>
           <ul className="list">
             {worktree.services.map((service) => (
-              <li key={service.service} className="item">
-                <State {...serviceWord(service)} />
-                <span className="item-name">{service.service}</span>
-                <span className="caption">{service.port === null ? "" : `:${service.port}`}</span>
-              </li>
+              <ServiceRow key={service.service} service={service} at={at} />
             ))}
           </ul>
         </>
