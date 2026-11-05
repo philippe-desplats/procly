@@ -280,9 +280,9 @@ fn delete(registry: &Registry, found: &[Found]) -> bool {
     for orphan in &mut orphans {
         // The container of a volume is the one that mounts it.
         let Some(cause) = found.iter().find(|found| {
-            found.record.repository == orphan.repository
-                && found.record.worktree == orphan.worktree
-                && match &orphan.kind {
+            found.record.repository == orphan.id.repository
+                && found.record.worktree == orphan.id.worktree
+                && match &orphan.id.kind {
                     OrphanKind::IsolatedContainer { service, .. } => found.record.service == *service,
                     OrphanKind::IsolatedVolume { volume, .. } => found.volumes.contains(volume),
                     _ => false,

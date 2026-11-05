@@ -5,21 +5,21 @@
  */
 export type Orphan = { 
 /**
- * The common git directory identifying the Repository.
- */
-repository: string, 
-/**
- * The root of the removed Worktree.
- */
-worktree: string, 
-/**
  * Whether it was deleted, always `false` without `apply`.
  */
 deleted: boolean, 
 /**
  * Why it could not be deleted.
  */
-error: string | null, } & ({ "kind": "lease", service: string, port_name: string, port: number, } | { "kind": "logical_resource", service: string, 
+error: string | null, 
+/**
+ * The common git directory identifying the Repository.
+ */
+repository: string, 
+/**
+ * The root of the removed Worktree.
+ */
+worktree: string, } & ({ "kind": "lease", service: string, port_name: string, port: number, } | { "kind": "logical_resource", service: string, 
 /**
  * The key of the resource in the configuration.
  */

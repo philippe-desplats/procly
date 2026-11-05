@@ -15,7 +15,7 @@
 //! that is not an Orphan has its compose project. Its volumes are the named volumes of that project it mounts, never a
 //! volume the compose file gives a name of its own. While Docker does not tell which volumes it has, it is not removed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -30,14 +30,24 @@ use super::store::StoreError;
 use super::worktree_dir::{self, WorktreeDir};
 use super::{Registry, blocking, foreign, listeners, read_config, requester};
 use crate::config::{Config, Settings};
-use crate::protocol::{GcReport, Orphan, OrphanKind, Response, SkippedRepository};
+use crate::protocol::{GcReport, Orphan, OrphanId, OrphanKind, Response, SkippedRepository};
 use crate::topology::{self, TopologyError};
 
 /// What `gc` says when the Orphans could not be collected.
 const COLLECT_FAILED: &str = "the orphans could not be collected";
 
-/// Answers a `Gc` request, logging who asked for every deletion.
-pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, peer: Option<i32>) -> Response {
+/// Why an Orphan a client listed in `only` is not deleted: it is not one by the time `gc` runs.
+const NO_LONGER_AN_ORPHAN: &str = "no longer an Orphan";
+
+/// Answers a `Gc` request, logging who asked for every deletion. With `only`, it is limited to the Orphans it lists, and
+/// reports each one that is no longer an Orphan as not deleted.
+pub(super) async fn run(
+    registry: &Arc<Registry>,
+    cwd: PathBuf,
+    apply: bool,
+    only: Option<Vec<OrphanId>>,
+    peer: Option<i32>,
+) -> Response {
     let collected = {
         let registry = Arc::clone(registry);
         // Listing the Worktrees runs git, naming the requester runs ps, and the rest reads the disk.
@@ -47,7 +57,17 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
         Ok(collected) => collected,
         Err(message) => return Response::Error { message },
     };
-    if let Some(who) = &collected.requester {
+    let limited = only.is_some();
+    // Reported with the others, after them, though none of them is deleted.
+    let gone = match &only {
+        Some(only) => narrow(&mut collected.report.orphans, only),
+        None => Vec::new(),
+    };
+    if let Some(who) = collected
+        .requester
+        .as_ref()
+        .filter(|_| !collected.report.orphans.is_empty())
+    {
         eprintln!(
             "gc --apply of {} orphans requested by {who}",
             collected.report.orphans.len()
@@ -56,7 +76,7 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
         for mut orphan in std::mem::take(&mut collected.report.orphans) {
             let timeout = collected
                 .driver_timeouts
-                .get(&orphan.repository)
+                .get(&orphan.id.repository)
                 .copied()
                 .unwrap_or_else(|| Settings::default().driver_timeout);
             match delete(registry, &collected.found, &orphan, timeout).await {
@@ -64,13 +84,16 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
                     orphan.deleted = true;
                     eprintln!("gc deleted {}, requested by {who}", orphan.describe());
                 }
-                // No longer an Orphan, so no longer reported as one.
+                // No longer an Orphan, so no longer reported as one, unless a client listed it.
                 Ok(Dropped::Held) => {
                     eprintln!(
                         "gc kept {}, a Worktree uses it again, requested by {who}",
                         orphan.describe()
                     );
-                    continue;
+                    if !limited {
+                        continue;
+                    }
+                    orphan.error = Some(NO_LONGER_AN_ORPHAN.to_owned());
                 }
                 Err(error) => {
                     let error = format!("{:#}", anyhow::Error::from(error));
@@ -82,12 +105,13 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
         }
         collected.report.orphans = orphans;
     }
+    collected.report.orphans.extend(gone);
     // The aliases of the Leases just deleted go with them, in one pass so that a Portless that fails warns once.
     if collected
         .report
         .orphans
         .iter()
-        .any(|orphan| orphan.deleted && matches!(orphan.kind, OrphanKind::Lease { .. }))
+        .any(|orphan| orphan.deleted && matches!(orphan.id.kind, OrphanKind::Lease { .. }))
     {
         let registry = Arc::clone(registry);
         // Running `portless` and writing the aliases are blocking.
@@ -108,6 +132,22 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, apply: bool, pee
         }
     }
     Response::Gc(collected.report)
+}
+
+/// Keeps in `found` the Orphans `only` lists, in the order they are deleted in, and returns the others `only` lists,
+/// each one reported as not deleted since it is no longer an Orphan. An Orphan listed twice counts once.
+fn narrow(found: &mut Vec<Orphan>, only: &[OrphanId]) -> Vec<Orphan> {
+    let wanted: HashSet<&OrphanId> = only.iter().collect();
+    found.retain(|orphan| wanted.contains(&orphan.id));
+    let mut reported: HashSet<&OrphanId> = found.iter().map(|orphan| &orphan.id).collect();
+    only.iter()
+        .filter(|id| reported.insert(id))
+        .map(|id| Orphan {
+            id: id.clone(),
+            deleted: false,
+            error: Some(NO_LONGER_AN_ORPHAN.to_owned()),
+        })
+        .collect()
 }
 
 /// The Orphans `gc` found, and what deleting them takes.
@@ -183,9 +223,11 @@ fn collect(registry: &Registry, cwd: &Path, apply: bool, peer: Option<i32>) -> a
         orphans.extend(dirs.into_iter().filter_map(|WorktreeDir { path, owner }| {
             let owner = owner?;
             removed(&owner.repository, &owner.worktree).then(|| Orphan {
-                kind: kind(path.clone()),
-                repository: owner.repository,
-                worktree: owner.worktree,
+                id: OrphanId {
+                    kind: kind(path.clone()),
+                    repository: owner.repository,
+                    worktree: owner.worktree,
+                },
                 deleted: false,
                 error: None,
             })
@@ -299,13 +341,15 @@ pub(super) fn isolated_orphans(found: &[Found]) -> Vec<Orphan> {
         .iter()
         .filter(|found| found.is_listed())
         .map(|found| Orphan {
-            kind: OrphanKind::IsolatedContainer {
-                service: found.record.service.clone(),
-                project: found.record.project.clone(),
-                compose: found.record.compose.clone(),
+            id: OrphanId {
+                kind: OrphanKind::IsolatedContainer {
+                    service: found.record.service.clone(),
+                    project: found.record.project.clone(),
+                    compose: found.record.compose.clone(),
+                },
+                repository: found.record.repository.clone(),
+                worktree: found.record.worktree.clone(),
             },
-            repository: found.record.repository.clone(),
-            worktree: found.record.worktree.clone(),
             deleted: false,
             error: None,
         })
@@ -317,12 +361,14 @@ pub(super) fn isolated_orphans(found: &[Found]) -> Vec<Orphan> {
         for volume in &found.volumes {
             if volumes.insert((&found.record.project, volume)) {
                 orphans.push(Orphan {
-                    kind: OrphanKind::IsolatedVolume {
-                        project: found.record.project.clone(),
-                        volume: volume.clone(),
+                    id: OrphanId {
+                        kind: OrphanKind::IsolatedVolume {
+                            project: found.record.project.clone(),
+                            volume: volume.clone(),
+                        },
+                        repository: found.record.repository.clone(),
+                        worktree: found.record.worktree.clone(),
                     },
-                    repository: found.record.repository.clone(),
-                    worktree: found.record.worktree.clone(),
                     deleted: false,
                     error: None,
                 });
@@ -388,13 +434,15 @@ fn in_use(registry: &Registry) -> BTreeSet<PathBuf> {
 
 fn lease_orphan(lease: WorktreeLease) -> Orphan {
     Orphan {
-        kind: OrphanKind::Lease {
-            service: lease.service,
-            port_name: lease.port_name,
-            port: lease.port,
+        id: OrphanId {
+            kind: OrphanKind::Lease {
+                service: lease.service,
+                port_name: lease.port_name,
+                port: lease.port,
+            },
+            repository: lease.repository,
+            worktree: lease.worktree,
         },
-        repository: lease.repository,
-        worktree: lease.worktree,
         deleted: false,
         error: None,
     }
@@ -414,14 +462,16 @@ fn resource_orphan(resource: LogicalResource) -> Orphan {
         ..
     } = resource;
     Orphan {
-        kind: OrphanKind::LogicalResource {
-            service,
-            resource,
-            name,
-            driver,
+        id: OrphanId {
+            kind: OrphanKind::LogicalResource {
+                service,
+                resource,
+                name,
+                driver,
+            },
+            repository,
+            worktree,
         },
-        repository,
-        worktree,
         deleted: false,
         error: None,
     }
@@ -586,10 +636,11 @@ fn resolved(path: &Path) -> PathBuf {
 pub(super) fn forget_removed(registry: &Registry, found: &[Found], orphans: &[Orphan]) {
     for found in found {
         let record = &found.record;
-        let of_record = |orphan: &&Orphan| orphan.repository == record.repository && orphan.worktree == record.worktree;
+        let of_record =
+            |orphan: &&Orphan| orphan.id.repository == record.repository && orphan.id.worktree == record.worktree;
         let container_removed = !found.is_listed() || orphans.iter().filter(of_record).any(|orphan| {
             orphan.deleted
-                && matches!(&orphan.kind, OrphanKind::IsolatedContainer { service, .. } if *service == record.service)
+                && matches!(&orphan.id.kind, OrphanKind::IsolatedContainer { service, .. } if *service == record.service)
         });
         if !container_removed {
             continue;
@@ -600,7 +651,7 @@ pub(super) fn forget_removed(registry: &Registry, found: &[Found], orphans: &[Or
             .filter(|volume| {
                 !orphans.iter().filter(of_record).any(|orphan| {
                     orphan.deleted
-                        && matches!(&orphan.kind, OrphanKind::IsolatedVolume { volume: removed, .. } if removed == *volume)
+                        && matches!(&orphan.id.kind, OrphanKind::IsolatedVolume { volume: removed, .. } if removed == *volume)
                 })
             })
             .cloned()
@@ -650,11 +701,11 @@ async fn delete(
         resource,
         name,
         driver,
-    } = &orphan.kind
+    } = &orphan.id.kind
     {
         let key = ResourceKey {
-            repository: orphan.repository.clone(),
-            worktree: orphan.worktree.clone(),
+            repository: orphan.id.repository.clone(),
+            worktree: orphan.id.worktree.clone(),
             service: service.clone(),
             resource: resource.clone(),
         };
@@ -670,7 +721,7 @@ async fn delete(
             move || forget(&registry, &key, &name)
         };
         let to_drop = ToDrop {
-            repository: &orphan.repository,
+            repository: &orphan.id.repository,
             service,
             name,
             driver,
@@ -727,12 +778,12 @@ fn forget(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bool, De
 pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orphan) -> Result<(), DeleteError> {
     let of = |service: &str| {
         found.iter().find(|found| {
-            found.record.repository == orphan.repository
-                && found.record.worktree == orphan.worktree
+            found.record.repository == orphan.id.repository
+                && found.record.worktree == orphan.id.worktree
                 && found.record.service == service
         })
     };
-    match &orphan.kind {
+    match &orphan.id.kind {
         OrphanKind::Lease {
             service,
             port_name,
@@ -740,8 +791,8 @@ pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orp
         } => {
             // Its alias goes with it, once for all the Leases, see [`run`].
             registry.leases.release(&WorktreeLease {
-                repository: orphan.repository.clone(),
-                worktree: orphan.worktree.clone(),
+                repository: orphan.id.repository.clone(),
+                worktree: orphan.id.worktree.clone(),
                 service: service.clone(),
                 port_name: port_name.clone(),
                 port: *port,
@@ -767,7 +818,7 @@ pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orp
             // Never the engine of the Daemon in place of the one the volume is on.
             let found = found
                 .iter()
-                .find(|found| found.record.repository == orphan.repository && found.volumes.contains(volume))
+                .find(|found| found.record.repository == orphan.id.repository && found.volumes.contains(volume))
                 .ok_or(DeleteError::Unrecorded)?;
             remove(&["volume", "rm", volume], &found.record.env)
         }

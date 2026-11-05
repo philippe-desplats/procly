@@ -1064,7 +1064,7 @@ fn init(json: bool) -> anyhow::Result<ExitCode> {
 /// Runs `gc`, printing each Orphan, or with `apply` each deletion on stdout and each failure on stderr.
 fn gc(state: &StateDir, apply: bool, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    let report = match client::send(state, &Request::Gc { cwd, apply })? {
+    let report = match client::send(state, &Request::Gc { cwd, apply, only: None })? {
         Response::Gc(report) => report,
         other => return unexpected(other),
     };
