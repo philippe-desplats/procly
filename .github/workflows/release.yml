@@ -306,8 +306,9 @@ jobs:
   homebrew:
     name: Update the Homebrew tap
     needs: [version, release]
-    # A prerelease is never offered through `brew install`, neither the formula nor the cask.
-    if: needs.version.outputs.prerelease == 'false'
+    # A prerelease is never offered through `brew install`, neither the formula nor the cask. The condition names a
+    # status function so that a failed `app` job upstream of `release` cannot skip the formula of a CLI-only release.
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.version.outputs.prerelease == 'false' }}
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
