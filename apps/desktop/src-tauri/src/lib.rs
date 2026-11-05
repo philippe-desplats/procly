@@ -6,6 +6,7 @@
 mod apps;
 mod atomic;
 mod daemon;
+mod lifecycle;
 mod menu;
 mod needs_you;
 mod opening;
@@ -159,6 +160,8 @@ pub fn run() {
             last_update,
             mark_seen,
             refresh,
+            lifecycle::start_daemon,
+            lifecycle::restart_daemon,
             apps::detected_apps,
             opening::open_worktree,
             opening::reveal_worktree,
