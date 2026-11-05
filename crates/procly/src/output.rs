@@ -12,6 +12,13 @@ use crate::daemon::clock::Clock;
 /// The recent output kept per Job or Service.
 pub(crate) const CAPACITY: usize = 1024 * 1024;
 
+/// The ended Jobs the Daemon keeps per Worktree, the Jobs started outside any Worktree forming one group of their own.
+/// Not a setting.
+pub(crate) const ENDED_JOBS_PER_WORKTREE: usize = 20;
+
+/// The ended Jobs the Daemon keeps in all, whatever their Worktrees. Not a setting.
+pub(crate) const ENDED_JOBS_TOTAL: usize = 200;
+
 /// A ring buffer of raw output bytes that drops its oldest lines once full.
 #[derive(Debug)]
 pub(crate) struct OutputBuffer {

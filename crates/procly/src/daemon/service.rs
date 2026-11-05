@@ -288,6 +288,13 @@ impl Services {
         stopping
     }
 
+    /// Forgets every ended Service of `worktree`, for a Worktree release that has stopped what ran. A Service that
+    /// runs stays, and is keyed by its name again once started.
+    pub(crate) fn remove_ended_in(&self, worktree: &Path) {
+        self.table()
+            .retain(|(path, _), service| path != worktree || service.is_running());
+    }
+
     /// Asks every running Service of the Repository whose common git directory is `git_common_dir` to stop, whatever
     /// its Worktree, including one git no longer lists. Returns them sorted by Worktree and name, to wait for with
     /// [`Service::ended`].
