@@ -31,9 +31,11 @@ pub enum Request {
         env: Vec<(String, String)>,
         timeout_ms: u64,
     },
-    /// Answers once the Job has ended.
+    /// Answers once the Job has ended. An ended Job the Daemon no longer keeps, evicted by its bound or forgotten by a
+    /// Worktree release, is an unknown Job and answers [`Response::Error`].
     Wait { job: String },
-    /// Answers the recent output of the Job `name`, or else of the Service `name` of the Worktree holding `cwd`. The
+    /// Answers the recent output of the Job `name`, or else of the Service `name` of the Worktree holding `cwd`. An
+    /// ended Job that was evicted is no longer found, as for [`Request::Wait`]. The
     /// output of a Compose service is the one of its container, read with `docker compose` in `env`.
     ///
     /// With `follow`, the answer is a stream: [`Response::Logs`] with the backlog, then [`Response::Output`] as output

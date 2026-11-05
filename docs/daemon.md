@@ -86,3 +86,16 @@ $ procly unit remove --json
 - a running container of a compose project whose directory is in the Worktree, unless Procly started or adopted it, as `foreign container <name> (compose project <project>, service <service>) port <port>`
 
 `procly status --json` carries them in the `foreign` list of each Worktree that has some, with a `kind` of `process` or `container`, and leaves the list out of a Worktree that has none. Processes are found with `lsof`, which on macOS sees only the processes of your user, and containers with `docker ps`. Without `lsof` or a running Docker engine, the list is empty. Procly never stops a Foreign process, see [Containers started outside Procly](configuration.md#containers-started-outside-procly) for the ones in the way of a Compose service.
+
+## Ended Jobs
+
+The Daemon keeps a Job after it ended, so that `procly wait` and `procly logs` can still answer for it. It keeps a bounded number of them, so that its memory stays bounded however long it runs:
+
+- at most 20 ended Jobs per Worktree, the Jobs started outside any Worktree counting as one group of their own
+- at most 200 ended Jobs in all, whatever their Worktrees
+
+When a Job ends and a bound is exceeded, the oldest Job that ended with exit code 0 goes first. A Job that failed, was killed by a signal or reached its timeout goes only once no success is left, so that a failure nobody has looked at stays visible as long as possible. The Job that has just ended is never the one evicted, so in a Worktree holding 20 ended failures, a Job that ends with exit code 0 is kept and the oldest failure goes. A Job that runs is never evicted, and there is no age limit and no timer. The bounds are fixed, they are not settings.
+
+`wait` and `logs` on an evicted Job fail as for an identifier that never existed, with exit code 125 and `no job <id>` on stderr. The Daemon also forgets its ended Jobs when it restarts, and a [Worktree release](worktree-release.md) forgets those of its Worktree.
+
+Ended Services are not bounded. Each stays reported by `procly status` under its Worktree and name until `up` starts it again, a Worktree release forgets it, or the Daemon restarts.
