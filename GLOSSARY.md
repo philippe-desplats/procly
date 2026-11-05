@@ -64,6 +64,10 @@ _Avoid_: hash, key
 The outcome of a start request that found the Service or Job already running and returned it unchanged.
 _Avoid_: attach, dedupe
 
+**Restart**:
+The request that stops a Service if it runs and starts it again with the environment of the last `up` that started it, which the Daemon holds in memory (ADR 0014).
+_Avoid_: reload, respawn
+
 **Foreign process**:
 A dev process or container in a Worktree that was started outside Procly.
 _Avoid_: rogue process, external server
@@ -205,4 +209,5 @@ _Avoid_: uninstall, teardown
 - "server" in Portly meant any supervised command. Resolved: Procly says **Service** for declared work and **Job** for ad hoc commands, and "server" is retired.
 - "temporary job" in Portly was a background command with a deadline. Resolved: Procly calls it a **Job**, deduplicated by its **Fingerprint**, which Portly's did not do.
 - "workspace" names the Cargo workspace in build files and Rust rules, never a Worktree. "supervisor" describes what Procly is, the running process is the **Daemon**.
+- "restart" covers 3 things. Resolved: a **Restart** is the request a person sends for one Service, the automatic restart of a Service that crashed is its restart policy (`restart_attempts`), and restarting the **Daemon** stops every Service it supervises.
 - "reserved ports" was used both for OAuth callback ports and for ports kept by `develop`. Resolved: the first is a **Pool**, the second is a **Pinned branch**.
