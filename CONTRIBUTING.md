@@ -43,10 +43,13 @@ A fresh clone builds with `cargo` alone, but the app it builds shows a placehold
 
 The app starts and restarts the Daemon with the `procly` beside its own executable. Run from the workspace, that is `target/debug/procly`, so build the CLI (`cargo build -p procly`) before using "Start the Daemon". `make bundle` builds a bundle that embeds the CLI as a sidecar, see `docs/rules/tauri.md`.
 
+`make e2e` builds the app with the `e2e` feature and drives its real window against an isolated Daemon, see [ADR 0016](docs/adr/0016-end-to-end-tests-drive-the-built-app-through-webdriver.md). It is not part of `make check`, it opens a window, so run it on a machine where you can spare the display. On Linux it needs a display, run it as `xvfb-run --auto-servernum make e2e`. The CI runs it on every pull request.
+
 ```sh
 make build        # cargo build --workspace --all-targets --locked
 make fmt          # apply the formatting
 make check        # what the CI runs, run it before pushing
+make e2e          # end-to-end tests of the desktop app, they open its window
 ```
 
 The project rules live in [`docs/rules/`](docs/rules): [`rust.md`](docs/rules/rust.md) for crate layout, errors, async and tests, [`processes.md`](docs/rules/processes.md) for spawning, stopping and output capture. The API of `process-wrap` and `portable-pty` at the pinned versions is vendored under [`docs/reference/`](docs/reference/README.md), regenerated with `make docs`.

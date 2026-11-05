@@ -14,6 +14,11 @@ name = "procly_desktop_lib"
 [build-dependencies]
 tauri-build.workspace = true
 
+[features]
+# Opens a WebDriver server on a loopback port so that `make e2e` can drive the window (ADR 0016). Off by default,
+# never in a release.
+e2e = ["dep:tauri-plugin-wdio-webdriver"]
+
 [dependencies]
 # The `ts` feature exports the TypeScript types of the protocol while `cargo test` runs (ADR 0015).
 procly-client = { workspace = true, features = ["ts"] }
@@ -21,6 +26,7 @@ procly-client = { workspace = true, features = ["ts"] }
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 tauri.workspace = true
+tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 
