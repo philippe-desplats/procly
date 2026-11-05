@@ -184,6 +184,14 @@ fn evict(jobs: &mut HashMap<String, Arc<Job>>, spared: Option<u64>) {
     }
 }
 
+/// Adds `job` under `id`, then evicts. A Job that ended before it was inserted could not evict when it ended, and as
+/// the one that has just ended it is spared as well.
+fn insert(jobs: &mut HashMap<String, Arc<Job>>, id: String, job: Arc<Job>) {
+    let spared = job.finished.get().map(|finished| finished.order);
+    jobs.insert(id, job);
+    evict(jobs, spared);
+}
+
 impl Jobs {
     /// Returns the running Job with the Fingerprint of `spec`, or spawns a new one without waiting for it.
     /// Must run inside the Tokio runtime.
@@ -206,9 +214,7 @@ impl Jobs {
         loop {
             let id = new_job_id();
             if !table.contains_key(&id) {
-                table.insert(id.clone(), job);
-                // A Job that ended before it was inserted could not evict when it ended.
-                evict(&mut table, None);
+                insert(&mut table, id.clone(), job);
                 return Ok((id, StartOutcome::Started));
             }
         }
@@ -504,8 +510,10 @@ mod tests {
     #[test]
     fn the_21st_ended_job_of_a_worktree_evicts_the_oldest_success() {
         let table = Table::default();
+        // A failure older than the success, which must not go first for being the oldest.
+        ended(&table, "oldest-failure", Some("/p/app"), failed());
         ended(&table, "success", Some("/p/app"), succeeded());
-        for n in 1..ENDED_JOBS_PER_WORKTREE {
+        for n in 2..ENDED_JOBS_PER_WORKTREE {
             ended(&table, &format!("job{n:02}"), Some("/p/app"), failed());
         }
         assert_eq!(
@@ -519,7 +527,7 @@ mod tests {
         let ids = known(&table);
         assert_eq!(ids.len(), ENDED_JOBS_PER_WORKTREE);
         assert!(!ids.contains(&"success".to_owned()), "the success went first");
-        assert!(ids.contains(&"job01".to_owned()), "the older failures stayed");
+        assert!(ids.contains(&"oldest-failure".to_owned()), "the older failure stayed");
     }
 
     #[test]
@@ -634,12 +642,30 @@ mod tests {
         let early = job(Some("/p/app"));
         table.finished(&early, succeeded());
         let mut jobs = table.lock();
-        jobs.insert("early".to_owned(), early);
-        evict(&mut jobs, None);
+        insert(&mut jobs, "early".to_owned(), early);
 
         assert_eq!(jobs.len(), ENDED_JOBS_PER_WORKTREE);
         assert!(!jobs.contains_key("job00"));
         assert!(jobs.contains_key("early"));
+    }
+
+    #[test]
+    fn a_success_that_ended_before_it_was_inserted_is_kept_over_the_oldest_failure() {
+        let table = Table::default();
+        for n in 0..ENDED_JOBS_PER_WORKTREE {
+            ended(&table, &format!("job{n:02}"), Some("/p/app"), failed());
+        }
+        let early = job(Some("/p/app"));
+        table.finished(&early, succeeded());
+        let mut jobs = table.lock();
+        insert(&mut jobs, "early".to_owned(), early);
+
+        assert_eq!(jobs.len(), ENDED_JOBS_PER_WORKTREE);
+        assert!(
+            jobs.contains_key("early"),
+            "the Job that has just ended was evicted at its insert"
+        );
+        assert!(!jobs.contains_key("job00"), "the oldest failure went in its place");
     }
 
     #[test]
