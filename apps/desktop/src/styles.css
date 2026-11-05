@@ -412,3 +412,34 @@ body {
   align-items: flex-start;
   gap: 2px;
 }
+
+/* The line of a row that has controls under it: the same line a plain row draws. */
+.item-line {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  align-self: stretch;
+}
+
+/* Stop and Restart of one Service, and the command to copy when the app cannot restart it. Nothing here is red. */
+.controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  align-self: stretch;
+  margin: 4px 0;
+}
+
+.controls-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.controls .copybox {
+  align-self: stretch;
+}
+
+.controls .error {
+  margin: 0;
+}

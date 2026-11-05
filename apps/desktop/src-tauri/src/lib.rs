@@ -12,6 +12,7 @@ mod needs_you;
 mod opening;
 mod orphans;
 mod poller;
+mod services;
 mod settings;
 
 use daemon::DaemonClient;
@@ -180,6 +181,8 @@ pub fn run() {
             opening::reveal_worktree,
             orphans::list_orphans,
             orphans::delete_orphans,
+            services::stop_service,
+            services::restart_service,
             settings::get_settings,
             settings::save_settings,
         ])
