@@ -5,19 +5,28 @@
 
 mod apps;
 mod atomic;
+mod clipboard;
 mod daemon;
+mod glyph;
 mod lifecycle;
+mod login_item;
 mod menu;
 mod needs_you;
 mod opening;
 mod poller;
 mod settings;
+mod tray;
+mod tray_menu;
+mod window;
 
 use daemon::DaemonClient;
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
 use tauri::{AppHandle, Emitter as _, Manager as _, State, Window, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
+use tray::Tray;
+use window::{Host as _, MainWindow};
 
 /// The event that carries each answer of the poller to the window.
 const DAEMON_UPDATE: &str = "daemon-update";
@@ -60,10 +69,13 @@ async fn mark_seen(
     saved
 }
 
-/// Tells the window about an answer.
+/// Tells the window and the menu bar icon about an answer.
 fn publish(app: &AppHandle, presented: &Presented) {
     // A window that is gone has nothing to be told, the next one asks `last_update`.
     let _ = app.emit(DAEMON_UPDATE, presented);
+    if let Some(tray) = app.try_state::<Tray>() {
+        tray.show(app, presented);
+    }
 }
 
 /// Asks the poller for a tick now. It never starts, stops or restarts anything.
@@ -87,8 +99,15 @@ fn window_state(window: &Window) -> WindowState {
     )
 }
 
-/// Tells the poller about a window event that changes where the window stands.
+/// Tells the poller about a window event that changes where the window stands. Closing the window hides it instead of
+/// ending the app, which stays in the menu bar until the developer quits it.
 fn follow_window(window: &Window, event: &WindowEvent) {
+    if let WindowEvent::CloseRequested { api, .. } = event
+        && window.label() == window::MAIN
+    {
+        api.prevent_close();
+        window::close(&MainWindow(window.app_handle()));
+    }
     let state = match event {
         WindowEvent::Focused(_) | WindowEvent::Resized(_) => window_state(window),
         WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => WindowState::Closed,
@@ -99,7 +118,8 @@ fn follow_window(window: &Window, event: &WindowEvent) {
     }
 }
 
-/// Runs the app until its last window closes. Closing the window or quitting the app stops nothing in the Daemon.
+/// Runs the app until the developer quits it. Closing the window leaves it in the menu bar, and neither closing the
+/// window nor quitting the app stops anything in the Daemon.
 ///
 /// # Panics
 ///
@@ -108,12 +128,25 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let client = DaemonClient::resolve()?;
+            let shown = MainWindow(app.handle());
+            // `LSUIElement` starts a bundled app with no Dock icon, and this does the same when it runs unbundled.
+            shown.set_dock_visibility(false);
+            app.manage(SettingsStore::open(app.path().app_config_dir()?.join(SETTINGS_FILE)));
+            // Open at login starts the app hidden: no window, only the glyph, and no Daemon, which the app never starts
+            // by itself. Any other launch opens the window.
+            let hidden = window::launched_hidden(std::env::args().skip(1));
+            if !hidden {
+                shown.open();
+            }
             // Told as soon as the window moves, but the first tick should already match how it opened.
-            let opened = app
-                .get_webview_window("main")
-                .map_or(WindowState::Front, |window| window_state(&window.as_ref().window()));
+            let opened = if hidden {
+                WindowState::Closed
+            } else {
+                WindowState::Front
+            };
             let attention = Attention::open(app.path().app_data_dir()?.join(SEEN_FILE));
             let poller = Poller::start(client.clone(), opened);
+            app.manage(Tray::create(app.handle())?);
             let mut updates = poller.subscribe();
             let handle = app.handle().clone();
             let seen = attention.clone();
@@ -138,12 +171,17 @@ pub fn run() {
             app.manage(client);
             app.manage(poller);
             app.manage(attention);
-            app.manage(SettingsStore::open(app.path().app_config_dir()?.join(SETTINGS_FILE)));
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())
         })
-        // The window reopens where it was left, with no visible setting.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // The window reopens where it was left, with no visible setting. Whether it shows is not part of what is
+        // restored: Open at login starts the app hidden, and the app decides at launch.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .build(),
+        )
+        .plugin(login_item::plugin())
         .on_menu_event(|app, event| {
             if menu::is_refresh(&event)
                 && let Some(poller) = app.try_state::<Poller>()
@@ -167,9 +205,20 @@ pub fn run() {
             opening::reveal_worktree,
             settings::get_settings,
             settings::save_settings,
+            login_item::get_open_at_login,
+            login_item::set_open_at_login,
         ])
-        .run(tauri::generate_context!())
-        .expect("the Tauri application runs");
+        .build(tauri::generate_context!())
+        .expect("the Tauri application builds")
+        .run(|app, event| {
+            // Clicking the Dock icon or opening the app again brings the window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                MainWindow(app).open();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]
@@ -201,6 +250,26 @@ mod tests {
             .collect();
 
         assert!(opener.is_empty(), "{opener:?}");
+    }
+
+    #[test]
+    fn the_window_is_granted_no_autostart_permission() {
+        // Rust switches Open at login through 2 commands, so the window cannot write a LaunchAgent of its own making.
+        let autostart: Vec<_> = granted()
+            .into_iter()
+            .filter(|name| name.starts_with("autostart:"))
+            .collect();
+
+        assert!(autostart.is_empty(), "{autostart:?}");
+    }
+
+    #[test]
+    fn the_window_starts_hidden_so_that_the_app_decides_at_launch_whether_it_opens() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("the Tauri configuration");
+
+        assert_eq!(config["app"]["windows"][0]["visible"], false);
+        assert_eq!(config["app"]["windows"][0]["label"], "main");
     }
 
     #[test]

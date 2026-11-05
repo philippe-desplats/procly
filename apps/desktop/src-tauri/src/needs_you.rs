@@ -240,6 +240,18 @@ pub(crate) struct Presented {
     seen: Vec<FailureKey>,
 }
 
+impl Presented {
+    /// The answer of the poller.
+    pub(crate) fn update(&self) -> &Update {
+        &self.update
+    }
+
+    /// What needs the developer in the answer, which the menu bar menu lists as the window does.
+    pub(crate) fn needs_you(&self) -> &[NeedsYou] {
+        &self.needs_you
+    }
+}
+
 /// The Seen set as the rest of the app holds it, with the file it survives in.
 #[derive(Debug, Clone)]
 pub(crate) struct Attention {

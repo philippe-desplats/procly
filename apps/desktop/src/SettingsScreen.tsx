@@ -4,7 +4,9 @@ import {
   type DetectedApps,
   detectedApps,
   failureOf,
+  loadOpenAtLogin,
   loadSettings,
+  saveOpenAtLogin,
   saveSettings,
   type Settings,
 } from "./settings";
@@ -16,21 +18,23 @@ const OTHER = "__other__";
 const NONE = "";
 
 /**
- * The Settings screen. Every change applies at once, there is no Save button. Only the "Open with" section lives here
- * yet, the others come with the behaviour they set.
+ * The Settings screen. Every change applies at once, there is no Save button. The "General" and "Open with" sections
+ * live here, the others come with the behaviour they set.
  */
 export function SettingsScreen({ focusEditor }: { focusEditor: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [apps, setApps] = useState<DetectedApps | null>(null);
+  const [openAtLogin, setOpenAtLogin] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let stopped = false;
-    Promise.all([loadSettings(), detectedApps()])
-      .then(([loaded, detected]) => {
+    Promise.all([loadSettings(), detectedApps(), loadOpenAtLogin()])
+      .then(([loaded, detected, login]) => {
         if (!stopped) {
           setSettings(loaded);
           setApps(detected);
+          setOpenAtLogin(login);
         }
       })
       .catch((reason: unknown) => {
@@ -52,6 +56,21 @@ export function SettingsScreen({ focusEditor }: { focusEditor: boolean }) {
     });
   }
 
+  /** Asks the system to switch Open at login, and shows the state the system ends up in, whatever was asked. */
+  function switchOpenAtLogin(enabled: boolean): void {
+    setError(null);
+    saveOpenAtLogin(enabled)
+      .then(setOpenAtLogin)
+      .catch((reason: unknown) => {
+        setError(failureOf(reason).message);
+        loadOpenAtLogin()
+          .then(setOpenAtLogin)
+          .catch(() => {
+            // The switch keeps what it showed, and the error above says why it did not change.
+          });
+      });
+  }
+
   return (
     <section aria-label="Settings">
       <h2 className="title">Settings</h2>
@@ -59,6 +78,21 @@ export function SettingsScreen({ focusEditor }: { focusEditor: boolean }) {
         <p role="alert" className="error">
           {error}
         </p>
+      )}
+      {settings === null || apps === null || openAtLogin === null ? null : (
+        <section aria-labelledby="general">
+          <h3 id="general" className="subtitle">
+            General
+          </h3>
+          <Switch
+            label="Show in Dock while the window is open"
+            checked={settings.show_in_dock}
+            onChange={(show_in_dock) => {
+              apply({ ...settings, show_in_dock });
+            }}
+          />
+          <Switch label="Open at login" checked={openAtLogin} onChange={switchOpenAtLogin} />
+        </section>
       )}
       {settings === null || apps === null ? null : (
         <section aria-labelledby="open-with">
@@ -97,6 +131,31 @@ export function SettingsScreen({ focusEditor }: { focusEditor: boolean }) {
         </section>
       )}
     </section>
+  );
+}
+
+/** A setting that is on or off, drawn as a checkbox that reads as a switch to a screen reader. */
+function Switch({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="switch">
+      <input
+        type="checkbox"
+        role="switch"
+        checked={checked}
+        onChange={(event) => {
+          onChange(event.target.checked);
+        }}
+      />
+      {label}
+    </label>
   );
 }
 

@@ -11,6 +11,7 @@ repository = "https://github.com/philippe-desplats/procly"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6", features = ["derive"] }
 nix = { version = "0.31.3", features = ["fs", "process", "signal", "user"] }
 portable-pty = "0.9.0"
@@ -20,8 +21,9 @@ rmcp = { version = "3.6", features = ["transport-io"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
-tauri = "2.12"
+tauri = { version = "2.12", features = ["image-png", "tray-icon"] }
 tauri-build = "2.7"
+tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
 tempfile = "3.27.0"

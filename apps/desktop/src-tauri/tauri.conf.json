@@ -13,6 +13,7 @@
       {
         "label": "main",
         "title": "Procly",
+        "visible": false,
         "width": 1100,
         "height": 720,
         "minWidth": 800,

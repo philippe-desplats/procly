@@ -36,9 +36,12 @@ function app(
     apps?: DetectedApps;
     opening?: (command: string, args: unknown) => unknown;
     saving?: () => unknown;
+    /** What the system says about Open at login, and what it answers when the switch is asked to change. */
+    login?: { enabled: boolean; switching?: (enabled: boolean) => unknown };
   } = {},
 ): Call[] {
   const calls: Call[] = [];
+  let loginItem = options.login?.enabled ?? false;
   mockIPC(
     (command, args) => {
       calls.push({ command, args });
@@ -46,9 +49,20 @@ function app(
         case "last_update":
           return FIXED;
         case "get_settings":
-          return options.settings ?? { editor: null, terminal: "Terminal" };
+          return options.settings ?? { editor: null, terminal: "Terminal", show_in_dock: true };
         case "detected_apps":
           return options.apps ?? APPS;
+        case "get_open_at_login":
+          return loginItem;
+        case "set_open_at_login": {
+          const { enabled } = args as { enabled: boolean };
+          const refused = options.login?.switching?.(enabled);
+          if (refused !== undefined) {
+            return refused;
+          }
+          loginItem = enabled;
+          return loginItem;
+        }
         case "save_settings":
           return options.saving?.();
         case "open_worktree":
@@ -95,7 +109,7 @@ describe("the Settings screen", () => {
   });
 
   it("shows the editor and the terminal the Rust side holds, among the apps it detected", async () => {
-    app({ settings: { editor: "Cursor", terminal: "iTerm" } });
+    app({ settings: { editor: "Cursor", terminal: "iTerm", show_in_dock: true } });
     render(<App store={createDaemonStore()} />);
 
     await openSettings();
@@ -125,7 +139,7 @@ describe("the Settings screen", () => {
   });
 
   it("applies a choice at once, with no Save button, and keeps the other field", async () => {
-    const calls = app({ settings: { editor: null, terminal: "iTerm" } });
+    const calls = app({ settings: { editor: null, terminal: "iTerm", show_in_dock: true } });
     render(<App store={createDaemonStore()} />);
     await openSettings();
     const editor = await screen.findByRole("combobox", { name: "Editor" });
@@ -136,19 +150,21 @@ describe("the Settings screen", () => {
     fireEvent.change(editor, { target: { value: "Zed" } });
 
     await waitFor(() => {
-      expect(saved(calls)).toEqual([{ settings: { editor: "Zed", terminal: "iTerm" } }]);
+      expect(saved(calls)).toEqual([{ settings: { editor: "Zed", terminal: "iTerm", show_in_dock: true } }]);
     });
     expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole("combobox", { name: "Terminal" }), { target: { value: "Ghostty" } });
 
     await waitFor(() => {
-      expect(saved(calls).at(-1)).toEqual({ settings: { editor: "Zed", terminal: "Ghostty" } });
+      expect(saved(calls).at(-1)).toEqual({
+        settings: { editor: "Zed", terminal: "Ghostty", show_in_dock: true },
+      });
     });
   });
 
   it("takes None as no editor", async () => {
-    const calls = app({ settings: { editor: "Zed", terminal: "Terminal" } });
+    const calls = app({ settings: { editor: "Zed", terminal: "Terminal", show_in_dock: true } });
     render(<App store={createDaemonStore()} />);
     await openSettings();
     const editor = await screen.findByRole("combobox", { name: "Editor" });
@@ -159,7 +175,9 @@ describe("the Settings screen", () => {
     fireEvent.change(editor, { target: { value: "" } });
 
     await waitFor(() => {
-      expect(saved(calls)).toEqual([{ settings: { editor: null, terminal: "Terminal" } }]);
+      expect(saved(calls)).toEqual([
+        { settings: { editor: null, terminal: "Terminal", show_in_dock: true } },
+      ]);
     });
   });
 
@@ -177,12 +195,14 @@ describe("the Settings screen", () => {
     fireEvent.change(name, { target: { value: "Nova" } });
 
     await waitFor(() => {
-      expect(saved(calls)).toEqual([{ settings: { editor: "Nova", terminal: "Terminal" } }]);
+      expect(saved(calls)).toEqual([
+        { settings: { editor: "Nova", terminal: "Terminal", show_in_dock: true } },
+      ]);
     });
   });
 
   it("shows an app that was typed and is not detected as Other, with its name", async () => {
-    app({ settings: { editor: "Nova", terminal: "Terminal" } });
+    app({ settings: { editor: "Nova", terminal: "Terminal", show_in_dock: true } });
     render(<App store={createDaemonStore()} />);
 
     await openSettings();
@@ -192,7 +212,7 @@ describe("the Settings screen", () => {
   });
 
   it("keeps the default terminal when the name typed is cleared", async () => {
-    const calls = app({ settings: { editor: null, terminal: "Alacritty" } });
+    const calls = app({ settings: { editor: null, terminal: "Alacritty", show_in_dock: true } });
     render(<App store={createDaemonStore()} />);
     await openSettings();
 
@@ -245,6 +265,117 @@ describe("the Settings screen", () => {
     });
 
     expect(await screen.findByRole("heading", { name: "Open with" })).toBeInTheDocument();
+  });
+});
+
+describe("the General section of Settings", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  it("holds the Dock switch, on by default, and Open at login, off by default", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    await openSettings();
+
+    expect(await screen.findByRole("heading", { name: "General" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Show in Dock while the window is open" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Open at login" })).not.toBeChecked();
+  });
+
+  it("applies the Dock switch at once and keeps the other settings", async () => {
+    const calls = app({ settings: { editor: "Zed", terminal: "iTerm", show_in_dock: true } });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    const dock = await screen.findByRole("switch", { name: "Show in Dock while the window is open" });
+
+    fireEvent.click(dock);
+
+    await waitFor(() => {
+      expect(saved(calls)).toEqual([{ settings: { editor: "Zed", terminal: "iTerm", show_in_dock: false } }]);
+    });
+    expect(dock).not.toBeChecked();
+  });
+
+  it("shows the Dock switch off when the settings say so", async () => {
+    app({ settings: { editor: null, terminal: "Terminal", show_in_dock: false } });
+    render(<App store={createDaemonStore()} />);
+
+    await openSettings();
+
+    expect(
+      await screen.findByRole("switch", { name: "Show in Dock while the window is open" }),
+    ).not.toBeChecked();
+  });
+
+  it("reads Open at login from the system, so that a login item removed elsewhere shows as off", async () => {
+    app({ login: { enabled: true } });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "Open at login" })).toBeChecked();
+    });
+    cleanup();
+    clearMocks();
+
+    app({ login: { enabled: false } });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "Open at login" })).not.toBeChecked();
+    });
+  });
+
+  it("asks Rust to switch Open at login and shows what the system says afterwards", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    const login = await screen.findByRole("switch", { name: "Open at login" });
+
+    fireEvent.click(login);
+
+    await waitFor(() => {
+      expect(login).toBeChecked();
+    });
+    expect(calls.filter((call) => call.command === "set_open_at_login")).toEqual([
+      { command: "set_open_at_login", args: { enabled: true } },
+    ]);
+  });
+
+  it("never sends Open at login with the settings, which Rust does not store", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    fireEvent.click(await screen.findByRole("switch", { name: "Open at login" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Show in Dock while the window is open" }));
+
+    await waitFor(() => {
+      expect(saved(calls)).toHaveLength(1);
+    });
+    expect(JSON.stringify(saved(calls))).not.toContain("login");
+  });
+
+  it("says when the system refuses the change and shows the state it kept", async () => {
+    app({
+      login: {
+        enabled: false,
+        switching: () =>
+          Promise.reject({ kind: "login_item", message: "cannot change Open at login: denied" }),
+      },
+    });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    const login = await screen.findByRole("switch", { name: "Open at login" });
+
+    fireEvent.click(login);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("cannot change Open at login: denied");
+    await waitFor(() => {
+      expect(login).not.toBeChecked();
+    });
   });
 });
 
