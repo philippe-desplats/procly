@@ -14,13 +14,17 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
     }
     ```
 
-- **ALWAYS** reach `doctor` by running `procly doctor --json`, never by sending `Request::Doctor`.
-  - ADR 0009: the checks of the installation live in the CLI and must still report a Daemon that does not run, so `doctor` is the only verb the app reaches through the CLI.
-  - Example: the `doctor` command runs the `procly` executable the app was given, with `doctor --json`, and returns the parsed document.
+- **ALWAYS** reach `doctor` and `daemon stop` by running `procly doctor --json` and `procly daemon stop --json`, never through a socket request.
+  - ADR 0009: these are the only 2 verbs the app reaches through the CLI. The checks of the installation must still report a Daemon that does not run, and stopping a Daemon of another protocol version cannot go through a socket it would refuse.
+  - Example: the `restart_daemon` command runs `procly daemon stop --json`, then calls `connect_or_start`, and only after the developer confirmed that every running Service stops.
 
-- **NEVER** let the app guess the `procly` executable from `current_exe()`, pass its path explicitly to `connect_or_start` and to the `doctor` command.
-  - Inside a Tauri bundle `current_exe()` is the app, and starting it with `daemon` would launch a second app instead of the Daemon.
-  - Example: `DaemonClient::connect_or_start(socket_path, &procly_exe)`.
+- **NEVER** let the app guess the `procly` executable, pass the sidecar it embeds explicitly to `connect_or_start` and to every CLI command.
+  - Inside a Tauri bundle `current_exe()` is the app, and starting it with `daemon` would launch a second app instead of the Daemon. A `procly` found on the `PATH` may be another release, whose Daemon the app could not talk to.
+  - Example: `DaemonClient::connect_or_start(socket_path, &procly_exe)`, where `procly_exe` is `Procly.app/Contents/MacOS/procly`.
+
+- **NEVER** start the Daemon implicitly, refresh with `connect` and call `connect_or_start` only from an action the developer took.
+  - A Daemon the developer stopped must stay stopped, and a Session unit keeps it running anyway when one is installed.
+  - Example: a refresh that finds no socket shows the "Daemon not running" state with the `doctor` report, it does not start one.
 
 - **NEVER** open a TCP or HTTP listener from the app to talk to the Daemon.
   - ADR 0003: the Daemon listens on a `0600` Unix socket only, and a loopback HTTP API is reachable from any browser tab.
