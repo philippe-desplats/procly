@@ -328,6 +328,49 @@ fn docker_a_worktree_release_lets_go_of_the_compose_service_like_down_and_keeps_
 }
 
 #[test]
+fn docker_a_dry_run_of_a_worktree_release_tells_what_it_would_let_go_of_and_schedules_no_stop() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("grace_period = \"1m\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let port = fixture.port;
+
+    let other = fixture
+        .procly
+        .procly_in(&fixture.other, &["worktree", "release", "--dry-run"]);
+    assert_success(&other);
+    assert_eq!(stdout(&other), "db would release, 1 other Worktree still needs it\n");
+    // The Worktree is still counted, so that the real release says the same.
+    let real = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+    assert_eq!(stdout(&real), "db released, 1 other Worktree still needs it\n");
+
+    let main = fixture
+        .procly
+        .procly_in(&fixture.main, &["worktree", "release", "--dry-run"]);
+    assert_success(&main);
+    assert_eq!(
+        stdout(&main),
+        format!(
+            "db would release, it would stop after 1m unless a Worktree needs it again\n\
+             lease db.db port {port} kept, its container still runs\n"
+        )
+    );
+    // No stop was scheduled: the container outlives the Grace period of a release that never ran.
+    fixture.procly.advance_clock(Duration::from_mins(5));
+    assert!(fixture.project.is_running(), "a dry run scheduled a stop");
+    let real = fixture.procly.procly_in(&fixture.main, &["worktree", "release"]);
+    assert_eq!(
+        stdout(&real),
+        format!(
+            "db released, it stops after 1m unless a Worktree needs it again\n\
+             lease db.db port {port} kept, its container still runs\n"
+        )
+    );
+}
+
+#[test]
 fn docker_a_compose_file_that_does_not_publish_the_lease_is_refused() {
     let Some(_docker) = require_docker() else {
         return;

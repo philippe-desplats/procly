@@ -37,11 +37,21 @@ pub enum Request {
     Wait { job: String },
     /// Answers the recent output of the Job `name`, or else of the Service `name` of the Worktree holding `cwd`. The
     /// output of a Compose service is the one of its container, read with `docker compose` in `env`.
+    ///
+    /// With `follow`, the answer is a stream: [`Response::Logs`] with the backlog, then [`Response::Output`] as output
+    /// arrives, through the automatic restarts of a Service that crashed, then [`Response::LogsEnded`] once the Job
+    /// or the Service has ended. A reader too slow to keep up gets [`Response::OutputDropped`] in place of what it
+    /// missed, the Daemon never waits for it. The client sends nothing after its request, and cancels by closing the
+    /// connection, or only its writing half. A Compose service cannot be followed, and answers [`Response::Error`]
+    /// with the `docker compose logs -f` command to run instead.
     Logs {
         name: String,
         cwd: PathBuf,
         /// The environment of the requesting command, as for `Up`.
         env: Vec<(String, String)>,
+        /// False when absent.
+        #[serde(default)]
+        follow: bool,
     },
     /// Starts a declared Service of the Worktree holding `cwd`, or finds it running, and answers once it is healthy.
     /// Without `service`, starts every declared Service that no Group covers.
@@ -87,7 +97,12 @@ pub enum Request {
     Gc { cwd: PathBuf, apply: bool },
     /// Runs the Worktree release of the Worktree holding `path`: stops its Services and Jobs, lets go of its Compose
     /// services and releases its Leases, apart from those of a Pinned branch, and answers once their trees are gone.
-    WorktreeRelease { path: PathBuf },
+    /// With `dry_run`, false when absent, it answers with what the release would do and changes nothing.
+    WorktreeRelease {
+        path: PathBuf,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Runs the checks only the Daemon can answer, and tells which version it is.
     Doctor,
     /// Writes the Worktrunk hooks block into the `.config/wt.toml` of the Worktree holding `cwd`, unless a hook is
@@ -204,6 +219,16 @@ pub enum Response {
         /// The Service that needs this one, when `up` was asked for that one instead.
         needed_by: Option<String>,
     },
+    /// Output the Job or the Service printed after the backlog of a followed [`Request::Logs`].
+    Output {
+        text: String,
+    },
+    /// Output a followed [`Request::Logs`] did not carry, as its reader was too slow to keep up.
+    OutputDropped {
+        bytes: u64,
+    },
+    /// The Job or the Service of a followed [`Request::Logs`] has ended, and every line of its output was sent.
+    LogsEnded,
 }
 
 /// Something started outside Procly that holds what a Service needs.
@@ -576,6 +601,13 @@ pub struct RepositoryStatus {
 pub struct WorktreeStatus {
     #[serde(flatten)]
     pub worktree: Worktree,
+    /// The branch checked out in the Worktree, as the short name git lists it under. Left out on a detached `HEAD`,
+    /// for a Worktree git no longer lists, and in a Repository without a branch to report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Whether `git worktree list` still lists the Worktree. A Worktree the Daemon ran something in, and that git
+    /// no longer lists, is reported with `false`.
+    pub listed: bool,
     pub services: Vec<ServiceStatus>,
     pub jobs: Vec<JobStatus>,
     /// What runs in the Worktree without Procly having started it. Left out when empty, so that the status of a
@@ -609,6 +641,9 @@ pub struct ServiceStatus {
     pub port: Option<u16>,
     /// Whether a previous Daemon started the Service, and this one found it running when it started.
     pub reattached: bool,
+    /// When the Service last started, in milliseconds since the Unix epoch. An automatic restart sets it again. For
+    /// a Service a previous Daemon started, it is when this Daemon found it running.
+    pub started_at: u64,
     #[serde(flatten)]
     pub state: ServiceState,
 }
@@ -1017,6 +1052,30 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_release_asks_for_a_dry_run_only_when_it_says_so() {
+        let line = encode(Request::WorktreeRelease {
+            path: PathBuf::from("/src/app"),
+            dry_run: true,
+        })
+        .unwrap();
+        assert_eq!(
+            line,
+            "{\"version\":22,\"request\":\"worktree_release\",\"path\":\"/src/app\",\"dry_run\":true}\n"
+        );
+        assert!(matches!(
+            decode::<Request>(&line),
+            Ok(Request::WorktreeRelease { dry_run: true, .. })
+        ));
+
+        // A request from a client that never heard of the flag is a real release.
+        let absent = "{\"version\":22,\"request\":\"worktree_release\",\"path\":\"/src/app\"}\n";
+        assert!(matches!(
+            decode::<Request>(absent),
+            Ok(Request::WorktreeRelease { dry_run: false, .. })
+        ));
+    }
+
+    #[test]
     fn an_orphan_carries_its_kind_beside_its_worktree_and_round_trips() {
         let orphan = Orphan {
             kind: OrphanKind::Lease {
@@ -1040,6 +1099,99 @@ mod tests {
             r#"{"kind":"lease","service":"web","port_name":"http","port":24000,"repository":"/src/app/.git","#
         ));
         assert!(matches!(decode::<Response>(&line), Ok(Response::Gc(report)) if report.orphans == [orphan]));
+    }
+
+    fn worktree_status(branch: Option<&str>, listed: bool) -> WorktreeStatus {
+        WorktreeStatus {
+            worktree: Worktree {
+                path: PathBuf::from("/src/app"),
+                slug: "app".to_owned(),
+                main: true,
+            },
+            branch: branch.map(str::to_owned),
+            listed,
+            services: vec![ServiceStatus {
+                service: "web".to_owned(),
+                port: Some(24000),
+                reattached: false,
+                started_at: 1_793_900_000_123,
+                state: ServiceState::Healthy,
+            }],
+            jobs: Vec::new(),
+            foreign: Vec::new(),
+            containers: Vec::new(),
+        }
+    }
+
+    fn status_line(worktree: WorktreeStatus) -> String {
+        encode(Response::Status(StatusReport {
+            repositories: vec![RepositoryStatus {
+                git_common_dir: PathBuf::from("/src/app/.git"),
+                worktrees: vec![worktree],
+            }],
+            jobs_outside_repositories: Vec::new(),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_branch_the_listed_flag_and_the_start_time_round_trip_through_a_line() {
+        let line = status_line(worktree_status(Some("feature/login"), true));
+        assert!(line.contains(r#""branch":"feature/login","listed":true,"services":[{"service":"web","port":24000,"reattached":false,"started_at":1793900000123,"state":"healthy"}]"#));
+        let Ok(Response::Status(report)) = decode::<Response>(&line) else {
+            panic!("the line decodes to a status report: {line}");
+        };
+        let status = &report.repositories[0].worktrees[0];
+        assert_eq!(status.branch.as_deref(), Some("feature/login"));
+        assert!(status.listed);
+        assert_eq!(status.services[0].started_at, 1_793_900_000_123);
+    }
+
+    #[test]
+    fn a_worktree_without_a_branch_leaves_the_key_out_and_a_removed_one_says_it_is_not_listed() {
+        let line = status_line(worktree_status(None, false));
+        assert!(!line.contains("branch"));
+        assert!(line.contains(r#""listed":false"#));
+        let Ok(Response::Status(report)) = decode::<Response>(&line) else {
+            panic!("the line decodes to a status report: {line}");
+        };
+        let status = &report.repositories[0].worktrees[0];
+        assert_eq!(status.branch, None);
+        assert!(!status.listed);
+    }
+
+    #[test]
+    fn a_logs_request_without_follow_asks_for_the_backlog_only() {
+        let line = r#"{"version":22,"request":"logs","name":"api","cwd":"/src/app","env":[]}"#;
+        assert!(matches!(
+            decode::<Request>(line),
+            Ok(Request::Logs { follow: false, .. })
+        ));
+    }
+
+    #[test]
+    fn the_responses_of_a_follow_round_trip_through_a_line() {
+        let output = encode(Response::Output {
+            text: "ready\n".to_owned(),
+        })
+        .unwrap();
+        assert_eq!(
+            output,
+            "{\"version\":22,\"response\":\"output\",\"text\":\"ready\\n\"}\n"
+        );
+        assert!(matches!(decode::<Response>(&output), Ok(Response::Output { text }) if text == "ready\n"));
+        let dropped = encode(Response::OutputDropped { bytes: 4096 }).unwrap();
+        assert_eq!(
+            dropped,
+            "{\"version\":22,\"response\":\"output_dropped\",\"bytes\":4096}\n"
+        );
+        assert!(matches!(
+            decode::<Response>(&dropped),
+            Ok(Response::OutputDropped { bytes: 4096 })
+        ));
+        let ended = encode(Response::LogsEnded).unwrap();
+        assert_eq!(ended, "{\"version\":22,\"response\":\"logs_ended\"}\n");
+        assert!(matches!(decode::<Response>(&ended), Ok(Response::LogsEnded)));
     }
 
     #[test]
