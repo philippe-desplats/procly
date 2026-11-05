@@ -11,6 +11,7 @@ use std::time::Duration;
 use super::compose::{ComposeError, ComposeSpec, Isolated, PlannedResource, PublishedLease, ResourcePlan};
 use super::environment::{self, DeclaredService, Leasing};
 use super::health::HealthCheck;
+use super::held::Admission;
 use super::lease::Scope as LeaseScope;
 use super::portless::{self, Wanted};
 use super::service::{Relation, Service, ServiceSpec, Start};
@@ -145,11 +146,12 @@ pub(super) async fn up(
     for current in &order {
         registry.held.hold(scope.worktree(), current, &env);
     }
-    reach(registry, &scope, name, &order, &env, gitignore).await
+    reach(registry, &scope, name, &order, &env, gitignore, None).await
 }
 
 /// Brings up the Services of `order`, the start order of `name`, each one healthy before the next starts, in `env`,
-/// and answers as [`up`] does.
+/// and answers as [`up`] does. With the `admission` of a Restart, each start and each read of the Leases happens under
+/// the release gate of the Worktree, and none once a Worktree release has begun.
 pub(super) async fn reach(
     registry: &Arc<Registry>,
     scope: &Scope,
@@ -157,12 +159,13 @@ pub(super) async fn reach(
     order: &[String],
     env: &[(String, String)],
     gitignore: bool,
+    admission: Option<&Admission>,
 ) -> Response {
     let mut reached = Vec::new();
     // One warning is enough for a Portless that does not answer, the next call would fail the same way.
     let mut portless_warned = false;
     for current in order {
-        let (outcome, via, port, health) = match start(registry, scope, current, env, gitignore).await {
+        let (outcome, via, port, health) = match start(registry, scope, current, env, gitignore, admission).await {
             Ok(Running::Process { service, outcome }) => {
                 let health = service.healthy().await.map_err(|end| (end, service.output()));
                 (outcome, None, service.port(), health)
@@ -192,6 +195,14 @@ pub(super) async fn reach(
                 needed_by: name.as_ref().filter(|target| *target != current).cloned(),
             };
         }
+        // Reading a Lease grants it when it is gone, which a Restart must not do once its Worktree was released.
+        let admitted = match admission {
+            Some(admission) => match admission.admit().await {
+                Some(guard) => Some(guard),
+                None => return super::restart::refused(admission, current),
+            },
+            None => None,
+        };
         let reach = {
             let (registry, scope, current) = (Arc::clone(registry), scope.clone(), current.clone());
             // Reading the Leases and the Driver is blocking.
@@ -206,6 +217,7 @@ pub(super) async fn reach(
             warnings.extend(alias(registry, scope, current, &ports, &urls).await);
             portless_warned = !warnings.is_empty();
         }
+        drop(admitted);
         // The URL of the Lease the health check probes, among the URLs of every Lease.
         let url = port
             .and_then(|port| ports.iter().find(|&(_, &lease)| lease == port))
@@ -297,8 +309,18 @@ async fn start(
     name: &str,
     env: &[(String, String)],
     gitignore: bool,
+    admission: Option<&Admission>,
 ) -> Result<Running, Box<Response>> {
     loop {
+        // Held until the start is decided and made, the container of a Compose service included, so that a release
+        // finds in place what was started, and a start after the release begins is refused.
+        let admitted = match admission {
+            Some(admission) => match admission.admit().await {
+                Some(guard) => Some(guard),
+                None => return Err(Box::new(super::restart::refused(admission, name))),
+            },
+            None => None,
+        };
         let started = {
             let (registry, scope, name, env) = (Arc::clone(registry), scope.clone(), name.to_owned(), env.to_owned());
             // Writing the generated files, granting the Leases and forking are blocking.
@@ -312,7 +334,10 @@ async fn start(
                 return Ok(Running::Process { service, outcome });
             }
             Started::Covered { group, name, port } => return Ok(Running::Covered { group, name, port }),
-            Started::Process(Start::Stopping(service)) => service.ended().await,
+            Started::Process(Start::Stopping(service)) => {
+                drop(admitted);
+                service.ended().await;
+            }
             Started::Compose { grace } => return up_compose(registry, scope, name, grace, env.to_owned()).await,
         }
     }

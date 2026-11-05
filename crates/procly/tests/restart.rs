@@ -1,8 +1,10 @@
 mod common;
 
+use std::net::TcpStream;
 use std::path::Path;
+use std::process::Stdio;
 
-use common::{Procly, assert_success, free_port, git_repository, stderr, stdout, test_server};
+use common::{Procly, assert_success, eventually, free_port, git_repository, stderr, stdout, test_server};
 use serde_json::Value;
 
 /// Writes `content` to `name` at the root of the Worktree `dir`.
@@ -273,4 +275,67 @@ fn a_group_a_previous_daemon_started_is_restarted_with_the_environment_of_an_up_
     assert_success(&output);
     assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start", "start"]);
+}
+
+#[test]
+fn a_worktree_release_during_a_restart_wins_and_the_restart_starts_nothing_again() {
+    let procly = Procly::new();
+    // A Worktree other than the Main worktree, whose Lease comes from a Range of its own.
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let server = test_server();
+    // The shell outlives the stop of its group by a second and a half, so the Restart waits that long in its `down`.
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = \"trap 'sleep 1.5; exit 0' TERM; {server} --port {{ports.http}} & wait\"\n\
+             ports = {{ http = {web} }}\n",
+            server = server.display(),
+            web = free_port(),
+        ),
+    );
+    common::git(&main, &["add", "."]);
+    common::git(&main, &["commit", "--quiet", "--message", "procly"]);
+    let feature = common::git_worktree_add(&main, "app-feature");
+    assert_success(&procly.procly_in(&feature, &["up", "web"]));
+    let port = service_status(&procly, &feature, "web")["port"]
+        .as_u64()
+        .expect("a Lease");
+    let restart = procly
+        .command()
+        .current_dir(&feature)
+        .args(["restart", "web"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the procly binary runs");
+    // Logged once the Restart has read the environment it would start the Service with.
+    eventually("the restart to be under way", || {
+        procly.daemon_log().contains("restart web of")
+    });
+
+    let release = procly.procly_in(&feature, &["worktree", "release", "--json"]);
+
+    assert_success(&release);
+    assert_eq!(
+        common::json_document(&release)["released"]["leases"][0]["port"].as_u64(),
+        Some(port),
+        "{}",
+        stdout(&release)
+    );
+    let restart = restart.wait_with_output().expect("the restart ends");
+    assert_eq!(restart.status.code(), Some(125), "{}", stdout(&restart));
+    assert!(
+        stderr(&restart).contains("was released while web was restarting"),
+        "{}",
+        stderr(&restart)
+    );
+    assert!(TcpStream::connect(("127.0.0.1", u16::try_from(port).unwrap())).is_err());
+    // Nothing the Restart did outlives the release: a second release finds no Service and no Lease.
+    let again = procly.procly_in(&feature, &["worktree", "release", "--json"]);
+    assert_success(&again);
+    let again = common::json_document(&again);
+    assert_eq!(again["stopped"]["services"], Value::Array(Vec::new()), "{again}");
+    assert_eq!(again["released"]["leases"], Value::Array(Vec::new()), "{again}");
 }

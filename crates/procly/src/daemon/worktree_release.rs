@@ -44,9 +44,10 @@ pub(super) async fn run(
     }
     eprintln!("worktree release of {} requested by {who}", worktree.display());
 
+    // Before anything is stopped, so that a Restart under way starts nothing the release would miss, and a Restart
+    // after it has no environment to start with.
+    registry.held.release(&worktree).await;
     let services = registry.services.stop(&worktree, None);
-    // A Restart after the release would start what the release just stopped.
-    registry.held.drop_worktree(&worktree);
     let jobs: Vec<_> = registry
         .jobs
         .running_in(&worktree)
