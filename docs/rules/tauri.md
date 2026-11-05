@@ -5,7 +5,7 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 ## Role of the app
 
 - **NEVER** put supervision logic in the desktop app, every Tauri command sends one `Request` through the `procly-client` crate and returns the `Response` unchanged.
-  - ADR 0009: the CLI is the contract, `procly mcp` and the app are logic-free clients, so behaviour can never diverge between surfaces. Reshaping the answer in Rust would start a second rendering of the protocol, the frontend draws it instead.
+  - ADR 0009: the CLI is the contract, `procly mcp` and the app are logic-free clients, so behaviour can never diverge between surfaces. Reshaping the answer in Rust would start a second rendering of the protocol, the frontend draws it instead. The one exception is the "Needs you" list, derived in Rust next to the unchanged `Response`, see the rule below.
   - Example:
     ```rust
     #[tauri::command]
@@ -13,6 +13,16 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
         client.send(&Request::Status { cwd, all }).await
     }
     ```
+
+- **ALWAYS** derive "Needs you" and hold the Seen set in Rust, once, and send the frontend the derived list next to the unchanged `Response`.
+  - The native menu bar menu is built in Rust and must agree with the window, so a second copy of the rule in TypeScript would drift. It is the one derivation the app makes in Rust, and it is presentation, not supervision: it decides nothing in the Daemon.
+  - A failure is keyed by (Worktree path, Service, `started_at`), or by the `id` of a Job, so a Service that fails again after a new start is not taken for the one already seen.
+  - Example: `needs_you(&report, &seen) -> Vec<NeedsYou>`, called by the poller on each answer, its result emitted with the `Response`.
+
+- **NEVER** poll the Daemon from the frontend or from a command, every refresh goes through the one poller task the app spawns at startup.
+  - A JavaScript timer in a hidden webview is throttled by WebKit and App Nap, and the menu must stay current with the window closed. Each `Status` spawns 4 processes plus 1 per Repository, so 2 pollers double that cost.
+  - The poller keeps 1 `Status` in flight, waits at least 4 times the last one's duration, ticks every 2 s with the window in front, 10 s visible, 30 s closed, and pauses while the Mac sleeps. Without a Daemon it only calls `connect`, every 5 s visible and 30 s otherwise.
+  - Example: the `refresh` command behind ⌘R sends a message to the poller asking for an immediate tick, it never calls `client.send` itself.
 
 - **ALWAYS** reach `doctor` and `daemon stop` by running `procly doctor --json` and `procly daemon stop --json`, never through a socket request.
   - ADR 0009: these are the only 2 verbs the app reaches through the CLI. The checks of the installation must still report a Daemon that does not run, and stopping a Daemon of another protocol version cannot go through a socket it would refuse.
@@ -55,9 +65,10 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
   - An async command may only borrow arguments such as `&str` or `State<'_, T>` when it returns a `Result`, and a serializable error reaches the frontend as a rejected promise instead of a panic.
   - Example: `async fn logs(name: String, cwd: PathBuf, client: State<'_, DaemonClient>) -> Result<Response, ClientError>`.
 
-- **ALWAYS** stream Service output to the frontend through a `tauri::ipc::Channel`, and keep events for small notifications.
+- **ALWAYS** stream the output of a Service or a Job to the frontend through a `tauri::ipc::Channel`, and keep events for small notifications.
   - Channels are ordered and built for throughput, the event system evaluates JavaScript per message and does not scale to log streams.
-  - Example: `async fn follow(service: String, on_line: Channel<LogLine>) -> Result<(), ClientError>`.
+  - Only the item shown in the inspector is followed, through `Logs { follow: true }`. Changing the selection or hiding the window drops the connection, which cancels the follow in the Daemon. A Compose service has no follow and keeps a snapshot with a Refresh.
+  - Example: `async fn follow(name: String, cwd: PathBuf, on_output: Channel<Response>) -> Result<(), ClientError>`, forwarding the backlog, each `Output` and the final `LogsEnded` unchanged.
 
 - **ALWAYS** import the frontend API from the v2 module paths.
   - The v1 paths no longer exist and a recalled v1 snippet fails at build time.
