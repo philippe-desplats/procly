@@ -323,6 +323,33 @@ fn docker_a_worktree_release_stops_the_container_of_the_worktree_at_once_and_rel
 }
 
 #[test]
+fn docker_a_dry_run_of_a_worktree_release_names_the_isolated_container_it_would_stop_and_stops_nothing() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+
+    let output = fixture
+        .procly
+        .procly_in(&fixture.other, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db would stop\nlease db.db port {other_port} would release\n")
+    );
+    assert!(fixture.other_project.is_running(), "a dry run stopped the container");
+    assert!(listens(other_port));
+    let real = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+    assert_eq!(
+        stdout(&real),
+        format!("db stopped\nlease db.db port {other_port} released\n")
+    );
+}
+
+#[test]
 fn docker_status_shows_the_containers_of_the_worktree_and_its_json_lists_them() {
     let Some(_docker) = require_docker() else {
         return;
@@ -803,6 +830,32 @@ fn docker_a_retention_delete_removes_the_container_and_volume_of_a_removed_workt
         Vec::<String>::new()
     );
     assert!(!fixture.main_project.container().is_empty() && fixture.main_project.volume_exists());
+}
+
+#[test]
+fn docker_a_dry_run_of_a_worktree_release_applies_no_retention_policy_and_the_real_release_still_does() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "delete");
+
+    let planned = fixture
+        .procly
+        .procly_in(&fixture.main, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&planned);
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "a dry run deleted the container"
+    );
+    assert!(fixture.other_project.volume_exists(), "a dry run deleted the volume");
+    assert!(!fixture.procly.daemon_log().contains("retention policy"));
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
 }
 
 #[test]

@@ -117,14 +117,15 @@ impl Table {
     }
 
     /// Records that `job` ended with `end`, evicts what the bounds no longer allow, then tells those waiting for it.
-    /// The eviction comes first, so that whoever hears of the end finds the table already bounded.
+    /// The eviction comes first, so that whoever hears of the end finds the table already bounded. It never takes
+    /// `job` itself, whose end triggered it: a Job nobody could have read yet is not the one to forget.
     fn finished(&self, job: &Job, end: JobEnd) {
         {
             let mut jobs = self.lock();
             let order = self.ended.fetch_add(1, Ordering::Relaxed) + 1;
             let success = matches!(end, JobEnd::Exited { code: 0 });
             let _ = job.finished.set(Finished { order, success });
-            evict(&mut jobs);
+            evict(&mut jobs, Some(order));
         }
         job.end.send_replace(Some(end));
     }
@@ -139,16 +140,28 @@ struct Ended {
 }
 
 /// Removes from `ended` the Jobs beyond `bound` and returns them: the oldest success goes first, and the oldest
-/// failure only once no success is left.
-fn surplus(ended: &mut Vec<Ended>, bound: usize) -> Vec<Ended> {
+/// failure only once no success is left. The Job of the order `spared` counts toward the bound but is never removed.
+fn surplus(ended: &mut Vec<Ended>, bound: usize, spared: Option<u64>) -> Vec<Ended> {
     ended.sort_by_key(|ended| (!ended.success, ended.order));
-    let excess = ended.len().saturating_sub(bound);
-    ended.drain(..excess).collect()
+    let mut excess = ended.len().saturating_sub(bound);
+    let mut evicted = Vec::new();
+    let mut kept = Vec::new();
+    for candidate in ended.drain(..) {
+        if excess > 0 && Some(candidate.order) != spared {
+            excess -= 1;
+            evicted.push(candidate);
+        } else {
+            kept.push(candidate);
+        }
+    }
+    *ended = kept;
+    evicted
 }
 
 /// Drops the ended Jobs beyond [`ENDED_JOBS_PER_WORKTREE`] in a Worktree, then beyond [`ENDED_JOBS_TOTAL`] overall,
-/// so that a failure nobody has seen stays visible as long as possible. A running Job is never evicted.
-fn evict(jobs: &mut HashMap<String, Arc<Job>>) {
+/// so that a failure nobody has seen stays visible as long as possible. A running Job is never evicted, and neither is
+/// the Job of the order `spared`, the one that has just ended.
+fn evict(jobs: &mut HashMap<String, Arc<Job>>, spared: Option<u64>) {
     let mut by_worktree: HashMap<Option<&Path>, Vec<Ended>> = HashMap::new();
     for (id, job) in jobs.iter() {
         if let Some(finished) = job.finished.get() {
@@ -162,10 +175,10 @@ fn evict(jobs: &mut HashMap<String, Arc<Job>>) {
     let mut evicted = Vec::new();
     let mut kept = Vec::new();
     for mut group in by_worktree.into_values() {
-        evicted.extend(surplus(&mut group, ENDED_JOBS_PER_WORKTREE));
+        evicted.extend(surplus(&mut group, ENDED_JOBS_PER_WORKTREE, spared));
         kept.extend(group);
     }
-    evicted.extend(surplus(&mut kept, ENDED_JOBS_TOTAL));
+    evicted.extend(surplus(&mut kept, ENDED_JOBS_TOTAL, spared));
     for ended in evicted {
         jobs.remove(&ended.id);
     }
@@ -195,7 +208,7 @@ impl Jobs {
             if !table.contains_key(&id) {
                 table.insert(id.clone(), job);
                 // A Job that ended before it was inserted could not evict when it ended.
-                evict(&mut table);
+                evict(&mut table, None);
                 return Ok((id, StartOutcome::Started));
             }
         }
@@ -510,6 +523,27 @@ mod tests {
     }
 
     #[test]
+    fn the_job_that_has_just_ended_is_never_the_one_evicted() {
+        let table = Table::default();
+        for n in 0..ENDED_JOBS_PER_WORKTREE {
+            ended(&table, &format!("job{n:02}"), Some("/p/app"), failed());
+        }
+
+        ended(&table, "just-ended", Some("/p/app"), succeeded());
+
+        let ids = known(&table);
+        assert_eq!(ids.len(), ENDED_JOBS_PER_WORKTREE);
+        assert!(
+            ids.contains(&"just-ended".to_owned()),
+            "the success that triggered the eviction stays"
+        );
+        assert!(
+            !ids.contains(&"job00".to_owned()),
+            "the oldest failure went in its place"
+        );
+    }
+
+    #[test]
     fn with_only_failures_left_the_oldest_failure_goes() {
         let table = Table::default();
         for n in 0..=ENDED_JOBS_PER_WORKTREE {
@@ -601,7 +635,7 @@ mod tests {
         table.finished(&early, succeeded());
         let mut jobs = table.lock();
         jobs.insert("early".to_owned(), early);
-        evict(&mut jobs);
+        evict(&mut jobs, None);
 
         assert_eq!(jobs.len(), ENDED_JOBS_PER_WORKTREE);
         assert!(!jobs.contains_key("job00"));

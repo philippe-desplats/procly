@@ -94,7 +94,7 @@ The Daemon keeps a Job after it ended, so that `procly wait` and `procly logs` c
 - at most 20 ended Jobs per Worktree, the Jobs started outside any Worktree counting as one group of their own
 - at most 200 ended Jobs in all, whatever their Worktrees
 
-When a Job ends and a bound is exceeded, the oldest Job that ended with exit code 0 goes first. A Job that failed, was killed by a signal or reached its timeout goes only once no success is left, so that a failure nobody has looked at stays visible as long as possible. A Job that runs is never evicted, and there is no age limit and no timer. The bounds are fixed, they are not settings.
+When a Job ends and a bound is exceeded, the oldest Job that ended with exit code 0 goes first. A Job that failed, was killed by a signal or reached its timeout goes only once no success is left, so that a failure nobody has looked at stays visible as long as possible. The Job that has just ended is never the one evicted, so in a Worktree holding 20 ended failures, a Job that ends with exit code 0 is kept and the oldest failure goes. A Job that runs is never evicted, and there is no age limit and no timer. The bounds are fixed, they are not settings.
 
 `wait` and `logs` on an evicted Job fail as for an identifier that never existed, with exit code 125 and `no job <id>` on stderr. The Daemon also forgets its ended Jobs when it restarts, and a [Worktree release](worktree-release.md) forgets those of its Worktree.
 
