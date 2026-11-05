@@ -180,6 +180,10 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.item[data-seen="true"] {
+  opacity: 0.55;
+}
+
 .item-name {
   flex: 1;
   min-width: 0;

@@ -1,10 +1,10 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
-import { createDaemonStore, type Failure, type Update } from "./daemon";
+import { createDaemonStore, type FailureKey, type Failure, type NeedsYou, type Update } from "./daemon";
 import recorded from "./fixtures/status.json";
 import overview from "./fixtures/status-overview.json";
 import type { Response } from "./protocol/Response";
@@ -18,22 +18,36 @@ const many: Response = overview as Response;
 /** When the poller read the answer. */
 const AT = Date.UTC(2026, 10, 5, 19, 35, 0);
 
-function answered(response: Response, at = AT): Update {
-  return { at_ms: at, response };
+function answered(
+  response: Response,
+  attention: { needsYou?: NeedsYou[]; seen?: FailureKey[] } = {},
+  at = AT,
+): Update {
+  return { at_ms: at, response, needs_you: attention.needsYou ?? [], seen: attention.seen ?? [] };
 }
 
 function failed(kind: Failure["kind"], message: string, at = AT): Update {
-  return { at_ms: at, failure: { kind, message } };
+  return { at_ms: at, failure: { kind, message }, needs_you: [], seen: [] };
 }
 
-/** Plays the Rust side: `last` is what the poller has already answered, and every command the window sends is kept. */
-function poller(last: Update | null = null): string[] {
+/**
+ * Plays the Rust side: `last` is what the poller has already answered, and every command the window sends is kept.
+ * `onMarkSeen` stands for the Seen set of Rust, which answers a mark with a new update.
+ */
+function poller(last: Update | null = null, onMarkSeen?: (key: unknown) => Update | void): string[] {
   const commands: string[] = [];
   mockIPC(
-    (command) => {
+    (command, args) => {
       commands.push(command);
       if (command === "last_update") {
         return last;
+      }
+      if (command === "mark_seen" && onMarkSeen !== undefined) {
+        const next = onMarkSeen((args as { key: unknown }).key);
+        if (next !== undefined) {
+          void emit("daemon-update", next);
+        }
+        return undefined;
       }
       return command === "refresh" ? undefined : Promise.reject(new Error(`unexpected command ${command}`));
     },
@@ -264,5 +278,178 @@ describe("the sidebar", () => {
     expect(within(long).getByText(/^feature\//)).toHaveClass("row-name");
     const detached = within(sidebar).getByRole("button", { name: "docs-preview" });
     expect(detached).toHaveAttribute("title", "Branch: none\nFolder: docs-preview\nSlug: docs_preview");
+  });
+});
+
+/** `api` of `web-login` ended with code 1: the one failure of the recorded answer. */
+const API_FAILURE: NeedsYou = {
+  kind: "service",
+  worktree: "/p/work/acme/web-login",
+  service: "api",
+  started_at: 1793820682000,
+  end: { kind: "exited", code: 1 },
+};
+
+const API_KEY: FailureKey = {
+  kind: "service",
+  worktree: "/p/work/acme/web-login",
+  service: "api",
+  started_at: 1793820682000,
+};
+
+const FOREIGN: NeedsYou = {
+  kind: "foreign",
+  worktree: "/p/work/acme/web",
+  process: { kind: "process", pid: 4242, command: "node server.js", ports: [3000] },
+};
+
+describe("Needs you", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  /** The rows of the Overview that are not in "Needs you". */
+  function serviceRows(): HTMLElement[] {
+    const overviewPane = screen.getByRole("region", { name: "Overview" });
+    const needs = within(overviewPane).queryByRole("region", { name: "Needs you" });
+    return within(overviewPane)
+      .getAllByRole("listitem")
+      .filter((row) => needs === null || !needs.contains(row));
+  }
+
+  it("is pinned on top of the Overview, with the failures and the Foreign processes it was given", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE, FOREIGN] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    const needs = within(overviewPane).getByRole("region", { name: "Needs you" });
+    expect(within(needs).getByRole("heading", { name: /^Needs you\s*2$/ })).toBeInTheDocument();
+    const lines = within(needs)
+      .getAllByRole("listitem")
+      .map((line) => line.textContent);
+    expect(lines).toEqual([
+      "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-endMark as Seen",
+      "Foreignnode server.js:3000main",
+    ]);
+    const firstService = within(overviewPane).getAllByText("healthy")[0];
+    expect(
+      needs.compareDocumentPosition(firstService as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // A Foreign process is not an ended failure, there is nothing to mark.
+    expect(within(needs).getAllByRole("button", { name: "Mark as Seen" })).toHaveLength(1);
+  });
+
+  it("is left out when nothing needs the developer, however many Services ended", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    expect(within(overviewPane).queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
+    expect(within(overviewPane).getByText("exited 1")).toBeInTheDocument();
+  });
+
+  it("marks a failure as Seen: it leaves the list and the count while its row stays, dimmed", async () => {
+    const marked: unknown[] = [];
+    poller(answered(many, { needsYou: [API_FAILURE, FOREIGN] }), (key) => {
+      marked.push(key);
+      return answered(many, { needsYou: [FOREIGN], seen: [API_KEY] });
+    });
+    render(<App store={createDaemonStore()} />);
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+
+    fireEvent.click(within(needs).getByRole("button", { name: "Mark as Seen" }));
+
+    await waitFor(() => {
+      expect(within(screen.getByRole("region", { name: "Needs you" })).getAllByRole("listitem")).toHaveLength(
+        1,
+      );
+    });
+    expect(marked).toEqual([API_KEY]);
+    const left = screen.getByRole("region", { name: "Needs you" });
+    expect(within(left).getByRole("heading", { name: /^Needs you\s*1$/ })).toBeInTheDocument();
+    expect(within(left).queryByText("exited 1")).not.toBeInTheDocument();
+    const row = serviceRows().find((candidate) => candidate.textContent?.startsWith("apiexited 1"));
+    expect(row).toBeDefined();
+    expect(row).toHaveAttribute("data-seen", "true");
+    expect(row).toHaveTextContent("Seen");
+    // The healthy Service of the same answer is not dimmed.
+    expect(serviceRows().filter((candidate) => candidate.hasAttribute("data-seen"))).toHaveLength(1);
+  });
+
+  it("leaves the section out once the last line is Seen", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }), () =>
+      answered(many, { needsYou: [], seen: [API_KEY] }),
+    );
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
+    });
+    expect(serviceRows().some((row) => row.hasAttribute("data-seen"))).toBe(true);
+  });
+
+  it("brings a failure back when its Service started again and failed again", async () => {
+    poller(answered(many, { seen: [API_KEY] }));
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("region", { name: "Overview" });
+    expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
+
+    await tick(
+      answered(many, {
+        needsYou: [{ ...API_FAILURE, started_at: API_FAILURE.started_at + 60_000 }],
+        seen: [],
+      }),
+    );
+
+    expect(await screen.findByRole("region", { name: "Needs you" })).toBeInTheDocument();
+  });
+
+  it("marks a Job as Seen by its id and dims its row in its Worktree", async () => {
+    const job = { id: "j-7", command: "make test", cwd: "/p/work/acme/web" };
+    const withJob: Response = {
+      ...status,
+      repositories:
+        status.response === "status"
+          ? status.repositories.map((repository) => ({
+              ...repository,
+              worktrees: repository.worktrees.map((worktree) =>
+                worktree.path === "/p/work/acme/web"
+                  ? {
+                      ...worktree,
+                      jobs: [{ ...job, state: "ended" as const, end: { kind: "exited" as const, code: 2 } }],
+                    }
+                  : worktree,
+              ),
+            }))
+          : [],
+    } as Response;
+    const failure: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web",
+      id: "j-7",
+      command: "make test",
+      end: { kind: "exited", code: 2 },
+    };
+    const marked: unknown[] = [];
+    poller(answered(withJob, { needsYou: [failure] }), (key) => {
+      marked.push(key);
+      return answered(withJob, { seen: [{ kind: "job", id: "j-7" }] });
+    });
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^main\s*main$/ }));
+
+    expect(marked).toEqual([{ kind: "job", id: "j-7" }]);
+    const row = (await screen.findByText("make test")).closest("li");
+    expect(row).toHaveAttribute("data-seen", "true");
   });
 });

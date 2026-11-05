@@ -17,7 +17,9 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 - **ALWAYS** derive "Needs you" and hold the Seen set in Rust, once, and send the frontend the derived list next to the unchanged `Response`.
   - The native menu bar menu is built in Rust and must agree with the window, so a second copy of the rule in TypeScript would drift. It is the one derivation the app makes in Rust, and it is presentation, not supervision: it decides nothing in the Daemon.
   - A failure is keyed by (Worktree path, Service, `started_at`), or by the `id` of a Job, so a Service that fails again after a new start is not taken for the one already seen.
-  - Example: `needs_you(&report, &seen) -> Vec<NeedsYou>`, called by the poller on each answer, its result emitted with the `Response`.
+  - An end is routine only when it is `stopped`, `idle` or `exited` with code 0, and every other end is a failure, so an end kind the app does not know yet counts as one. The list of routine ends is the allowlist, never a list of failures.
+  - The Seen set is `seen.json` in `app_data_dir()`, written atomically. Each answer to `Status` drops the keys it holds no failure for, while an answer that is not a status leaves the set alone, so that a Daemon that stops does not bring every failure back.
+  - Example: `needs_you(&report, &seen) -> Vec<NeedsYou>`, called on each answer of the poller, its result emitted with the `Response` and the Seen keys, so the frontend dims a Seen row without deciding anything.
 
 - **NEVER** poll the Daemon from the frontend or from a command, every refresh goes through the one poller task the app spawns at startup.
   - A JavaScript timer in a hidden webview is throttled by WebKit and App Nap, and the menu must stay current with the window closed. Each `Status` spawns 4 processes plus 1 per Repository, so 2 pollers double that cost.
