@@ -158,7 +158,7 @@ A later version of procly may add a check. A reader that does not know a `name` 
 
 ## `restart`
 
-`procly restart --json <service>` prints the document of `procly up --json <service>`, with the same `result` values and exit codes. The Service restarted has an `outcome` of `started`, a Service it needs that was running is `reused`, and one that was not is `started`. A Service a Group covers is restarted through its Group, which is then the Service of the document. A Compose service follows the path of `down` then `up`: the container of an Isolated one is stopped and started again, while a Shared or Logical one is let go of and reached again, so its container, which other Worktrees may use, keeps running and is `reused`.
+`procly restart --json <service>` prints the document of `procly up --json <service>`, with the same `result` values and exit codes. The Service restarted has an `outcome` of `started`, a Service it needs that was running is `reused`, and one that was not is `started`. A Service a Group covers is restarted through its Group, which is then the Service of the document. A Compose service follows the path of `down` then `up`: the container of an Isolated one is stopped and started again, while a Shared or Logical one is let go of and reached again, so its container, which other Worktrees may use, keeps running and is `reused`. A Worktree release of the same Worktree that begins during a Restart wins, the Restart then exits with 125, and a release that begins while the Restart is starting a Compose service waits for that start to finish, see [Releasing a Worktree](worktree-release.md#what-it-does).
 
 ```console
 $ procly restart --json web
