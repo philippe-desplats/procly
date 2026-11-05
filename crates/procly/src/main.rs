@@ -15,9 +15,7 @@ mod output;
 mod placeholder;
 mod ports;
 mod proposal;
-mod protocol;
 mod shell;
-mod state_dir;
 mod status;
 mod topology;
 mod unit;
@@ -30,6 +28,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+// The protocol and the state directory live in `procly-client`, shared with the desktop app, and keep their paths
+// in this crate.
+use procly_client::{protocol, state_dir};
 
 use crate::protocol::{
     BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
@@ -1287,7 +1288,7 @@ fn guard_hook() -> ExitCode {
             Some(cwd) => cwd,
             None => std::env::current_dir().context("cannot read the current directory")?,
         };
-        Ok(client::send(&state, &Request::Guard { cwd })?)
+        client::send(&state, &Request::Guard { cwd })
     });
     match asked {
         Ok(Response::Guard {

@@ -1,20 +1,28 @@
 //! The versioned request and response protocol spoken over the Daemon socket.
 //!
-//! One connection carries one request and one response, each a single line of JSON.
+//! One connection carries one request, then the responses to it, each a single line of JSON.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::topology::Worktree;
+/// A Worktree as the protocol carries it. Discovering it through `git` is the business of the CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worktree {
+    /// The root directory of the Worktree, canonicalized.
+    pub path: PathBuf,
+    pub slug: String,
+    /// Whether this is the Main worktree, the first entry of `git worktree list`.
+    pub main: bool,
+}
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub(crate) const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
-pub(crate) enum Request {
+pub enum Request {
     /// Starts a Job and answers as soon as it is spawned, or answers with the running Job of the same Fingerprint.
     Run {
         command: String,
@@ -87,7 +95,7 @@ pub(crate) enum Request {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "response", rename_all = "snake_case")]
-pub(crate) enum Response {
+pub enum Response {
     Run {
         job: String,
         outcome: StartOutcome,
@@ -197,20 +205,20 @@ pub(crate) enum Response {
 
 /// Something started outside Procly that holds what a Service needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Conflict {
+pub struct Conflict {
     /// What the Service needs and the occupant holds.
-    pub(crate) held: Held,
+    pub held: Held,
     /// What holds it.
-    pub(crate) occupant: Occupant,
+    pub occupant: Occupant,
     /// The command that frees what the Service needs, which Procly never runs itself. `None` when the occupant
     /// cannot be named.
-    pub(crate) stop: Option<String>,
+    pub stop: Option<String>,
 }
 
 /// What an occupant holds that a Service needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum Held {
+pub enum Held {
     /// The port of a Lease of the Service.
     Port { port: u16 },
     /// The name the container of the Compose service gets.
@@ -223,7 +231,7 @@ pub(crate) enum Held {
 /// What holds a port or a name, as Docker and `lsof` tell it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum Occupant {
+pub enum Occupant {
     /// A container, with its compose labels when it has them.
     Container {
         name: String,
@@ -240,7 +248,7 @@ pub(crate) enum Occupant {
 /// A dev process or container running in a Worktree that Procly did not start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum ForeignProcess {
+pub enum ForeignProcess {
     /// A process listening on TCP ports, whose working directory is in the Worktree.
     Process { pid: i32, command: String, ports: Vec<u16> },
     /// A running container of a compose project whose directory is in the Worktree.
@@ -255,7 +263,7 @@ pub(crate) enum ForeignProcess {
 /// What a request to write a Managed block did to the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BlockOutcome {
+pub enum BlockOutcome {
     /// The block was added or updated.
     Written,
     /// The file already held exactly this block.
@@ -265,7 +273,8 @@ pub(crate) enum BlockOutcome {
 }
 
 impl BlockOutcome {
-    pub(crate) fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Written => "written",
             Self::Unchanged => "unchanged",
@@ -276,31 +285,31 @@ impl BlockOutcome {
 
 /// A Managed block and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BlockReport {
-    pub(crate) file: PathBuf,
-    pub(crate) outcome: BlockOutcome,
+pub struct BlockReport {
+    pub file: PathBuf,
+    pub outcome: BlockOutcome,
 }
 
 /// What `agent install` wrote.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct InstallReport {
-    pub(crate) rules: BlockReport,
-    pub(crate) guard: BlockReport,
+pub struct InstallReport {
+    pub rules: BlockReport,
+    pub guard: BlockReport,
     /// Whether the Repository is Off, in which case the Rules block says so.
-    pub(crate) off: bool,
+    pub off: bool,
 }
 
 /// What `off` and `on` did to the Rules blocks of the Repository.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct SwitchReport {
-    pub(crate) off: bool,
-    pub(crate) rules: Vec<BlockReport>,
+pub struct SwitchReport {
+    pub off: bool,
+    pub rules: Vec<BlockReport>,
 }
 
 /// What kind of file or text Procly wrote into a Repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Written {
+pub enum Written {
     /// The Rules block of an instruction file.
     Rules,
     /// The Guard of the Claude Code settings.
@@ -314,7 +323,8 @@ pub(crate) enum Written {
 }
 
 impl Written {
-    pub(crate) fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Rules => "rules",
             Self::Guard => "guard",
@@ -327,117 +337,118 @@ impl Written {
 
 /// Something `eject` removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Removed {
-    pub(crate) kind: Written,
-    pub(crate) file: PathBuf,
+pub struct Removed {
+    pub kind: Written,
+    pub file: PathBuf,
     /// Whether the file held nothing else, so that it was deleted with it.
-    pub(crate) deleted: bool,
+    pub deleted: bool,
 }
 
 /// Something `eject` left as it is because the developer edited it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Left {
-    pub(crate) kind: Written,
-    pub(crate) file: PathBuf,
+pub struct Left {
+    pub kind: Written,
+    pub file: PathBuf,
 }
 
 /// A Service `eject` stopped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Stopped {
-    pub(crate) service: String,
+pub struct Stopped {
+    pub service: String,
     /// The Worktree it ran for, `None` for a Compose service whose container belongs to the Repository.
-    pub(crate) worktree: Option<PathBuf>,
+    pub worktree: Option<PathBuf>,
     /// Whether it is a Compose service whose container belongs to `worktree`, an Isolated one. Left out when not, so
     /// that the report of the other Services reads as it did before Isolated ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) isolated: bool,
+    pub isolated: bool,
 }
 
 /// What `eject` did to a Repository.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct EjectReport {
-    pub(crate) stopped: Vec<Stopped>,
-    pub(crate) removed: Vec<Removed>,
-    pub(crate) left: Vec<Left>,
+pub struct EjectReport {
+    pub stopped: Vec<Stopped>,
+    pub removed: Vec<Removed>,
+    pub left: Vec<Left>,
     /// What to undo in the `left` items, written for a coding agent. `None` when nothing was left.
-    pub(crate) prompt: Option<String>,
+    pub prompt: Option<String>,
 }
 
 /// A healthy Service `up` brought up or found running.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct UpService {
-    pub(crate) service: String,
-    pub(crate) outcome: StartOutcome,
+pub struct UpService {
+    pub service: String,
+    pub outcome: StartOutcome,
     /// The Group running it, as for [`Response::Up`].
-    pub(crate) via: Option<String>,
-    pub(crate) port: Option<u16>,
-    pub(crate) url: Option<String>,
+    pub via: Option<String>,
+    pub port: Option<u16>,
+    pub url: Option<String>,
     /// Every Lease of the Service, by Port name, the one `port` is the health check's among them.
-    pub(crate) ports: BTreeMap<String, u16>,
+    pub ports: BTreeMap<String, u16>,
     /// Where to reach each Lease whose scheme Procly knows, by Port name, the one `url` is among them.
-    pub(crate) urls: BTreeMap<String, String>,
+    pub urls: BTreeMap<String, String>,
     /// What went wrong without failing `up`, such as a Portless alias that could not be made.
-    pub(crate) warnings: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 /// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Released {
-    pub(crate) service: String,
+pub struct Released {
+    pub service: String,
     /// How many other Worktrees still need the container.
-    pub(crate) others: usize,
+    pub others: usize,
     /// How long the container keeps running once no Worktree needs it.
-    pub(crate) grace_ms: u64,
+    pub grace_ms: u64,
 }
 
 /// What a Worktree release did to a Worktree.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct ReleaseReport {
-    pub(crate) worktree: PathBuf,
+pub struct ReleaseReport {
+    pub worktree: PathBuf,
     /// The Services it stopped, by name.
-    pub(crate) services: Vec<String>,
+    pub services: Vec<String>,
     /// The Jobs it stopped, by identifier.
-    pub(crate) jobs: Vec<String>,
+    pub jobs: Vec<String>,
     /// The Compose services the Worktree let go of.
-    pub(crate) compose_services: Vec<Released>,
+    pub compose_services: Vec<Released>,
     /// The Leases it released, whose ports any Worktree can be granted now.
-    pub(crate) leases: Vec<LeaseHeld>,
+    pub leases: Vec<LeaseHeld>,
     /// The Leases of the Worktree it kept.
-    pub(crate) kept_leases: Vec<KeptLease>,
+    pub kept_leases: Vec<KeptLease>,
     /// The Logical resources of the Worktree, which a Worktree release never drops.
-    pub(crate) logical_resources: Vec<KeptResource>,
+    pub logical_resources: Vec<KeptResource>,
     /// What went wrong without failing the release, such as a Portless alias that could not be removed.
-    pub(crate) warnings: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 impl ReleaseReport {
     /// Whether nothing was stopped, let go of nor released, as for a second release or a Worktree Procly never saw.
-    pub(crate) fn released_nothing(&self) -> bool {
+    #[must_use]
+    pub fn released_nothing(&self) -> bool {
         self.services.is_empty() && self.jobs.is_empty() && self.compose_services.is_empty() && self.leases.is_empty()
     }
 }
 
 /// The port one Port name of one Service holds through its Lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LeaseHeld {
-    pub(crate) service: String,
-    pub(crate) port_name: String,
-    pub(crate) port: u16,
+pub struct LeaseHeld {
+    pub service: String,
+    pub port_name: String,
+    pub port: u16,
 }
 
 /// A Lease a Worktree release kept, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct KeptLease {
+pub struct KeptLease {
     #[serde(flatten)]
-    pub(crate) lease: LeaseHeld,
+    pub lease: LeaseHeld,
     #[serde(flatten)]
-    pub(crate) reason: KeptBecause,
+    pub reason: KeptBecause,
 }
 
 /// Why a Worktree release kept a Lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
-pub(crate) enum KeptBecause {
+pub enum KeptBecause {
     /// The Lease is bound to the Pinned branch `branch` the Worktree is on, so that it survives the Worktree.
     PinnedBranch { branch: String },
     /// The container of the Compose service still runs on it, for the other Worktrees or its Grace period.
@@ -446,20 +457,20 @@ pub(crate) enum KeptBecause {
 
 /// A Logical resource a Worktree release kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct KeptResource {
+pub struct KeptResource {
     /// The Compose service whose container holds it.
-    pub(crate) service: String,
-    pub(crate) driver: String,
+    pub service: String,
+    pub driver: String,
     /// The key of the resource in the configuration.
-    pub(crate) resource: String,
+    pub resource: String,
     /// Its name in the container.
-    pub(crate) name: String,
+    pub name: String,
 }
 
 /// Why a Service ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum ServiceEnd {
+pub enum ServiceEnd {
     Exited {
         code: i32,
     },
@@ -505,13 +516,14 @@ pub(crate) enum ServiceEnd {
 /// Whether a start request started new work or ended in Reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum StartOutcome {
+pub enum StartOutcome {
     Started,
     Reused,
 }
 
 impl StartOutcome {
-    pub(crate) fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",
             Self::Reused => "reused",
@@ -520,60 +532,60 @@ impl StartOutcome {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct StatusReport {
-    pub(crate) repositories: Vec<RepositoryStatus>,
+pub struct StatusReport {
+    pub repositories: Vec<RepositoryStatus>,
     /// Jobs started in a directory outside any Repository.
-    pub(crate) jobs_outside_repositories: Vec<JobStatus>,
+    pub jobs_outside_repositories: Vec<JobStatus>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct RepositoryStatus {
-    pub(crate) git_common_dir: PathBuf,
-    pub(crate) worktrees: Vec<WorktreeStatus>,
+pub struct RepositoryStatus {
+    pub git_common_dir: PathBuf,
+    pub worktrees: Vec<WorktreeStatus>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct WorktreeStatus {
+pub struct WorktreeStatus {
     #[serde(flatten)]
-    pub(crate) worktree: Worktree,
-    pub(crate) services: Vec<ServiceStatus>,
-    pub(crate) jobs: Vec<JobStatus>,
+    pub worktree: Worktree,
+    pub services: Vec<ServiceStatus>,
+    pub jobs: Vec<JobStatus>,
     /// What runs in the Worktree without Procly having started it. Left out when empty, so that the status of a
     /// Worktree without any reads as it did before Foreign processes were reported.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) foreign: Vec<ForeignProcess>,
+    pub foreign: Vec<ForeignProcess>,
     /// The Isolated containers Procly runs for the Worktree. Left out when empty, so that the status of a Worktree
     /// without any reads as it did before Isolated containers were reported.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) containers: Vec<ContainerStatus>,
+    pub containers: Vec<ContainerStatus>,
 }
 
 /// An Isolated container Procly started or adopted for a Worktree, which runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ContainerStatus {
+pub struct ContainerStatus {
     /// The name of the Compose service in `procly.toml`.
-    pub(crate) service: String,
+    pub service: String,
     /// The compose project of the Worktree the container belongs to.
-    pub(crate) project: String,
+    pub project: String,
     /// The service of the compose file it runs.
-    pub(crate) compose: String,
+    pub compose: String,
     /// The Lease its health check probes.
-    pub(crate) port: Option<u16>,
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ServiceStatus {
-    pub(crate) service: String,
-    pub(crate) port: Option<u16>,
+pub struct ServiceStatus {
+    pub service: String,
+    pub port: Option<u16>,
     /// Whether a previous Daemon started the Service, and this one found it running when it started.
-    pub(crate) reattached: bool,
+    pub reattached: bool,
     #[serde(flatten)]
-    pub(crate) state: ServiceState,
+    pub state: ServiceState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum ServiceState {
+pub enum ServiceState {
     Starting,
     Healthy,
     /// The process crashed and its restart is waiting out the delay.
@@ -585,45 +597,45 @@ pub(crate) enum ServiceState {
 
 /// A declared Service, as the Guard matches a command it blocks against it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct GuardService {
-    pub(crate) name: String,
+pub struct GuardService {
+    pub name: String,
     /// The command of a Process service or a Group.
-    pub(crate) run: Option<String>,
+    pub run: Option<String>,
     /// The service of the compose file a Compose service maps to.
-    pub(crate) compose: Option<String>,
+    pub compose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct JobStatus {
-    pub(crate) id: String,
-    pub(crate) command: String,
-    pub(crate) cwd: PathBuf,
+pub struct JobStatus {
+    pub id: String,
+    pub command: String,
+    pub cwd: PathBuf,
     #[serde(flatten)]
-    pub(crate) state: JobState,
+    pub state: JobState,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum JobState {
+pub enum JobState {
     Running,
     Ended { end: JobEnd },
 }
 
 /// What `worktree init` changed in a Worktree.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct InitReport {
+pub struct InitReport {
     /// The listed paths that were copied, as listed.
-    pub(crate) copied: Vec<String>,
+    pub copied: Vec<String>,
     /// The listed paths the Main worktree does not hold.
-    pub(crate) missing: Vec<String>,
+    pub missing: Vec<String>,
     /// The setup commands that ran and succeeded.
-    pub(crate) ran: Vec<String>,
+    pub ran: Vec<String>,
 }
 
 /// How a Job ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum JobEnd {
+pub enum JobEnd {
     Exited {
         code: i32,
     },
@@ -637,14 +649,14 @@ pub(crate) enum JobEnd {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct Envelope<T> {
-    pub(crate) version: u32,
+pub struct Envelope<T> {
+    pub version: u32,
     #[serde(flatten)]
-    pub(crate) body: T,
+    pub body: T,
 }
 
 impl<T> Envelope<T> {
-    pub(crate) fn new(body: T) -> Self {
+    pub fn new(body: T) -> Self {
         Self {
             version: PROTOCOL_VERSION,
             body,
@@ -653,7 +665,7 @@ impl<T> Envelope<T> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum DecodeError {
+pub enum DecodeError {
     #[error("malformed message: {0}")]
     Malformed(#[from] serde_json::Error),
     #[error("protocol version {0} is not supported, this procly speaks version {PROTOCOL_VERSION}")]
@@ -661,7 +673,12 @@ pub(crate) enum DecodeError {
 }
 
 /// Decodes one line, checking the version before the body so that a newer peer gets a clear answer.
-pub(crate) fn decode<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, DecodeError> {
+///
+/// # Errors
+///
+/// [`DecodeError::Version`] when the line carries another protocol version, [`DecodeError::Malformed`] when it is not
+/// a message of this one.
+pub fn decode<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, DecodeError> {
     #[derive(Deserialize)]
     struct Version {
         version: u32,
@@ -674,8 +691,12 @@ pub(crate) fn decode<T: for<'de> Deserialize<'de>>(line: &str) -> Result<T, Deco
     Ok(envelope.body)
 }
 
-/// Encodes one message as a line, newline included. Fails only on a path that is not valid UTF-8.
-pub(crate) fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error> {
+/// Encodes one message as a line, newline included.
+///
+/// # Errors
+///
+/// Only on a path that is not valid UTF-8.
+pub fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error> {
     let mut line = serde_json::to_string(&Envelope::new(body))?;
     line.push('\n');
     Ok(line)
@@ -683,44 +704,46 @@ pub(crate) fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error>
 
 /// What `gc` found, and with `applied` what it deleted.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct GcReport {
+pub struct GcReport {
     /// Whether `gc` was asked to delete the Orphans, and not only to list them.
-    pub(crate) applied: bool,
+    pub applied: bool,
     /// Every Orphan, Leases first, then Logical resources, then output directories, setup directories, Isolated
     /// containers and their volumes, the order they are deleted in.
-    pub(crate) orphans: Vec<Orphan>,
+    pub orphans: Vec<Orphan>,
     /// The Repositories whose Worktrees git could not list, nothing of which is an Orphan.
-    pub(crate) skipped: Vec<SkippedRepository>,
+    pub skipped: Vec<SkippedRepository>,
     /// What went wrong without failing `gc`, such as a Portless alias that could not be removed. One for all the
     /// Orphans, not one for each.
-    pub(crate) warnings: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 impl GcReport {
     /// Whether some deletion failed.
-    pub(crate) fn failed(&self) -> bool {
+    #[must_use]
+    pub fn failed(&self) -> bool {
         self.orphans.iter().any(|orphan| orphan.error.is_some())
     }
 }
 
 /// Something a removed Worktree left behind, whose Worktree git no longer lists and that no Pinned branch holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Orphan {
+pub struct Orphan {
     #[serde(flatten)]
-    pub(crate) kind: OrphanKind,
+    pub kind: OrphanKind,
     /// The common git directory identifying the Repository.
-    pub(crate) repository: PathBuf,
+    pub repository: PathBuf,
     /// The root of the removed Worktree.
-    pub(crate) worktree: PathBuf,
+    pub worktree: PathBuf,
     /// Whether it was deleted, always `false` without `apply`.
-    pub(crate) deleted: bool,
+    pub deleted: bool,
     /// Why it could not be deleted.
-    pub(crate) error: Option<String>,
+    pub error: Option<String>,
 }
 
 impl Orphan {
     /// What the Orphan is and which Worktree it belongs to, for the text of `gc` and the Daemon log.
-    pub(crate) fn describe(&self) -> String {
+    #[must_use]
+    pub fn describe(&self) -> String {
         let worktree = self.worktree.display();
         match &self.kind {
             OrphanKind::Lease {
@@ -751,7 +774,7 @@ impl Orphan {
 /// What an Orphan is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum OrphanKind {
+pub enum OrphanKind {
     /// A Lease of a Port name of a Service.
     Lease {
         service: String,
@@ -786,17 +809,17 @@ pub(crate) enum OrphanKind {
 
 /// A Repository whose Worktrees git could not list, so that none of them counts as removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SkippedRepository {
+pub struct SkippedRepository {
     /// The common git directory identifying the Repository.
-    pub(crate) repository: PathBuf,
+    pub repository: PathBuf,
     /// Why git could not list its Worktrees.
-    pub(crate) error: String,
+    pub error: String,
 }
 
 /// What a `doctor` check found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CheckStatus {
+pub enum CheckStatus {
     /// Nothing is wrong.
     Passed,
     /// A problem, which makes `doctor` exit with 7.
@@ -808,7 +831,8 @@ pub(crate) enum CheckStatus {
 }
 
 impl CheckStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Passed => "passed",
             Self::Failed => "failed",
@@ -820,19 +844,19 @@ impl CheckStatus {
 
 /// One check of `procly doctor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Check {
+pub struct Check {
     /// What is checked, the same in every run so that a script can match it.
-    pub(crate) name: String,
-    pub(crate) status: CheckStatus,
-    pub(crate) message: String,
+    pub name: String,
+    pub status: CheckStatus,
+    pub message: String,
     /// The command that fixes the problem, which `doctor` never runs. `None` when nothing is wrong, or when no command
     /// fixes it.
-    pub(crate) fix: Option<String>,
+    pub fix: Option<String>,
 }
 
 impl Check {
     /// A check that found nothing wrong.
-    pub(crate) fn passed(name: &str, message: impl Into<String>) -> Self {
+    pub fn passed(name: &str, message: impl Into<String>) -> Self {
         Self {
             name: name.to_owned(),
             status: CheckStatus::Passed,
@@ -842,7 +866,7 @@ impl Check {
     }
 
     /// A problem, with the command that fixes it when one does.
-    pub(crate) fn failed(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
+    pub fn failed(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
         Self {
             name: name.to_owned(),
             status: CheckStatus::Failed,
@@ -852,7 +876,7 @@ impl Check {
     }
 
     /// Something missing that Procly can do without, with the command that adds it, which `doctor` never runs.
-    pub(crate) fn warning(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
+    pub fn warning(name: &str, message: impl Into<String>, fix: Option<String>) -> Self {
         Self {
             name: name.to_owned(),
             status: CheckStatus::Warning,
@@ -862,7 +886,7 @@ impl Check {
     }
 
     /// A check that does not apply here or could not run, `why` telling which.
-    pub(crate) fn skipped(name: &str, why: impl Into<String>) -> Self {
+    pub fn skipped(name: &str, why: impl Into<String>) -> Self {
         Self {
             name: name.to_owned(),
             status: CheckStatus::Skipped,
@@ -875,7 +899,7 @@ impl Check {
 /// What `worktree hooks` did to the Worktrunk config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum HooksOutcome {
+pub enum HooksOutcome {
     /// The block was added or updated.
     Written,
     /// The file already held exactly this block.
@@ -887,7 +911,8 @@ pub(crate) enum HooksOutcome {
 }
 
 impl HooksOutcome {
-    pub(crate) fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Written => "written",
             Self::Unchanged => "unchanged",
@@ -899,20 +924,21 @@ impl HooksOutcome {
 
 /// What `worktree hooks` wrote, or why it wrote nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct HooksReport {
+pub struct HooksReport {
     /// The `.config/wt.toml` of the Worktree.
-    pub(crate) file: PathBuf,
-    pub(crate) outcome: HooksOutcome,
+    pub file: PathBuf,
+    pub outcome: HooksOutcome,
     /// The hooks already set outside the block, for a `conflict`, empty otherwise.
-    pub(crate) set: Vec<String>,
+    pub set: Vec<String>,
     /// The lines the block holds, which are the ones to add by hand after a `conflict`.
-    pub(crate) lines: Vec<String>,
+    pub lines: Vec<String>,
 }
 
 impl HooksReport {
     /// The hooks of the block that are not set outside it, whose lines a `conflict` leaves for the person to add as
     /// they are.
-    pub(crate) fn unset(&self) -> Vec<&str> {
+    #[must_use]
+    pub fn unset(&self) -> Vec<&str> {
         self.lines
             .iter()
             .filter_map(|line| line.split_once(" = ").map(|(hook, _)| hook))
@@ -923,12 +949,12 @@ impl HooksReport {
 
 /// What the Daemon answers a `Doctor` request with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct DaemonChecks {
+pub struct DaemonChecks {
     /// The version of the procly executable the Daemon runs, which the client compares with its own. Not `version`,
     /// which the envelope of every message already carries.
-    pub(crate) procly_version: String,
+    pub procly_version: String,
     /// The checks only the Daemon can answer.
-    pub(crate) checks: Vec<Check>,
+    pub checks: Vec<Check>,
 }
 
 #[cfg(test)]
@@ -941,7 +967,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":21,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":22,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 

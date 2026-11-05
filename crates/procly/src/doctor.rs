@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::client::{self, ClientError};
+use procly_client::ClientError;
+
+use crate::client;
 use crate::config;
 use crate::daemon;
 use crate::driver::{self, Driver};
