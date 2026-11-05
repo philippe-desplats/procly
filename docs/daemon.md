@@ -78,6 +78,30 @@ $ procly unit remove --json
 {"schema_version":1,"path":"/home/me/Library/LaunchAgents/io.github.philippe-desplats.procly.plist","removed":true}
 ```
 
+## Stopping the Daemon
+
+```console
+$ procly daemon stop
+procly: Daemon (pid 4242) stopped
+$ procly daemon stop
+procly: no Daemon running
+```
+
+`procly daemon stop` sends `SIGTERM` to the Daemon, which stops its Jobs and its Services before it exits, and waits until its socket has gone and nothing holds the lock of the state directory any more. The next command then starts a new Daemon, which is what an upgrade needs: it is the remedy [`procly doctor`](doctor.md) offers for a Daemon of another version of Procly.
+
+The command never speaks the protocol, so it stops a Daemon of any version, which would refuse every request of this one. Whether a Daemon runs is read from the lock it holds on its state directory, not from the pid file alone, since the pid of a Daemon that crashed may now belong to another process. A pid file left behind by a crash counts as no Daemon, and the command signals nobody.
+
+The Daemon stops its Services in parallel, so the command waits at most 10 s, twice the 5 s the Daemon gives a process to stop. Past that it exits with 125 and `the Daemon (pid <pid>) did not stop within 10 s` on stderr, prints no document, and never sends `SIGKILL`: what holds the Daemon is yours to look at. It stops no Compose container, as the Daemon does not on exit, see [Containers after a crash or a restart](#containers-after-a-crash-or-a-restart).
+
+With `--json` it prints the `outcome` and the `pid` it signalled, plus the time it waited for a Daemon it stopped. See [JSON output](json.md).
+
+```console
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"stopped","pid":4242,"waited_ms":5310}
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"not_running","pid":null}
+```
+
 ## Foreign processes
 
 `procly status` lists under each Worktree what runs in it without Procly having started it, so that an agent that bypassed Procly shows up:

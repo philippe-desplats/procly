@@ -1,6 +1,7 @@
 mod client;
 mod config;
 mod daemon;
+mod daemon_stop;
 mod derived;
 mod doctor;
 mod driver;
@@ -295,9 +296,16 @@ enum Command {
                       that fails is a tool error carrying its exit code and its stderr. See docs/mcp.md."
     )]
     Mcp,
-    /// Run the Daemon in the foreground. Every other command starts it on demand.
-    #[command(hide = true)]
-    Daemon,
+    /// Run the Daemon in the foreground, or stop it with `daemon stop`. Every other command starts it on demand.
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "Exit codes: 0 for `daemon stop`, also when no Daemon runs, 125 when the Daemon is still there \
+                      after 10 s or Procly itself fails. See docs/daemon.md."
+    )]
+    Daemon {
+        #[command(subcommand)]
+        command: Option<DaemonCommand>,
+    },
     /// Append the standard input to the output file of a Service, keeping it bounded. The Daemon starts it.
     #[command(hide = true)]
     OutputFile { path: PathBuf },
@@ -409,6 +417,16 @@ enum WorktreeCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Stop the running Daemon with `SIGTERM`, which stops its Services and its Jobs, and wait until it has gone. It
+    /// never speaks the protocol, so it stops a Daemon of any version of Procly, and it never sends `SIGKILL`.
+    Stop {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum UnitCommand {
     /// Write the Session unit and have the session manager start the Daemon now and with every session, restarting
     /// it if it crashes. Run it again after moving the procly executable or the state directory.
@@ -433,7 +451,7 @@ enum UnitCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // A command of `procly mcp` stops with it. The Daemon outlives everything, and a server watches no server.
-    if !matches!(cli.command, Command::Daemon | Command::Mcp) {
+    if !matches!(cli.command, Command::Daemon { command: None } | Command::Mcp) {
         #[expect(
             unsafe_code,
             reason = "`watch` edits the environment, which is only sound before any thread starts"
@@ -554,11 +572,27 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Mcp => unreachable!("the MCP server is served before the state directory is resolved"),
         Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
-        Command::Daemon => {
-            daemon::run(&state)?;
-            Ok(ExitCode::SUCCESS)
+        Command::Daemon { command } => daemon(&state, command.as_ref()),
+    }
+}
+
+/// Runs the Daemon in the foreground, or `daemon stop`, which signals the Daemon instead of asking it.
+fn daemon(state: &StateDir, command: Option<&DaemonCommand>) -> anyhow::Result<ExitCode> {
+    let Some(DaemonCommand::Stop { json }) = command else {
+        daemon::run(state)?;
+        return Ok(ExitCode::SUCCESS);
+    };
+    let json = json.json;
+    let outcome = daemon_stop::run(state)?;
+    if json {
+        json::print(&outcome)?;
+    } else {
+        match outcome {
+            daemon_stop::DaemonStop::NotRunning { .. } => eprintln!("procly: no Daemon running"),
+            daemon_stop::DaemonStop::Stopped { pid, .. } => eprintln!("procly: Daemon (pid {pid}) stopped"),
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Prints the recent output of the Job or the Service `job_or_service`, or with `follow` its output as it arrives.

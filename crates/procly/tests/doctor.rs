@@ -309,13 +309,7 @@ fn a_daemon_of_another_version_is_a_problem_and_the_fix_restarts_it() {
         "{}",
         message(&document, "daemon")
     );
-    assert_eq!(
-        check(&document, "daemon")["fix"],
-        json!(format!(
-            "kill \"$(cat {})\"",
-            setup.procly.state_dir().join("daemon.pid").display()
-        ))
-    );
+    assert_eq!(check(&document, "daemon")["fix"], json!("procly daemon stop"));
 }
 
 #[test]
@@ -332,7 +326,7 @@ fn a_daemon_speaking_another_protocol_version_is_a_problem_and_its_checks_are_sk
     daemon.join().expect("the fake Daemon ends");
     assert_eq!(status(&document, "daemon"), "failed");
     assert!(message(&document, "daemon").contains("speaks protocol version 1"));
-    assert!(check(&document, "daemon")["fix"].is_string());
+    assert_eq!(check(&document, "daemon")["fix"], json!("procly daemon stop"));
     assert_eq!(status(&document, "leased_ports"), "skipped");
     assert_eq!(status(&document, "orphans"), "skipped");
 }

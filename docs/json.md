@@ -1,6 +1,6 @@
 # JSON output
 
-Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, `mcp`, which speaks JSON-RPC and returns these documents as tool results, and `daemon`, which prints nothing.
+Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, `mcp`, which speaks JSON-RPC and returns these documents as tool results, and `daemon` without a subcommand, which runs the Daemon in the foreground and prints nothing.
 
 The one exception to 1 document is `logs --follow`, which streams and prints 1 JSON document per line, see [`logs --follow`](#logs---follow).
 
@@ -35,6 +35,7 @@ The one exception to 1 document is `logs --follow`, which streams and prints 1 J
 | `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
 | `doctor` | every check with its status, message and fix | below, and [Checking the installation](doctor.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |
+| `daemon stop` | whether a Daemon was stopped, its pid and how long it took | [below](#daemon-stop), and [The Daemon](daemon.md#stopping-the-daemon) |
 | `mcp` | none, it serves the documents above as MCP tools | [The MCP server](mcp.md) |
 
 ## `run`
@@ -154,6 +155,17 @@ $ procly doctor --json
 `prompt` is what `procly doctor --agent` would hand to a coding agent for the failed checks, so that your own agent can act on it, and `null` when no check failed. With `--agent <cli>` the prompt is handed to that CLI, `prompt` is `null` and `agent` names the CLI, `null` otherwise. What the agent prints on its standard output goes to stderr. See [Checking the installation](doctor.md#handing-the-problems-to-your-coding-agent).
 
 A later version of procly may add a check. A reader that does not know a `name` should skip that check, and the schema version stays 1.
+
+## `daemon stop`
+
+```console
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"stopped","pid":4242,"waited_ms":5310}
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"not_running","pid":null}
+```
+
+`outcome` is `stopped` when a Daemon ran and has gone, with the `pid` it was sent `SIGTERM` and `waited_ms`, the time it took to go in milliseconds. It is `not_running` when no Daemon held the lock of the state directory, a pid file left by a crash included, and `pid` is then `null` and there is no `waited_ms`. A Daemon still there after 10 s prints no document: the command exits with 125 and the reason on stderr, see [exit codes](exit-codes.md). The command never speaks the protocol, so the document is the same whatever version of Procly the Daemon runs, see [Stopping the Daemon](daemon.md#stopping-the-daemon).
 
 ## `status`
 
