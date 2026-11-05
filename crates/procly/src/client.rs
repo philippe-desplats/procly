@@ -21,8 +21,14 @@ pub(crate) fn send_with_progress(
     request: &Request,
     on_progress: impl FnMut(&Response),
 ) -> anyhow::Result<Response> {
-    let exe = std::env::current_exe().context("cannot locate the procly executable to start the daemon")?;
-    Ok(connect_or_start(state, &exe)?.send(request)?.answer(on_progress)?)
+    // The executable is located only when a Daemon has to be started, as it always was.
+    let connection = if let Ok(connection) = connect(state) {
+        connection
+    } else {
+        let exe = std::env::current_exe().context("cannot locate the procly executable to start the daemon")?;
+        connect_or_start(state, &exe)?
+    };
+    Ok(connection.send(request)?.answer(on_progress)?)
 }
 
 /// Sends one request to the Daemon only if one runs, and never starts it.

@@ -67,6 +67,12 @@ fn logs(output: &str) -> Response {
     }
 }
 
+fn wait() -> Request {
+    Request::Wait {
+        job: "3f9a1c2e".to_owned(),
+    }
+}
+
 fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + DEADLINE;
     while !done() {
@@ -94,9 +100,7 @@ fn the_request_is_one_line_and_every_response_line_is_read_in_order_until_the_da
 
     let responses: Vec<Response> = connect(&state)
         .unwrap()
-        .send(&Request::Wait {
-            job: "3f9a1c2e".to_owned(),
-        })
+        .send(&wait())
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -128,9 +132,7 @@ fn the_answer_is_the_first_response_that_is_not_setup_progress() {
     let mut seen = Vec::new();
     let answer = connect(&state)
         .unwrap()
-        .send(&Request::Wait {
-            job: "3f9a1c2e".to_owned(),
-        })
+        .send(&wait())
         .unwrap()
         .answer(|response| {
             if let Response::SetupProgress { command, .. } = response {
@@ -149,13 +151,7 @@ fn a_daemon_that_closes_before_answering_is_no_response() {
     let (_dir, state) = state();
     let daemon = daemon(&state, vec![line(progress("bun install"))]);
 
-    let result = connect(&state)
-        .unwrap()
-        .send(&Request::Wait {
-            job: "3f9a1c2e".to_owned(),
-        })
-        .unwrap()
-        .answer(|_| ());
+    let result = connect(&state).unwrap().send(&wait()).unwrap().answer(|_| ());
 
     daemon.join().unwrap();
     assert!(matches!(result, Err(ClientError::NoResponse)), "{result:?}");
@@ -172,12 +168,7 @@ fn a_response_of_another_protocol_version_ends_the_stream_with_its_version() {
         ],
     );
 
-    let mut responses = connect(&state)
-        .unwrap()
-        .send(&Request::Wait {
-            job: "3f9a1c2e".to_owned(),
-        })
-        .unwrap();
+    let mut responses = connect(&state).unwrap().send(&wait()).unwrap();
 
     assert!(matches!(
         responses.next(),
@@ -202,19 +193,18 @@ fn connect_or_start_starts_the_executable_it_is_given_with_the_daemon_argument()
     let (dir, state) = state();
     let marker = dir.path().join("started");
     let exe = recording_exe(dir.path(), &marker);
-    // The stand-in binds the socket a little after the call, so the call finds no Daemon and starts the executable.
-    let socket = state.socket();
+    // The stand-in binds the socket only once the call opened the log of the Daemon, which it does after finding no
+    // Daemon and before starting the executable.
+    let (socket, log) = (state.socket(), state.log());
     let daemon = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(200));
+        eventually("the call to prepare a Daemon start", || log.exists());
         let listener = UnixListener::bind(socket).unwrap();
         answer(&listener, &[line(logs("ok\n"))])
     });
 
     let answer = connect_or_start(&state, &exe)
         .unwrap()
-        .send(&Request::Wait {
-            job: "3f9a1c2e".to_owned(),
-        })
+        .send(&wait())
         .unwrap()
         .answer(|_| ())
         .unwrap();
@@ -239,9 +229,7 @@ fn connect_or_start_with_a_daemon_running_starts_nothing() {
 
     let answer = connect_or_start(&state, &exe)
         .unwrap()
-        .send(&Request::Wait {
-            job: "3f9a1c2e".to_owned(),
-        })
+        .send(&wait())
         .unwrap()
         .answer(|_| ())
         .unwrap();
