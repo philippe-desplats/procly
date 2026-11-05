@@ -97,7 +97,7 @@ fn daemon_checks(state: &StateDir, answer: Result<Response, ClientError>) -> (Ch
             .map(|name| Check::skipped(name, why))
             .collect()
     };
-    let restart = Some(format!("kill \"$(cat {})\"", state.pid().display()));
+    let restart = Some("procly daemon stop".to_owned());
     match answer {
         Ok(Response::Doctor(DaemonChecks {
             procly_version: version,
