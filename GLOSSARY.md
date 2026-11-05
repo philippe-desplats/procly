@@ -53,7 +53,7 @@ A Service that runs several Services as one unit, such as a monorepo-wide dev co
 _Avoid_: meta-service, umbrella
 
 **Job**:
-A bounded, ad hoc command started without a config entry, deduplicated by its Fingerprint and ending with an exit code.
+A bounded, ad hoc command started without a config entry, deduplicated by its Fingerprint and ending with an exit code. An ended Job stays known to the Daemon until a bounded retention evicts it, its Worktree is released, or the Daemon restarts.
 _Avoid_: temp, temporary process, task
 
 **Fingerprint**:
