@@ -72,3 +72,9 @@ endif
 e2e:
 	$(MAKE) bundle TAURI_ARGS="--features e2e $(E2E_BUNDLES)"
 	cd $(APP) && PROCLY_E2E_APP="$(E2E_APP)" PROCLY_E2E_TEST_SERVER="$(CURDIR)/target/debug/procly-test-server" $(BUN) run e2e
+
+# The scripts the release workflow runs, see docs/releasing.md. Needs nothing but bash.
+.PHONY: test-release-scripts
+
+test-release-scripts:
+	bash scripts/test-release-scripts.sh

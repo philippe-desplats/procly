@@ -43,6 +43,8 @@ jobs:
       - run: make fmt-check
       - run: make lint
       - run: make test
+      # The scripts of the release workflow, which only a tag would otherwise run.
+      - run: make test-release-scripts
 
   # The end-to-end tests (ADR 0016) drive the built app against a real Daemon, outside `make check`. They run on every
   # pull request. Linux has no display on a runner, so `xvfb-run` gives the window one. Narrow the trigger with a `paths`

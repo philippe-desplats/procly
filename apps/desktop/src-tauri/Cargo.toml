@@ -26,7 +26,11 @@ procly-client = { workspace = true, features = ["ts"] }
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 tauri.workspace = true
+# Rust opens a Worktree with the app the developer chose, the window itself holds no `opener` permission.
+tauri-plugin-opener.workspace = true
 tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
+# The window reopens where it was left, with no visible setting.
+tauri-plugin-window-state.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
