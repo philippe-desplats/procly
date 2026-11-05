@@ -14,6 +14,11 @@ name = "procly_desktop_lib"
 [build-dependencies]
 tauri-build.workspace = true
 
+[features]
+# Opens a WebDriver server on a loopback port so that `make e2e` can drive the window (ADR 0016). Off by default,
+# never in a release.
+e2e = ["dep:tauri-plugin-wdio-webdriver"]
+
 [dependencies]
 # The `ts` feature exports the TypeScript types of the protocol while `cargo test` runs (ADR 0015).
 procly-client = { workspace = true, features = ["ts"] }
@@ -23,6 +28,7 @@ serde_json.workspace = true
 tauri.workspace = true
 # Rust opens a Worktree with the app the developer chose, the window itself holds no `opener` permission.
 tauri-plugin-opener.workspace = true
+tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
 # The window reopens where it was left, with no visible setting.
 tauri-plugin-window-state.workspace = true
 thiserror.workspace = true

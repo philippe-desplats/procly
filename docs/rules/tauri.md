@@ -125,3 +125,12 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 - **ALWAYS** test the frontend against `mockIPC` from `@tauri-apps/api/mocks`, and test the Rust side through the `procly-client` crate.
   - The commands hold no logic, so the frontend tests check rendering and the client tests check the protocol, without a running webview.
   - Example: `mockIPC((cmd, args) => cmd === 'restart' ? { response: 'up', service: 'web', outcome: 'started', port: 5173 } : undefined)`.
+
+- **ALWAYS** prove a screen that depends on the window, the sidecar and a real Daemon together with an end-to-end flow in `apps/desktop/e2e/specs/`, run by `make e2e`.
+  - ADR 0016: WebdriverIO drives the built app through an embedded WebDriver server. The layer is outside `make check` because it opens a window, so a ticket that needs live proof adds its flow there instead of widening the unit tests.
+  - A flow sets its scene with the embedded `procly` against the Daemon the runner isolated in temporary directories, reads and presses the page through `browser.execute`, and never reaches the Daemon of the developer.
+  - Example: `await procly(["up", "--json", "web"], scene.path)`, then `await showingText(OVERVIEW, ["web", `:${scene.port}`])`.
+
+- **NEVER** enable the `e2e` Cargo feature in a release build, or add its WebDriver server, the bridge plugin or their permissions to a build that ships.
+  - The feature runs a WebDriver server on a loopback port that can drive the window. The listener rule above covers the Daemon, this one covers the app, and a release build with the feature fails to compile.
+  - Example: `make e2e` builds with `TAURI_ARGS="--features e2e"`, while the release workflow runs `make bundle PROFILE=release` with no feature.

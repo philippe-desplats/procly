@@ -100,13 +100,25 @@ fn follow_window(window: &Window, event: &WindowEvent) {
     }
 }
 
+#[cfg(all(feature = "e2e", not(debug_assertions)))]
+compile_error!("the `e2e` feature opens a WebDriver server and must never be part of a release build (ADR 0016)");
+
+/// The builder every run starts from. A build made for the end-to-end tests (ADR 0016) also carries the plugin that
+/// serves `WebDriver` on the loopback port the test runner chose, which no other build has.
+fn builder() -> tauri::Builder<tauri::Wry> {
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "e2e")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
+}
+
 /// Runs the app until its last window closes. Closing the window or quitting the app stops nothing in the Daemon.
 ///
 /// # Panics
 ///
 /// When Tauri cannot start, which leaves nothing to show.
 pub fn run() {
-    tauri::Builder::default()
+    builder()
         .setup(|app| {
             let client = DaemonClient::resolve()?;
             // Told as soon as the window moves, but the first tick should already match how it opened.

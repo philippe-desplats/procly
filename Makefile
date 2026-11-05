@@ -55,6 +55,24 @@ sidecar:
 bundle: sidecar
 	cd $(APP) && $(BUN) run tauri build $(if $(filter debug,$(PROFILE)),--debug) --config src-tauri/tauri.bundle.conf.json $(TAURI_ARGS)
 
+# The end-to-end tests (ADR 0016) drive the real app, built with the `e2e` feature, against a real Daemon. They are not
+# part of `check`. The runner isolates the Daemon in temporary directories and the app finds its `procly` beside its
+# executable, so the build goes through `bundle` like every build that embeds the CLI. A macOS bundle is an `.app`,
+# Linux has no `app` bundle type and runs the executable the build leaves in `target`.
+ifeq ($(shell uname -s),Darwin)
+E2E_BUNDLES := --bundles app
+E2E_APP := $(CURDIR)/target/debug/bundle/macos/Procly.app/Contents/MacOS/procly-desktop
+else
+E2E_BUNDLES := --no-bundle
+E2E_APP := $(CURDIR)/target/debug/procly-desktop
+endif
+
+.PHONY: e2e
+
+e2e:
+	$(MAKE) bundle TAURI_ARGS="--features e2e $(E2E_BUNDLES)"
+	cd $(APP) && PROCLY_E2E_APP="$(E2E_APP)" PROCLY_E2E_TEST_SERVER="$(CURDIR)/target/debug/procly-test-server" $(BUN) run e2e
+
 # The scripts the release workflow runs, see docs/releasing.md. Needs nothing but bash.
 .PHONY: test-release-scripts
 
