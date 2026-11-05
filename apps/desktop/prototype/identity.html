@@ -1,0 +1,305 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Ticket #105 of map #81: visual identity of the app, palette and menu bar glyphs.
+  Question: which state each menu bar glyph stands for, which palette tokens the spec names,
+  and whether the glyphs ship as drawn here or are redrawn during the build.
+  4 glyph variants switchable with ?variant=A|B|C|D (arrows or the bottom bar), 2 palette options with ?palette=system|ink.
+  Glyphs are drawn on the 12x12 grid of the brand mark (docs/brand/procly-tuile.svg), unit = 1 viewBox unit,
+  rasterised at 36 px tall (18 pt @2x, 3 px per grid unit) exactly as a template PNG would ship.
+  Open with: open apps/desktop/prototype/identity.html (Safari shows the real system accent colour).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE · Procly identity (#105)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --mono: ui-monospace, "SF Mono", Menlo, monospace; --brand-ink: #14161A; --brand-lime: #D7F23C; --brand-lime-deep: #A8BF22; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.45 -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; padding: 24px 32px 90px; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; } h2 { font-size: 13px; font-weight: 600; margin: 32px 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  code, .mono { font-family: var(--mono); font-size: 11px; }
+  .muted { color: var(--muted); } .faint { color: var(--faint); }
+  .proto { display: inline-block; font: 600 11px system-ui; color: #ff3da8; border: 1.5px dashed #ff3da8; border-radius: 6px; padding: 2px 7px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin: 10px 0 0; flex-wrap: wrap; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button { font: inherit; color: var(--text); background: var(--raise); border: 0; padding: 3px 10px; cursor: pointer; }
+  .seg button.on { background: var(--accent); color: #fff; }
+
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 11px; color: var(--faint); font-weight: 600; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px 6px; }
+
+  /* Fake macOS menu bars, always both appearances: the bar follows the wallpaper, not only the app theme */
+  .mb { display: inline-flex; align-items: center; gap: 2px; height: 24px; padding: 0 8px; border-radius: 6px; font: 13px -apple-system, system-ui; }
+  .mb.dark { background: #2a2b2f; color: #fff; } .mb.light { background: #e9e9ec; color: rgba(0,0,0,.85); }
+  .mb .it { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 6px; border-radius: 5px; }
+  .mb.dark .it.hl { background: rgba(255,255,255,.22); } .mb.light .it.hl { background: rgba(0,0,0,.11); }
+  .mb .clock { opacity: .9; padding: 0 4px; }
+  .zoom { image-rendering: pixelated; border: 1px solid var(--line); border-radius: 4px; background: repeating-conic-gradient(#8881 0 25%, transparent 0 50%) 0 0 / 12px 12px; }
+  .dl { font: 11px var(--mono); color: var(--accent); background: none; border: 0; cursor: pointer; padding: 0 4px; }
+
+  /* Palette */
+  .pal { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .scheme { border-radius: 10px; padding: 12px; border: 1px solid #8884; }
+  .tok { display: grid; grid-template-columns: 22px 150px 80px 1fr; gap: 8px; align-items: center; padding: 3px 0; font-size: 12px; }
+  .sw { width: 22px; height: 22px; border-radius: 5px; border: 1px solid #8885; }
+  .ok { color: #2e9d48; } .bad { color: #d70015; font-weight: 600; }
+  .grp { font-size: 11px; font-weight: 600; opacity: .7; margin: 10px 0 2px; }
+
+  /* Sample window built only from tokens, rendered in both schemes */
+  .win { display: grid; grid-template-columns: 170px 1fr; border-radius: 10px; overflow: hidden; border: 1px solid var(--t-line); background: var(--t-panel); color: var(--t-text); font-size: 13px; margin-top: 12px; }
+  .win .side { background: var(--t-side); padding: 8px 6px; border-right: 1px solid var(--t-line); }
+  .win .row { display: flex; align-items: center; gap: 7px; padding: 4px 8px; border-radius: 6px; }
+  .win .row.sel { background: color-mix(in srgb, var(--t-accent) 22%, transparent); }
+  .win .row.seen { opacity: .5; }
+  .win .main { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .win .w { color: var(--t-muted); } .win .w.fail { color: var(--t-fail); } .win .w.warn { color: var(--t-warn); }
+  .win .cap { color: var(--t-faint); font-size: 11px; }
+  .btn { display: inline-flex; align-items: center; height: 24px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--t-line); background: var(--t-raise); color: var(--t-text); font: inherit; }
+  .btn.def { background: var(--t-accent); border-color: var(--t-accent); color: #fff; }
+  .btn.brand { background: var(--brand-lime); border-color: var(--brand-lime); color: var(--brand-ink); font-weight: 600; }
+  .dot { width: 10px; height: 10px; flex: none; }
+
+  .switcher { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 5px; background: #fff; color: #111; border-radius: 99px; box-shadow: 0 8px 30px rgba(0,0,0,.45); z-index: 9; font: 12px system-ui; border: 2px dashed #ff3da8; }
+  .switcher button { border: 0; background: #eee; border-radius: 99px; width: 28px; height: 28px; cursor: pointer; font-size: 14px; }
+  .switcher span { padding: 0 10px; font-weight: 600; min-width: 260px; text-align: center; }
+</style>
+</head>
+<body>
+<span class="proto">PROTOTYPE · throwaway · #105</span>
+<h1>Procly, visual identity: menu bar glyphs and palette</h1>
+<div class="muted">Glyphs on the 12×12 grid of the brand mark, rasterised at 36 px (18 pt @2x, 3 px per grid unit) as the template PNG would ship. The zoom shows that raster, pixel for pixel.</div>
+<div class="bar">
+  <span class="faint">Theme</span><span class="seg" id="theme"></span>
+  <span class="faint" style="margin-left:12px">Palette</span><span class="seg" id="palette"></span>
+</div>
+
+<h2>Glyphs, variant <span id="vname"></span></h2>
+<div class="muted" id="vdesc" style="margin-bottom:10px"></div>
+<div class="card"><table id="glyphs"></table></div>
+
+<h2>Which state each glyph stands for</h2>
+<div class="card"><table id="mapping"></table></div>
+
+<h2>Palette tokens</h2>
+<div class="muted">Contrast is computed against <code>panel</code>. Text tokens need 4.5:1, state glyph fills 3:1. The accent reads <code>-apple-system-control-accent</code> where WebKit has it (Safari, WKWebView), the fallback elsewhere.</div>
+<div class="pal" id="pal"></div>
+
+<h2>App icon (brand tile, unchanged)</h2>
+<div class="bar" id="tiles"></div>
+
+<div class="switcher"><button id="prev" title="Previous (←)">←</button><span id="label"></span><button id="next" title="Next (→)">→</button></div>
+
+<script>
+// ---------- Geometry, in grid units (viewBox 0 0 12 12) ----------
+const P = pts => 'M' + pts.map(p => p.join(',')).join(' L') + ' Z';
+const OUTER = P([[4,0],[12,0],[12,8],[8,12],[0,12],[0,4]]);
+const SLASH1 = P([[6,2],[8,2],[0,10],[0,8]]);
+const SLASH2 = P([[10,4],[10,6],[4,12],[2,12]]);
+const MARK = OUTER + ' ' + SLASH1 + ' ' + SLASH2;
+const svg = (body, w = 12, opacity = 1) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} 12" width="${w * 3}" height="36"><g opacity="${opacity}">${body}</g></svg>`;
+const solid = d => `<path d="${d}" fill="#000" fill-rule="evenodd"/>`;
+// Inner stroke of 2/3 unit = 2 px @2x: stroke twice as wide, clipped to the filled shape.
+const innerStroke = (d, id) => `<defs><clipPath id="${id}"><path d="${d}" clip-rule="evenodd"/></clipPath></defs><path d="${d}" fill="none" stroke="#000" stroke-width="1.333" clip-path="url(#${id})"/>`;
+
+const G = {
+  mark: svg(solid(MARK)),
+  outlineOuter: svg(innerStroke(OUTER, 'oo')),
+  outlineFull: svg(innerStroke(MARK, 'of')),
+  dimmed: svg(solid(MARK), 12, 0.35),
+  // A: the draft from #82, a round bite at the top right with a dot, off the grid (widens the glyph to 13.85 units)
+  bite: svg(`<defs><mask id="bm"><rect width="13.85" height="12" fill="#fff"/><circle cx="11.54" cy="1.54" r="3" fill="#000"/></mask></defs><path d="${MARK}" fill="#000" fill-rule="evenodd" mask="url(#bm)"/><circle cx="11.54" cy="1.54" r="1.92" fill="#000"/>`, 13.85),
+  // B: a 4x4 square notch cut at the top right on the grid, with a 3x3 badge sitting in it
+  notch: svg(`<defs><mask id="nm"><rect width="12" height="12" fill="#fff"/><rect x="8" y="0" width="4" height="4" fill="#000"/></mask></defs><path d="${MARK}" fill="#000" fill-rule="evenodd" mask="url(#nm)"/><rect x="9" y="0" width="3" height="3" rx=".5" fill="#000"/>`),
+  // D: the slashes close, the mark turns solid
+  filled: svg(solid(OUTER)),
+};
+
+const VARIANTS = {
+  A: { name: 'Round bite (draft of #82)', desc: 'Needs you: a round bite at the top right with a dot inside, like a badge. No Daemon: the outer outline. The bite sits off the grid, so its edge is anti-aliased and the glyph is 15% wider.',
+       glyphs: { mark: G.mark, needs: G.bite, off: G.outlineOuter } },
+  B: { name: 'Square notch on the grid', desc: 'Needs you: a 4×4 square cut from the top right corner, a 3×3 badge in it. Every edge falls on the 3 px grid, so the raster is crisp. No Daemon: the full mark in outline, slashes included, so it still reads as Procly.',
+       glyphs: { mark: G.mark, needs: G.notch, off: G.outlineFull } },
+  C: { name: 'Mark plus native count', desc: 'Needs you: the mark unchanged, the count as the native tray title next to it (TrayIcon::set_title, macOS only). No Daemon: the mark at 35% alpha, the disabled look. Only 2 drawings ship.',
+       glyphs: { mark: G.mark, needs: G.mark, off: G.dimmed }, count: true },
+  D: { name: 'Mark closes', desc: 'Needs you: the slashes close and the mark turns solid, a change of the mark itself rather than an added badge. No Daemon: the outer outline.',
+       glyphs: { mark: G.mark, needs: G.filled, off: G.outlineOuter } },
+};
+const KEYS = Object.keys(VARIANTS);
+
+const STATES = [
+  ['mark', 'The mark', 'The Daemon answers and nothing needs you.'],
+  ['needs', 'Needs you', 'The Daemon answers and "Needs you" is not empty: a failure not marked as seen, or a Foreign process.'],
+  ['off', 'Cannot read', 'No Daemon to read: socket absent, connection refused, or a protocol of another version.'],
+];
+
+// ---------- Raster pipeline: SVG → 36 px alpha → tinted like a template image ----------
+const imgCache = {};
+function raster(svgText) {
+  if (!imgCache[svgText]) imgCache[svgText] = new Promise(res => { const i = new Image(); i.onload = () => res(i); i.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText); });
+  return imgCache[svgText];
+}
+async function tinted(svgText, color) {
+  const img = await raster(svgText), c = document.createElement('canvas');
+  c.width = img.width; c.height = 36;
+  const x = c.getContext('2d'); x.drawImage(img, 0, 0, c.width, 36); x.globalCompositeOperation = 'source-in'; x.fillStyle = color; x.fillRect(0, 0, c.width, 36);
+  c.style.width = c.width / 2 + 'px'; c.style.height = '18px';
+  return c;
+}
+async function zoomed(svgText, k = 5) {
+  const src = await tinted(svgText, '#000'), c = document.createElement('canvas');
+  c.width = src.width * k; c.height = 36 * k; c.className = 'zoom';
+  const x = c.getContext('2d'); x.imageSmoothingEnabled = false; x.drawImage(src, 0, 0, c.width, c.height);
+  x.strokeStyle = 'rgba(255,61,168,.35)'; x.lineWidth = 1;
+  for (let u = 0; u <= c.width / (3 * k); u++) { x.beginPath(); x.moveTo(u * 3 * k + .5, 0); x.lineTo(u * 3 * k + .5, c.height); x.stroke(); }
+  for (let u = 0; u <= 12; u++) { x.beginPath(); x.moveTo(0, u * 3 * k + .5); x.lineTo(c.width, u * 3 * k + .5); x.stroke(); }
+  c.style.width = c.width / 2 + 'px';
+  return c;
+}
+function download(name, href) { const a = document.createElement('a'); a.href = href; a.download = name; a.click(); }
+
+// ---------- Glyph table ----------
+async function renderGlyphs(v) {
+  const V = VARIANTS[v], t = document.getElementById('glyphs');
+  document.getElementById('vname').textContent = `${v}, ${V.name}`;
+  document.getElementById('vdesc').textContent = V.desc;
+  t.innerHTML = `<tr><th>State</th><th>Dark menu bar</th><th>Light menu bar</th><th>Menu open</th><th>36 px raster, 1 cell = 1 grid unit</th><th>Ship</th></tr>`;
+  for (const [key, label] of STATES) {
+    const s = V.glyphs[key], tr = document.createElement('tr');
+    tr.innerHTML = `<td><b>${label}</b></td><td></td><td></td><td></td><td></td><td></td>`;
+    const count = V.count && key === 'needs' ? '<span>2</span>' : '';
+    for (const [i, cls, col, hl] of [[1, 'dark', '#fff', false], [2, 'light', 'rgba(0,0,0,.85)', false], [3, 'dark', '#fff', true]]) {
+      const bar = document.createElement('div'); bar.className = 'mb ' + cls;
+      bar.innerHTML = `<span class="it" style="opacity:.55">⌕</span><span class="it ${hl ? 'hl' : ''}"></span><span class="clock">Thu 5 Nov 16:58</span>`;
+      const slot = bar.children[1]; slot.append(await tinted(s, col)); if (count) slot.insertAdjacentHTML('beforeend', count);
+      tr.children[i].append(bar);
+    }
+    tr.children[4].append(await zoomed(s));
+    const png = (await tinted(s, '#000')).toDataURL('image/png');
+    tr.children[5].innerHTML = `<button class="dl">svg</button><button class="dl">png</button>`;
+    tr.children[5].children[0].onclick = () => download(`tray-${key}.svg`, 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(s));
+    tr.children[5].children[1].onclick = () => download(`tray-${key}@2x.png`, png);
+    t.append(tr);
+  }
+}
+
+function renderMapping() {
+  document.getElementById('mapping').innerHTML = `<tr><th>Condition seen by the poller</th><th>Glyph</th><th>Note</th></tr>` + [
+    ['The app just launched, no answer yet', 'The mark', 'Recommended: no outline before the first failed connect, otherwise every login flashes a "cannot read" glyph for up to one poll.'],
+    ['Status answered, "Needs you" empty', 'The mark', 'Routine starting and restarting stay out, and so does doctor (#82).'],
+    ['Status answered, "Needs you" not empty', 'Needs you', 'Unseen failures plus Foreign processes, the same set the menu lists. The count is in the menu, not in the glyph (except variant C).'],
+    ['Connect fails: socket absent or refused', 'Cannot read', 'The window shows "Daemon not running".'],
+    ['Protocol mismatch, older or newer Daemon', 'Cannot read', 'Status cannot be decoded, the window shows "Daemon of another version".'],
+    ['A request in flight times out once', 'Unchanged', 'Recommended: keep the last glyph until a second failure, the poller already holds one request in flight (#86).'],
+  ].map(r => `<tr><td>${r[0]}</td><td><b>${r[1]}</b></td><td class="muted">${r[2]}</td></tr>`).join('');
+}
+
+// ---------- Palette ----------
+const PALETTES = {
+  system: {
+    name: 'System neutral', note: 'Greys taken from the macOS window materials, state colours from the accessible variants of the system colours.',
+    light: { bg: '#ececec', side: '#e6e6e8', panel: '#ffffff', raise: '#f5f5f7', line: '#d9d9de', text: '#1d1d1f', muted: '#5e5e63', faint: '#6e6e73', ok: '#248a3d', warn: '#c93400', fail: '#d70015', ended: '#8e8e93', accentFallback: '#007aff' },
+    dark:  { bg: '#1e1e1e', side: '#262628', panel: '#1e1e1e', raise: '#2c2c2e', line: '#3a3a3c', text: '#f2f2f7', muted: '#aeaeb2', faint: '#8e8e93', ok: '#30db5b', warn: '#ffb340', fail: '#ff6961', ended: '#8e8e93', accentFallback: '#0a84ff' },
+  },
+  ink: {
+    name: 'Ink tinted (draft of #82)', note: 'Greys pulled toward the brand ink #14161A, a quiet olive for healthy, as in the shape prototype.',
+    light: { bg: '#e4e7ea', side: '#f3f4f6', panel: '#ffffff', raise: '#eef0f2', line: '#dfe2e6', text: '#14161A', muted: '#50575f', faint: '#646b74', ok: '#5c6b2f', warn: '#8f5a00', fail: '#b42318', ended: '#6f767e', accentFallback: '#007aff' },
+    dark:  { bg: '#101215', side: '#1b1e23', panel: '#17191d', raise: '#23272d', line: '#2a2f36', text: '#e8eaed', muted: '#a2a9b2', faint: '#858d97', ok: '#8fa05f', warn: '#f0b042', fail: '#ff6b6b', ended: '#7b828b', accentFallback: '#0a84ff' },
+  },
+};
+const lum = h => { const n = parseInt(h.slice(1), 16), c = [n >> 16, n >> 8 & 255, n & 255].map(v => { v /= 255; return v <= .03928 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return .2126 * c[0] + .7152 * c[1] + .0722 * c[2]; };
+const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + .05) / (y + .05); };
+const SUPPORTS_SYS_ACCENT = CSS.supports('color', '-apple-system-control-accent');
+const accentOf = s => SUPPORTS_SYS_ACCENT ? '-apple-system-control-accent' : s.accentFallback;
+
+const GROUPS = [
+  ['Surfaces', [['bg', 'window behind panes'], ['side', 'sidebar'], ['panel', 'center and inspector'], ['raise', 'buttons, copy boxes'], ['line', 'separators, borders']]],
+  ['Text', [['text', 'primary', 4.5], ['muted', 'secondary, state words', 4.5], ['faint', 'captions, times', 4.5]]],
+  ['State (glyph slot and its word)', [['ok', 'healthy, quiet dot', 3], ['warn', 'restarting, Foreign process', 4.5], ['fail', 'failure', 4.5], ['ended', 'ended, hollow ring', 3]]],
+];
+
+function scheme(pal, mode) {
+  const s = PALETTES[pal][mode], el = document.createElement('div');
+  el.className = 'scheme'; el.style.background = s.bg; el.style.color = s.text;
+  let h = `<b>${mode === 'light' ? 'Light' : 'Dark'}</b>`;
+  for (const [g, toks] of GROUPS) {
+    h += `<div class="grp">${g}</div>`;
+    for (const [k, role, need] of toks) {
+      const r = ratio(s[k], s.panel), okc = mode === 'light' ? '#248a3d' : '#30db5b', badc = mode === 'light' ? '#d70015' : '#ff6961';
+      const rr = need ? `<span style="color:${r >= need ? okc : badc};font-weight:${r >= need ? 400 : 600}">${r.toFixed(1)}:1${r >= need ? '' : ' < ' + need}</span>` : '';
+      h += `<div class="tok"><span class="sw" style="background:${s[k]}"></span><code>--${k}</code><code>${s[k]}</code><span style="opacity:.75">${role} ${rr}</span></div>`;
+    }
+  }
+  h += `<div class="grp">System and brand</div>
+    <div class="tok"><span class="sw" style="background:${accentOf(s)}"></span><code>--accent</code><code>${SUPPORTS_SYS_ACCENT ? 'system' : s.accentFallback}</code><span style="opacity:.75">selection, focus, default button</span></div>
+    <div class="tok"><span class="sw" style="background:var(--brand-lime)"></span><code>--brand-lime</code><code>#D7F23C</code><span style="opacity:.75">mark and "Start the Daemon" only</span></div>
+    <div class="tok"><span class="sw" style="background:var(--brand-lime-deep)"></span><code>--brand-lime-deep</code><code>#A8BF22</code><span style="opacity:.75">mark only</span></div>
+    <div class="tok"><span class="sw" style="background:var(--brand-ink)"></span><code>--brand-ink</code><code>#14161A</code><span style="opacity:.75">text on lime, tile</span></div>`;
+  el.innerHTML = h;
+  // Sample window, tokens only
+  const st = s, acc = accentOf(s), dot = (c, kind) => kind === 'ring' ? `<svg class="dot" viewBox="0 0 10 10"><circle cx="5" cy="5" r="3.8" fill="none" stroke="${c}" stroke-width="1.6"/></svg>` : kind === 'x' ? `<svg class="dot" viewBox="0 0 10 10"><path d="M2 2 8 8M8 2 2 8" stroke="${c}" stroke-width="2" stroke-linecap="round"/></svg>` : kind === 'dia' ? `<svg class="dot" viewBox="0 0 10 10"><path d="M5 .8 9.2 5 5 9.2 .8 5Z" fill="${c}"/></svg>` : `<svg class="dot" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="${c}"/></svg>`;
+  const win = document.createElement('div'); win.className = 'win';
+  win.style.cssText = Object.entries({ panel: st.panel, side: st.side, raise: st.raise, line: st.line, text: st.text, muted: st.muted, faint: st.faint, fail: st.fail, warn: st.warn, accent: acc }).map(([k, v]) => `--t-${k}:${v}`).join(';');
+  win.innerHTML = `<div class="side">
+      <div class="row sel">${dot(st.ok)}<span>Overview</span></div>
+      <div class="row">${dot(st.fail, 'x')}<span>feat/login</span></div>
+      <div class="row">${dot(st.ok)}<span>main</span></div>
+      <div class="row seen">${dot(st.fail, 'x')}<span>fix/cache</span></div>
+      <div class="row">${dot(st.warn, 'dia')}<span>Orphans</span></div>
+    </div><div class="main">
+      <div style="display:flex;gap:8px;align-items:center">${dot(st.fail, 'x')}<b>web</b><span class="w fail">exited with code 1</span><span style="flex:1"></span><span class="cap">16:41:07</span></div>
+      <div style="display:flex;gap:8px;align-items:center">${dot(st.ok)}<b>api</b><span class="w">running</span><span class="cap">port 4123</span></div>
+      <div style="display:flex;gap:8px;align-items:center">${dot(st.ended, 'ring')}<b>seed</b><span class="w">exited with code 0</span></div>
+      <div style="display:flex;gap:8px;align-items:center">${dot(st.warn, 'dia')}<b>node</b><span class="w warn">Foreign process on 3000</span></div>
+      <div style="display:flex;gap:6px"><button class="btn">Cancel</button><button class="btn def">Release Worktree</button></div>
+      <div style="border-top:1px solid ${st.line};padding-top:10px;display:flex;gap:8px;align-items:center"><span class="cap">Daemon not running</span><button class="btn brand">Start the Daemon</button></div>
+    </div>`;
+  el.append(win);
+  return el;
+}
+
+function renderPalette(pal) {
+  const box = document.getElementById('pal'); box.innerHTML = '';
+  box.insertAdjacentHTML('beforebegin', '');
+  box.append(scheme(pal, 'light'), scheme(pal, 'dark'));
+  box.insertAdjacentHTML('afterbegin', `<div class="muted" style="grid-column:1/-1">${PALETTES[pal].name}: ${PALETTES[pal].note}</div>`);
+}
+function renderTiles() {
+  const t = document.getElementById('tiles');
+  [128, 64, 32, 16].forEach(n => { const i = new Image(); i.src = '../../../docs/brand/procly-tuile.svg'; i.width = n; i.height = n; i.title = n + ' px'; t.append(i); });
+}
+
+// ---------- Page theme (follows the system unless forced) ----------
+function applyTheme(mode, pal) {
+  const sys = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  const s = PALETTES[pal][mode === 'system' ? sys : mode], r = document.documentElement.style;
+  for (const k of ['bg', 'panel', 'raise', 'line', 'text', 'muted', 'faint']) r.setProperty('--' + k, s[k]);
+  r.setProperty('--accent', accentOf(s));
+}
+
+// ---------- State, URL, switcher ----------
+const q = new URLSearchParams(location.search);
+const S = { v: KEYS.includes(q.get('variant')) ? q.get('variant') : 'A', pal: PALETTES[q.get('palette')] ? q.get('palette') : 'system', theme: q.get('theme') || 'system' };
+function seg(id, opts, cur, on) {
+  const el = document.getElementById(id); el.innerHTML = '';
+  for (const [k, l] of opts) { const b = document.createElement('button'); b.textContent = l; b.className = k === cur ? 'on' : ''; b.onclick = () => on(k); el.append(b); }
+}
+function sync() {
+  const u = new URL(location); u.searchParams.set('variant', S.v); u.searchParams.set('palette', S.pal); u.searchParams.set('theme', S.theme); history.replaceState(null, '', u);
+  applyTheme(S.theme, S.pal);
+  seg('theme', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.theme, k => { S.theme = k; sync(); });
+  seg('palette', [['system', 'System neutral'], ['ink', 'Ink tinted']], S.pal, k => { S.pal = k; sync(); });
+  document.getElementById('label').textContent = `${S.v} · ${VARIANTS[S.v].name}`;
+  renderGlyphs(S.v); renderPalette(S.pal);
+}
+const step = d => { S.v = KEYS[(KEYS.indexOf(S.v) + d + KEYS.length) % KEYS.length]; sync(); };
+document.getElementById('prev').onclick = () => step(-1);
+document.getElementById('next').onclick = () => step(1);
+addEventListener('keydown', e => { if (e.target.closest('input,textarea,[contenteditable]')) return; if (e.key === 'ArrowLeft') step(-1); if (e.key === 'ArrowRight') step(1); });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme(S.theme, S.pal));
+renderMapping(); renderTiles(); sync();
+</script>
+</body>
+</html>
