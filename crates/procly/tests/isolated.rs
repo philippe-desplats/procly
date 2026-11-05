@@ -833,6 +833,32 @@ fn docker_a_retention_delete_removes_the_container_and_volume_of_a_removed_workt
 }
 
 #[test]
+fn docker_a_dry_run_of_a_worktree_release_applies_no_retention_policy_and_the_real_release_still_does() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "delete");
+
+    let planned = fixture
+        .procly
+        .procly_in(&fixture.main, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&planned);
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "a dry run deleted the container"
+    );
+    assert!(fixture.other_project.volume_exists(), "a dry run deleted the volume");
+    assert!(!fixture.procly.daemon_log().contains("retention policy"));
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+}
+
+#[test]
 fn docker_the_retention_declared_when_the_container_last_came_up_is_the_one_applied() {
     let Some(_docker) = require_docker() else {
         return;
