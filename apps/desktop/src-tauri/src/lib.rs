@@ -6,6 +6,7 @@
 mod apps;
 mod atomic;
 mod daemon;
+mod doctor;
 mod lifecycle;
 mod menu;
 mod needs_you;
@@ -21,6 +22,9 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State, Window, WindowEvent};
 
 /// The event that carries each answer of the poller to the window.
 const DAEMON_UPDATE: &str = "daemon-update";
+
+/// The event that tells the window the menu refreshed, so that it runs doctor again as it does on its own Refresh.
+const REFRESH_REQUESTED: &str = "refresh-requested";
 
 /// The file the Seen failures survive a restart in, inside the data directory of the app.
 const SEEN_FILE: &str = "seen.json";
@@ -145,10 +149,12 @@ pub fn run() {
         // The window reopens where it was left, with no visible setting.
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .on_menu_event(|app, event| {
-            if menu::is_refresh(&event)
-                && let Some(poller) = app.try_state::<Poller>()
-            {
-                poller.refresh();
+            if menu::is_refresh(&event) {
+                if let Some(poller) = app.try_state::<Poller>() {
+                    poller.refresh();
+                }
+                // The window runs doctor again on a Refresh, and this one did not go through it.
+                let _ = app.emit(REFRESH_REQUESTED, ());
             }
             if menu::is_settings(&event) {
                 // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
@@ -162,6 +168,7 @@ pub fn run() {
             refresh,
             lifecycle::start_daemon,
             lifecycle::restart_daemon,
+            doctor::doctor,
             apps::detected_apps,
             opening::open_worktree,
             opening::reveal_worktree,

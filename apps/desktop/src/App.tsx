@@ -3,32 +3,51 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 
 import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
+import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
+import { DoctorScreen, ReleaseBanner, WorktreeChecks } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey, isSeen } from "./needs-you";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
+import { State } from "./StateMark";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { jobEndWord, jobWord, serviceEndWord, serviceWord, type StateWord } from "./state";
+import { jobEndWord, jobWord, serviceEndWord, serviceWord } from "./state";
 import { formatMoment } from "./time";
 
 /**
- * What the center shows: the Overview of every Service, one Worktree, or Settings, which hides the inspector.
- * `focusEditor` sends the developer to the editor field, because "Open in editor" found none set.
+ * What the center shows: the Overview of every Service, one Worktree, Doctor, or Settings, which hides the
+ * inspector. `focusEditor` sends the developer to the editor field, because "Open in editor" found none set.
  */
 type View =
   | { kind: "overview" }
   | { kind: "worktree"; path: string }
+  | { kind: "doctor" }
   | { kind: "settings"; focusEditor: boolean };
 
-export function App({ store }: { store: DaemonStore }) {
+/** `doctor` is the store of the checks, a window makes its own unless a test hands it one. */
+export function App({ store, doctor: given }: { store: DaemonStore; doctor?: DoctorStore }) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [view, setView] = useState<View>({ kind: "overview" });
+  const [doctor] = useState(() => given ?? createDoctorStore());
 
   // The poller of the app keeps the snapshot current, the window only follows it.
   useEffect(() => store.start(), [store]);
+
+  // Doctor runs when the app enters "Daemon not running", not on each tick that finds it still not running.
+  const notRunning = snapshot.kind === "no-daemon";
+  useEffect(() => {
+    if (notRunning) {
+      void doctor.run(null);
+    }
+  }, [doctor, notRunning]);
+
+  // The menu refreshes without the window, so Rust says so.
+  useTauriEvent(REFRESH_REQUESTED, () => {
+    void doctor.refresh();
+  });
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -68,6 +87,7 @@ export function App({ store }: { store: DaemonStore }) {
     view.kind === "worktree" ? (worktrees.find((worktree) => worktree.path === view.path) ?? null) : null;
 
   const settings = view.kind === "settings";
+  const checking = view.kind === "doctor";
 
   return (
     <div className={settings ? "window window-settings" : "window"}>
@@ -78,11 +98,15 @@ export function App({ store }: { store: DaemonStore }) {
           repositories={repositories}
           current={current}
           settings={settings}
+          checking={checking}
           onSelect={(path) => {
             setView({ kind: "worktree", path });
           }}
           onOverview={() => {
             setView({ kind: "overview" });
+          }}
+          onDoctor={() => {
+            setView({ kind: "doctor" });
           }}
           onSettings={() => {
             setView({ kind: "settings", focusEditor: false });
@@ -94,8 +118,20 @@ export function App({ store }: { store: DaemonStore }) {
           <SettingsScreen focusEditor={view.focusEditor} />
         ) : (
           <>
-            <Toolbar snapshot={snapshot} store={store} />
-            <Center snapshot={snapshot} current={current} store={store} />
+            <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
+            {snapshot.kind === "status" ? (
+              <ReleaseBanner
+                store={doctor}
+                onOpenDoctor={() => {
+                  setView({ kind: "doctor" });
+                }}
+              />
+            ) : null}
+            {view.kind === "doctor" ? (
+              <DoctorScreen store={doctor} />
+            ) : (
+              <Center snapshot={snapshot} current={current} store={store} doctor={doctor} />
+            )}
           </>
         )}
       </main>
@@ -113,7 +149,15 @@ export function App({ store }: { store: DaemonStore }) {
   );
 }
 
-function Toolbar({ snapshot, store }: { snapshot: DaemonSnapshot; store: DaemonStore }) {
+function Toolbar({
+  snapshot,
+  store,
+  doctor,
+}: {
+  snapshot: DaemonSnapshot;
+  store: DaemonStore;
+  doctor: DoctorStore;
+}) {
   return (
     <header className="toolbar">
       {snapshot.kind === "loading" ? null : (
@@ -124,6 +168,7 @@ function Toolbar({ snapshot, store }: { snapshot: DaemonSnapshot; store: DaemonS
         className="button"
         onClick={() => {
           void store.refresh();
+          void doctor.refresh();
         }}
       >
         Refresh
@@ -137,16 +182,20 @@ function Sidebar({
   repositories,
   current,
   settings,
+  checking,
   onSelect,
   onOverview,
+  onDoctor,
   onSettings,
 }: {
   snapshot: DaemonSnapshot;
   repositories: RepositoryStatus[];
   current: WorktreeStatus | null;
   settings: boolean;
+  checking: boolean;
   onSelect: (path: string) => void;
   onOverview: () => void;
+  onDoctor: () => void;
   onSettings: () => void;
 }) {
   return (
@@ -154,7 +203,7 @@ function Sidebar({
       <button
         type="button"
         className="row"
-        aria-current={current === null && !settings ? "true" : undefined}
+        aria-current={current === null && !settings && !checking ? "true" : undefined}
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
@@ -169,9 +218,12 @@ function Sidebar({
       <button
         type="button"
         className="row sidebar-foot"
-        aria-current={settings ? "true" : undefined}
-        onClick={onSettings}
+        aria-current={checking ? "true" : undefined}
+        onClick={onDoctor}
       >
+        <span className="row-name">Doctor</span>
+      </button>
+      <button type="button" className="row" aria-current={settings ? "true" : undefined} onClick={onSettings}>
         <span className="row-name">Settings</span>
         <span className="caption">⌘,</span>
       </button>
@@ -235,10 +287,12 @@ function Center({
   snapshot,
   current,
   store,
+  doctor,
 }: {
   snapshot: DaemonSnapshot;
   current: WorktreeStatus | null;
   store: DaemonStore;
+  doctor: DoctorStore;
 }) {
   const onMarkSeen = (key: FailureKey): void => {
     // Rust answers with a new update, so a mark that could not be saved still shows.
@@ -248,7 +302,7 @@ function Center({
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
     case "no-daemon":
-      return <DaemonNotRunning store={store} />;
+      return <DaemonNotRunning store={store} doctor={doctor} />;
     case "protocol-mismatch":
       return <DaemonOfAnotherVersion daemon={snapshot.daemon} app={snapshot.app} store={store} />;
     case "failure":
@@ -268,7 +322,7 @@ function Center({
           onMarkSeen={onMarkSeen}
         />
       ) : (
-        <WorktreeView worktree={current} at={snapshot.at} seen={snapshot.seen} />
+        <WorktreeView worktree={current} at={snapshot.at} seen={snapshot.seen} doctor={doctor} />
       );
     default: {
       const unhandled: never = snapshot;
@@ -495,7 +549,17 @@ function JobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
   );
 }
 
-function WorktreeView({ worktree, at, seen }: { worktree: WorktreeStatus; at: number; seen: FailureKey[] }) {
+function WorktreeView({
+  worktree,
+  at,
+  seen,
+  doctor,
+}: {
+  worktree: WorktreeStatus;
+  at: number;
+  seen: FailureKey[];
+  doctor: DoctorStore;
+}) {
   const empty = worktree.services.length === 0 && worktree.jobs.length === 0;
   return (
     <section>
@@ -530,16 +594,8 @@ function WorktreeView({ worktree, at, seen }: { worktree: WorktreeStatus; at: nu
           </ul>
         </>
       ) : null}
+      <WorktreeChecks store={doctor} path={worktree.path} />
     </section>
-  );
-}
-
-function State({ word, tone }: StateWord) {
-  return (
-    <span className={`state tone-${tone}`}>
-      <span className="dot" aria-hidden="true" />
-      {word}
-    </span>
   );
 }
 
