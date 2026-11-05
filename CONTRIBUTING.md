@@ -41,6 +41,8 @@ The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), and `ru
 
 A fresh clone builds with `cargo` alone, but the app it builds shows a placeholder page until `bun run build` has run in `apps/desktop`.
 
+The app starts and restarts the Daemon with the `procly` beside its own executable. Run from the workspace, that is `target/debug/procly`, so build the CLI (`cargo build -p procly`) before using "Start the Daemon". `make bundle` builds a bundle that embeds the CLI as a sidecar, see `docs/rules/tauri.md`.
+
 ```sh
 make build        # cargo build --workspace --all-targets --locked
 make fmt          # apply the formatting

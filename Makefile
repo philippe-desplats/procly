@@ -35,3 +35,22 @@ test:
 
 docs:
 	python3 scripts/vendor-docs.py
+
+# The app embeds the CLI as a sidecar (`Procly.app/Contents/MacOS/procly`). The sidecar is declared in
+# `tauri.bundle.conf.json`, not in `tauri.conf.json`: Tauri copies a declared sidecar over `target/<profile>/procly`
+# at every build of the app, which is the CLI the tests run. Everything that builds a bundle goes through `bundle`.
+# `PROFILE=release` embeds an optimised CLI, `TAURI_ARGS` goes to `tauri build` (`--bundles app`, `--features e2e`).
+PROFILE ?= debug
+TRIPLE := $(shell rustc --print host-tuple)
+SIDECAR := $(APP)/src-tauri/binaries/procly-$(TRIPLE)
+TAURI_ARGS ?=
+
+.PHONY: sidecar bundle
+
+sidecar:
+	$(CARGO) build --package procly --locked $(if $(filter release,$(PROFILE)),--release)
+	mkdir -p $(dir $(SIDECAR))
+	cp target/$(PROFILE)/procly $(SIDECAR)
+
+bundle: sidecar
+	cd $(APP) && $(BUN) run tauri build $(if $(filter debug,$(PROFILE)),--debug) --config src-tauri/tauri.bundle.conf.json $(TAURI_ARGS)

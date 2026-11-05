@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey, isSeen } from "./needs-you";
@@ -56,14 +57,7 @@ export function App({ store }: { store: DaemonStore }) {
       </nav>
       <main className="pane center">
         <Toolbar snapshot={snapshot} store={store} />
-        <Center
-          snapshot={snapshot}
-          current={current}
-          onMarkSeen={(key) => {
-            // Rust answers with a new update, so a mark that could not be saved still shows.
-            store.markSeen(key).catch(() => undefined);
-          }}
-        />
+        <Center snapshot={snapshot} current={current} store={store} />
       </main>
       <aside className="pane inspector" aria-label="Inspector">
         <Inspector current={current} />
@@ -180,22 +174,23 @@ function RemovedMark({ worktree }: { worktree: WorktreeStatus }) {
 function Center({
   snapshot,
   current,
-  onMarkSeen,
+  store,
 }: {
   snapshot: DaemonSnapshot;
   current: WorktreeStatus | null;
-  onMarkSeen: (key: FailureKey) => void;
+  store: DaemonStore;
 }) {
+  const onMarkSeen = (key: FailureKey): void => {
+    // Rust answers with a new update, so a mark that could not be saved still shows.
+    store.markSeen(key).catch(() => undefined);
+  };
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
     case "no-daemon":
-      return (
-        <section>
-          <h2 className="title">Daemon not running</h2>
-          <p className="muted">No Daemon answers on its socket, and this app does not start one.</p>
-        </section>
-      );
+      return <DaemonNotRunning store={store} />;
+    case "protocol-mismatch":
+      return <DaemonOfAnotherVersion daemon={snapshot.daemon} app={snapshot.app} store={store} />;
     case "failure":
       return (
         <section>

@@ -284,3 +284,62 @@ body {
   color: var(--muted);
   font-size: var(--size-small);
 }
+
+/* "Start the Daemon" is the one action drawn in the brand lime. */
+.button.brand {
+  border-color: var(--brand-lime-deep);
+  background: var(--brand-lime);
+  color: var(--brand-ink);
+}
+
+.button:disabled {
+  opacity: 0.5;
+}
+
+/* The default button of a sheet is the one Enter presses, and it is never a destructive one. */
+.button.default {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.copybox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raise);
+}
+
+.error {
+  color: var(--fail);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+  background: rgb(0 0 0 / 30%);
+}
+
+.sheet {
+  width: min(460px, calc(100% - 32px));
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 25%);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
