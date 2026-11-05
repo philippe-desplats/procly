@@ -285,6 +285,61 @@ body {
   font-size: var(--size-small);
 }
 
+/* Settings replaces the inspector, so the window has 2 panes. */
+.window-settings {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+/* Settings stays at the bottom of the sidebar, whatever the list above it holds. */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  flex: none;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 320px;
+  margin: 0 0 12px;
+}
+
+.field .caption {
+  margin: 0;
+}
+
+.control {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The actions on a Worktree stand in a column under its facts. */
+.worktree-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.worktree-actions .error {
+  margin: 4px 0 0;
+}
+
 /* "Start the Daemon" is the one action drawn in the brand lime. */
 .button.brand {
   border-color: var(--brand-lime-deep);
@@ -316,6 +371,7 @@ body {
 
 .error {
   color: var(--fail);
+  overflow-wrap: anywhere;
 }
 
 .overlay {

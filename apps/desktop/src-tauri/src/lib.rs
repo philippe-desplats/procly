@@ -3,15 +3,20 @@
 //! Every command sends one `Request` through `procly-client` and returns the `Response` unchanged, the frontend
 //! draws it. Nothing here supervises anything. The window is kept current by one poller (`docs/rules/tauri.md`).
 
+mod apps;
+mod atomic;
 mod daemon;
 mod lifecycle;
 mod menu;
 mod needs_you;
+mod opening;
 mod poller;
+mod settings;
 
 use daemon::DaemonClient;
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use poller::{Poller, WindowState};
+use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
 use tauri::{AppHandle, Emitter as _, Manager as _, State, Window, WindowEvent};
 
 /// The event that carries each answer of the poller to the window.
@@ -133,14 +138,21 @@ pub fn run() {
             app.manage(client);
             app.manage(poller);
             app.manage(attention);
+            app.manage(SettingsStore::open(app.path().app_config_dir()?.join(SETTINGS_FILE)));
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())
         })
+        // The window reopens where it was left, with no visible setting.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .on_menu_event(|app, event| {
             if menu::is_refresh(&event)
                 && let Some(poller) = app.try_state::<Poller>()
             {
                 poller.refresh();
+            }
+            if menu::is_settings(&event) {
+                // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
+                let _ = app.emit(OPEN_SETTINGS, ());
             }
         })
         .on_window_event(follow_window)
@@ -149,8 +161,56 @@ pub fn run() {
             mark_seen,
             refresh,
             lifecycle::start_daemon,
-            lifecycle::restart_daemon
+            lifecycle::restart_daemon,
+            apps::detected_apps,
+            opening::open_worktree,
+            opening::reveal_worktree,
+            settings::get_settings,
+            settings::save_settings,
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri application runs");
+}
+
+#[cfg(test)]
+mod tests {
+    /// The permissions the capability of the window lists, whether they are written as a name or with a scope.
+    fn granted() -> Vec<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/main-window.json")).expect("a capability file");
+        capability["permissions"]
+            .as_array()
+            .expect("a list of permissions")
+            .iter()
+            .map(|permission| {
+                permission
+                    .as_str()
+                    .or_else(|| permission["identifier"].as_str())
+                    .expect("a permission is a name or has an identifier")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_window_is_granted_no_opener_permission() {
+        // Rust opens a Worktree, so the window cannot open a path or a URL of its own choosing.
+        let opener: Vec<_> = granted()
+            .into_iter()
+            .filter(|name| name.starts_with("opener:"))
+            .collect();
+
+        assert!(opener.is_empty(), "{opener:?}");
+    }
+
+    #[test]
+    fn the_window_is_granted_nothing_to_move_or_restore_itself() {
+        // The window reopens where it was left through the plugin, which needs no call from the window.
+        let state: Vec<_> = granted()
+            .into_iter()
+            .filter(|name| name.starts_with("window-state:"))
+            .collect();
+
+        assert!(state.is_empty(), "{state:?}");
+    }
 }

@@ -14,6 +14,7 @@ use procly_client::protocol::{
 };
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::atomic;
 use crate::poller::{Answer, Update};
 
 /// What identifies a failure, so that one that happens again is not taken for the one already seen.
@@ -191,14 +192,7 @@ impl Seen {
             source,
         };
         let bytes = serde_json::to_vec_pretty(self).map_err(|error| write(io::Error::other(error)))?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(write)?;
-        }
-        let mut pending = path.as_os_str().to_owned();
-        pending.push(".tmp");
-        let pending = PathBuf::from(pending);
-        fs::write(&pending, bytes).map_err(write)?;
-        fs::rename(&pending, path).map_err(write)
+        atomic::write(path, &bytes).map_err(write)
     }
 }
 
