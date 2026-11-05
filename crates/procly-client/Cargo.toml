@@ -11,6 +11,11 @@ repository.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Generates the TypeScript types of the desktop app (ADR 0015), only with the `ts` feature.
+ts-rs = { workspace = true, optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 tempfile.workspace = true

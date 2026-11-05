@@ -1,0 +1,16 @@
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+
+import { App } from "./App";
+import { createDaemonStore } from "./daemon";
+import "./styles.css";
+
+const root = document.getElementById("root");
+if (root === null) {
+  throw new Error("the page has no #root element");
+}
+createRoot(root).render(
+  <StrictMode>
+    <App store={createDaemonStore()} />
+  </StrictMode>,
+);
