@@ -73,7 +73,13 @@ fn plan(registry: &Registry, service: &str, cwd: &Path) -> anyhow::Result<Planne
         Some(group) if registry.services.runs(worktree, group) => group.to_owned(),
         Some(_) | None => service.to_owned(),
     };
-    let Some(env) = registry.held.get(worktree, &target) else {
+    // A Service the running Group was found covering by an `up` holds the environment of that `up`, the Group may hold
+    // none, as when a previous Daemon started it.
+    let held = registry
+        .held
+        .get(worktree, &target)
+        .or_else(|| registry.held.get(worktree, service));
+    let Some(env) = held else {
         anyhow::bail!(
             "{service} has no environment to restart with, run procly up {service} from a shell in the Worktree"
         );

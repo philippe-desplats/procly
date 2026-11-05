@@ -116,6 +116,8 @@ async fn find(
     if let Some((service, follow)) = registry.services.follow(&worktree, name) {
         return Ok((Followed::Service(service), follow));
     }
+    // As for `Logs`, the compose file interpolates in the environment of the last `up` of the Service.
+    let env = registry.held.get(&worktree, name).unwrap_or(env);
     let compose = {
         let name = name.to_owned();
         blocking("the logs could not be read", move || compose_service(&worktree, &name)).await?

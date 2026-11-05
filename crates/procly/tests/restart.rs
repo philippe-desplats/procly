@@ -217,3 +217,60 @@ fn a_service_a_group_covers_is_restarted_through_its_group() {
     assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start", "start"]);
 }
+
+#[test]
+fn a_service_that_never_became_healthy_can_be_restarted_once_its_cause_is_fixed() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let ready = procly.scratch().join("ready");
+    let server = test_server();
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = 'test -f {ready} || exit 7; exec {server} --port {{ports.http}}'\n\
+             ports = {{ http = {web} }}\n",
+            ready = ready.display(),
+            server = server.display(),
+            web = free_port(),
+        ),
+    );
+    assert_eq!(procly.procly_in(&main, &["up", "web"]).status.code(), Some(3));
+    std::fs::write(&ready, "").expect("write the flag");
+
+    let output = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("web started"), "{}", stdout(&output));
+}
+
+#[test]
+fn a_group_a_previous_daemon_started_is_restarted_with_the_environment_of_an_up_of_a_service_it_covers() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    let server = test_server();
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\n\
+             [services.dev]\ncovers = ['web']\n\
+             run = 'echo start >> {starts}; exec {server} --port $PORT_WEB_HTTP'\n",
+            server = server.display(),
+            starts = starts.display(),
+            web = free_port(),
+        ),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    procly.kill_daemon();
+    let reused = procly.procly_in(&main, &["up", "web"]);
+    assert_success(&reused);
+    assert!(stdout(&reused).contains("reused (via dev)"), "{}", stdout(&reused));
+
+    let output = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert_eq!(lines(&starts), ["start", "start"]);
+}
