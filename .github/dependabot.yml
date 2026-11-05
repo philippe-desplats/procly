@@ -10,6 +10,19 @@ updates:
       cargo:
         patterns: ["*"]
 
+  # The frontend of the desktop app. oxlint and oxfmt are upgraded together, since oxfmt is still 0.x and a minor
+  # release can reformat code.
+  - package-ecosystem: bun
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+    groups:
+      oxc:
+        patterns: ["oxlint", "oxfmt"]
+      bun:
+        patterns: ["*"]
+        exclude-patterns: ["oxlint", "oxfmt"]
+
   # GitHub Actions: keeps the actions of every workflow current, SHA-pinned ones included.
   - package-ecosystem: github-actions
     directory: /

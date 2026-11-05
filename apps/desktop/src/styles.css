@@ -1,0 +1,236 @@
+/* The Ink palette of the spec. Colour only carries state, light and dark follow the system. */
+:root {
+  --bg: #e4e7ea;
+  --side: #f3f4f6;
+  --panel: #ffffff;
+  --raise: #eef0f2;
+  --line: #dfe2e6;
+  --text: #14161a;
+  --muted: #50575f;
+  --faint: #646b74;
+  --ok: #5c6b2f;
+  --warn: #8f5a00;
+  --fail: #b42318;
+  --ended: #6f767e;
+  --accent: #007aff;
+  --brand-lime: #d7f23c;
+  --brand-lime-deep: #a8bf22;
+  --brand-ink: #14161a;
+
+  --size-small: 11px;
+  --size-body: 13px;
+  --size-title: 17px;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101215;
+    --side: #1b1e23;
+    --panel: #17191d;
+    --raise: #23272d;
+    --line: #2a2f36;
+    --text: #e8eaed;
+    --muted: #a2a9b2;
+    --faint: #858d97;
+    --ok: #8fa05f;
+    --warn: #f0b042;
+    --fail: #ff6b6b;
+    --ended: #7b828b;
+    --accent: #0a84ff;
+  }
+}
+
+/* The system accent where WebKit provides it, the fallbacks above elsewhere. */
+@supports (color: -apple-system-control-accent) {
+  :root {
+    --accent: -apple-system-control-accent;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    var(--size-body) / 1.45 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.window {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 280px;
+  height: 100%;
+}
+
+.pane {
+  overflow: auto;
+  padding: 16px;
+  margin: 0;
+}
+
+.sidebar {
+  background: var(--side);
+  border-right: 1px solid var(--line);
+}
+
+.center {
+  background: var(--panel);
+}
+
+.inspector {
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+
+.pane-title {
+  margin: 0 0 16px;
+  font-size: var(--size-body);
+  font-weight: 600;
+}
+
+.title {
+  margin: 0 0 12px;
+  font-size: var(--size-title);
+  font-weight: 600;
+}
+
+.caption {
+  margin: 12px 0 4px;
+  color: var(--faint);
+  font-size: var(--size-small);
+  font-weight: 500;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: var(--size-small);
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.row .caption {
+  margin: 0;
+}
+
+.row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row[aria-current="true"] {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.row[aria-current="true"] .caption {
+  color: inherit;
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.item {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item .caption {
+  margin: 0;
+}
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 112px;
+  color: var(--muted);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.tone-ok .dot {
+  background: var(--ok);
+}
+
+.tone-warn .dot {
+  background: var(--warn);
+}
+
+.tone-fail .dot {
+  background: var(--fail);
+}
+
+.tone-ended .dot {
+  background: var(--ended);
+}
+
+.tone-muted .dot {
+  background: var(--faint);
+}
+
+.facts {
+  margin: 0;
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

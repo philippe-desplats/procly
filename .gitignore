@@ -1,2 +1,8 @@
 /target
 .DS_Store
+
+/apps/desktop/dist
+/apps/desktop/src-tauri/gen
+node_modules
+package-lock.json
+pnpm-lock.yaml

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use serde::{Serialize, Serializer};
+
 use crate::protocol::{self, DecodeError, Request, Response};
 use crate::state_dir::{StateDir, StateDirError};
 
@@ -47,6 +49,58 @@ pub enum ClientError {
     NoResponse,
     #[error("unreadable answer from the daemon")]
     Decode(#[from] DecodeError),
+}
+
+/// Which [`ClientError`] a [`ClientFailure`] stands for, so that a client in another language can tell a Daemon that
+/// does not run from one that answers badly without reading the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum ClientFailureKind {
+    StateDir,
+    OpenLog,
+    StartDaemon,
+    Unreachable,
+    Connection,
+    Encode,
+    NoResponse,
+    Decode,
+}
+
+/// A [`ClientError`] as it crosses a process boundary, such as the one between the Rust side of the desktop app and
+/// its webview. The source chain stays on this side, the message is the top level one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ClientFailure {
+    pub kind: ClientFailureKind,
+    pub message: String,
+}
+
+impl ClientError {
+    /// The kind of this error, as a [`ClientFailure`] carries it.
+    #[must_use]
+    pub fn kind(&self) -> ClientFailureKind {
+        match self {
+            Self::StateDir(_) => ClientFailureKind::StateDir,
+            Self::OpenLog { .. } => ClientFailureKind::OpenLog,
+            Self::StartDaemon { .. } => ClientFailureKind::StartDaemon,
+            Self::Unreachable { .. } => ClientFailureKind::Unreachable,
+            Self::Connection { .. } => ClientFailureKind::Connection,
+            Self::Encode(_) => ClientFailureKind::Encode,
+            Self::NoResponse => ClientFailureKind::NoResponse,
+            Self::Decode(_) => ClientFailureKind::Decode,
+        }
+    }
+}
+
+impl Serialize for ClientError {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ClientFailure {
+            kind: self.kind(),
+            message: self.to_string(),
+        }
+        .serialize(serializer)
+    }
 }
 
 /// A connection to the Daemon, ready to carry one request.
