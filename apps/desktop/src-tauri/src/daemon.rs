@@ -8,6 +8,8 @@ use procly_client::state_dir::StateDir;
 use procly_client::{ClientError, connect};
 use serde::{Serialize, Serializer};
 
+use crate::poller::Source;
+
 /// What a Tauri command fails with. It reaches the webview as a rejected promise holding a [`ClientFailure`], or the
 /// same shape with the kind `task` when the thread that talks to the Daemon broke.
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +18,13 @@ pub(crate) enum CommandError {
     Client(#[from] ClientError),
     #[error("the thread talking to the Daemon stopped: {0}")]
     Task(#[source] tauri::Error),
+}
+
+impl CommandError {
+    /// Whether no Daemon accepted the connection, as opposed to one that answered badly.
+    pub(crate) fn is_unreachable(&self) -> bool {
+        matches!(self, Self::Client(ClientError::Unreachable { .. }))
+    }
 }
 
 impl Serialize for CommandError {
@@ -85,6 +94,20 @@ impl DaemonClient {
             all: true,
         })
         .await
+    }
+}
+
+impl Source for DaemonClient {
+    async fn reachable(&self) -> bool {
+        let state = self.state.clone();
+        // A refused connection is the answer, and a thread that broke tells nothing about the Daemon.
+        tauri::async_runtime::spawn_blocking(move || connect(&state).is_ok())
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn status(&self) -> Result<Response, CommandError> {
+        DaemonClient::status(self).await
     }
 }
 

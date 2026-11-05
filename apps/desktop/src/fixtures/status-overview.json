@@ -1,0 +1,115 @@
+{
+  "response": "status",
+  "repositories": [
+    {
+      "git_common_dir": "/p/work/acme/web/.git",
+      "worktrees": [
+        {
+          "path": "/p/work/acme/web",
+          "slug": "web",
+          "main": true,
+          "branch": "main",
+          "listed": true,
+          "services": [
+            {
+              "service": "api",
+              "port": 18731,
+              "reattached": false,
+              "started_at": 1793907082159,
+              "state": "healthy"
+            },
+            {
+              "service": "worker",
+              "port": null,
+              "reattached": false,
+              "started_at": 1793907082900,
+              "state": "restarting"
+            }
+          ],
+          "jobs": []
+        },
+        {
+          "path": "/p/work/acme/web-login",
+          "slug": "web_login",
+          "main": false,
+          "branch": "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
+          "listed": true,
+          "services": [
+            {
+              "service": "api",
+              "port": 18742,
+              "reattached": false,
+              "started_at": 1793820682000,
+              "state": "ended",
+              "end": { "kind": "exited", "code": 1 }
+            }
+          ],
+          "jobs": []
+        }
+      ]
+    },
+    {
+      "git_common_dir": "/p/work/acme/docs/.git",
+      "worktrees": [
+        {
+          "path": "/p/work/acme/docs",
+          "slug": "docs",
+          "main": true,
+          "branch": "main",
+          "listed": true,
+          "services": [],
+          "jobs": []
+        },
+        {
+          "path": "/p/work/acme/docs-preview",
+          "slug": "docs_preview",
+          "main": false,
+          "listed": true,
+          "services": [
+            {
+              "service": "site",
+              "port": 18755,
+              "reattached": true,
+              "started_at": 1793907100000,
+              "state": "starting"
+            }
+          ],
+          "jobs": []
+        },
+        {
+          "path": "/p/work/acme/docs-old",
+          "slug": "docs_old",
+          "main": false,
+          "branch": "docs-old",
+          "listed": false,
+          "services": [
+            {
+              "service": "site",
+              "port": 18760,
+              "reattached": false,
+              "started_at": 1793907000000,
+              "state": "ended",
+              "end": { "kind": "stopped" }
+            }
+          ],
+          "jobs": []
+        }
+      ]
+    },
+    {
+      "git_common_dir": "/p/work/acme/infra/.git",
+      "worktrees": [
+        {
+          "path": "/p/work/acme/infra",
+          "slug": "infra",
+          "main": true,
+          "branch": "main",
+          "listed": true,
+          "services": [],
+          "jobs": []
+        }
+      ]
+    }
+  ],
+  "jobs_outside_repositories": []
+}

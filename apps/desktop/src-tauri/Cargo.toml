@@ -17,13 +17,17 @@ tauri-build.workspace = true
 [dependencies]
 # The `ts` feature exports the TypeScript types of the protocol while `cargo test` runs (ADR 0015).
 procly-client = { workspace = true, features = ["ts"] }
-serde.workspace = true
+# `rc` lets the last answer cross to the window while the poller shares it.
+serde = { workspace = true, features = ["rc"] }
 tauri.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+# The paused clock runs the poller's timers without waiting for them.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
