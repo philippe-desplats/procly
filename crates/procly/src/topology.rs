@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+pub(crate) use procly_client::protocol::Worktree;
 
 /// The longest Worktree slug, leaving room for a prefix and a suffix in a 63-byte Postgres identifier.
 pub(crate) const SLUG_MAX_LEN: usize = 32;
@@ -41,15 +41,6 @@ pub(crate) enum TopologyError {
 pub(crate) struct Topology {
     pub(crate) git_common_dir: PathBuf,
     pub(crate) worktree: Worktree,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Worktree {
-    /// The root directory of the Worktree, canonicalized.
-    pub(crate) path: PathBuf,
-    pub(crate) slug: String,
-    /// Whether this is the Main worktree, the first entry of `git worktree list`.
-    pub(crate) main: bool,
 }
 
 impl Topology {

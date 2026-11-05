@@ -14,6 +14,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6", features = ["derive"] }
 nix = { version = "0.31.3", features = ["fs", "process", "signal", "user"] }
 portable-pty = "0.9.0"
+procly-client = { path = "crates/procly-client" }
 process-wrap = { version = "10.0.1", features = ["tokio1"] }
 rmcp = { version = "3.6", features = ["transport-io"] }
 serde = { version = "1.0.229", features = ["derive"] }
