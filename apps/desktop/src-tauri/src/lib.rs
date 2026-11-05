@@ -68,8 +68,11 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let client = DaemonClient::resolve()?;
-            // The window opens in front of the others.
-            let poller = Poller::start(client.clone(), WindowState::Front);
+            // Told as soon as the window moves, but the first tick should already match how it opened.
+            let opened = app
+                .get_webview_window("main")
+                .map_or(WindowState::Front, |window| window_state(&window.as_ref().window()));
+            let poller = Poller::start(client.clone(), opened);
             let mut updates = poller.subscribe();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
