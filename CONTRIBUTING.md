@@ -19,7 +19,8 @@ Small fixes (typos, docs, obvious bugs) can go straight to a pull request. For l
 
 A contribution is merged only once it meets all of the following:
 
-- **Checks**: `make check` passes. It runs `cargo fmt --all --check`, Clippy on every target with warnings denied (the `pedantic` group is on for the whole workspace), rustdoc with warnings denied, and the tests. The CI runs the same `make` targets on macOS and Linux.
+- **Checks**: `make check` passes. It runs `cargo fmt --all --check` and `oxfmt --check`, Clippy on every target with warnings denied (the `pedantic` group is on for the whole workspace), rustdoc with warnings denied, `oxlint` and `tsc --noEmit`, then the tests, Vitest and a check that the generated TypeScript types of the protocol are committed. The CI runs the same `make` targets on macOS and Linux.
+- **Protocol types**: a change to a type of `crates/procly-client/src/protocol.rs` lands with its regenerated TypeScript types in `apps/desktop/src/protocol/`. `cargo test --workspace` writes them, commit the result, or `make test` fails ([ADR 0015](docs/adr/0015-react-bun-and-oxc-for-the-desktop-frontend.md)).
 - **Lint exceptions**: silence a lint with `#[expect(<lint>, reason = "...")]` on the smallest item, never with a bare `#[allow]`, so the reason is recorded and the build fails once the exception is no longer needed. `unsafe_code` is denied, see [`docs/rules/rust.md`](docs/rules/rust.md).
 - **Tests**: new behavior and bug fixes ship with tests. The CLI is the contract, so integration tests in `crates/procly/tests/` drive the built binary, each against a Daemon of its own with an isolated state directory, and never touch the state directory of a Daemon you run. Pure logic gets unit tests in its module. A test that needs Docker is named `docker_*` and skips itself when `docker compose` v2 is unavailable.
 - **Vocabulary**: code, docs and messages use the terms of [`GLOSSARY.md`](GLOSSARY.md), such as Service, Job, Lease and Worktree, not their synonyms.
@@ -31,6 +32,14 @@ A contribution is merged only once it meets all of the following:
 ## Local development
 
 The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), and `rustup` installs it with `rustfmt` and Clippy on the first build.
+
+`make check` also needs what the desktop app in `apps/desktop/` uses, even for a change that only touches the Daemon:
+
+- [bun](https://bun.sh), the one package manager of the app, at the version `packageManager` pins in `apps/desktop/package.json`. Run `bun install --frozen-lockfile` in `apps/desktop` once and after each change of `bun.lock`. Only `bun.lock` counts, `package-lock.json` and `pnpm-lock.yaml` are ignored by git.
+- Node, at the LTS version of `apps/desktop/.node-version`, because Vitest runs on it.
+- On Linux, the system packages Tauri links against: `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libxdo-dev` and `libssl-dev`.
+
+A fresh clone builds with `cargo` alone, but the app it builds shows a placeholder page until `bun run build` has run in `apps/desktop`.
 
 ```sh
 make build        # cargo build --workspace --all-targets --locked
