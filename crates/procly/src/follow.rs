@@ -49,8 +49,8 @@ fn print_event(name: &str, event: FollowEvent<'_>) -> anyhow::Result<()> {
     json::print(&json::Follow { name, event })
 }
 
-/// Makes Ctrl-C end this command with 0 between 2 lines of its output, so that a reader never gets half a line, and
-/// tells an interruption by the missing `ended` line rather than by the exit code.
+/// Makes Ctrl-C end this command with 0 between 2 writes of its output, so that a reader of `--json` never gets half a
+/// line, and tells an interruption by the missing `ended` line rather than by the exit code.
 fn exit_on_interrupt() -> anyhow::Result<()> {
     let mut interrupt = SigSet::empty();
     interrupt.add(Signal::SIGINT);

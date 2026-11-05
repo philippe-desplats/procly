@@ -163,7 +163,7 @@ enum Command {
         after_help = "A Job identifier printed by `procly run` names that Job, any other name a Service of the current \
                       Worktree, whose output is kept across a restart of the Daemon. The output of a Compose service \
                       is the last 1000 lines of its container, read with `docker compose logs`. With `--follow` the \
-                      output streams as it arrives, through a restart of the Service, until the Job or the Service \
+                      output streams as it arrives, through the automatic restarts of a Service, until the Job or the Service \
                       ends or Ctrl-C, and `--json` then prints one JSON object per line, ended by an `ended` line \
                       that Ctrl-C never prints. A Compose service cannot be followed, the error gives the \
                       `docker compose logs -f` command to run. Exit codes: 0 on success, also on Ctrl-C, 125 when \

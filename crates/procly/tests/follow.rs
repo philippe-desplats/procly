@@ -160,7 +160,7 @@ fn an_ended_job_is_followed_to_its_backlog_and_its_end_at_once() {
 }
 
 #[test]
-fn a_followed_service_goes_on_through_its_restart_and_ends_with_it() {
+fn a_followed_service_goes_on_through_its_automatic_restart_and_ends_with_it() {
     let procly = Procly::with_clock();
     let main = git_repository(procly.scratch(), "app");
     let port = free_port();
@@ -252,7 +252,10 @@ fn ctrl_c_ends_the_follow_with_0_and_no_ended_line() {
     let (status, rest, errors) = following.finish();
     assert_eq!(status.code(), Some(0), "{status} {errors}");
     assert!(rest.iter().all(|line| !line.contains("\"ended\"")), "{rest:?}");
+    // The Daemon let go of the interrupted follow, and goes on serving the Job it followed.
     std::fs::write(&release, "").unwrap();
+    assert_success(&procly.procly(&["wait", &job]));
+    assert_eq!(stdout(&procly.procly(&["logs", &job])), "before\nafter\n");
 }
 
 #[test]

@@ -109,7 +109,7 @@ impl OutputBuffer {
 
 /// How many chunks of output wait for a follower at most. Past that, the follower misses what is pushed until it has
 /// read some, so that a reader too slow never holds the Job or the Service that prints.
-pub(crate) const FOLLOW_QUEUE: usize = 64;
+const FOLLOW_QUEUE: usize = 64;
 
 /// A follower of the output of a buffer, as the buffer sees it.
 #[derive(Debug)]
@@ -131,8 +131,11 @@ pub(crate) struct Chunk {
 /// The output of a buffer as it arrives: its backlog, then every chunk pushed after it. Dropping it stops the follow.
 #[derive(Debug)]
 pub(crate) struct Follow {
-    /// The buffered output when the follow started, as [`OutputBuffer::text`] gives it.
+    /// The buffered output when the follow started, as [`OutputBuffer::text`] gives it, short of a character or a
+    /// line ending its last bytes only start.
     pub(crate) backlog: String,
+    /// Decodes the chunks after the backlog, starting with what the backlog held back.
+    pub(crate) text: Text,
     buffer: Arc<Mutex<OutputBuffer>>,
     id: u64,
     receiver: mpsc::Receiver<Chunk>,
@@ -146,8 +149,12 @@ pub(crate) fn follow(buffer: &Arc<Mutex<OutputBuffer>>) -> Follow {
     let id = locked.next_follower;
     locked.next_follower += 1;
     locked.followers.push(Follower { id, sender, dropped: 0 });
+    let mut text = Text::default();
+    let (front, back) = locked.bytes.as_slices();
+    let backlog = text.decode(&[front, back].concat());
     Follow {
-        backlog: locked.text(),
+        backlog,
+        text,
         buffer: Arc::clone(buffer),
         id,
         receiver,
@@ -161,7 +168,7 @@ impl Follow {
     }
 
     /// The next chunk if one is queued.
-    pub(crate) fn try_next(&mut self) -> Option<Chunk> {
+    fn try_next(&mut self) -> Option<Chunk> {
         self.receiver.try_recv().ok()
     }
 
@@ -183,6 +190,63 @@ impl Drop for Follow {
     }
 }
 
+/// Turns chunks of raw output into text as [`OutputBuffer::text`] does, with the terminal's `\r\n` turned
+/// into `\n`, keeping a character or a line ending cut in half by the end of a chunk for the next one.
+#[derive(Debug, Default)]
+pub(crate) struct Text {
+    /// The start of a UTF-8 character the last chunk ended in.
+    pending: Vec<u8>,
+    /// Whether the last chunk ended in `\r`, which may be the start of `\r\n`.
+    carriage_return: bool,
+}
+
+impl Text {
+    pub(crate) fn decode(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut text = String::new();
+        if std::mem::take(&mut self.carriage_return) {
+            text.push('\r');
+        }
+        let mut rest = std::mem::take(&mut self.pending);
+        loop {
+            match std::str::from_utf8(&rest) {
+                Ok(valid) => {
+                    text.push_str(valid);
+                    rest.clear();
+                    break;
+                }
+                Err(error) => {
+                    let (valid, after) = rest.split_at(error.valid_up_to());
+                    text.push_str(std::str::from_utf8(valid).expect("valid_up_to bounds valid UTF-8"));
+                    if let Some(invalid) = error.error_len() {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        rest = after[invalid..].to_vec();
+                    } else {
+                        // A character the next chunk completes.
+                        rest = after.to_vec();
+                        break;
+                    }
+                }
+            }
+        }
+        self.pending = rest;
+        if text.ends_with('\r') {
+            text.pop();
+            self.carriage_return = true;
+        }
+        text.replace("\r\n", "\n")
+    }
+
+    /// What is held back, once no chunk will complete it.
+    pub(crate) fn finish(&mut self) -> String {
+        let mut text = String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned();
+        if std::mem::take(&mut self.carriage_return) {
+            text.insert(0, '\r');
+        }
+        text
+    }
+}
+
 /// Locks a shared output buffer.
 pub(crate) fn lock(output: &Mutex<OutputBuffer>) -> MutexGuard<'_, OutputBuffer> {
     output
@@ -193,6 +257,52 @@ pub(crate) fn lock(output: &Mutex<OutputBuffer>) -> MutexGuard<'_, OutputBuffer>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terminal_line_ending_cut_between_2_chunks_is_still_a_newline() {
+        let mut text = Text::default();
+        assert_eq!(text.decode(b"one\r"), "one");
+        assert_eq!(text.decode(b"\ntwo\r\n"), "\ntwo\n");
+        assert_eq!(text.finish(), "");
+    }
+
+    #[test]
+    fn a_carriage_return_alone_is_kept_to_rewrite_the_line() {
+        let mut text = Text::default();
+        assert_eq!(text.decode(b"10%\r"), "10%");
+        assert_eq!(text.decode(b"20%\r"), "\r20%");
+        assert_eq!(text.finish(), "\r");
+    }
+
+    #[test]
+    fn a_character_cut_between_2_chunks_is_decoded_whole() {
+        let mut text = Text::default();
+        let word = "café".as_bytes();
+        assert_eq!(text.decode(&word[..4]), "caf");
+        assert_eq!(text.decode(&word[4..]), "é");
+    }
+
+    #[test]
+    fn invalid_bytes_are_replaced_and_a_character_left_unfinished_is_replaced_at_the_end() {
+        let mut text = Text::default();
+        assert_eq!(text.decode(b"a\xffb\xc3"), "a\u{fffd}b");
+        assert_eq!(text.finish(), "\u{fffd}");
+    }
+
+    #[test]
+    fn a_character_cut_between_the_backlog_and_the_next_chunk_is_decoded_whole() {
+        let buffer = shared(OutputBuffer::new(64));
+        lock(&buffer).push(b"caf\xc3");
+        let mut follow = follow(&buffer);
+        assert_eq!(follow.backlog, "caf");
+        lock(&buffer).push(b"\xa9\r");
+        lock(&buffer).push(b"\n");
+        let mut text = String::new();
+        while let Some(chunk) = follow.try_next() {
+            text.push_str(&follow.text.decode(&chunk.bytes));
+        }
+        assert_eq!(text, "\u{e9}\n");
+    }
 
     #[test]
     fn keeps_everything_below_capacity() {

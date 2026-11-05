@@ -77,7 +77,7 @@ $ procly logs --follow --json api
 ```
 
 - `backlog` comes first, once, with the recent output as `logs --json` gives it.
-- `output` carries what the Job or the Service printed since the line before. A Service that crashes and restarts goes on in the same stream, the note of its restart included.
+- `output` carries what the Job or the Service printed since the line before. A Service that crashes goes on in the same stream through its automatic restart, the note of the restart included.
 - `dropped` tells how many bytes of output this reader missed because it read too slowly. The Daemon never waits for a reader, it drops what does not fit in the queue of the connection instead.
 - `ended` comes last, once the Job or the Service has ended and all of its output was printed, and `logs` then exits with 0.
 

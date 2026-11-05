@@ -37,10 +37,11 @@ pub enum Request {
     /// output of a Compose service is the one of its container, read with `docker compose` in `env`.
     ///
     /// With `follow`, the answer is a stream: [`Response::Logs`] with the backlog, then [`Response::Output`] as output
-    /// arrives, a restart of the Service included, then [`Response::LogsEnded`] once the Job or the Service has ended.
-    /// A reader too slow to keep up gets [`Response::OutputDropped`] in place of what it missed, the Daemon never
-    /// waits for it. The client cancels by closing the connection. A Compose service cannot be followed, and
-    /// answers [`Response::Error`] with the `docker compose logs -f` command to run instead.
+    /// arrives, through the automatic restarts of a Service that crashed, then [`Response::LogsEnded`] once the Job
+    /// or the Service has ended. A reader too slow to keep up gets [`Response::OutputDropped`] in place of what it
+    /// missed, the Daemon never waits for it. The client sends nothing after its request, and cancels by closing the
+    /// connection, or only its writing half. A Compose service cannot be followed, and answers [`Response::Error`]
+    /// with the `docker compose logs -f` command to run instead.
     Logs {
         name: String,
         cwd: PathBuf,
