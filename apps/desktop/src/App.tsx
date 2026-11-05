@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 
+import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore } from "./daemon";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
@@ -54,7 +55,7 @@ export function App({ store }: { store: DaemonStore }) {
       </nav>
       <main className="pane center">
         <Toolbar snapshot={snapshot} store={store} />
-        <Center snapshot={snapshot} current={current} />
+        <Center snapshot={snapshot} current={current} store={store} />
       </main>
       <aside className="pane inspector" aria-label="Inspector">
         <Inspector current={current} />
@@ -168,17 +169,22 @@ function RemovedMark({ worktree }: { worktree: WorktreeStatus }) {
   return worktree.listed ? null : <span className="mark">Removed</span>;
 }
 
-function Center({ snapshot, current }: { snapshot: DaemonSnapshot; current: WorktreeStatus | null }) {
+function Center({
+  snapshot,
+  current,
+  store,
+}: {
+  snapshot: DaemonSnapshot;
+  current: WorktreeStatus | null;
+  store: DaemonStore;
+}) {
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
     case "no-daemon":
-      return (
-        <section>
-          <h2 className="title">Daemon not running</h2>
-          <p className="muted">No Daemon answers on its socket, and this app does not start one.</p>
-        </section>
-      );
+      return <DaemonNotRunning store={store} />;
+    case "protocol-mismatch":
+      return <DaemonOfAnotherVersion daemon={snapshot.daemon} app={snapshot.app} store={store} />;
     case "failure":
       return (
         <section>

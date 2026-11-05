@@ -11,10 +11,40 @@ export type DaemonSnapshot =
   | { kind: "loading" }
   | { kind: "status"; report: StatusReport; at: number }
   | { kind: "no-daemon"; at: number }
+  | { kind: "protocol-mismatch"; daemon: number; app: number; at: number }
   | { kind: "failure"; message: string; at: number };
 
-/** A command failure as the Rust side sends it: a `ClientFailure`, or the same shape with the kind `task` for a broken thread. */
-export type Failure = Omit<ClientFailure, "kind"> & { kind: ClientFailureKind | "task" };
+/**
+ * A command failure as the Rust side sends it: a `ClientFailure`, or the same shape with another kind: `task` for a
+ * broken thread, `sidecar` when the embedded `procly` cannot run, `daemon_stop` when `procly daemon stop` failed.
+ */
+export type Failure =
+  | (Omit<ClientFailure, "kind"> & { kind: ClientFailureKind | "task" | "sidecar" | "daemon_stop" })
+  | ProtocolMismatch;
+
+/** A Daemon that answers in another protocol version, with the version it speaks and the one of this app. */
+export interface ProtocolMismatch {
+  kind: "protocol_mismatch";
+  message: string;
+  daemon_protocol: number;
+  app_protocol: number;
+}
+
+/** What a rejected command says, whether the Rust side sent a `Failure` or something else broke. */
+export function failureMessage(error: unknown): string {
+  if (typeof error === "string") {
+    return error;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return error.message;
+  }
+  return "unknown error";
+}
 
 /** One tick of the poller, as the Rust side emits it: the time it was read, and the `Response` unchanged or why there is none. */
 export type Update = { at_ms: number } & ({ response: Response } | { failure: Failure });
@@ -30,6 +60,10 @@ export interface DaemonStore {
   start(): () => void;
   /** Asks the poller for a tick now. It changes nothing in the Daemon, and the answer comes back as any other tick. */
   refresh(): Promise<void>;
+  /** Starts the Daemon with the `procly` the app embeds. Only the developer's click calls it. Rejects with why it failed. */
+  startDaemon(): Promise<void>;
+  /** Stops the Daemon of another version, then starts the embedded one. Only a confirmed sheet calls it. Rejects with why it failed. */
+  restartDaemon(): Promise<void>;
 }
 
 const NO_DAEMON: ClientFailureKind = "unreachable";
@@ -50,6 +84,14 @@ function fromUpdate(update: Update): DaemonSnapshot {
     return fromResponse(update.response, update.at_ms);
   }
   const { failure } = update;
+  if (failure.kind === "protocol_mismatch") {
+    return {
+      kind: "protocol-mismatch",
+      daemon: failure.daemon_protocol,
+      app: failure.app_protocol,
+      at: update.at_ms,
+    };
+  }
   return failure.kind === NO_DAEMON
     ? { kind: "no-daemon", at: update.at_ms }
     : { kind: "failure", message: failure.message, at: update.at_ms };
@@ -101,5 +143,7 @@ export function createDaemonStore(): DaemonStore {
       };
     },
     refresh: () => invoke("refresh"),
+    startDaemon: () => invoke("start_daemon"),
+    restartDaemon: () => invoke("restart_daemon"),
   };
 }

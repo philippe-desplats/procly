@@ -4,6 +4,7 @@
 //! draws it. Nothing here supervises anything. The window is kept current by one poller (`docs/rules/tauri.md`).
 
 mod daemon;
+mod lifecycle;
 mod menu;
 mod poller;
 
@@ -97,7 +98,12 @@ pub fn run() {
             }
         })
         .on_window_event(follow_window)
-        .invoke_handler(tauri::generate_handler![last_update, refresh])
+        .invoke_handler(tauri::generate_handler![
+            last_update,
+            refresh,
+            lifecycle::start_daemon,
+            lifecycle::restart_daemon
+        ])
         .run(tauri::generate_context!())
         .expect("the Tauri application runs");
 }

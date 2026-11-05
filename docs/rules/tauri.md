@@ -42,6 +42,12 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
   - Inside a Tauri bundle `current_exe()` is the app, and starting it with `daemon` would launch a second app instead of the Daemon. A `procly` found on the `PATH` may be another release, whose Daemon the app could not talk to.
   - Example: `DaemonClient::connect_or_start(socket_path, &procly_exe)`, where `procly_exe` is `Procly.app/Contents/MacOS/procly`.
 
+- **ALWAYS** declare the sidecar in `src-tauri/tauri.bundle.conf.json` and build every bundle with `make bundle`, never put `bundle.externalBin` in `tauri.conf.json`.
+  - At each build of the app, tauri-build copies a declared sidecar over `target/<profile>/procly`, which is the CLI binary every test of `crates/procly/tests/` runs. A fresh clone has no sidecar to copy, so the build would need a placeholder, and that placeholder replaces the CLI until cargo links it again. Measured on Tauri 2.12.
+  - The app finds its `procly` beside its own executable, `Contents/MacOS/procly` in a bundle and `target/<profile>/procly`, the CLI itself, when it runs from the workspace.
+  - `make bundle` builds the CLI, places it at `src-tauri/binaries/procly-<target triple>` (git-ignored), then runs `tauri build --config src-tauri/tauri.bundle.conf.json`. The end-to-end build (ADR 0016) and the release workflow call it, with `PROFILE=release` for the latter, a plain `tauri build` yields a bundle without the sidecar.
+  - Example: `make bundle TAURI_ARGS="--bundles app"` leaves `target/debug/bundle/macos/Procly.app/Contents/MacOS/procly` next to `procly-desktop`.
+
 - **NEVER** start the Daemon implicitly, refresh with `connect` and call `connect_or_start` only from an action the developer took.
   - A Daemon the developer stopped must stay stopped, and a Session unit keeps it running anyway when one is installed.
   - Example: a refresh that finds no socket shows the "Daemon not running" state with the `doctor` report, it does not start one.

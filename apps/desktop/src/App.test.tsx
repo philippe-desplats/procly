@@ -22,7 +22,7 @@ function answered(response: Response, at = AT): Update {
   return { at_ms: at, response };
 }
 
-function failed(kind: Failure["kind"], message: string, at = AT): Update {
+function failed(kind: Exclude<Failure["kind"], "protocol_mismatch">, message: string, at = AT): Update {
   return { at_ms: at, failure: { kind, message } };
 }
 
