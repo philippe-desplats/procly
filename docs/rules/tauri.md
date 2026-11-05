@@ -4,15 +4,23 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 
 ## Role of the app
 
-- **NEVER** put supervision logic in the desktop app, every Tauri command forwards to the Daemon socket and returns its answer.
-  - ADR 0009: the CLI is the contract, `procly mcp` and the app are logic-free clients, so behaviour can never diverge between surfaces.
+- **NEVER** put supervision logic in the desktop app, every Tauri command sends one `Request` through the `procly-client` crate and returns the `Response` unchanged.
+  - ADR 0009: the CLI is the contract, `procly mcp` and the app are logic-free clients, so behaviour can never diverge between surfaces. Reshaping the answer in Rust would start a second rendering of the protocol, the frontend draws it instead.
   - Example:
     ```rust
     #[tauri::command]
-    async fn up(service: String, client: State<'_, DaemonClient>) -> Result<UpReport, ClientError> {
-        client.up(&service).await
+    async fn status(cwd: PathBuf, all: bool, client: State<'_, DaemonClient>) -> Result<Response, ClientError> {
+        client.send(&Request::Status { cwd, all }).await
     }
     ```
+
+- **ALWAYS** reach `doctor` by running `procly doctor --json`, never by sending `Request::Doctor`.
+  - ADR 0009: the checks of the installation live in the CLI and must still report a Daemon that does not run, so `doctor` is the only verb the app reaches through the CLI.
+  - Example: the `doctor` command runs the `procly` executable the app was given, with `doctor --json`, and returns the parsed document.
+
+- **NEVER** let the app guess the `procly` executable from `current_exe()`, pass its path explicitly to `connect_or_start` and to the `doctor` command.
+  - Inside a Tauri bundle `current_exe()` is the app, and starting it with `daemon` would launch a second app instead of the Daemon.
+  - Example: `DaemonClient::connect_or_start(socket_path, &procly_exe)`.
 
 - **NEVER** open a TCP or HTTP listener from the app to talk to the Daemon.
   - ADR 0003: the Daemon listens on a `0600` Unix socket only, and a loopback HTTP API is reachable from any browser tab.
@@ -21,7 +29,7 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 ## Layout
 
 - **ALWAYS** place the app under `apps/desktop/`, with its Rust crate in `apps/desktop/src-tauri/` added to the root workspace members.
-  - The app then shares the workspace lockfile, lints and toolchain, and reuses the socket client crate directly.
+  - The app then shares the workspace lockfile, lints and toolchain, and reuses the `procly-client` crate directly.
   - Example: `members = ["crates/*", "apps/desktop/src-tauri"]` in the root `Cargo.toml`.
 
 - **ALWAYS** start from the Tauri v2 project structure: `src-tauri/tauri.conf.json`, `src-tauri/capabilities/`, and a `lib.rs` holding the `run()` function that `main.rs` calls.
@@ -41,7 +49,7 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 
 - **ALWAYS** return `Result<T, E>` from an `async` command, with an error type that implements `serde::Serialize`.
   - An async command may only borrow arguments such as `&str` or `State<'_, T>` when it returns a `Result`, and a serializable error reaches the frontend as a rejected promise instead of a panic.
-  - Example: `async fn logs(service: String, lines: usize) -> Result<Vec<String>, ClientError>`.
+  - Example: `async fn logs(name: String, cwd: PathBuf, client: State<'_, DaemonClient>) -> Result<Response, ClientError>`.
 
 - **ALWAYS** stream Service output to the frontend through a `tauri::ipc::Channel`, and keep events for small notifications.
   - Channels are ordered and built for throughput, the event system evaluates JavaScript per message and does not scale to log streams.
@@ -81,6 +89,6 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 
 ## Tests
 
-- **ALWAYS** test the frontend against `mockIPC` from `@tauri-apps/api/mocks`, and test the Rust side through the socket client crate.
+- **ALWAYS** test the frontend against `mockIPC` from `@tauri-apps/api/mocks`, and test the Rust side through the `procly-client` crate.
   - The commands hold no logic, so the frontend tests check rendering and the client tests check the protocol, without a running webview.
-  - Example: `mockIPC((cmd, args) => cmd === 'up' ? { state: 'reused', port: 5173 } : undefined)`.
+  - Example: `mockIPC((cmd, args) => cmd === 'up' ? { response: 'up', service: 'web', outcome: 'reused', port: 5173 } : undefined)`.
