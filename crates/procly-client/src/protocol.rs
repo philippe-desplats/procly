@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// A Worktree as the protocol carries it. Discovering it through `git` is the business of the CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Worktree {
     /// The root directory of the Worktree, canonicalized.
     pub path: PathBuf,
@@ -21,6 +22,7 @@ pub struct Worktree {
 pub const PROTOCOL_VERSION: u32 = 22;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
     /// Starts a Job and answers as soon as it is spawned, or answers with the running Job of the same Fingerprint.
@@ -94,6 +96,7 @@ pub enum Request {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "response", rename_all = "snake_case")]
 pub enum Response {
     Run {
@@ -205,6 +208,7 @@ pub enum Response {
 
 /// Something started outside Procly that holds what a Service needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Conflict {
     /// What the Service needs and the occupant holds.
     pub held: Held,
@@ -217,6 +221,7 @@ pub struct Conflict {
 
 /// What an occupant holds that a Service needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Held {
     /// The port of a Lease of the Service.
@@ -230,6 +235,7 @@ pub enum Held {
 
 /// What holds a port or a name, as Docker and `lsof` tell it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Occupant {
     /// A container, with its compose labels when it has them.
@@ -247,6 +253,7 @@ pub enum Occupant {
 
 /// A dev process or container running in a Worktree that Procly did not start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ForeignProcess {
     /// A process listening on TCP ports, whose working directory is in the Worktree.
@@ -262,6 +269,7 @@ pub enum ForeignProcess {
 
 /// What a request to write a Managed block did to the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum BlockOutcome {
     /// The block was added or updated.
@@ -285,6 +293,7 @@ impl BlockOutcome {
 
 /// A Managed block and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct BlockReport {
     pub file: PathBuf,
     pub outcome: BlockOutcome,
@@ -292,6 +301,7 @@ pub struct BlockReport {
 
 /// What `agent install` wrote.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct InstallReport {
     pub rules: BlockReport,
     pub guard: BlockReport,
@@ -301,6 +311,7 @@ pub struct InstallReport {
 
 /// What `off` and `on` did to the Rules blocks of the Repository.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SwitchReport {
     pub off: bool,
     pub rules: Vec<BlockReport>,
@@ -308,6 +319,7 @@ pub struct SwitchReport {
 
 /// What kind of file or text Procly wrote into a Repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum Written {
     /// The Rules block of an instruction file.
@@ -337,6 +349,7 @@ impl Written {
 
 /// Something `eject` removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Removed {
     pub kind: Written,
     pub file: PathBuf,
@@ -346,6 +359,7 @@ pub struct Removed {
 
 /// Something `eject` left as it is because the developer edited it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Left {
     pub kind: Written,
     pub file: PathBuf,
@@ -353,6 +367,7 @@ pub struct Left {
 
 /// A Service `eject` stopped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Stopped {
     pub service: String,
     /// The Worktree it ran for, `None` for a Compose service whose container belongs to the Repository.
@@ -365,6 +380,7 @@ pub struct Stopped {
 
 /// What `eject` did to a Repository.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct EjectReport {
     pub stopped: Vec<Stopped>,
     pub removed: Vec<Removed>,
@@ -375,6 +391,7 @@ pub struct EjectReport {
 
 /// A healthy Service `up` brought up or found running.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct UpService {
     pub service: String,
     pub outcome: StartOutcome,
@@ -392,6 +409,7 @@ pub struct UpService {
 
 /// A Compose service a Worktree let go of, whose container keeps running while another Worktree needs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Released {
     pub service: String,
     /// How many other Worktrees still need the container.
@@ -402,6 +420,7 @@ pub struct Released {
 
 /// What a Worktree release did to a Worktree.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ReleaseReport {
     pub worktree: PathBuf,
     /// The Services it stopped, by name.
@@ -430,6 +449,7 @@ impl ReleaseReport {
 
 /// The port one Port name of one Service holds through its Lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct LeaseHeld {
     pub service: String,
     pub port_name: String,
@@ -438,6 +458,7 @@ pub struct LeaseHeld {
 
 /// A Lease a Worktree release kept, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct KeptLease {
     #[serde(flatten)]
     pub lease: LeaseHeld,
@@ -447,6 +468,7 @@ pub struct KeptLease {
 
 /// Why a Worktree release kept a Lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum KeptBecause {
     /// The Lease is bound to the Pinned branch `branch` the Worktree is on, so that it survives the Worktree.
@@ -457,6 +479,7 @@ pub enum KeptBecause {
 
 /// A Logical resource a Worktree release kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct KeptResource {
     /// The Compose service whose container holds it.
     pub service: String,
@@ -469,6 +492,7 @@ pub struct KeptResource {
 
 /// Why a Service ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServiceEnd {
     Exited {
@@ -515,6 +539,7 @@ pub enum ServiceEnd {
 
 /// Whether a start request started new work or ended in Reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum StartOutcome {
     Started,
@@ -532,6 +557,7 @@ impl StartOutcome {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct StatusReport {
     pub repositories: Vec<RepositoryStatus>,
     /// Jobs started in a directory outside any Repository.
@@ -539,12 +565,14 @@ pub struct StatusReport {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RepositoryStatus {
     pub git_common_dir: PathBuf,
     pub worktrees: Vec<WorktreeStatus>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct WorktreeStatus {
     #[serde(flatten)]
     pub worktree: Worktree,
@@ -562,6 +590,7 @@ pub struct WorktreeStatus {
 
 /// An Isolated container Procly started or adopted for a Worktree, which runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ContainerStatus {
     /// The name of the Compose service in `procly.toml`.
     pub service: String,
@@ -574,6 +603,7 @@ pub struct ContainerStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ServiceStatus {
     pub service: String,
     pub port: Option<u16>,
@@ -584,6 +614,7 @@ pub struct ServiceStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ServiceState {
     Starting,
@@ -597,6 +628,7 @@ pub enum ServiceState {
 
 /// A declared Service, as the Guard matches a command it blocks against it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct GuardService {
     pub name: String,
     /// The command of a Process service or a Group.
@@ -606,6 +638,7 @@ pub struct GuardService {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct JobStatus {
     pub id: String,
     pub command: String,
@@ -615,6 +648,7 @@ pub struct JobStatus {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum JobState {
     Running,
@@ -623,6 +657,7 @@ pub enum JobState {
 
 /// What `worktree init` changed in a Worktree.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct InitReport {
     /// The listed paths that were copied, as listed.
     pub copied: Vec<String>,
@@ -634,6 +669,7 @@ pub struct InitReport {
 
 /// How a Job ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobEnd {
     Exited {
@@ -704,6 +740,7 @@ pub fn encode<T: Serialize>(body: T) -> Result<String, serde_json::Error> {
 
 /// What `gc` found, and with `applied` what it deleted.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct GcReport {
     /// Whether `gc` was asked to delete the Orphans, and not only to list them.
     pub applied: bool,
@@ -727,6 +764,7 @@ impl GcReport {
 
 /// Something a removed Worktree left behind, whose Worktree git no longer lists and that no Pinned branch holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Orphan {
     #[serde(flatten)]
     pub kind: OrphanKind,
@@ -773,6 +811,7 @@ impl Orphan {
 
 /// What an Orphan is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrphanKind {
     /// A Lease of a Port name of a Service.
@@ -809,6 +848,7 @@ pub enum OrphanKind {
 
 /// A Repository whose Worktrees git could not list, so that none of them counts as removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SkippedRepository {
     /// The common git directory identifying the Repository.
     pub repository: PathBuf,
@@ -818,6 +858,7 @@ pub struct SkippedRepository {
 
 /// What a `doctor` check found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     /// Nothing is wrong.
@@ -844,6 +885,7 @@ impl CheckStatus {
 
 /// One check of `procly doctor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Check {
     /// What is checked, the same in every run so that a script can match it.
     pub name: String,
@@ -898,6 +940,7 @@ impl Check {
 
 /// What `worktree hooks` did to the Worktrunk config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum HooksOutcome {
     /// The block was added or updated.
@@ -924,6 +967,7 @@ impl HooksOutcome {
 
 /// What `worktree hooks` wrote, or why it wrote nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct HooksReport {
     /// The `.config/wt.toml` of the Worktree.
     pub file: PathBuf,
@@ -949,6 +993,7 @@ impl HooksReport {
 
 /// What the Daemon answers a `Doctor` request with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct DaemonChecks {
     /// The version of the procly executable the Daemon runs, which the client compares with its own. Not `version`,
     /// which the envelope of every message already carries.

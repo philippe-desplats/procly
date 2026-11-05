@@ -251,3 +251,16 @@ fn connect_or_start_names_an_executable_that_cannot_start() {
         "{result:?}"
     );
 }
+
+#[test]
+fn an_error_serializes_as_its_kind_and_its_message() {
+    let (_dir, state) = state();
+    let error = connect(&state).expect_err("no Daemon runs here");
+    assert!(matches!(error, ClientError::Unreachable { .. }));
+    let json = serde_json::to_value(&error).expect("an error serializes");
+    assert_eq!(json["kind"], "unreachable");
+    assert_eq!(json["message"], error.to_string());
+
+    let json = serde_json::to_value(ClientError::NoResponse).expect("an error serializes");
+    assert_eq!(json["kind"], "no_response");
+}
