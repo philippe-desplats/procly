@@ -9,6 +9,7 @@ import { REFRESH_REQUESTED, type DoctorDocument } from "./doctor";
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import drift from "./fixtures/doctor-release-drift.json";
+import repairs from "./fixtures/doctor-worktree-repairs.json";
 import ofWorktree from "./fixtures/doctor-worktree.json";
 import recorded from "./fixtures/status.json";
 import type { Response } from "./protocol/Response";
@@ -20,6 +21,7 @@ const MACHINE: DoctorDocument = machine as DoctorDocument;
 const NO_DAEMON: DoctorDocument = noDaemon as DoctorDocument;
 const DRIFT: DoctorDocument = drift as DoctorDocument;
 const WORKTREE: DoctorDocument = ofWorktree as DoctorDocument;
+const REPAIRS: DoctorDocument = repairs as DoctorDocument;
 
 /** The Worktree of the recorded answer the Worktree screen is opened on. */
 const WORKTREE_PATH = "/p/work/acme/web-fix";
@@ -169,6 +171,8 @@ describe("the Doctor screen", () => {
     // One command per line: the 2 aliases to remove are 2 buttons, and a line is never merged with the next.
     expect(written).toEqual([
       "kill 4812",
+      // The fix for a Port mismatch moves to the Worktree, so it is pasted in parentheses and moves nothing else.
+      "(cd /p/work/acme/web-fix && procly env web)",
       "procly gc",
       "portless alias --remove web.acme",
       "portless alias --remove api.acme",
@@ -302,20 +306,45 @@ describe("when doctor runs", () => {
     expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
   });
 
-  it("starts no timer, whatever the time that passes on the Doctor screen", async () => {
+  it("installs no timer from the Doctor code, at mount or later, whatever the time that passes", async () => {
+    // Every timer is recorded with the place that asked for it, from before the first render. The test tools and React
+    // install their own, only those asked for by the files of the Doctor are a failure.
+    const doctorFiles = /src\/(doctor\.ts|DoctorScreen\.tsx|CheckList\.tsx|CopyBox\.tsx)/;
+    const asked: string[] = [];
+    for (const name of [
+      "setInterval",
+      "setTimeout",
+      "requestAnimationFrame",
+      "requestIdleCallback",
+    ] as const) {
+      const original = globalThis[name] as ((...args: unknown[]) => unknown) | undefined;
+      if (original === undefined) {
+        continue;
+      }
+      vi.spyOn(globalThis, name as "setTimeout").mockImplementation(((...args: unknown[]) => {
+        const stack = new Error().stack ?? "";
+        if (doctorFiles.test(stack)) {
+          asked.push(`${name}: ${stack}`);
+        }
+        return original(...args);
+      }) as typeof setTimeout);
+    }
     const calls = rust(answered(), () => MACHINE);
     render(<App store={createDaemonStore()} />);
     await openDoctor();
     await screen.findByText("orphans");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await settle();
     const before = doctorCalls(calls).length;
 
+    vi.restoreAllMocks();
     vi.useFakeTimers({ toFake: ["setInterval", "setTimeout"] });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
     });
 
+    expect(asked).toEqual([]);
     expect(doctorCalls(calls)).toHaveLength(before);
-    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -344,6 +373,28 @@ describe("the Worktree screen", () => {
     fireEvent.click(within(checks).getByRole("button", { name: "Copy" }));
 
     expect(written).toEqual(["${EDITOR:-vi} /p/work/acme/web-fix/procly.toml"]);
+  });
+
+  it("copies a command that needs the Worktree as (cd <path> && procly <verb>), shown as it is copied", async () => {
+    rust(answered(), (cwd) => (cwd === WORKTREE_PATH ? REPAIRS : MACHINE));
+    const written = clipboard();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /web_fix|web-fix/ }));
+    const checks = await screen.findByRole("region", { name: "Doctor checks" });
+    await within(checks).findByText("guard");
+
+    const shown: string[] = [];
+    for (const button of within(checks).getAllByRole("button", { name: "Copy" })) {
+      shown.push(button.parentElement?.querySelector("code")?.textContent ?? "");
+      fireEvent.click(button);
+    }
+
+    const expected = [
+      "(cd /p/work/acme/web-fix && procly agent install)",
+      "(cd /p/work/acme/web-fix && procly worktree hooks)",
+    ];
+    expect(shown).toEqual(expected);
+    expect(written).toEqual(expected);
   });
 });
 

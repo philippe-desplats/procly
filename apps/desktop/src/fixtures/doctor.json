@@ -38,8 +38,8 @@
     {
       "name": "leased_ports",
       "status": "failed",
-      "message": "lease web.http port 24081 of /p/work/acme/web-fix is held by process 4812 node, which Procly did not start",
-      "fix": "kill 4812"
+      "message": "lease web.http port 24081 of /p/work/acme/web-fix is held by process 4812 node, which Procly did not start\nservice web of /p/work/acme/web-fix listens on port 10189 instead of its Lease, port 24000 (Port mismatch)",
+      "fix": "kill 4812\ncd /p/work/acme/web-fix && procly env web"
     },
     {
       "name": "orphans",

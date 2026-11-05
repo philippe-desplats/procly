@@ -61,6 +61,34 @@ export function checksWithoutDaemon(checks: Check[]): Check[] {
   return checks.filter((check) => !DAEMON_CHECKS.includes(check.name));
 }
 
+/** A word the shell reads as it is, which needs no quote. */
+const PLAIN_WORD = /^[A-Za-z0-9_/.,:@%+=-]+$/;
+
+function shellWord(text: string): string {
+  return PLAIN_WORD.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The commands of a fix, one per line, as the developer pastes them: a command that needs a working directory is
+ * wrapped as `(cd <path> && <command>)`, so that the `cd` leaves the shell where it was. `worktree` is the directory
+ * of the Worktree the fix is for, `null` for the machine. A `procly` command of a Worktree runs in it, and a fix that
+ * already moves to a directory, as the one for a Port mismatch does, only gets its parentheses.
+ */
+export function fixCommands(fix: string, worktree: string | null): string[] {
+  return fix
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => {
+      if (/^cd \S.* && /.test(line)) {
+        return `(${line})`;
+      }
+      if (worktree !== null && line.startsWith("procly ")) {
+        return `(cd ${shellWord(worktree)} && ${line})`;
+      }
+      return line;
+    });
+}
+
 const RANK: Record<CheckStatus, number> = { failed: 0, warning: 1, passed: 2, skipped: 3 };
 
 /** Problems first: failed, then warning, then passed, then skipped, in the order of the document within each. */
