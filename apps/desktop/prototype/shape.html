@@ -1,0 +1,390 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Wayfinder ticket #82 "Shape and screens of the desktop app".
+  Question: menu bar popover, main window, or menu bar icon that opens a window,
+  and which screens (Repositories > Worktrees > Services, Jobs, Leases, Logical
+  resources, output, doctor).
+  Three variants, switchable with ?variant=A|B|C, the bottom bar, or the arrow keys.
+  Mock data only, every action shows the Request it would send and sends nothing.
+  The stack used here binds nothing (ticket #89 decides it).
+  Run: open apps/desktop/prototype/shape.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Procly, desktop shape prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --ink: #14161A; --lime: #D7F23C; --olive: #A8BF22;
+    --bg: #0f1114; --panel: #16191d; --panel2: #1c2025; --line: #262b31;
+    --text: #e8eaed; --muted: #8a929c; --faint: #5b626b;
+    --ok: #b8d62a; --busy: #f2b33c; --bad: #ff5d5d; --idle: #5b626b; --run: #6cb6ff;
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  :root[data-theme="light"] {
+    --bg: #eceef0; --panel: #ffffff; --panel2: #f5f6f7; --line: #e3e5e8;
+    --text: #14161A; --muted: #6a717a; --faint: #a3a9b0;
+    --ok: #7f9612; --busy: #c98a12; --bad: #e03d3d; --idle: #a3a9b0; --run: #2f7fd6;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { font: 13px/1.4 -apple-system, system-ui, "Inter", sans-serif; color: var(--text); background: var(--bg); overflow: hidden; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--muted); } .faint { color: var(--faint); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--idle); }
+  .dot.ok { background: var(--ok); } .dot.busy { background: var(--busy); } .dot.bad { background: var(--bad); } .dot.run { background: var(--run); }
+  .dot.busy, .dot.run { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 99px; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .chip.port { font-family: var(--mono); color: var(--text); }
+  .chip.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+  .chip.warn { color: var(--busy); border-color: color-mix(in srgb, var(--busy) 35%, transparent); }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel2); font-size: 12px; transition: background .12s, border-color .12s; }
+  .btn:hover { border-color: var(--faint); }
+  .btn.primary { background: var(--lime); color: var(--ink); border-color: var(--lime); font-weight: 600; }
+  .btn.danger:hover { color: var(--bad); border-color: var(--bad); }
+  .icon-btn { width: 24px; height: 24px; border-radius: 6px; display: inline-grid; place-items: center; color: var(--muted); }
+  .icon-btn:hover { background: var(--panel2); color: var(--text); }
+  .sec { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin: 14px 0 6px; display: flex; justify-content: space-between; align-items: center; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; }
+  .row.hover:hover, .row.sel { background: var(--panel2); cursor: pointer; }
+  .row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .acts { display: none; gap: 2px; } .row:hover .acts { display: inline-flex; }
+  .log { font-family: var(--mono); font-size: 11.5px; line-height: 1.55; background: #0b0d10; color: #cfd3d8; border-radius: 8px; padding: 10px 12px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+  :root[data-theme="light"] .log { background: #14161A; }
+  .log .t { color: #5b626b; } .log .e { color: #ff7b7b; } .log .w { color: #f2c36b; }
+  .logo { width: 18px; height: 18px; flex: none; }
+  .scroll { overflow: auto; }
+
+  /* Fake macOS desktop shared by the variants */
+  .desk { position: fixed; inset: 0; background: radial-gradient(1200px 700px at 70% 10%, #2a3a1e 0%, transparent 60%), radial-gradient(900px 600px at 10% 90%, #1d2a38 0%, transparent 60%), #101215; }
+  :root[data-theme="light"] .desk { background: radial-gradient(1200px 700px at 70% 10%, #e3ecc0 0%, transparent 60%), radial-gradient(900px 600px at 10% 90%, #cfdbe8 0%, transparent 60%), #dfe3e7; }
+  .menubar { position: absolute; top: 0; left: 0; right: 0; height: 26px; display: flex; align-items: center; gap: 18px; padding: 0 14px; background: color-mix(in srgb, var(--panel) 70%, transparent); backdrop-filter: blur(20px); font-size: 12.5px; z-index: 5; }
+  .menubar .sp { flex: 1; }
+  .mb-icon { position: relative; height: 22px; padding: 0 6px; border-radius: 5px; display: inline-flex; align-items: center; }
+  .mb-icon.on, .mb-icon:hover { background: color-mix(in srgb, var(--text) 14%, transparent); }
+  .mb-icon .badge { position: absolute; top: 2px; right: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--bad); }
+  .win { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 30px 80px rgba(0,0,0,.45); overflow: hidden; display: flex; flex-direction: column; }
+  .titlebar { height: 38px; display: flex; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--line); flex: none; }
+  .lights { display: flex; gap: 7px; } .lights i { width: 11px; height: 11px; border-radius: 50%; background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+  .pop { position: absolute; top: 32px; background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(30px); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.45); display: flex; flex-direction: column; overflow: hidden; z-index: 6; }
+
+  /* Variant A, popover only */
+  .A-pop { right: 150px; width: 384px; max-height: calc(100vh - 110px); }
+  .A-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
+  .A-body { padding: 4px 8px 10px; }
+  .A-foot { display: flex; gap: 4px; padding: 8px; border-top: 1px solid var(--line); }
+  .A-foot button { flex: 1; padding: 6px; border-radius: 7px; font-size: 12px; color: var(--muted); }
+  .A-foot button:hover { background: var(--panel2); color: var(--text); }
+  .banner { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--text); margin: 8px 0 2px; cursor: pointer; }
+
+  /* Variant B, main window with 3 panes */
+  .B-win { inset: 46px 40px 70px 40px; }
+  .B-grid { flex: 1; display: grid; grid-template-columns: 236px 1fr 430px; min-height: 0; }
+  .B-side { border-right: 1px solid var(--line); background: var(--panel2); padding: 10px 8px; display: flex; flex-direction: column; min-height: 0; }
+  .B-main { padding: 16px 20px; min-height: 0; }
+  .B-insp { border-left: 1px solid var(--line); padding: 16px; display: flex; flex-direction: column; min-height: 0; gap: 10px; }
+  .B-insp .log { flex: 1; }
+  .tbl { width: 100%; border-collapse: collapse; }
+  .tbl td { padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .tbl tr.hover:hover td, .tbl tr.sel td { background: var(--panel2); cursor: pointer; }
+  .tbl td.grow { width: 100%; }
+  .check { display: grid; grid-template-columns: 18px 160px 1fr auto; gap: 10px; align-items: start; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+  .fix { font-family: var(--mono); font-size: 11.5px; background: var(--panel2); border: 1px solid var(--line); padding: 2px 8px; border-radius: 6px; }
+
+  /* Variant C, menu bar summary + board window */
+  .C-win { inset: 46px 40px 70px 40px; }
+  .C-pop { right: 150px; width: 300px; }
+  .C-board { flex: 1; display: flex; gap: 12px; padding: 14px; overflow-x: auto; min-height: 0; align-items: flex-start; }
+  .col { width: 290px; flex: none; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; max-height: 100%; overflow: auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin-bottom: 6px; cursor: pointer; transition: border-color .12s; }
+  .card:hover, .card.sel { border-color: var(--olive); }
+  .card.job { border-style: dashed; }
+  .drawer { flex: none; height: 270px; border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+  .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); }
+  .tab { padding: 6px 10px; border-radius: 7px 7px 0 0; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+  .tab.on { background: var(--panel2); color: var(--text); }
+  .seg { display: inline-flex; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+  .seg button { padding: 4px 12px; border-radius: 6px; color: var(--muted); }
+  .seg button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.2); }
+  .strip { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: color-mix(in srgb, var(--bad) 10%, transparent); border-bottom: 1px solid var(--line); }
+
+  /* Prototype chrome, deliberately not part of the design */
+  .switcher { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 5px; background: #fff; color: #111; border-radius: 99px; box-shadow: 0 8px 30px rgba(0,0,0,.5); z-index: 100; font: 12px system-ui; border: 2px dashed #ff3da8; }
+  .switcher button { width: 28px; height: 28px; border-radius: 50%; font-size: 15px; }
+  .switcher button:hover { background: #eee; }
+  .switcher .lbl { padding: 0 10px; font-weight: 600; min-width: 250px; text-align: center; }
+  .switcher .th { width: auto; padding: 0 10px; border-radius: 99px; font-size: 11px; color: #555; }
+  .toast { position: fixed; left: 50%; bottom: 66px; transform: translateX(-50%); background: #fff; color: #111; padding: 8px 14px; border-radius: 8px; font: 12px var(--mono); box-shadow: 0 8px 30px rgba(0,0,0,.4); z-index: 101; border: 2px dashed #ff3da8; max-width: 80vw; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast" class="toast" hidden></div>
+<script>
+// ---------- Mock data, shaped after `procly status --json`, `doctor --json`, `gc --json` ----------
+const REPOS = [
+  { name: 'acme-web', gitdir: '/Users/me/code/acme-web/.git', worktrees: [
+    { branch: 'main', slug: 'acme_web', path: '/Users/me/code/acme-web', main: true,
+      items: [
+        { kind: 'service', name: 'api', state: 'healthy', port: 4100, url: 'http://localhost:4100' },
+        { kind: 'service', name: 'web', state: 'healthy', port: 4101, url: 'http://localhost:4101' },
+        { kind: 'service', name: 'worker', state: 'failed', end: 'exited 1' },
+        { kind: 'compose', name: 'db', state: 'healthy', mode: 'Logical', port: 5432, note: 'shared container, 3 Worktrees' },
+        { kind: 'job', name: '3f9a1c2e', command: 'bun test', state: 'ended', end: 'exited 0' },
+      ],
+      leases: [['api', 'http', 4100], ['web', 'http', 4101], ['db', 'pg', 5432]],
+      logical: [['db', 'dev', 'acme_web', 'postgres']], foreign: [] },
+    { branch: 'feat/login', slug: 'acme_web_login', path: '/Users/me/code/acme-web-login',
+      items: [
+        { kind: 'service', name: 'api', state: 'healthy', port: 24100, url: 'http://localhost:24100' },
+        { kind: 'service', name: 'web', state: 'restarting', port: 24101, url: 'http://localhost:24101' },
+        { kind: 'compose', name: 'cache', state: 'healthy', mode: 'Isolated', port: 24001, note: 'project acme-web-acme_web_login' },
+        { kind: 'job', name: 'a71c0b44', command: 'bun run lint', state: 'running' },
+      ],
+      leases: [['api', 'http', 24100], ['web', 'http', 24101], ['cache', 'redis', 24001]],
+      logical: [['db', 'dev', 'acme_web_login', 'postgres']],
+      foreign: [{ pid: 4812, name: 'node', port: 24081 }] },
+    { branch: 'fix/billing', slug: 'acme_web_billing', path: '/Users/me/code/acme-web-billing',
+      items: [ { kind: 'job', name: 'c02e9f10', command: 'pnpm vitest run', state: 'running' } ],
+      leases: [['api', 'http', 24110], ['web', 'http', 24111]],
+      logical: [['db', 'dev', 'acme_web_billing', 'postgres']], foreign: [] },
+  ]},
+  { name: 'globex-api', gitdir: '/Users/me/code/globex-api/.git', worktrees: [
+    { branch: 'main', slug: 'globex_api', path: '/Users/me/code/globex-api', main: true,
+      items: [
+        { kind: 'service', name: 'api', state: 'healthy', port: 8080, url: 'http://localhost:8080' },
+        { kind: 'service', name: 'mailpit', state: 'healthy', port: 8025, url: 'http://localhost:8025' },
+        { kind: 'compose', name: 'db', state: 'healthy', mode: 'Shared', port: 5433, note: 'shared container' },
+      ],
+      leases: [['api', 'http', 8080], ['mailpit', 'http', 8025], ['mailpit', 'smtp', 1025]],
+      logical: [], foreign: [] },
+  ]},
+];
+const DOCTOR = [
+  ['docker_compose', 'passed', 'docker compose 2.29.1', null],
+  ['daemon', 'passed', 'the Daemon answers and runs procly 0.5.0', null],
+  ['session_unit', 'warning', 'the Session unit ~/Library/LaunchAgents/dev.procly.daemon.plist is not installed, the Daemon does not start with your session', 'procly unit install'],
+  ['state_documents', 'passed', 'every state document can be read', null],
+  ['configuration', 'passed', '/Users/me/code/acme-web/procly.toml is valid and its Drivers load', null],
+  ['guard', 'skipped', 'no Guard in .claude/settings.json', null],
+  ['portless', 'skipped', 'settings.portless is not on', null],
+  ['worktrunk_hooks', 'skipped', 'no Worktrunk hooks', null],
+  ['leased_ports', 'failed', 'lease web.http port 24081 of /Users/me/code/acme-web-login is held by process 4812 node, which Procly did not start', 'kill 4812'],
+  ['orphans', 'failed', '3 Orphans left by removed Worktrees', 'procly gc'],
+  ['portless_aliases', 'passed', 'every Portless alias Procly made is held by a Lease', null],
+].map(([name, status, message, fix]) => ({ name, status, message, fix }));
+const ORPHANS = [
+  { kind: 'lease', label: 'web.http, port 24081', worktree: '/Users/me/code/acme-web-old' },
+  { kind: 'logical_resource', label: 'db.dev, acme_web_old (postgres)', worktree: '/Users/me/code/acme-web-old' },
+  { kind: 'setup_directory', label: '~/.local/state/procly/setup/acme_web_old-5c2e0d6b', worktree: '/Users/me/code/acme-web-old' },
+];
+const PROBLEMS = DOCTOR.filter(c => c.status === 'failed').length;
+
+REPOS.forEach((r, ri) => r.worktrees.forEach((w, wi) => {
+  w.id = `${ri}.${wi}`; w.repo = r;
+  w.items.forEach(it => { it.id = `${w.id}.${it.kind}.${it.name}`; it.wt = w; it.lines = seedLogs(it); });
+}));
+const allWts = () => REPOS.flatMap(r => r.worktrees);
+const wtById = id => allWts().find(w => w.id === id);
+const itemById = id => allWts().flatMap(w => w.items).find(i => i.id === id);
+
+function seedLogs(it) {
+  const t = n => `13:${String(30 + n).padStart(2, '0')}:0${n % 10}`;
+  if (it.kind === 'job' && it.command.includes('test')) return [`${t(1)} bun test v1.2.4`, `${t(1)} ✓ auth > signs in (12ms)`, `${t(2)} ✓ auth > refreshes the token (8ms)`, `${t(2)} ✓ billing > computes VAT (3ms)`, `${t(3)}  48 pass, 0 fail`, `${t(3)} Ran 48 tests across 9 files. [1.21s]`];
+  if (it.kind === 'job') return [`${t(1)} $ ${it.command}`, `${t(2)} Checking 214 files...`];
+  if (it.name === 'worker') return [`${t(1)} [worker] connecting to redis://localhost:6379`, `${t(2)} !Error: connect ECONNREFUSED 127.0.0.1:6379`, `${t(2)} !    at TCPConnectWrap.afterConnect (node:net:1607:16)`, `${t(3)} [worker] exited with code 1`];
+  if (it.name === 'web' && it.state === 'restarting') return [`${t(1)}   VITE v6.0.3  ready in 412 ms`, `${t(2)}   ➜  Local:   http://localhost:24101/`, `${t(4)} ?[vite] hmr update /src/login/Form.tsx`, `${t(5)} !Error: Cannot find module './session'`, `${t(5)} [procly] web exited, restart 2 of 5`];
+  if (it.kind === 'compose') return [`${t(0)} ${it.name}-1  | database system is ready to accept connections`, `${t(3)} ${it.name}-1  | checkpoint starting: time`];
+  return [`${t(0)} ${it.name} listening on ${it.url || 'port ' + it.port}`, `${t(2)} GET /health 200 1.2ms`, `${t(3)} GET /api/session 200 14ms`, `${t(4)} POST /api/login 302 41ms`];
+}
+
+// ---------- State ----------
+const S = {
+  variant: new URLSearchParams(location.search).get('variant') || 'A',
+  theme: localStorage.getItem('proto-theme') || 'dark',
+  pop: true, view: 'home', wt: '0.1', item: '0.1.service.web', repo: 0, follow: true, tabs: ['0.1.service.web'], drawer: true,
+};
+const VARIANTS = { A: 'Menu bar popover only', B: 'Main window, 3 panes', C: 'Menu bar summary + board window' };
+
+// ---------- Shared bits ----------
+const LOGO = `<svg class="logo" viewBox="0 0 512 512"><rect width="512" height="512" rx="116" fill="#14161A"/><path d="M204,100 L412,100 L412,308 L308,412 L100,412 L100,204 Z M256,152 L308,152 L100,360 L100,308 Z M360,204 L360,256 L204,412 L152,412 Z" fill="#A8BF22" fill-rule="evenodd"/><path d="M204,100 L412,100 L412,308 L360,360 L360,152 L152,152 Z" fill="#D7F23C"/></svg>`;
+const GLYPH = `<svg width="15" height="15" viewBox="100 100 312 312"><path d="M204,100 L412,100 L412,308 L308,412 L100,412 L100,204 Z M256,152 L308,152 L100,360 L100,308 Z M360,204 L360,256 L204,412 L152,412 Z" fill="currentColor" fill-rule="evenodd"/></svg>`;
+const tone = s => ({ healthy: 'ok', running: 'run', starting: 'busy', restarting: 'busy', failed: 'bad', ended: 'idle' }[s] || 'idle');
+const dot = s => `<span class="dot ${tone(s)}"></span>`;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const stateText = it => it.end ? `${it.state === 'failed' ? 'failed' : 'ended'}, ${it.end}` : it.state;
+const wtTone = w => w.items.some(i => i.state === 'failed') || w.foreign.length ? 'bad' : w.items.some(i => ['restarting', 'starting'].includes(i.state)) ? 'busy' : w.items.some(i => i.state === 'healthy' || i.state === 'running') ? 'ok' : 'idle';
+const counts = w => { const c = { ok: 0, busy: 0, bad: 0, run: 0 }; w.items.forEach(i => { const t = tone(i.state); if (t in c) c[t]++; }); return c; };
+const countDots = w => Object.entries(counts(w)).filter(([, n]) => n).map(([t, n]) => `<span class="muted" style="display:inline-flex;align-items:center;gap:4px">${n}<span class="dot ${t}"></span></span>`).join(' ');
+const reqFor = (verb, it) => ({
+  stop: `Request::Down { service: Some("${it.name}"), cwd: "${it.wt.path}" }`,
+  restart: `Down then Up { service: "${it.name}" } (shape decided in #88)`,
+  logs: `Request::Logs { name: "${it.name}", cwd: "${it.wt.path}" }`,
+}[verb]);
+function logHtml(it) {
+  return it.lines.map(l => { const m = l.match(/^(\S+) ([!?]?)(.*)$/); const cls = m[2] === '!' ? 'e' : m[2] === '?' ? 'w' : ''; return `<span class="t">${m[1]}</span> <span class="${cls}">${esc(m[3])}</span>`; }).join('\n');
+}
+const menubar = (onIcon, badge) => `<div class="menubar"><b>Finder</b><span>File</span><span>Edit</span><span>View</span><span class="sp"></span>
+  <span class="mb-icon ${onIcon ? 'on' : ''}" data-a="pop" title="Procly">${GLYPH}${badge ? '<span class="badge"></span>' : ''}</span>
+  <span class="faint">◐</span><span class="faint">⌕</span><span>Thu 5 Nov 13:42</span></div>`;
+const daemonChip = `<span class="chip"><span class="dot ok"></span>Daemon · 0.5.0</span>`;
+function itemActions(it) {
+  if (it.kind === 'job') return it.state === 'running' ? `<button class="icon-btn" title="Stop" data-a="req" data-req="Job stop (not in the protocol today)">■</button>` : '';
+  return `<button class="icon-btn" title="Restart" data-a="req" data-req='${reqFor('restart', it)}'>↻</button><button class="icon-btn" title="Stop" data-a="req" data-req='${reqFor('stop', it)}'>■</button>`;
+}
+const itemLabel = it => it.kind === 'job' ? `<span class="mono">${esc(it.command)}</span>` : `<b>${it.name}</b>${it.mode ? ` <span class="chip">${it.mode}</span>` : ''}`;
+const portChip = it => it.port ? `<span class="chip port">:${it.port}</span>` : '';
+function detailSections(w, rowAttrs) {
+  const groups = [['Services', w.items.filter(i => i.kind === 'service')], ['Compose services', w.items.filter(i => i.kind === 'compose')], ['Jobs', w.items.filter(i => i.kind === 'job')]];
+  let h = groups.filter(([, l]) => l.length).map(([title, list]) => `<div class="sec">${title}<span>${list.length}</span></div>` + list.map(it =>
+    `<div class="row hover ${S.item === it.id ? 'sel' : ''}" ${rowAttrs(it)}>${dot(it.state)}<span class="grow">${itemLabel(it)} <span class="faint">${it.end ? it.end : ''}</span></span>${portChip(it)}<span class="acts">${itemActions(it)}</span></div>`).join('')).join('');
+  if (w.foreign.length) h += `<div class="sec">Foreign processes</div>` + w.foreign.map(f => `<div class="row">${dot('failed')}<span class="grow"><b>${f.name}</b> <span class="faint">pid ${f.pid}</span></span><span class="chip port bad">:${f.port}</span></div>`).join('');
+  h += `<div class="sec">Leases<span>${w.leases.length}</span></div>` + w.leases.map(([s, p, n]) => `<div class="row"><span class="grow mono">${s}.${p}</span><span class="chip port">${n}</span></div>`).join('');
+  if (w.logical.length) h += `<div class="sec">Logical resources</div>` + w.logical.map(([s, r, n, d]) => `<div class="row"><span class="grow mono">${s}.${r}</span><span class="mono muted">${n}</span><span class="chip">${d}</span></div>`).join('');
+  return h;
+}
+function doctorList() {
+  const icon = { passed: `<span style="color:var(--ok)">✓</span>`, failed: `<span style="color:var(--bad)">✕</span>`, warning: `<span style="color:var(--busy)">!</span>`, skipped: `<span class="faint">–</span>` };
+  return DOCTOR.map(c => `<div class="check">${icon[c.status]}<span class="mono">${c.name}</span><span class="${c.status === 'passed' || c.status === 'skipped' ? 'muted' : ''}">${esc(c.message)}</span>${c.fix ? `<span class="fix">${c.fix}</span>` : '<span></span>'}</div>`).join('');
+}
+
+// ---------- Variant A: everything inside the menu bar popover ----------
+function VariantA() {
+  let head, body;
+  const w = wtById(S.wt), it = itemById(S.item);
+  if (S.view === 'home') {
+    head = `${LOGO}<b style="flex:1">Procly</b>${daemonChip}`;
+    body = (PROBLEMS ? `<div class="banner" data-a="go" data-v="doctor"><span class="dot bad"></span><span style="flex:1">${PROBLEMS} problems found by doctor</span><span class="muted">›</span></div>` : '') +
+      REPOS.map(r => `<div class="sec">${r.name}</div>` + r.worktrees.map(w => `<div class="row hover" data-a="go" data-v="wt" data-wt="${w.id}"><span class="dot ${wtTone(w)}"></span><span class="grow"><b>${w.branch}</b> <span class="faint mono">${w.slug}</span></span>${countDots(w)}<span class="faint">›</span></div>`).join('')).join('');
+  } else if (S.view === 'wt') {
+    head = `<button class="icon-btn" data-a="go" data-v="home">‹</button><div style="flex:1;min-width:0"><b>${w.branch}</b> <span class="faint">${w.repo.name}</span><div class="mono faint" style="font-size:11px">${w.path}</div></div>`;
+    body = `<div style="display:flex;gap:6px;margin:10px 0 0"><button class="btn" data-a="req" data-req='Request::Down { service: None, cwd: "${w.path}" }'>Stop all</button><button class="btn danger" data-a="req" data-req='Request::WorktreeRelease { path: "${w.path}" } (confirm, #88)'>Release Worktree</button></div>` +
+      detailSections(w, it => `data-a="go" data-v="item" data-wt="${w.id}" data-it="${it.id}"`);
+  } else if (S.view === 'item') {
+    head = `<button class="icon-btn" data-a="go" data-v="wt">‹</button>${dot(it.state)}<div style="flex:1"><b>${it.kind === 'job' ? it.command : it.name}</b> <span class="faint">${stateText(it)}</span></div>${portChip(it)}`;
+    body = `<div style="display:flex;gap:6px;margin:10px 0">${it.url ? `<button class="btn" data-a="req" data-req="open ${it.url}">Open ↗</button>` : ''}${it.kind !== 'job' ? `<button class="btn" data-a="req" data-req='${reqFor('restart', it)}'>Restart</button><button class="btn danger" data-a="req" data-req='${reqFor('stop', it)}'>Stop</button>` : ''}<span style="flex:1"></span><button class="btn" data-a="follow">${S.follow ? '● Following' : '○ Follow'}</button></div><div class="log" id="log" style="height:300px">${logHtml(it)}</div>`;
+  } else {
+    head = `<button class="icon-btn" data-a="go" data-v="home">‹</button><b style="flex:1">Doctor</b><button class="btn" data-a="req" data-req="procly doctor --json">Run again</button>`;
+    body = `<div style="font-size:12px">${doctorList().replace(/grid-template-columns[^;]*;/g, '')}</div><div class="sec">Orphans</div>${ORPHANS.map(o => `<div class="row"><span class="grow mono" style="font-size:11px">${o.label}</span></div>`).join('')}<button class="btn" style="margin-top:8px" data-a="req" data-req="Request::Gc { apply: true } (confirm, #88)">Collect 3 Orphans</button>`;
+  }
+  return `<div class="desk">${menubar(S.pop, PROBLEMS)}${S.pop ? `<div class="pop A-pop"><div class="A-head">${head}</div><div class="A-body scroll">${body}</div>
+    <div class="A-foot"><button data-a="go" data-v="doctor">Doctor</button><button data-a="req" data-req="procly gc (dry run)">Orphans</button><button data-a="req" data-req="Quit Procly (the Daemon keeps running)">Quit</button></div></div>` : ''}</div>`;
+}
+
+// ---------- Variant B: one main window, sidebar + list + inspector ----------
+function VariantB() {
+  const w = wtById(S.wt), it = itemById(S.item);
+  const side = `<div style="padding:4px 6px 10px"><div class="chip" style="width:100%;justify-content:flex-start;padding:5px 8px;border-radius:7px">⌕ <span class="faint">Filter Worktrees</span></div></div>
+    <div class="scroll" style="flex:1">${REPOS.map(r => `<div class="sec" style="padding:0 8px">${r.name}</div>` + r.worktrees.map(x => `<div class="row hover ${S.view !== 'doctor' && S.view !== 'gc' && x.id === S.wt ? 'sel' : ''}" data-a="selwt" data-wt="${x.id}"><span class="dot ${wtTone(x)}"></span><span class="grow">${x.branch}</span>${x.main ? '<span class="faint" style="font-size:10px">main</span>' : ''}</div>`).join('')).join('')}</div>
+    <div style="border-top:1px solid var(--line);padding-top:8px">
+      <div class="row hover ${S.view === 'doctor' ? 'sel' : ''}" data-a="go" data-v="doctor"><span class="grow">Doctor</span><span class="chip bad">${PROBLEMS}</span></div>
+      <div class="row hover ${S.view === 'gc' ? 'sel' : ''}" data-a="go" data-v="gc"><span class="grow">Orphans</span><span class="chip">${ORPHANS.length}</span></div>
+      <div class="row"><span class="dot ok"></span><span class="grow muted">Daemon running · 0.5.0</span></div></div>`;
+  let center;
+  if (S.view === 'doctor') {
+    center = `<div class="B-main scroll" style="grid-column:2 / 4"><div style="display:flex;align-items:center;gap:10px"><h2 style="margin:0;font-size:18px;flex:1">Doctor</h2><button class="btn" data-a="req" data-req="procly daemon stop --json, then connect_or_start (confirm)">Restart Daemon</button><button class="btn primary" data-a="req" data-req="procly doctor --json">Run again</button></div><p class="muted">${PROBLEMS} problems. Procly runs none of the fixes, copy them into a terminal.</p>${doctorList()}</div>`;
+  } else if (S.view === 'gc') {
+    center = `<div class="B-main scroll" style="grid-column:2 / 4"><div style="display:flex;align-items:center;gap:10px"><h2 style="margin:0;font-size:18px;flex:1">Orphans</h2><button class="btn primary" data-a="req" data-req="Request::Gc { apply: true } (confirm, #88)">Collect all</button></div><p class="muted">Left behind by Worktrees git no longer lists.</p><table class="tbl">${ORPHANS.map(o => `<tr><td><span class="chip">${o.kind}</span></td><td class="mono grow">${o.label}</td><td class="mono faint">${o.worktree}</td></tr>`).join('')}</table></div>`;
+  } else {
+    const rows = (title, list) => list.length ? `<div class="sec">${title}</div><table class="tbl">${list.map(i => `<tr class="hover ${i.id === S.item ? 'sel' : ''}" data-a="selit" data-it="${i.id}"><td>${dot(i.state)}</td><td class="grow">${itemLabel(i)}</td><td class="muted">${stateText(i)}</td><td>${portChip(i)}</td><td><span style="display:inline-flex">${itemActions(i)}</span></td></tr>`).join('')}</table>` : '';
+    center = `<div class="B-main scroll">
+      <div style="display:flex;align-items:flex-start;gap:10px"><div style="flex:1"><h2 style="margin:0;font-size:18px">${w.branch}</h2><div class="mono faint">${w.path}</div></div>
+      <button class="btn" data-a="req" data-req='Request::Down { service: None, cwd: "${w.path}" }'>Stop all</button><button class="btn danger" data-a="req" data-req='Request::WorktreeRelease { path: "${w.path}" } (confirm, #88)'>Release</button></div>
+      ${w.foreign.length ? `<div class="banner" style="cursor:default"><span class="dot bad"></span>Foreign process ${w.foreign[0].name} (pid ${w.foreign[0].pid}) holds port ${w.foreign[0].port}</div>` : ''}
+      ${rows('Services', w.items.filter(i => i.kind === 'service'))}${rows('Compose services', w.items.filter(i => i.kind === 'compose'))}${rows('Jobs', w.items.filter(i => i.kind === 'job'))}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px"><div><div class="sec">Leases</div><table class="tbl">${w.leases.map(([s, p, n]) => `<tr><td class="mono grow">${s}.${p}</td><td class="mono">${n}</td></tr>`).join('')}</table></div>
+      <div><div class="sec">Logical resources</div>${w.logical.length ? `<table class="tbl">${w.logical.map(([s, r, n, d]) => `<tr><td class="mono grow">${s}.${r}</td><td class="mono muted">${n}</td><td><span class="chip">${d}</span></td></tr>`).join('')}</table>` : '<p class="faint">None</p>'}</div></div></div>`;
+    const sel = it && it.wt === w ? it : null;
+    center += `<div class="B-insp">${sel ? `<div style="display:flex;align-items:center;gap:8px">${dot(sel.state)}<b style="font-size:15px;flex:1">${sel.kind === 'job' ? sel.command : sel.name}</b>${portChip(sel)}</div>
+      <div class="muted">${stateText(sel)}${sel.note ? ` · ${sel.note}` : ''}</div>
+      <div style="display:flex;gap:6px">${sel.url ? `<button class="btn" data-a="req" data-req="open ${sel.url}">Open ↗</button>` : ''}${sel.kind !== 'job' ? `<button class="btn" data-a="req" data-req='${reqFor('restart', sel)}'>Restart</button><button class="btn danger" data-a="req" data-req='${reqFor('stop', sel)}'>Stop</button>` : ''}<span style="flex:1"></span><button class="btn" data-a="follow">${S.follow ? '● Following' : '○ Follow'}</button></div>
+      <div class="log" id="log">${logHtml(sel)}</div>` : '<p class="faint" style="margin:auto">Select a Service or a Job to see its output</p>'}</div>`;
+  }
+  return `<div class="desk">${menubar(false, false)}<div class="win B-win"><div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>${LOGO}<b>Procly</b><span style="flex:1"></span><span class="faint">⌘K</span></div>
+    <div class="B-grid"><div class="B-side">${side}</div>${center}</div></div></div>`;
+}
+
+// ---------- Variant C: small menu bar summary, plus a board window per Repository ----------
+function VariantC() {
+  const r = REPOS[S.repo];
+  const attention = allWts().flatMap(w => w.items.filter(i => ['failed', 'restarting'].includes(i.state)));
+  const pop = S.pop ? `<div class="pop C-pop"><div class="A-head">${LOGO}<b style="flex:1">Procly</b>${daemonChip}</div><div style="padding:6px 8px">
+      <div class="row"><span class="grow muted">${allWts().flatMap(w => w.items).filter(i => i.state === 'healthy').length} healthy · ${allWts().flatMap(w => w.items).filter(i => i.state === 'running').length} Jobs running</span></div>
+      ${attention.map(i => `<div class="row hover" data-a="open" data-it="${i.id}">${dot(i.state)}<span class="grow"><b>${i.name}</b> <span class="faint">${i.wt.branch}</span></span><span class="faint">${i.state}</span></div>`).join('')}
+      <div class="row hover" data-a="doctorc">${dot('failed')}<span class="grow">${PROBLEMS} doctor problems</span></div></div>
+      <div class="A-foot"><button data-a="pop" style="color:var(--text)">Open Procly ⌘O</button></div></div>` : '';
+  const strip = PROBLEMS && S.view !== 'doctor' ? `<div class="strip"><span class="dot bad"></span><span style="flex:1">${DOCTOR.filter(c => c.status === 'failed').map(c => `<span class="mono">${c.name}</span>`).join(', ')} failed</span><button class="btn" data-a="doctorc">Show doctor</button></div>` : '';
+  const card = it => `<div class="card ${it.kind === 'job' ? 'job' : ''} ${S.tabs.includes(it.id) ? 'sel' : ''}" data-a="open" data-it="${it.id}">
+      <div style="display:flex;align-items:center;gap:7px">${dot(it.state)}<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${itemLabel(it)}</span>${portChip(it)}</div>
+      <div class="faint" style="font-size:11.5px;margin-top:3px;padding-left:14px">${stateText(it)}${it.note ? ` · ${it.note}` : ''}</div></div>`;
+  const col = w => `<div class="col"><div style="display:flex;align-items:center;gap:7px;margin-bottom:2px"><span class="dot ${wtTone(w)}"></span><b style="flex:1">${w.branch}</b>
+      <button class="icon-btn" title="Stop all" data-a="req" data-req='Request::Down { service: None, cwd: "${w.path}" }'>■</button><button class="icon-btn" title="Release Worktree" data-a="req" data-req='Request::WorktreeRelease { path: "${w.path}" } (confirm, #88)'>⏏</button></div>
+      <div class="mono faint" style="font-size:10.5px;margin-bottom:10px">${w.path.replace('/Users/me', '~')}</div>
+      ${w.items.map(card).join('') || '<p class="faint">Nothing running</p>'}
+      ${w.foreign.map(f => `<div class="card" style="border-color:var(--bad)"><span class="dot bad"></span> <b>${f.name}</b> <span class="faint">pid ${f.pid}, foreign</span> <span class="chip port bad">:${f.port}</span></div>`).join('')}
+      <div class="sec">Leases</div><div style="display:flex;flex-wrap:wrap;gap:4px">${w.leases.map(([s, p, n]) => `<span class="chip port" title="${s}.${p}">${s}.${p} ${n}</span>`).join('')}</div>
+      ${w.logical.length ? `<div class="sec">Logical resources</div>${w.logical.map(([s, rr, n, d]) => `<div class="mono muted" style="font-size:11px">${s}.${rr} → ${n} <span class="faint">${d}</span></div>`).join('')}` : ''}</div>`;
+  const main = S.view === 'doctor'
+    ? `<div class="scroll" style="flex:1;padding:16px 20px"><div style="display:flex;gap:10px;align-items:center"><button class="icon-btn" data-a="go" data-v="board">‹</button><h2 style="margin:0;font-size:18px;flex:1">Doctor</h2><button class="btn" data-a="req" data-req="procly gc --json">Orphans (${ORPHANS.length})</button><button class="btn primary" data-a="req" data-req="procly doctor --json">Run again</button></div>${doctorList()}</div>`
+    : `<div class="C-board">${r.worktrees.map(col).join('')}</div>`;
+  const open = S.tabs.map(itemById), cur = itemById(S.item);
+  const drawer = S.drawer && open.length && S.view !== 'doctor' ? `<div class="drawer"><div class="tabs">${open.map(i => `<span class="tab ${i.id === S.item ? 'on' : ''}" data-a="tab" data-it="${i.id}">${dot(i.state)}${i.kind === 'job' ? i.command : i.name} <span class="faint">${i.wt.branch}</span><button class="faint" data-a="closetab" data-it="${i.id}">×</button></span>`).join('')}<span style="flex:1"></span>
+      ${cur.kind !== 'job' ? `<button class="icon-btn" title="Restart" data-a="req" data-req='${reqFor('restart', cur)}'>↻</button>` : ''}<button class="btn" style="margin:0 4px 6px" data-a="follow">${S.follow ? '● Following' : '○ Follow'}</button></div>
+      <div class="log" id="log" style="flex:1;border-radius:0">${logHtml(cur)}</div></div>` : '';
+  return `<div class="desk">${menubar(S.pop, PROBLEMS)}<div class="win C-win"><div class="titlebar"><span class="lights"><i></i><i></i><i></i></span>${LOGO}
+    <div class="seg">${REPOS.map((x, i) => `<button class="${i === S.repo ? 'on' : ''}" data-a="repo" data-repo="${i}">${x.name}</button>`).join('')}</div><span style="flex:1"></span>${daemonChip}</div>
+    ${strip}${main}${drawer}</div>${pop}</div>`;
+}
+
+// ---------- Render and events ----------
+function render() {
+  document.documentElement.dataset.theme = S.theme;
+  const keys = Object.keys(VARIANTS); if (!keys.includes(S.variant)) S.variant = 'A';
+  const html = { A: VariantA, B: VariantB, C: VariantC }[S.variant]();
+  document.getElementById('app').innerHTML = html + `<div class="switcher"><button data-a="prev">←</button><span class="lbl">${S.variant} (${VARIANTS[S.variant]})</span><button data-a="next">→</button><button class="th" data-a="theme">${S.theme}</button></div>`;
+  const log = document.getElementById('log'); if (log) log.scrollTop = log.scrollHeight;
+}
+function cycle(d) { const k = Object.keys(VARIANTS); S.variant = k[(k.indexOf(S.variant) + d + k.length) % k.length]; const u = new URL(location); u.searchParams.set('variant', S.variant); history.replaceState(null, '', u); S.view = S.variant === 'A' ? 'home' : S.variant === 'B' ? 'wt' : 'board'; S.pop = S.variant === 'A'; render(); }
+let toastTimer;
+function toast(t) { const el = document.getElementById('toast'); el.textContent = 'would send: ' + t; el.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.hidden = true, 2600); }
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-a]'); if (!el) return; e.stopPropagation();
+  const d = el.dataset;
+  switch (d.a) {
+    case 'prev': return cycle(-1);
+    case 'next': return cycle(1);
+    case 'theme': S.theme = S.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('proto-theme', S.theme); break;
+    case 'pop': S.pop = !S.pop; break;
+    case 'go': S.view = d.v; if (d.wt) S.wt = d.wt; if (d.it) S.item = d.it; break;
+    case 'selwt': S.view = 'wt'; S.wt = d.wt; S.item = (wtById(d.wt).items[0] || {}).id; break;
+    case 'selit': S.item = d.it; toast(reqFor('logs', itemById(d.it))); break;
+    case 'repo': S.repo = +d.repo; S.view = 'board'; break;
+    case 'open': { const it = itemById(d.it); S.view = 'board'; S.repo = REPOS.indexOf(it.wt.repo); if (!S.tabs.includes(d.it)) S.tabs.push(d.it); S.item = d.it; S.drawer = true; S.pop = false; break; }
+    case 'tab': S.item = d.it; break;
+    case 'closetab': S.tabs = S.tabs.filter(t => t !== d.it); if (S.item === d.it) S.item = S.tabs[S.tabs.length - 1]; if (!S.tabs.length) S.drawer = false; break;
+    case 'doctorc': S.view = 'doctor'; S.pop = false; break;
+    case 'follow': S.follow = !S.follow; break;
+    case 'req': return toast(d.req);
+  }
+  render();
+});
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input, textarea, [contenteditable]')) return;
+  if (e.key === 'ArrowLeft') cycle(-1); if (e.key === 'ArrowRight') cycle(1);
+});
+// Fake live output for the selected item while following (live updates are decided in #86).
+const FAKE = ['GET /api/session 200 9ms', 'GET /health 200 0.9ms', 'POST /api/login 302 38ms', '?slow query 812ms on sessions', 'GET /assets/app.js 304 2ms'];
+setInterval(() => {
+  const it = itemById(S.item); if (!S.follow || !it || it.state === 'ended' || it.state === 'failed') return;
+  const now = new Date(); it.lines.push(`${now.toTimeString().slice(0, 8)} ${FAKE[Math.floor(Math.random() * FAKE.length)]}`);
+  const log = document.getElementById('log'); if (log) { log.innerHTML = logHtml(it); log.scrollTop = log.scrollHeight; }
+}, 1500);
+if (S.variant === 'B') S.view = 'wt'; if (S.variant === 'C') { S.view = 'board'; S.pop = false; }
+render();
+</script>
+</body>
+</html>
