@@ -91,8 +91,14 @@ pub enum Request {
     /// Managed blocks that were edited.
     Eject { cwd: PathBuf },
     /// Lists the Orphans of every Repository, and deletes them with `apply`. `cwd` only names the requester in the
-    /// Daemon log.
-    Gc { cwd: PathBuf, apply: bool },
+    /// Daemon log. With `only`, absent when not given, it is limited to the Orphans it lists: the Daemon deletes those
+    /// that still are Orphans, and reports the others as not deleted, with the reason in their `error`.
+    Gc {
+        cwd: PathBuf,
+        apply: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only: Option<Vec<OrphanId>>,
+    },
     /// Runs the Worktree release of the Worktree holding `path`: stops its Services and Jobs, lets go of its Compose
     /// services and releases its Leases, apart from those of a Pinned branch, and answers once their trees are gone.
     /// With `dry_run`, false when absent, it answers with what the release would do and changes nothing.
@@ -760,15 +766,24 @@ impl GcReport {
     }
 }
 
-/// Something a removed Worktree left behind, whose Worktree git no longer lists and that no Pinned branch holds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Orphan {
+/// What tells an Orphan from any other: what it is and the Worktree it belongs to. An [`Orphan`] carries it flattened,
+/// so that the `orphans` of a dry run, sent back as returned, deserialize as the `only` of [`Request::Gc`], serde
+/// ignoring `deleted` and `error`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OrphanId {
     #[serde(flatten)]
     pub kind: OrphanKind,
     /// The common git directory identifying the Repository.
     pub repository: PathBuf,
     /// The root of the removed Worktree.
     pub worktree: PathBuf,
+}
+
+/// Something a removed Worktree left behind, whose Worktree git no longer lists and that no Pinned branch holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Orphan {
+    #[serde(flatten)]
+    pub id: OrphanId,
     /// Whether it was deleted, always `false` without `apply`.
     pub deleted: bool,
     /// Why it could not be deleted.
@@ -779,8 +794,8 @@ impl Orphan {
     /// What the Orphan is and which Worktree it belongs to, for the text of `gc` and the Daemon log.
     #[must_use]
     pub fn describe(&self) -> String {
-        let worktree = self.worktree.display();
-        match &self.kind {
+        let worktree = self.id.worktree.display();
+        match &self.id.kind {
             OrphanKind::Lease {
                 service,
                 port_name,
@@ -807,7 +822,7 @@ impl Orphan {
 }
 
 /// What an Orphan is.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrphanKind {
     /// A Lease of a Port name of a Service.
@@ -1032,17 +1047,7 @@ mod tests {
 
     #[test]
     fn an_orphan_carries_its_kind_beside_its_worktree_and_round_trips() {
-        let orphan = Orphan {
-            kind: OrphanKind::Lease {
-                service: "web".to_owned(),
-                port_name: "http".to_owned(),
-                port: 24000,
-            },
-            repository: PathBuf::from("/src/app/.git"),
-            worktree: PathBuf::from("/src/app-a"),
-            deleted: false,
-            error: None,
-        };
+        let orphan = lease_orphan(false, None);
         let line = encode(Response::Gc(GcReport {
             applied: false,
             orphans: vec![orphan.clone()],
@@ -1054,6 +1059,72 @@ mod tests {
             r#"{"kind":"lease","service":"web","port_name":"http","port":24000,"repository":"/src/app/.git","#
         ));
         assert!(matches!(decode::<Response>(&line), Ok(Response::Gc(report)) if report.orphans == [orphan]));
+    }
+
+    fn lease_orphan(deleted: bool, error: Option<&str>) -> Orphan {
+        Orphan {
+            id: OrphanId {
+                kind: OrphanKind::Lease {
+                    service: "web".to_owned(),
+                    port_name: "http".to_owned(),
+                    port: 24000,
+                },
+                repository: PathBuf::from("/src/app/.git"),
+                worktree: PathBuf::from("/src/app-a"),
+            },
+            deleted,
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn an_orphan_serializes_exactly_as_it_did_before_its_identity_was_named() {
+        let line = serde_json::to_string(&lease_orphan(false, None)).unwrap();
+
+        assert_eq!(
+            line,
+            r#"{"kind":"lease","service":"web","port_name":"http","port":24000,"repository":"/src/app/.git","worktree":"/src/app-a","deleted":false,"error":null}"#
+        );
+    }
+
+    #[test]
+    fn the_orphans_of_a_dry_run_sent_back_as_returned_deserialize_as_only() {
+        let report = GcReport {
+            applied: false,
+            orphans: vec![lease_orphan(true, Some("kept"))],
+            ..GcReport::default()
+        };
+        let answer: serde_json::Value = serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        let request = format!(
+            r#"{{"version":{PROTOCOL_VERSION},"request":"gc","cwd":"/src/app","apply":true,"only":{}}}"#,
+            answer["orphans"]
+        );
+
+        let decoded = decode::<Request>(&request);
+
+        let Ok(Request::Gc {
+            apply: true,
+            only: Some(only),
+            ..
+        }) = decoded
+        else {
+            panic!("not a Gc request limited to Orphans: {decoded:?}");
+        };
+        assert_eq!(only, [lease_orphan(false, None).id]);
+    }
+
+    #[test]
+    fn a_gc_request_without_only_lists_or_deletes_every_orphan() {
+        let absent = format!(r#"{{"version":{PROTOCOL_VERSION},"request":"gc","cwd":"/src/app","apply":true}}"#);
+
+        assert!(matches!(decode::<Request>(&absent), Ok(Request::Gc { only: None, .. })));
+        let line = encode(Request::Gc {
+            cwd: PathBuf::from("/src/app"),
+            apply: true,
+            only: None,
+        })
+        .unwrap();
+        assert!(!line.contains("only"), "{line}");
     }
 
     fn worktree_status(branch: Option<&str>, listed: bool) -> WorktreeStatus {

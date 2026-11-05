@@ -407,7 +407,7 @@ async fn dispatch(
             .unwrap_or_else(failure),
         Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
         Request::Doctor => doctor::run(registry).await,
-        Request::Gc { cwd, apply } => gc::run(registry, cwd, apply, peer).await,
+        Request::Gc { cwd, apply, only } => gc::run(registry, cwd, apply, only, peer).await,
         Request::WorktreeRelease { path, dry_run } => answer(
             worktree_release::run(Arc::clone(registry), path, dry_run, peer)
                 .await
