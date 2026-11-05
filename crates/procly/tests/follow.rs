@@ -175,6 +175,10 @@ fn a_followed_service_goes_on_through_its_automatic_restart_and_ends_with_it() {
     );
     std::fs::write(main.join("procly.toml"), config).unwrap();
     assert_success(&procly.procly_in(&main, &["up", "web"]));
+    // `up` answers once the Service is healthy, which may be before the Daemon has captured its first output.
+    common::eventually("the service to print its first start", || {
+        stdout(&procly.procly_in(&main, &["logs", "web"])).contains("start 1")
+    });
 
     let following = Following::start(&procly, &main, &["--json", "web"]);
     let backlog = following.event("web");
