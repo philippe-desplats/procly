@@ -5,6 +5,7 @@ import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey, isSeen } from "./needs-you";
+import { OrphansScreen } from "./OrphansScreen";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
 import type { JobStatus } from "./protocol/JobStatus";
@@ -15,12 +16,13 @@ import { jobEndWord, jobWord, serviceEndWord, serviceWord, type StateWord } from
 import { formatMoment } from "./time";
 
 /**
- * What the center shows: the Overview of every Service, one Worktree, or Settings, which hides the inspector.
+ * What the center shows: the Overview of every Service, one Worktree, the Orphans, or Settings, which hide the inspector.
  * `focusEditor` sends the developer to the editor field, because "Open in editor" found none set.
  */
 type View =
   | { kind: "overview" }
   | { kind: "worktree"; path: string }
+  | { kind: "orphans" }
   | { kind: "settings"; focusEditor: boolean };
 
 export function App({ store }: { store: DaemonStore }) {
@@ -68,9 +70,12 @@ export function App({ store }: { store: DaemonStore }) {
     view.kind === "worktree" ? (worktrees.find((worktree) => worktree.path === view.path) ?? null) : null;
 
   const settings = view.kind === "settings";
+  const orphans = view.kind === "orphans";
+  // A screen that is not about one Worktree has no inspector.
+  const wide = settings || orphans;
 
   return (
-    <div className={settings ? "window window-settings" : "window"}>
+    <div className={wide ? "window window-settings" : "window"}>
       <nav className="pane sidebar" aria-label="Worktrees">
         <h1 className="pane-title">Procly</h1>
         <Sidebar
@@ -78,11 +83,15 @@ export function App({ store }: { store: DaemonStore }) {
           repositories={repositories}
           current={current}
           settings={settings}
+          orphans={orphans}
           onSelect={(path) => {
             setView({ kind: "worktree", path });
           }}
           onOverview={() => {
             setView({ kind: "overview" });
+          }}
+          onOrphans={() => {
+            setView({ kind: "orphans" });
           }}
           onSettings={() => {
             setView({ kind: "settings", focusEditor: false });
@@ -92,6 +101,8 @@ export function App({ store }: { store: DaemonStore }) {
       <main className="pane center">
         {view.kind === "settings" ? (
           <SettingsScreen focusEditor={view.focusEditor} />
+        ) : view.kind === "orphans" && snapshot.kind === "status" ? (
+          <OrphansScreen />
         ) : (
           <>
             <Toolbar snapshot={snapshot} store={store} />
@@ -99,7 +110,7 @@ export function App({ store }: { store: DaemonStore }) {
           </>
         )}
       </main>
-      {settings ? null : (
+      {wide ? null : (
         <aside className="pane inspector" aria-label="Inspector">
           <Inspector
             current={current}
@@ -137,16 +148,20 @@ function Sidebar({
   repositories,
   current,
   settings,
+  orphans,
   onSelect,
   onOverview,
+  onOrphans,
   onSettings,
 }: {
   snapshot: DaemonSnapshot;
   repositories: RepositoryStatus[];
   current: WorktreeStatus | null;
   settings: boolean;
+  orphans: boolean;
   onSelect: (path: string) => void;
   onOverview: () => void;
+  onOrphans: () => void;
   onSettings: () => void;
 }) {
   return (
@@ -154,7 +169,7 @@ function Sidebar({
       <button
         type="button"
         className="row"
-        aria-current={current === null && !settings ? "true" : undefined}
+        aria-current={current === null && !settings && !orphans ? "true" : undefined}
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
@@ -166,6 +181,9 @@ function Sidebar({
         current={current}
         onSelect={onSelect}
       />
+      <button type="button" className="row" aria-current={orphans ? "true" : undefined} onClick={onOrphans}>
+        <span className="row-name">Orphans</span>
+      </button>
       <button
         type="button"
         className="row sidebar-foot"
