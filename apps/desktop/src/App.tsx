@@ -1,8 +1,11 @@
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey, isSeen } from "./needs-you";
+import { SettingsScreen } from "./SettingsScreen";
+import { failureOf, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
@@ -10,8 +13,14 @@ import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { jobEndWord, jobWord, serviceEndWord, serviceWord, type StateWord } from "./state";
 import { formatMoment } from "./time";
 
-/** What the center shows: the Overview of every Service, or one Worktree. */
-type View = { kind: "overview" } | { kind: "worktree"; path: string };
+/**
+ * What the center shows: the Overview of every Service, one Worktree, or Settings, which hides the inspector.
+ * `focusEditor` sends the developer to the editor field, because "Open in editor" found none set.
+ */
+type View =
+  | { kind: "overview" }
+  | { kind: "worktree"; path: string }
+  | { kind: "settings"; focusEditor: boolean };
 
 export function App({ store }: { store: DaemonStore }) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
@@ -32,42 +41,80 @@ export function App({ store }: { store: DaemonStore }) {
     };
   }, []);
 
+  // The native menu sends Settings, which `⌘,` triggers.
+  useEffect(() => {
+    let stopped = false;
+    let unlisten: (() => void) | null = null;
+    void listen(OPEN_SETTINGS, () => {
+      setView({ kind: "settings", focusEditor: false });
+    }).then((off) => {
+      if (stopped) {
+        off();
+      } else {
+        unlisten = off;
+      }
+    });
+    return () => {
+      stopped = true;
+      unlisten?.();
+    };
+  }, []);
+
   const repositories = snapshot.kind === "status" ? snapshot.report.repositories : [];
   const worktrees = repositories.flatMap((repository) => repository.worktrees);
   // A Worktree that is no longer reported leaves the Overview in its place.
   const current =
     view.kind === "worktree" ? (worktrees.find((worktree) => worktree.path === view.path) ?? null) : null;
 
+  const settings = view.kind === "settings";
+
   return (
-    <div className="window">
+    <div className={settings ? "window window-settings" : "window"}>
       <nav className="pane sidebar" aria-label="Worktrees">
         <h1 className="pane-title">Procly</h1>
         <Sidebar
           snapshot={snapshot}
           repositories={repositories}
           current={current}
+          settings={settings}
           onSelect={(path) => {
             setView({ kind: "worktree", path });
           }}
           onOverview={() => {
             setView({ kind: "overview" });
           }}
+          onSettings={() => {
+            setView({ kind: "settings", focusEditor: false });
+          }}
         />
       </nav>
       <main className="pane center">
-        <Toolbar snapshot={snapshot} store={store} />
-        <Center
-          snapshot={snapshot}
-          current={current}
-          onMarkSeen={(key) => {
-            // Rust answers with a new update, so a mark that could not be saved still shows.
-            store.markSeen(key).catch(() => undefined);
-          }}
-        />
+        {view.kind === "settings" ? (
+          <SettingsScreen focusEditor={view.focusEditor} />
+        ) : (
+          <>
+            <Toolbar snapshot={snapshot} store={store} />
+            <Center
+              snapshot={snapshot}
+              current={current}
+              onMarkSeen={(key) => {
+                // Rust answers with a new update, so a mark that could not be saved still shows.
+                store.markSeen(key).catch(() => undefined);
+              }}
+            />
+          </>
+        )}
       </main>
-      <aside className="pane inspector" aria-label="Inspector">
-        <Inspector current={current} />
-      </aside>
+      {settings ? null : (
+        <aside className="pane inspector" aria-label="Inspector">
+          <Inspector
+            current={current}
+            onNeedEditor={() => {
+              setView({ kind: "settings", focusEditor: true });
+            }}
+          />
+        </aside>
+      )}
     </div>
   );
 }
@@ -95,21 +142,25 @@ function Sidebar({
   snapshot,
   repositories,
   current,
+  settings,
   onSelect,
   onOverview,
+  onSettings,
 }: {
   snapshot: DaemonSnapshot;
   repositories: RepositoryStatus[];
   current: WorktreeStatus | null;
+  settings: boolean;
   onSelect: (path: string) => void;
   onOverview: () => void;
+  onSettings: () => void;
 }) {
   return (
     <>
       <button
         type="button"
         className="row"
-        aria-current={current === null ? "true" : undefined}
+        aria-current={current === null && !settings ? "true" : undefined}
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
@@ -121,6 +172,15 @@ function Sidebar({
         current={current}
         onSelect={onSelect}
       />
+      <button
+        type="button"
+        className="row sidebar-foot"
+        aria-current={settings ? "true" : undefined}
+        onClick={onSettings}
+      >
+        <span className="row-name">Settings</span>
+        <span className="caption">⌘,</span>
+      </button>
     </>
   );
 }
@@ -488,10 +548,73 @@ function State({ word, tone }: StateWord) {
   );
 }
 
-function Inspector({ current }: { current: WorktreeStatus | null }) {
+function Inspector({ current, onNeedEditor }: { current: WorktreeStatus | null; onNeedEditor: () => void }) {
   if (current === null) {
     return <p className="caption">Select a Worktree.</p>;
   }
+  return (
+    <>
+      <WorktreeFacts current={current} />
+      <WorktreeActions key={current.path} path={current.path} onNeedEditor={onNeedEditor} />
+    </>
+  );
+}
+
+/** Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. */
+function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+
+  function run(action: Promise<void>): void {
+    setError(null);
+    action.catch((reason: unknown) => {
+      const failure = failureOf(reason);
+      if (failure.kind === "no_editor") {
+        onNeedEditor();
+      } else {
+        setError(failure.message);
+      }
+    });
+  }
+
+  return (
+    <div className="actions">
+      <button
+        type="button"
+        className="button"
+        onClick={() => {
+          run(openWorktree(path, "editor"));
+        }}
+      >
+        Open in editor
+      </button>
+      <button
+        type="button"
+        className="button"
+        onClick={() => {
+          run(openWorktree(path, "terminal"));
+        }}
+      >
+        Open in terminal
+      </button>
+      <button
+        type="button"
+        className="button"
+        onClick={() => {
+          run(revealWorktree(path));
+        }}
+      >
+        Reveal in Finder
+      </button>
+      {error === null ? null : (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function WorktreeFacts({ current }: { current: WorktreeStatus }) {
   return (
     <dl className="facts">
       <dt className="caption">Path</dt>
