@@ -1,0 +1,628 @@
+# Window Menu
+
+> Vendored from <https://github.com/tauri-apps/tauri-docs/blob/b9dd7032c3a872cad5995bc78c2946f087019942/src/content/docs/learn/window-menu.mdx>
+> (published at <https://v2.tauri.app/learn/window-menu/>) by `scripts/vendor-docs.py`, MIT licensed.
+> Do not edit by hand, regenerate instead.
+
+Native application menus can be attached to both to a window or system tray. Available on desktop.
+
+:::tip
+
+Starting from Tauri 2.12, the JavaScript menu APIs now support [Explicit Resource Management](https://github.com/tc39/proposal-explicit-resource-management).
+Which allows you to use the `await using` syntax that closes the menu resources automatically when the variable goes out of scope.
+Since this feature is quite new and isn't available on older browsers,
+you'll probably want to use a polyfill, learn more on this in [`Resource`].
+
+We'll use them in the examples through out this guide.
+
+:::
+
+## Creating a base-level menu
+
+To create a base-level native window menu, and attach to a window. You can create various types of menu items including basic items, check items, and separators:
+
+**JavaScript:**
+
+Use the [`Menu.new`] static function to create a window menu:
+
+```javascript
+import { Menu } from '@tauri-apps/api/menu';
+
+await using menu = await Menu.new({
+  items: [
+    {
+      id: 'quit',
+      text: 'Quit',
+      action: () => {
+        console.log('quit pressed');
+      },
+    },
+    {
+      id: 'check_item',
+      text: 'Check Item',
+      checked: true,
+    },
+    {
+      item: 'Separator',
+    },
+    {
+      id: 'disabled_item',
+      text: 'Disabled Item',
+      enabled: false,
+    },
+    {
+      id: 'status',
+      text: 'Status: Processing...',
+    },
+  ],
+});
+
+// If a window was not created with an explicit menu or had one set explicitly,
+// this menu will be assigned to it.
+await menu.setAsAppMenu();
+
+// Update individual menu item text
+await using statusItem = await menu.get('status');
+if (statusItem) {
+  await statusItem.setText('Status: Ready');
+}
+```
+
+**Rust:**
+
+```rust
+use tauri::menu::MenuBuilder;
+
+fn main() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let menu = MenuBuilder::new(app)
+                .text("open", "Open")
+                .text("close", "Close")
+                .check("check_item", "Check Item")
+                .separator()
+                .text("disabled_item", "Disabled Item")
+                .text("status", "Status: Processing...")
+                .build()?;
+
+            app.set_menu(menu.clone())?;
+
+            // Update individual menu item text
+            menu
+                .get("status")
+                .unwrap()
+                .as_menuitem_unchecked()
+                .set_text("Status: Ready")?;
+
+            Ok(())
+        })
+        .run(tauri::generate_context!());
+}
+```
+
+## Listening to events on custom menu items
+
+Each custom menu item triggers an event when clicked. Use the `on_menu_event` API to handle them.
+
+**JavaScript:**
+
+```javascript
+import { Menu } from '@tauri-apps/api/menu';
+
+await using menu = await Menu.new({
+  items: [
+    {
+      id: 'Open',
+      text: 'open',
+      action: () => {
+        console.log('open pressed');
+      },
+    },
+    {
+      id: 'Close',
+      text: 'close',
+      action: () => {
+        console.log('close pressed');
+      },
+    },
+  ],
+});
+
+await menu.setAsAppMenu();
+```
+
+**Rust:**
+
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use tauri::menu::{MenuBuilder};
+
+fn main() {
+  tauri::Builder::default()
+        .setup(|app| {
+            let menu = MenuBuilder::new(app)
+                .text("open", "Open")
+                .text("close", "Close")
+                .build()?;
+
+            app.set_menu(menu)?;
+
+            app.on_menu_event(move |app_handle: &tauri::AppHandle, event| {
+
+                println!("menu event: {:?}", event.id());
+
+                match event.id().0.as_str() {
+                    "open" => {
+                        println!("open event");
+                    }
+                    "close" => {
+                        println!("close event");
+                    }
+                    _ => {
+                        println!("unexpected menu event");
+                    }
+                }
+            });
+
+            Ok(())
+        })
+}
+```
+
+## Creating a multi-level menu
+
+Multi-level menus allow you to group menu items under categories like "File," "Edit," etc. These will appear as part of the application window for Windows or Linux, or in the menu bar on MacOS.
+
+**Note:** When using submenus on MacOS, all items must be grouped under a submenu. Top-level items will be ignored. Additionally, the first submenu will be placed under the application's about menu by default, regardless of the `text` label. You should include a submenu as the first entry (say, an "About" submenu) to fill this space.
+
+:::note
+Icon support for submenus is available since Tauri 2.8.0.
+:::
+
+**JavaScript:**
+
+```javascript
+import { Menu, MenuItem, Submenu } from '@tauri-apps/api/menu';
+
+// Will become the application submenu on MacOS
+await using aboutSubmenu = await Submenu.new({
+  text: 'About',
+  items: [
+    {
+      id: 'quit',
+      text: 'Quit',
+      action: () => {
+        console.log('Quit pressed');
+      },
+    },
+  ],
+});
+
+await using fileSubmenu = await Submenu.new({
+  text: 'File',
+  icon: 'folder', // Optional: Add an icon to the submenu
+  items: [
+    {
+      id: 'new',
+      text: 'New',
+      action: () => {
+        console.log('New clicked');
+      },
+    },
+    {
+      id: 'open',
+      text: 'Open',
+      action: () => {
+        console.log('Open clicked');
+      },
+    },
+    {
+      id: 'save_as',
+      text: 'Save As...',
+      action: () => {
+        console.log('Save As clicked');
+      },
+    },
+  ],
+});
+
+await using editSubmenu = await Submenu.new({
+  text: 'Edit',
+  items: [
+    {
+      id: 'undo',
+      text: 'Undo',
+      action: () => {
+        console.log('Undo clicked');
+      },
+    },
+    {
+      id: 'redo',
+      text: 'Redo',
+      action: () => {
+        console.log('Redo clicked');
+      },
+    },
+  ],
+});
+
+await using menu = await Menu.new({
+  items: [aboutSubmenu, fileSubmenu, editSubmenu],
+});
+
+await menu.setAsAppMenu();
+
+// You can also update the submenu icon dynamically
+await fileSubmenu.setIcon('document');
+// Or set a native icon (only one type applies per platform)
+await fileSubmenu.setNativeIcon('NSFolder');
+```
+
+**Rust:**
+
+```rust
+use tauri::{
+    image::Image,
+    menu::{CheckMenuItemBuilder, IconMenuItemBuilder, MenuBuilder, SubmenuBuilder},
+};
+
+fn main() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let menu_image = Image::from_bytes(include_bytes!("../icons/menu.png")).unwrap();
+            let file_menu = SubmenuBuilder::new(app, "File")
+                .submenu_icon(menu_image) // Optional: Add an icon to the submenu
+                .text("open", "Open")
+                .text("quit", "Quit")
+                .build()?;
+
+            let lang_str = "en";
+            let check_sub_item_1 = CheckMenuItemBuilder::new("English")
+                .id("en")
+                .checked(lang_str == "en")
+                .build(app)?;
+
+            let check_sub_item_2 = CheckMenuItemBuilder::new("Chinese")
+                .id("zh")
+                .checked(lang_str == "zh")
+                .enabled(false)
+                .build(app)?;
+
+            // Load icon from path
+            let icon_image = Image::from_bytes(include_bytes!("../icons/icon.png")).unwrap();
+
+            let icon_item = IconMenuItemBuilder::new("icon")
+                .icon(icon_image)
+                .build(app)?;
+
+            let other_item = SubmenuBuilder::new(app, "language")
+                .item(&check_sub_item_1)
+                .item(&check_sub_item_2)
+                .build()?;
+
+            let menu = MenuBuilder::new(app)
+                .items(&[&file_menu, &other_item, &icon_item])
+                .build()?;
+
+            app.set_menu(menu)?;
+
+            let menu_image_update =
+                Image::from_bytes(include_bytes!("../icons/menu_update.png")).unwrap();
+            // You can also update the submenu icon dynamically
+            file_menu.set_icon(Some(menu_image_update))?;
+            // Or set a native icon (only one type applies per platform)
+            file_menu.set_native_icon(Some(tauri::menu::NativeIcon::Folder))?;
+
+            Ok(())
+        })
+        .run(tauri::generate_context!());
+}
+```
+
+Note that you need to enable `image-ico` or `image-png` feature to use this API:
+
+```toml title="src-tauri/Cargo.toml"
+[dependencies]
+tauri = { version = "...", features = ["...", "image-png"] }
+```
+
+## Creating predefined menu
+
+To use built-in (native) menu items that has predefined behavior by the operating system or Tauri:
+
+**JavaScript:**
+
+```javascript
+import { Menu, PredefinedMenuItem } from '@tauri-apps/api/menu';
+
+await using copy = await PredefinedMenuItem.new({
+  text: 'copy-text',
+  item: 'Copy',
+});
+
+await using separator = await PredefinedMenuItem.new({
+  text: 'separator-text',
+  item: 'Separator',
+});
+
+await using undo = await PredefinedMenuItem.new({
+  text: 'undo-text',
+  item: 'Undo',
+});
+
+await using redo = await PredefinedMenuItem.new({
+  text: 'redo-text',
+  item: 'Redo',
+});
+
+await using cut = await PredefinedMenuItem.new({
+  text: 'cut-text',
+  item: 'Cut',
+});
+
+await using paste = await PredefinedMenuItem.new({
+  text: 'paste-text',
+  item: 'Paste',
+});
+
+await using select_all = await PredefinedMenuItem.new({
+  text: 'select_all-text',
+  item: 'SelectAll',
+});
+
+await using menu = await Menu.new({
+  items: [copy, separator, undo, redo, cut, paste, select_all],
+});
+
+await menu.setAsAppMenu();
+```
+
+**Rust:**
+
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use tauri::menu::{MenuBuilder, PredefinedMenuItem};
+
+fn main() {
+  tauri::Builder::default()
+        .setup(|app| {
+      let menu = MenuBuilder::new(app)
+                .copy()
+                .separator()
+                .undo()
+                .redo()
+                .cut()
+                .paste()
+                .select_all()
+                .item(&PredefinedMenuItem::copy(app, Some("custom text"))?)
+                .build()?;
+            app.set_menu(menu)?;
+
+            Ok(())
+        })
+}
+```
+
+For more preset capabilities, please refer to the documentation [`PredefinedMenuItem`].
+
+:::tip
+The menu builder has dedicated methods to add each predefined menu item so you can call `.copy()` instead of `.item(&PredefinedMenuItem::copy(app, None)?)`.
+:::
+
+## Change menu status
+
+If you want to change the status of the menu, such as text, icon, or check status, you can `set_menu` again:
+
+**JavaScript:**
+
+```javascript
+import {
+  Menu,
+  CheckMenuItem,
+  IconMenuItem,
+  MenuItem,
+} from '@tauri-apps/api/menu';
+import { Image } from '@tauri-apps/api/image';
+
+let currentLanguage = 'en';
+
+await using check_sub_item_en = await CheckMenuItem.new({
+  id: 'en',
+  text: 'English',
+  checked: currentLanguage === 'en',
+  action: () => {
+    currentLanguage = 'en';
+    check_sub_item_en.setChecked(currentLanguage === 'en');
+    check_sub_item_zh.setChecked(currentLanguage === 'cn');
+    console.log('English pressed');
+  },
+});
+
+await using check_sub_item_zh = await CheckMenuItem.new({
+  id: 'zh',
+  text: 'Chinese',
+  checked: currentLanguage === 'zh',
+  action: () => {
+    currentLanguage = 'zh';
+    check_sub_item_en.setChecked(currentLanguage === 'en');
+    check_sub_item_zh.setChecked(currentLanguage === 'zh');
+    check_sub_item_zh.setAccelerator('Ctrl+L');
+    console.log('Chinese pressed');
+  },
+});
+
+// Load icon from path
+await using icon = await Image.fromPath('../src/icon.png');
+await using icon2 = await Image.fromPath('../src/icon-2.png');
+
+await using icon_item = await IconMenuItem.new({
+  id: 'icon_item',
+  text: 'Icon Item',
+  icon: icon,
+  action: () => {
+    icon_item.setIcon(icon2);
+    console.log('icon pressed');
+  },
+});
+
+await using text_item = await MenuItem.new({
+  id: 'text_item',
+  text: 'Text Item',
+  action: () => {
+    text_item.setText('Text Item Changed');
+    console.log('text pressed');
+  },
+});
+
+await using menu = await Menu.new({
+  items: [
+    {
+      id: 'change menu',
+      text: 'change_menu',
+      items: [text_item, check_sub_item_en, check_sub_item_zh, icon_item],
+    },
+  ],
+});
+
+await menu.setAsAppMenu();
+```
+
+**Rust:**
+
+```rust
+// change-menu-status
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use tauri::{
+    image::Image,
+    menu::{CheckMenuItemBuilder, IconMenuItem, MenuBuilder, MenuItem, SubmenuBuilder},
+};
+
+fn main() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let check_sub_item_en = CheckMenuItemBuilder::with_id("en", "EN")
+                .checked(true)
+                .build(app)?;
+
+            let check_sub_item_zh = CheckMenuItemBuilder::with_id("zh", "ZH")
+                .checked(false)
+                .build(app)?;
+
+            let text_menu = MenuItem::with_id(
+                app,
+                "change_text",
+                &"Change menu".to_string(),
+                true,
+                Some("Ctrl+Z"),
+            )
+            .unwrap();
+
+            let icon_menu = IconMenuItem::with_id(
+                app,
+                "change_icon",
+                &"Change icon menu",
+                true,
+                Some(Image::from_bytes(include_bytes!("../icons/icon.png")).unwrap()),
+                Some("Ctrl+F"),
+            )
+            .unwrap();
+
+            let menu_item = SubmenuBuilder::new(app, "Change menu")
+                .item(&text_menu)
+                .item(&icon_menu)
+                .items(&[&check_sub_item_en, &check_sub_item_zh])
+                .build()?;
+            let menu = MenuBuilder::new(app).items(&[&menu_item]).build()?;
+            app.set_menu(menu)?;
+            app.on_menu_event(move |_app_handle: &tauri::AppHandle, event| {
+                match event.id().0.as_str() {
+                    "change_text" => {
+                        text_menu
+                            .set_text("changed menu text")
+                            .expect("Change text error");
+
+                        text_menu
+                            .set_text("changed menu text")
+                            .expect("Change text error");
+                    }
+                    "change_icon" => {
+                        icon_menu
+                            .set_text("changed menu-icon text")
+                            .expect("Change text error");
+                        icon_menu
+                            .set_icon(Some(
+                                Image::from_bytes(include_bytes!("../icons/icon-2.png")).unwrap(),
+                            ))
+                            .expect("Change icon error");
+                    }
+
+                    "en" | "zh" => {
+                        check_sub_item_en
+                            .set_checked(event.id().0.as_str() == "en")
+                            .expect("Change check error");
+                        check_sub_item_zh
+                            .set_checked(event.id().0.as_str() == "zh")
+                            .expect("Change check error");
+                        check_sub_item_zh.set_accelerator(Some("Ctrl+L"))
+                        .expect("Change accelerator error");
+                    }
+                    _ => {
+                        println!("unexpected menu event");
+                    }
+                }
+            });
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+```
+
+## Prevent JavaScript menu leaks
+
+There're a few gotchas you should be aware of when using the JavaScript menu APIs,
+mainly because JavaScript does not have any way to run cleanup code when an object is being removed by garbage collection:
+
+- The menus will not clean up automatically unless `close` is called or closed by `await using` after the binding variable goes out of scope.
+- You should close the menu items you got e.g. from `Menu.get`, the `await using` syntax makes it easier, for example: `await using status = menu.get('status')`
+  Be careful with APIs that can return a `Menu` such as `Menu.setAsAppMenu`, you'll need to close them when you're done with them or if you don't plan to use them.
+- You should close the menu resource whenever you don't need to access it in JavaScript anymore.
+
+For example:
+
+**Manual close:**
+
+```typescript
+const copy = await PredefinedMenuItem.new({ item: 'Copy' });
+const menu = await Menu.new({ items: [copy] });
+// `copy` is now managed by the `menu` and the JavaScript resource reference can be closed
+await copy.close();
+
+const prev = await menu.setAsAppMenu();
+// `menu` is now set as the app menu, we can close the JavaScript resource reference
+await menu.close();
+// We don't plan to use the previously set menu, close it here.
+await prev?.close();
+```
+
+**await using:**
+
+```typescript
+await using copy = await PredefinedMenuItem.new({ item: 'Copy' });
+await using menu = await Menu.new({ items: [copy] });
+await using prev = await menu.setAsAppMenu();
+```
+
+:::tip
+
+Think about it this way, all the menus in JavaScript are added references to the actual menus,
+and you need to release all the references to release a menu.
+
+:::
+
+[`Resource`]: /reference/javascript/api/namespacecore/#resource
+[`PredefinedMenuItem`]: https://docs.rs/tauri/latest/tauri/menu/struct.PredefinedMenuItem.html
+[`Menu.new`]: /reference/javascript/api/namespacemenu/#new-2
