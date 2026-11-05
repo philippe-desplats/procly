@@ -328,6 +328,18 @@ impl Leases {
         Ok(released)
     }
 
+    /// What [`Leases::release_worktree`] would return for the same arguments, without releasing any Lease: the
+    /// release is computed on a copy that is dropped. Blocking: it reads the document on the first request.
+    pub(crate) fn would_release_worktree(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        branch: Option<&str>,
+        running: &BTreeSet<(PathBuf, String)>,
+    ) -> Result<(Vec<LeaseHeld>, Vec<KeptLease>), StoreError> {
+        self.with_table(|table| release_in(&mut table.clone(), repository, worktree, branch, running))
+    }
+
     /// Reads the document, a Lease of a document of version 1 counting as used at `now`.
     fn read(&self, now: Duration) -> Result<Table, StoreError> {
         let document = store::load::<LeaseDocument>(&self.path, DOCUMENT_VERSION)?;

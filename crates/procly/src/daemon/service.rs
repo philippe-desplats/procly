@@ -273,7 +273,24 @@ impl Services {
     /// Asks every running Service of `worktree`, or only the one named `name`, to stop, and returns them sorted by
     /// name. Wait for each with [`Service::ended`].
     pub(crate) fn stop(&self, worktree: &Path, name: Option<&str>) -> Vec<(String, Arc<Service>)> {
-        let mut stopping: Vec<_> = self
+        let stopping = self.running_in(worktree, name);
+        for (_, service) in &stopping {
+            service.request_stop(ServiceEnd::Stopped);
+        }
+        stopping
+    }
+
+    /// The names of the Services of `worktree` that [`Services::stop`] would ask to stop, sorted, without asking.
+    pub(crate) fn would_stop(&self, worktree: &Path) -> Vec<String> {
+        self.running_in(worktree, None)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Every running Service of `worktree`, or only the one named `name`, sorted by name.
+    fn running_in(&self, worktree: &Path, name: Option<&str>) -> Vec<(String, Arc<Service>)> {
+        let mut running: Vec<_> = self
             .table()
             .iter()
             .filter(|((path, service_name), service)| {
@@ -281,11 +298,8 @@ impl Services {
             })
             .map(|((_, service_name), service)| (service_name.clone(), Arc::clone(service)))
             .collect();
-        stopping.sort_by(|(a, _), (b, _)| a.cmp(b));
-        for (_, service) in &stopping {
-            service.request_stop(ServiceEnd::Stopped);
-        }
-        stopping
+        running.sort_by(|(a, _), (b, _)| a.cmp(b));
+        running
     }
 
     /// Asks every running Service of the Repository whose common git directory is `git_common_dir` to stop, whatever
