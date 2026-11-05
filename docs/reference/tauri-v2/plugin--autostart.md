@@ -1,0 +1,237 @@
+# Autostart
+
+> Vendored from <https://github.com/tauri-apps/tauri-docs/blob/b9dd7032c3a872cad5995bc78c2946f087019942/src/content/docs/plugin/autostart.mdx>
+> (published at <https://v2.tauri.app/plugin/autostart/>) by `scripts/vendor-docs.py`, MIT licensed.
+> Do not edit by hand, regenerate instead.
+
+Automatically launch your application at system startup.
+
+## Supported Platforms
+
+_This plugin requires a Rust version of at least **1.90**._
+
+| Platform | Level | Notes |
+| --- | --- | --- |
+| windows | full |  |
+| linux | full |  |
+| macos | full |  |
+| android | none |  |
+| ios | none |  |
+
+## Setup
+
+Install the autostart plugin to get started.
+
+**Automatic:**
+
+    Use your project's package manager to add the dependency:
+
+    {' '}
+
+    ```sh
+cargo tauri add autostart
+npm run tauri add autostart
+```
+
+**Manual:**
+
+        1. Run the following command in the `src-tauri` folder to add the plugin to the project's dependencies in `Cargo.toml`:
+
+            ```sh frame=none
+            cargo add tauri-plugin-autostart --target 'cfg(any(target_os = "macos", windows, target_os = "linux"))'
+            ```
+
+        2.  Modify `lib.rs` to initialize the plugin:
+
+            ```rust title="src-tauri/src/lib.rs" ins={5-6}
+            #[cfg_attr(mobile, tauri::mobile_entry_point)]
+            pub fn run() {
+                tauri::Builder::default()
+                    .setup(|app| {
+                        #[cfg(desktop)]
+                        app.handle().plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--flag1", "--flag2"]) /* arbitrary number of args to pass to your app */));
+                        Ok(())
+                    })
+                    .run(tauri::generate_context!())
+                    .expect("error while running tauri application");
+            }
+            ```
+
+        3.  You can install the JavaScript Guest bindings using your preferred JavaScript package manager:
+
+            ```sh
+npm install @tauri-apps/plugin-autostart
+```
+
+## Usage
+
+The autostart plugin is available in both JavaScript and Rust.
+
+**JavaScript:**
+
+```javascript
+import { enable, isEnabled, disable } from '@tauri-apps/plugin-autostart';
+// when using `"withGlobalTauri": true`, you may use
+// const { enable, isEnabled, disable } = window.__TAURI__.autostart;
+
+// Enable autostart
+await enable();
+// Check enable state
+console.log(`registered for autostart? ${await isEnabled()}`);
+// Disable autostart
+disable();
+```
+
+**Rust:**
+
+```rust
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_autostart::MacosLauncher;
+                use tauri_plugin_autostart::ManagerExt;
+
+                app.handle().plugin(tauri_plugin_autostart::init(
+                    MacosLauncher::LaunchAgent,
+                    Some(vec!["--flag1", "--flag2"]),
+                ));
+
+                // Get the autostart manager
+                let autostart_manager = app.autolaunch();
+                // Enable autostart
+                let _ = autostart_manager.enable();
+                // Check enable state
+                println!("registered for autostart? {}", autostart_manager.is_enabled().unwrap());
+                // Disable autostart
+                let _ = autostart_manager.disable();
+            }
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+## Permissions
+
+By default all potentially dangerous plugin commands and scopes are blocked and cannot be accessed. You must modify the permissions in your `capabilities` configuration to enable these.
+
+See the [Capabilities Overview](https://v2.tauri.app/security/capabilities/) for more information and the [step by step guide](https://v2.tauri.app/learn/security/using-plugin-permissions/) to use plugin permissions.
+
+```json title="src-tauri/capabilities/default.json"
+{
+  "permissions": [
+    ...,
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
+  ]
+}
+```
+
+### Default Permission
+
+This permission set configures if your
+application can enable or disable auto
+starting the application on boot.
+
+##### Granted Permissions
+
+It allows all to check, enable and
+disable the automatic start on boot.
+
+##### This default permission set includes the following:
+
+- `allow-enable`
+- `allow-disable`
+- `allow-is-enabled`
+
+### Permission Table
+
+<table>
+<tr>
+<th>Identifier</th>
+<th>Description</th>
+</tr>
+
+<tr>
+<td>
+
+`autostart:allow-disable`
+
+</td>
+<td>
+
+Enables the disable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`autostart:deny-disable`
+
+</td>
+<td>
+
+Denies the disable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`autostart:allow-enable`
+
+</td>
+<td>
+
+Enables the enable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`autostart:deny-enable`
+
+</td>
+<td>
+
+Denies the enable command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`autostart:allow-is-enabled`
+
+</td>
+<td>
+
+Enables the is_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`autostart:deny-is-enabled`
+
+</td>
+<td>
+
+Denies the is_enabled command without any pre-configured scope.
+
+</td>
+</tr>
+</table>

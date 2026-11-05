@@ -18,6 +18,11 @@ ConPTY) are documented on docs.rs only.
 
 ## Tauri v2 (tauri-docs at `b9dd7032c3a8`)
 
+The guides below do not cover every macOS-only API of the `tauri` crate, such as
+`AppHandle::set_dock_visibility`, `AppHandle::set_activation_policy` and `RunEvent::Reopen`. Read those
+on the docs.rs build for macOS, <https://docs.rs/tauri/latest/x86_64-apple-darwin/tauri/>, since the
+default docs.rs build is for Linux and omits them.
+
 | Page | Published at |
 | --- | --- |
 | [Tauri Architecture](tauri-v2/concept--architecture.md) | https://v2.tauri.app/concept/architecture/ |
@@ -41,3 +46,20 @@ ConPTY) are documented on docs.rs only.
 | [Command Scopes](tauri-v2/security--scope.md) | https://v2.tauri.app/security/scope/ |
 | [Runtime Authority](tauri-v2/security--runtime-authority.md) | https://v2.tauri.app/security/runtime-authority/ |
 | [Content Security Policy (CSP)](tauri-v2/security--csp.md) | https://v2.tauri.app/security/csp/ |
+| [System Tray](tauri-v2/learn--system-tray.md) | https://v2.tauri.app/learn/system-tray/ |
+| [Window Menu](tauri-v2/learn--window-menu.md) | https://v2.tauri.app/learn/window-menu/ |
+| [Window Customization](tauri-v2/learn--window-customization.md) | https://v2.tauri.app/learn/window-customization/ |
+| [Positioner](tauri-v2/plugin--positioner.md) | https://v2.tauri.app/plugin/positioner/ |
+| [Notifications](tauri-v2/plugin--notification.md) | https://v2.tauri.app/plugin/notification/ |
+| [Opener](tauri-v2/plugin--opener.md) | https://v2.tauri.app/plugin/opener/ |
+| [Shell](tauri-v2/plugin--shell.md) | https://v2.tauri.app/plugin/shell/ |
+| [Autostart](tauri-v2/plugin--autostart.md) | https://v2.tauri.app/plugin/autostart/ |
+| [Single Instance](tauri-v2/plugin--single-instance.md) | https://v2.tauri.app/plugin/single-instance/ |
+| [Window State](tauri-v2/plugin--window-state.md) | https://v2.tauri.app/plugin/window-state/ |
+| [Global Shortcut](tauri-v2/plugin--global-shortcut.md) | https://v2.tauri.app/plugin/global-shortcut/ |
+| [WebDriver](tauri-v2/develop--tests--webdriver.md) | https://v2.tauri.app/develop/tests/webdriver/ |
+| [macOS Application Bundle](tauri-v2/distribute--macos-application-bundle.md) | https://v2.tauri.app/distribute/macos-application-bundle/ |
+| [DMG](tauri-v2/distribute--dmg.md) | https://v2.tauri.app/distribute/dmg/ |
+| [macOS Code Signing](tauri-v2/distribute--sign--macos.md) | https://v2.tauri.app/distribute/sign/macos/ |
+| [GitHub](tauri-v2/distribute--pipelines--github.md) | https://v2.tauri.app/distribute/pipelines/github/ |
+| [Configuration (Tauri 2.12.4)](tauri-v2/reference--config.md) | https://v2.tauri.app/reference/config/ |
