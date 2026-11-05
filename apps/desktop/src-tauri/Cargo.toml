@@ -1,0 +1,29 @@
+[package]
+name = "procly-desktop"
+description = "The Procly desktop app: a window on the Daemon, a client of it like the CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "procly_desktop_lib"
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+# The `ts` feature exports the TypeScript types of the protocol while `cargo test` runs (ADR 0015).
+procly-client = { workspace = true, features = ["ts"] }
+serde.workspace = true
+tauri.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

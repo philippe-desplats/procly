@@ -25,6 +25,20 @@ jobs:
       # rustup reads rust-toolchain.toml and installs the pinned toolchain with rustfmt and clippy.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # The desktop app (ADR 0015): bun from `packageManager`, Node from `.node-version`, both read from the app.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: apps/desktop/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: apps/desktop/.node-version
+      - name: Install the system packages Tauri needs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - run: bun install --frozen-lockfile
+        working-directory: apps/desktop
       - run: make build
       - run: make fmt-check
       - run: make lint

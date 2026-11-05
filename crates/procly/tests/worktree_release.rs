@@ -423,3 +423,89 @@ fn a_dry_run_leaves_a_lease_of_a_running_service_of_another_worktree_and_the_num
     );
     assert_eq!(documents(&procly), before, "a dry run wrote a state file");
 }
+
+#[test]
+fn a_worktree_release_forgets_the_ended_jobs_and_services_of_its_worktree_and_only_those() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&main, "procly.toml", &web_declaring(free_port()));
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    // Each Worktree has a Service and a Job that have ended, and the Worktree to release also has a Job that runs.
+    let ended_job = |dir: &Path| {
+        let job = stdout(&procly.procly_in(dir, &["run", "exit 3"])).trim().to_owned();
+        assert_eq!(procly.procly(&["wait", &job]).status.code(), Some(3));
+        job
+    };
+    let (released_job, kept_job) = (ended_job(&other), ended_job(&main));
+    for dir in [&other, &main] {
+        port_of(&procly.procly_in(dir, &["up", "web"]));
+        assert_success(&procly.procly_in(dir, &["down", "web"]));
+    }
+    let running = stdout(&procly.procly_in(&other, &["run", "sleep 60"]))
+        .trim()
+        .to_owned();
+
+    let before = procly.procly_in(&other, &["status", "--all"]);
+    assert!(stdout(&before).contains("service web ended"), "{}", stdout(&before));
+
+    assert_success(&procly.procly_in(&other, &["worktree", "release"]));
+
+    let status = stdout(&procly.procly_in(&other, &["status", "--all"]));
+    let worktrees: Vec<&str> = status.split("  worktree ").collect();
+    let (main_status, other_status) = (worktrees[1], worktrees[2]);
+    assert!(
+        main_status.contains("service web ended") && main_status.contains(&kept_job),
+        "{status}"
+    );
+    assert!(
+        !other_status.contains("service web") && !other_status.contains(&released_job),
+        "{status}"
+    );
+    assert_eq!(procly.procly(&["wait", &released_job]).status.code(), Some(125));
+    assert_eq!(procly.procly(&["wait", &kept_job]).status.code(), Some(3));
+    // The release stopped the running Job, which was forgotten with the rest.
+    assert_eq!(procly.procly(&["wait", &running]).status.code(), Some(125));
+}
+
+#[test]
+fn a_dry_run_leaves_the_ended_jobs_and_services_in_place_and_the_release_after_it_clears_them() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    let job = stdout(&procly.procly_in(&other, &["run", "exit 3"])).trim().to_owned();
+    assert_eq!(procly.procly(&["wait", &job]).status.code(), Some(3));
+    port_of(&procly.procly_in(&other, &["up", "web"]));
+    assert_success(&procly.procly_in(&other, &["down", "web"]));
+    let status = || stdout(&procly.procly_in(&other, &["status"]));
+    assert!(status().contains("service web ended"), "{}", status());
+
+    assert_success(&procly.procly_in(&other, &["worktree", "release", "--dry-run"]));
+
+    assert!(
+        status().contains("service web ended"),
+        "the dry run forgot the Service: {}",
+        status()
+    );
+    assert_eq!(
+        procly.procly(&["wait", &job]).status.code(),
+        Some(3),
+        "the dry run forgot the Job"
+    );
+
+    assert_success(&procly.procly_in(&other, &["worktree", "release"]));
+
+    assert!(
+        !status().contains("service web"),
+        "the release kept the Service: {}",
+        status()
+    );
+    assert_eq!(
+        procly.procly(&["wait", &job]).status.code(),
+        Some(125),
+        "the release kept the Job"
+    );
+}

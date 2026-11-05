@@ -174,3 +174,34 @@ fn the_job_identifier_printed_by_run_feeds_wait_through_command_substitution() {
     assert_eq!(stdout(&output), "hello\n");
     assert_eq!(common::stderr(&output), "started\n");
 }
+
+#[test]
+fn the_21st_ended_job_evicts_the_oldest_success_and_wait_and_logs_then_fail_for_it() {
+    let procly = Procly::new();
+
+    // One at a time, so that the Jobs end in the order they started.
+    let jobs: Vec<String> = (0..=20)
+        .map(|n| {
+            let job = procly.run(&[&format!("echo job {n}")]);
+            assert_success(&procly.procly(&["wait", &job]));
+            job
+        })
+        .collect();
+
+    for (verb, error) in [
+        ("wait", format!("no job {}", jobs[0])),
+        ("logs", format!("no job or service {}", jobs[0])),
+    ] {
+        let output = procly.procly(&[verb, &jobs[0]]);
+        assert_eq!(output.status.code(), Some(125), "{verb}");
+        assert!(
+            common::stderr(&output).contains(&error),
+            "{verb}: {}",
+            common::stderr(&output)
+        );
+    }
+    // The 20 others are still there.
+    let output = procly.procly(&["wait", &jobs[1]]);
+    assert_eq!(stdout(&output), "job 1\n");
+    assert_success(&procly.procly(&["wait", &jobs[20]]));
+}

@@ -13,11 +13,12 @@ use crate::topology::{self, Topology};
 
 /// Releases the Worktree holding `path`, logging who asked: stops its Services and Jobs with their whole trees, lets
 /// go of its Compose services, then releases its Leases, apart from those of its Pinned branch and those a container
-/// still runs on. Its Logical resources are kept and named. Running it again, or in a Worktree Procly never saw,
-/// releases nothing. It then applies the Retention policy of the Isolated containers of the Worktrees already removed.
+/// still runs on. The Daemon then forgets every ended Job and ended Service of the Worktree. Its Logical resources are
+/// kept and named. Running it again, or in a Worktree Procly never saw, releases nothing. It then applies the
+/// Retention policy of the Isolated containers of the Worktrees already removed.
 ///
-/// With `dry_run` it answers with the report the same release would give and changes nothing, so it applies no
-/// Retention policy.
+/// With `dry_run` it answers with the report the same release would give and changes nothing, so it forgets no Job or
+/// Service and applies no Retention policy.
 pub(super) async fn run(
     registry: Arc<Registry>,
     path: PathBuf,
@@ -90,6 +91,9 @@ pub(super) async fn run(
         let _ = stopping.await;
         report.jobs.push(id);
     }
+    // Everything that ran is stopped, so what the Daemon still holds of the Worktree is its ended Jobs and Services.
+    registry.jobs.remove_ended_in(&worktree);
+    registry.services.remove_ended_in(&worktree);
 
     // Once the Services are gone, so that only a container still running keeps a Lease of the Worktree.
     let (leases, kept_leases, logical_resources, warning) = {

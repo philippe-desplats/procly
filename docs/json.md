@@ -53,7 +53,7 @@ $ procly wait --json 3f9a1c2e
 {"schema_version":1,"job":"3f9a1c2e","exit_code":3,"end":{"kind":"exited","code":3},"output":"hi\n"}
 ```
 
-`exit_code` is the code `wait` exits with: the Job's own, 128 + N for a Job killed by signal N, and 124 for a Job killed on its timeout. `end` tells how the Job ended, with a `kind` of `exited` (`code`), `signaled` (`signal`) or `timed_out` (`timeout_ms`). `output` is everything the Job printed.
+`exit_code` is the code `wait` exits with: the Job's own, 128 + N for a Job killed by signal N, and 124 for a Job killed on its timeout. `end` tells how the Job ended, with a `kind` of `exited` (`code`), `signaled` (`signal`) or `timed_out` (`timeout_ms`). `output` is everything the Job printed. A Job that ended long ago may be unknown by now, see [ended Jobs](daemon.md#ended-jobs): `wait` then fails with exit code 125 and `no job 3f9a1c2e` on stderr, as for an identifier that never existed.
 
 ## `logs`
 
@@ -62,7 +62,7 @@ $ procly logs --json 3f9a1c2e
 {"schema_version":1,"name":"3f9a1c2e","output":"hi\n"}
 ```
 
-`name` is the Job or the Service asked for. The `output` of a Compose service is the last 1000 lines of its container, as `docker compose logs` prints them.
+`name` is the Job or the Service asked for. The `output` of a Compose service is the last 1000 lines of its container, as `docker compose logs` prints them. The `output` of an ended Job is no longer there once the Daemon has evicted the Job, see [ended Jobs](daemon.md#ended-jobs).
 
 ## `logs --follow`
 

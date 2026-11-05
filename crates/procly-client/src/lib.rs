@@ -9,4 +9,4 @@ mod client;
 pub mod protocol;
 pub mod state_dir;
 
-pub use client::{ClientError, Connection, Responses, connect, connect_or_start};
+pub use client::{ClientError, ClientFailure, ClientFailureKind, Connection, Responses, connect, connect_or_start};
