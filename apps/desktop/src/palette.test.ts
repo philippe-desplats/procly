@@ -79,6 +79,20 @@ describe("the palette", () => {
     },
   );
 
+  it.each(["light", "dark"] as const)(
+    "keeps the mark cut out of a failure disc and a warning triangle readable in the %s theme",
+    (theme) => {
+      const colours = palette()[theme];
+      const cut = colours.get("--panel") ?? "";
+      for (const name of ["--fail", "--warn"]) {
+        // 3:1 is the floor of WCAG 1.4.11 for a graphical object, the cross and the bar are drawn in the pane colour.
+        expect(contrast(cut, colours.get(name) ?? ""), `--panel on ${name}, ${theme}`).toBeGreaterThanOrEqual(
+          3,
+        );
+      }
+    },
+  );
+
   it("falls back to the system accent where WebKit provides it", () => {
     expect(css).toMatch(
       /@supports \(color: -apple-system-control-accent\)\s*\{\s*:root\s*\{\s*--accent: -apple-system-control-accent;/,

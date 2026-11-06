@@ -204,31 +204,66 @@ body {
   color: var(--muted);
 }
 
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentcolor;
+/* The shape of a state tells it apart, the tone only colours it. A failure and a restart colour their word too. */
+.glyph {
+  flex: none;
+  width: 12px;
+  height: 12px;
 }
 
-.tone-ok .dot {
-  background: var(--ok);
+.tone-ok .glyph {
+  color: var(--ok);
 }
 
-.tone-warn .dot {
-  background: var(--warn);
+.tone-warn .glyph {
+  color: var(--warn);
 }
 
-.tone-fail .dot {
-  background: var(--fail);
+.tone-fail .glyph {
+  color: var(--fail);
 }
 
-.tone-ended .dot {
-  background: var(--ended);
+.tone-ended .glyph {
+  color: var(--ended);
 }
 
-.tone-muted .dot {
-  background: var(--faint);
+.tone-muted .glyph {
+  color: var(--muted);
+}
+
+.state.tone-warn {
+  color: var(--warn);
+}
+
+.state.tone-fail {
+  color: var(--fail);
+}
+
+/* The mark cut out of a filled glyph is drawn in the colour of the pane, so it reads in both themes. */
+.glyph-cut {
+  fill: none;
+  stroke: var(--panel);
+}
+
+.glyph-cut-fill {
+  fill: var(--panel);
+}
+
+.spin {
+  transform-origin: 50% 50%;
+  animation: spin 1.1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
 }
 
 .facts {
