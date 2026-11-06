@@ -171,7 +171,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
       <FailuresContext.Provider value={failures}>
         <div className={wide ? "window window-settings" : "window"}>
           <nav className="pane sidebar" aria-label="Worktrees">
-            <h1 className="pane-title">Procly</h1>
+            <div className="drag-strip" data-tauri-drag-region />
             <Sidebar
               snapshot={snapshot}
               repositories={repositories}
