@@ -14,7 +14,7 @@ const RESTART_FAILED: &str = "the service could not be restarted";
 /// What a Restart brings up again, worked out before anything is stopped.
 struct Planned {
     scope: Scope,
-    /// The Service that is stopped and started again: the one asked for, or the running Group covering it.
+    /// The Service that is stopped and started again: the one asked for, or the Group covering it.
     target: String,
     /// The start order of `target`, its needs first.
     order: Vec<String>,
@@ -22,8 +22,9 @@ struct Planned {
 
 /// Restarts the Service `service` of the Worktree holding `cwd`, logging who asked: stops it if it runs, through the
 /// path of `down`, then brings it up again with the environment of its last `up` and the same Lease, the Services it
-/// needs that do not run included, and answers as `up` does for one Service. A Service covered by a Group that runs is
-/// restarted through its Group. Without a held environment, nothing is stopped and the answer is an error. A Worktree
+/// needs that do not run included, and answers as `up` does for one Service. A Service a Group covers is restarted
+/// through its Group, unless it runs on its own, which its Group cannot start over. Without a held environment, nothing
+/// is stopped and the answer is an error. A Worktree
 /// release that begins once the environment is read wins: the Restart starts nothing more and answers an error.
 pub(super) async fn run(registry: &Arc<Registry>, service: String, cwd: PathBuf, peer: Option<i32>) -> Response {
     let planned = {
@@ -86,8 +87,9 @@ fn plan(registry: &Registry, service: &str, cwd: &Path) -> anyhow::Result<Planne
     let scope = Scope::of(cwd)?;
     scope.declared(service)?;
     let worktree = scope.worktree();
+    // A covered Service that runs on its own is the one thing its Group cannot start over, so it is restarted alone.
     let target = match scope.config().group_of(service) {
-        Some(group) if registry.services.runs(worktree, group) => group.to_owned(),
+        Some(group) if !registry.services.runs(worktree, service) => group.to_owned(),
         Some(_) | None => service.to_owned(),
     };
     let order = scope.start_order(Some(&target))?;
