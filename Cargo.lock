@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "procly"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "procly-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "procly-desktop"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "procly-client",
