@@ -80,7 +80,7 @@ export function WorktreeChecks({ store, path }: { store: DoctorStore; path: stri
 export function ChecksWithoutDaemon({ store }: { store: DoctorStore }) {
   const state = useDoctor(store, null);
   // The report kept from before the Daemon stopped says it answers, so nothing is shown until doctor ran again.
-  const fresh: DoctorState = state.kind === "running" ? { kind: "running", document: null } : state;
+  const fresh: DoctorState = state.kind === "running" ? { kind: "running", document: null, at: null } : state;
   return (
     <section aria-label="Checks without the Daemon">
       <h3 className="subtitle">Checks that run without the Daemon</h3>

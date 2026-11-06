@@ -24,3 +24,12 @@ export function formatMoment(moment: number, now: number, timeZone?: string): st
   const sameDay = at.year === today.year && at.month === today.month && at.day === today.day;
   return sameDay ? time : `${at.year}-${at.month}-${at.day} ${time}`;
 }
+
+/** Like `formatMoment`, to the minute, for a line too narrow to hold the seconds. */
+export function formatMinute(moment: number, now: number, timeZone?: string): string {
+  const at = parts(moment, timeZone);
+  const today = parts(now, timeZone);
+  const time = `${at.hour}:${at.minute}`;
+  const sameDay = at.year === today.year && at.month === today.month && at.day === today.day;
+  return sameDay ? time : `${at.year}-${at.month}-${at.day} ${time}`;
+}

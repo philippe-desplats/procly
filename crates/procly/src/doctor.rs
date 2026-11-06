@@ -394,6 +394,34 @@ mod tests {
         }
     }
 
+    /// The `daemon` check for a Daemon that answers with `version`, as the desktop app reads it.
+    fn daemon_check_of_a_daemon_running(version: &str) -> Check {
+        let answer = Response::Doctor(DaemonChecks {
+            procly_version: version.to_owned(),
+            checks: Vec::new(),
+        });
+        daemon_checks(&StateDir::at("/p/state/procly"), Ok(answer)).0
+    }
+
+    /// The desktop app reads the version the Daemon runs from this message, with `daemonVersion` in
+    /// `apps/desktop/src/doctor.ts`, because the document of `doctor --json` has no field for it. Rewording either
+    /// message must fail here, and the parser must follow.
+    #[test]
+    fn the_daemon_check_words_the_version_the_desktop_app_parses_in_both_of_its_messages() {
+        let own = env!("CARGO_PKG_VERSION");
+
+        let healthy = daemon_check_of_a_daemon_running(own);
+        assert_eq!(healthy.status, CheckStatus::Passed);
+        assert_eq!(healthy.message, format!("the Daemon answers and runs procly {own}"));
+
+        let drifted = daemon_check_of_a_daemon_running("0.0.1");
+        assert_eq!(drifted.status, CheckStatus::Failed);
+        assert_eq!(
+            drifted.message,
+            format!("the Daemon runs procly 0.0.1, this is procly {own}, restart it to run this one")
+        );
+    }
+
     #[test]
     fn a_report_with_a_failed_check_has_failed_and_one_with_only_skipped_or_warning_ones_has_not() {
         let report = |statuses: &[CheckStatus]| Report {

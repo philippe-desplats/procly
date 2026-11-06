@@ -354,6 +354,35 @@ body {
 .sidebar-foot {
   margin-top: auto;
   flex: none;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+/* What a footer entry counts, on the right of its name: the name keeps its room, the count gives way. */
+.sidebar-foot .row-name {
+  flex: none;
+}
+
+.sidebar-foot .row-count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The Daemon answers: a quiet dot and when the last Status was read. */
+.daemon-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 6px 8px 2px;
+  color: var(--muted);
+  font-size: var(--size-small);
+}
+
+.daemon-line .glyph {
+  color: var(--ok);
 }
 
 .field {

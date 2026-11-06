@@ -3,11 +3,19 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
-import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
+import {
+  createDoctorStore,
+  REFRESH_REQUESTED,
+  useDoctor,
+  useTauriEvent,
+  type DoctorState,
+  type DoctorStore,
+} from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { MENU_CHOICE, menuContext, useMenuContext, type MenuChoice } from "./menu";
 import { failureKey, FailuresContext, failuresOf } from "./needs-you";
+import { createOrphanScanStore, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
@@ -15,6 +23,7 @@ import { SelectableRow, SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
+import { SidebarFooter } from "./SidebarFooter";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
@@ -37,8 +46,19 @@ type View =
   | { kind: "doctor" }
   | { kind: "settings"; focusEditor: boolean };
 
-/** `doctor` is the store of the checks, a window makes its own unless a test hands it one. */
-export function App({ store, doctor: given }: { store: DaemonStore; doctor?: DoctorStore }) {
+/**
+ * `doctor` is the store of the checks and `orphans` the one of the last dry run of `Gc`, a window makes its own unless a
+ * test hands it one.
+ */
+export function App({
+  store,
+  doctor: given,
+  orphans: givenOrphans,
+}: {
+  store: DaemonStore;
+  doctor?: DoctorStore;
+  orphans?: OrphanScanStore;
+}) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [view, setCurrentView] = useState<View>({ kind: "overview" });
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -54,6 +74,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     [snapshot],
   );
   const [doctor] = useState(() => given ?? createDoctorStore());
+  const [orphanScan] = useState(() => givenOrphans ?? createOrphanScanStore());
   // The Worktree whose release sheet is open. The app holds it, since the status may stop reporting the Worktree once
   // it is released, and the screen that opened the sheet goes with it.
   const [releasing, setReleasing] = useState<{
@@ -74,20 +95,24 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     }
   }, [doctor, notRunning]);
 
-  // The release banner reads the machine checks, so they run once when the Daemon first answers, on no timer, rather
-  // than waiting for a visit to Doctor or a Refresh.
+  // The release banner reads the machine checks, and the sidebar counts the Orphans, so both run once when the Daemon
+  // first answers, on no timer, rather than waiting for a visit to Doctor or the Orphans or a Refresh.
   const answering = snapshot.kind === "status";
   const launched = useRef(false);
   useEffect(() => {
     if (answering && !launched.current) {
       launched.current = true;
       void doctor.run(null);
+      void orphanScan.run();
     }
-  }, [doctor, answering]);
+  }, [doctor, orphanScan, answering]);
 
-  // The menu refreshes without the window, so Rust says so.
+  // The menu refreshes without the window, so Rust says so. A scan of the Orphans asks the Daemon, so it waits for one.
   useTauriEvent(REFRESH_REQUESTED, () => {
     void doctor.refresh();
+    if (answering) {
+      void orphanScan.run();
+    }
   });
 
   // The native menu sends Settings, which `⌘,` triggers.
@@ -208,6 +233,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   const outside = view.kind === "outside";
   // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
   const wide = settings || orphans;
+  const doctorRun = useDoctor(doctor, null);
+  const orphanDryRun = useOrphanScan(orphanScan);
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
@@ -228,6 +255,9 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               orphans={orphans}
               outside={outside}
               outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
+              updatedAt={snapshot.kind === "status" ? snapshot.at : null}
+              doctor={doctorRun}
+              orphanScan={orphanDryRun}
               needsYou={snapshot.kind === "status" ? snapshot.needsYou.length : 0}
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
@@ -253,7 +283,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
             {view.kind === "settings" ? (
               <SettingsScreen focusEditor={view.focusEditor} />
             ) : view.kind === "orphans" && snapshot.kind === "status" ? (
-              <OrphansScreen />
+              <OrphansScreen store={orphanScan} />
             ) : view.kind === "outside" && snapshot.kind === "status" ? (
               <OutsideRepositoriesScreen
                 jobs={snapshot.report.jobs_outside_repositories}
@@ -261,7 +291,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               />
             ) : (
               <>
-                <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
+                <Toolbar snapshot={snapshot} store={store} doctor={doctor} orphans={orphanScan} />
                 {snapshot.kind === "status" ? (
                   <ReleaseBanner
                     store={doctor}
@@ -322,10 +352,12 @@ function Toolbar({
   snapshot,
   store,
   doctor,
+  orphans,
 }: {
   snapshot: DaemonSnapshot;
   store: DaemonStore;
   doctor: DoctorStore;
+  orphans: OrphanScanStore;
 }) {
   return (
     <header className="toolbar">
@@ -338,6 +370,10 @@ function Toolbar({
         onClick={() => {
           void store.refresh();
           void doctor.refresh();
+          // The scan asks the Daemon, which a Daemon that does not answer cannot give.
+          if (snapshot.kind === "status") {
+            void orphans.run();
+          }
         }}
       >
         Refresh
@@ -360,6 +396,9 @@ function Sidebar({
   orphans,
   outside,
   outsideJobs,
+  updatedAt,
+  doctor,
+  orphanScan,
   needsYou,
   onSelect,
   onOverview,
@@ -377,6 +416,12 @@ function Sidebar({
   outside: boolean;
   /** How many Jobs started outside any Repository, so the entry says whether it holds something. */
   outsideJobs: number;
+  /** When the poller last read a Status, `null` while none was read. */
+  updatedAt: number | null;
+  /** The last run of doctor for the machine, which the footer counts the problems of. */
+  doctor: DoctorState;
+  /** The last dry run of `Gc`, which the footer counts the Orphans of. */
+  orphanScan: OrphanScan;
   /** How many items are in Needs you, the same list the Overview pins on top. */
   needsYou: number;
   onSelect: (path: string) => void;
@@ -407,21 +452,17 @@ function Sidebar({
         <span className="row-name">Outside Repositories</span>
         {outsideJobs === 0 ? null : <span className="caption">{outsideJobs}</span>}
       </button>
-      <button
-        type="button"
-        className="row sidebar-foot"
-        aria-current={checking ? "true" : undefined}
-        onClick={onDoctor}
-      >
-        <span className="row-name">Doctor</span>
-      </button>
-      <button type="button" className="row" aria-current={orphans ? "true" : undefined} onClick={onOrphans}>
-        <span className="row-name">Orphans</span>
-      </button>
-      <button type="button" className="row" aria-current={settings ? "true" : undefined} onClick={onSettings}>
-        <span className="row-name">Settings</span>
-        <span className="caption">⌘,</span>
-      </button>
+      <SidebarFooter
+        updatedAt={updatedAt}
+        doctor={doctor}
+        orphans={orphanScan}
+        checking={checking}
+        orphansOpen={orphans}
+        settings={settings}
+        onDoctor={onDoctor}
+        onOrphans={onOrphans}
+        onSettings={onSettings}
+      />
     </>
   );
 }
