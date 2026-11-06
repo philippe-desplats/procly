@@ -550,6 +550,16 @@ describe("Needs you", () => {
       expect(within(needs).getAllByRole("listitem")).toHaveLength(3);
     });
 
+    it("is drawn as the count of a sidebar entry, not as a caption", async () => {
+      poller(answered(many, { needsYou: [API_FAILURE, FOREIGN, SECOND_FOREIGN] }));
+
+      render(<App store={createDaemonStore()} />);
+
+      const count = within(await overviewEntry()).getByText("3 need you");
+      expect(count).toHaveClass("row-count");
+      expect(count).not.toHaveClass("caption");
+    });
+
     it("says 'needs' for a single item", async () => {
       poller(answered(many, { needsYou: [FOREIGN] }));
 

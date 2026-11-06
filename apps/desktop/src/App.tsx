@@ -353,7 +353,7 @@ function Sidebar({
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
-        {needsYou === 0 ? null : <span className="caption">{needsYouCount(needsYou)}</span>}
+        {needsYou === 0 ? null : <span className="row-count">{needsYouCount(needsYou)}</span>}
       </button>
       <SidebarWorktrees
         snapshot={snapshot}
