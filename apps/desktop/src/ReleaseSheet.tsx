@@ -214,6 +214,8 @@ export function ReleaseSheet({
                 <p>Each Service and Job is stopped with its whole process tree.</p>
                 <p className="loss">What it held in memory is lost.</p>
               </>
+            ) : report.compose_services.length > 0 ? (
+              <p>No Service or Job stops in this Worktree.</p>
             ) : (
               <p>Nothing runs in this Worktree.</p>
             )}

@@ -262,6 +262,24 @@ describe("the Worktree release sheet", () => {
     expect(within(dialog).queryByText(/held in memory/)).not.toBeInTheDocument();
   });
 
+  it("does not say nothing runs when the release only lets go of a Compose service", async () => {
+    app({
+      previewing: () => ({
+        ...emptyReport,
+        compose_services: [{ service: "db", others: 1, grace_ms: 300_000 }],
+      }),
+    });
+
+    const dialog = await openSheet();
+    const sheet = within(dialog);
+
+    await sheet.findByRole("heading", { name: "Will let go of" });
+    expect(sheet.getByText("No Service or Job stops in this Worktree.")).toBeInTheDocument();
+    expect(sheet.queryByText(/Nothing runs in this Worktree/)).not.toBeInTheDocument();
+    expect(sheet.getByText("db: its container keeps running for 1 other Worktree")).toBeInTheDocument();
+    expect(dialog.querySelector(".loss")).toBeNull();
+  });
+
   it("draws no paragraph about ended items when the status holds none", async () => {
     app();
 
