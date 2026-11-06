@@ -166,23 +166,20 @@ body {
   white-space: nowrap;
 }
 
+/* The open entry takes the tint of the picked rows and keeps every colour it has, so a glyph is read by its shape and its tone. */
 .row[aria-current="true"] {
-  background: var(--accent);
-  color: #ffffff;
+  background: var(--selected);
 }
 
+/* A caption is the faintest text of the sidebar, and on the tint it would fall under 4.5:1, so it takes the muted colour. */
 .row[aria-current="true"] .caption {
-  color: inherit;
+  color: var(--muted);
 }
 
 .row-count {
   color: var(--muted);
   font-size: var(--size-small);
   font-variant-numeric: tabular-nums;
-}
-
-.row[aria-current="true"] .row-count {
-  color: inherit;
 }
 
 .row:focus-visible {
@@ -226,14 +223,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.row[aria-current="true"] .row-reason {
-  color: inherit;
-}
-
-.row[aria-current="true"] .row-reason .glyph {
-  color: inherit;
 }
 
 .item {

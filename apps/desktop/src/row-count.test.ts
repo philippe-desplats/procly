@@ -21,7 +21,7 @@ describe("the count on a sidebar entry", () => {
     expect(count).toMatch(/font-variant-numeric:\s*tabular-nums\s*;/);
   });
 
-  it("follows the text colour on the open entry, whose background is the accent", () => {
-    expect(declarations('.row[aria-current="true"] .row-count')).toMatch(/color:\s*inherit\s*;/);
+  it("keeps its own colour on the open entry, which is tinted and not filled", () => {
+    expect(declarations('.row[aria-current="true"] .row-count')).toBe("");
   });
 });

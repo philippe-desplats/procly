@@ -29,8 +29,8 @@ describe("the reason line under a Worktree", () => {
     expect(text).toMatch(/white-space:\s*nowrap\s*;/);
   });
 
-  it("follows the text colour on the open entry, whose background is the accent", () => {
-    expect(declarations('.row[aria-current="true"] .row-reason')).toMatch(/color:\s*inherit\s*;/);
-    expect(declarations('.row[aria-current="true"] .row-reason .glyph')).toMatch(/color:\s*inherit\s*;/);
+  it("keeps its own colours on the open entry, so that the cross of a failure still shows", () => {
+    expect(declarations('.row[aria-current="true"] .row-reason')).toBe("");
+    expect(declarations('.row[aria-current="true"] .row-reason .glyph')).toBe("");
   });
 });
