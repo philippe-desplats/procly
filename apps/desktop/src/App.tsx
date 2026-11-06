@@ -25,7 +25,7 @@ import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
 
 /**
  * What the center shows: the Overview of every Service, one Worktree, the Jobs outside any Repository, the Orphans,
- * Doctor, or Settings. The Jobs outside any Repository, the Orphans and Settings hide the inspector. `focusEditor`
+ * Doctor, or Settings. The Orphans and Settings hide the inspector. `focusEditor`
  * sends the developer to the editor field, because "Open in editor" found none set.
  */
 type View =
@@ -133,8 +133,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   const checking = view.kind === "doctor";
   const orphans = view.kind === "orphans";
   const outside = view.kind === "outside";
-  // A screen that is not about one Worktree has no inspector.
-  const wide = settings || orphans || outside;
+  // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
+  const wide = settings || orphans;
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
@@ -221,6 +221,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
             <Inspector
               current={current}
               selected={selected}
+              hint={outside ? "Select a Job." : "Select a Worktree."}
               at={snapshot.kind === "loading" ? 0 : snapshot.at}
               onChanged={refresh}
               onNeedEditor={() => {
@@ -631,12 +632,15 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
 function Inspector({
   current,
   selected,
+  hint,
   at,
   onChanged,
   onNeedEditor,
 }: {
   current: WorktreeStatus | null;
   selected: Selected | null;
+  /** What the inspector says while nothing is picked and no Worktree is open. */
+  hint: string;
   at: number;
   onChanged: () => void;
   onNeedEditor: () => void;
@@ -656,7 +660,7 @@ function Inspector({
     );
   }
   if (current === null) {
-    return <p className="caption">Select a Worktree.</p>;
+    return <p className="caption">{hint}</p>;
   }
   return (
     <>

@@ -7,6 +7,7 @@ import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
+import { SelectableRow } from "./selectable";
 import { jobWord } from "./state";
 import { State } from "./StateMark";
 
@@ -125,21 +126,27 @@ export function WorktreeScreen({
   );
 }
 
-/** A Job of the screen outside any Repository, with the directory it started in. Nothing here picks it or stops it. */
+/**
+ * A Job of the screen outside any Repository, with the directory it started in. A row picks it for the inspector,
+ * which follows its output as for any other Job.
+ */
 function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
   const marked = isSeen(seen, { kind: "job", id: job.id });
   return (
-    <li className="item" data-seen={marked ? "true" : undefined}>
+    <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
       <State {...jobWord(job)} />
       <span className="item-name mono">{job.command}</span>
       <span className="caption mono">{job.id}</span>
       <span className="caption mono">{job.cwd}</span>
       <SeenMark seen={marked} />
-    </li>
+    </SelectableRow>
   );
 }
 
-/** The Jobs started in a directory outside any Repository. They have no Worktree, so nothing here stops them. */
+/**
+ * The Jobs started in a directory outside any Repository. They have no Worktree, so nothing here stops them, and a row
+ * picks the Job for the inspector.
+ */
 export function OutsideRepositoriesScreen({ jobs, seen }: { jobs: JobStatus[]; seen: FailureKey[] }) {
   return (
     <section aria-label="Outside Repositories">

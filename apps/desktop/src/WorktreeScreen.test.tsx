@@ -442,6 +442,28 @@ describe("the Outside Repositories screen", () => {
     expect(within(center).queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
   });
 
+  it("picks a Job for the inspector, which follows its output from the directory it started in", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByText("make watch");
+    expect(within(inspector()).getByText("Select a Job.")).toBeInTheDocument();
+
+    const panel = within(pick(center, "running\\s*make watch"));
+
+    expect(panel.getByRole("heading", { name: "make watch" })).toBeInTheDocument();
+    expect(panel.getByText("c0ffee01")).toBeInTheDocument();
+    // A Job has no Stop, and a Job outside any Repository has no Worktree to open.
+    expect(panel.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
+    expect(panel.queryByRole("button", { name: "Open in editor" })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(calls.filter((call) => call.command === "follow_logs").map((call) => call.args)).toEqual([
+        expect.objectContaining({ name: "c0ffee01", cwd: "/p/tmp/scratch" }),
+      ]);
+    });
+  });
+
   it("says so when no Job started outside a Repository", async () => {
     app({}, { ...(scene as Extract<Response, { response: "status" }>), jobs_outside_repositories: [] });
     render(<App store={createDaemonStore()} />);
