@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface Settings {
   editor: string | null;
   terminal: string;
+  /** Whether the app shows a Dock icon while its window is open. */
+  show_in_dock: boolean;
 }
 
 /** The editors and terminals installed on this Mac, among the ones the app knows. */
@@ -17,7 +19,7 @@ export type OpenWith = "editor" | "terminal";
 
 /** Why a Worktree did not open. `no_editor` sends the developer to Settings, every other kind is shown as it is. */
 export interface OpenFailure {
-  kind: "no_editor" | "missing" | "launch" | "reveal" | "task";
+  kind: "no_editor" | "missing" | "launch" | "reveal" | "task" | "settings" | "login_item";
   message: string;
 }
 
@@ -28,6 +30,13 @@ export const loadSettings = (): Promise<Settings> => invoke("get_settings");
 
 /** Applies the settings at once. Rust writes them to `settings.json`. */
 export const saveSettings = (settings: Settings): Promise<void> => invoke("save_settings", { settings });
+
+/** Whether the system starts the app at login. It is read from the system every time, the app never stores it. */
+export const loadOpenAtLogin = (): Promise<boolean> => invoke("get_open_at_login");
+
+/** Asks Rust to switch Open at login, and answers what the system says afterwards. */
+export const saveOpenAtLogin = (enabled: boolean): Promise<boolean> =>
+  invoke("set_open_at_login", { enabled });
 
 export const detectedApps = (): Promise<DetectedApps> => invoke("detected_apps");
 

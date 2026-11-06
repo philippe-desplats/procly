@@ -20,12 +20,16 @@ tauri-build.workspace = true
 e2e = ["dep:tauri-plugin-wdio-webdriver"]
 
 [dependencies]
+# The time of the last state in the menu bar menu is the time of day of the machine.
+chrono.workspace = true
 # The `ts` feature exports the TypeScript types of the protocol while `cargo test` runs (ADR 0015).
 procly-client = { workspace = true, features = ["ts"] }
 # `rc` lets the last answer cross to the window while the poller shares it.
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 tauri.workspace = true
+# Open at login is a LaunchAgent the plugin writes, switched from Rust and never stored by the app.
+tauri-plugin-autostart.workspace = true
 # Rust opens a Worktree with the app the developer chose, the window itself holds no `opener` permission.
 tauri-plugin-opener.workspace = true
 tauri-plugin-wdio-webdriver = { workspace = true, optional = true }

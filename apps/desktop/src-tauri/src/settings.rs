@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fs, io};
 
 use serde::{Deserialize, Serialize, Serializer};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::atomic;
+use crate::window::{self, MainWindow};
 
 /// The terminal `Open in terminal` uses until the developer picks another one.
 const DEFAULT_TERMINAL: &str = "Terminal";
@@ -24,6 +25,8 @@ pub(crate) struct Settings {
     pub(crate) editor: Option<String>,
     /// The app "Open in terminal" uses.
     pub(crate) terminal: String,
+    /// Whether the app shows a Dock icon while its window is open. On unless the developer turns it off.
+    pub(crate) show_in_dock: bool,
 }
 
 impl Default for Settings {
@@ -31,6 +34,7 @@ impl Default for Settings {
         Self {
             editor: None,
             terminal: DEFAULT_TERMINAL.to_owned(),
+            show_in_dock: true,
         }
     }
 }
@@ -89,6 +93,7 @@ impl SettingsStore {
                 "" => DEFAULT_TERMINAL.to_owned(),
                 terminal => terminal.to_owned(),
             },
+            show_in_dock: settings.show_in_dock,
         };
         // Held while the file is written, so that two changes reach the file in the order they were applied.
         let mut held = self.held();
@@ -124,12 +129,21 @@ pub(crate) fn get_settings(store: State<'_, SettingsStore>) -> Settings {
 ///
 /// When the file cannot be written. The change holds until the app quits, and the window shows the error.
 #[tauri::command]
-pub(crate) async fn save_settings(settings: Settings, store: State<'_, SettingsStore>) -> Result<(), SettingsError> {
+pub(crate) async fn save_settings(
+    settings: Settings,
+    app: AppHandle,
+    store: State<'_, SettingsStore>,
+) -> Result<(), SettingsError> {
     let store = store.inner().clone();
+    let held = store.clone();
     // Writing the file blocks, so it leaves the task that serves the window.
-    tauri::async_runtime::spawn_blocking(move || store.set(settings))
+    let saved = tauri::async_runtime::spawn_blocking(move || store.set(settings))
         .await
-        .map_err(|error| SettingsError::task(&error))?
+        .map_err(|error| SettingsError::task(&error))?;
+    // The change holds even when the file could not be written, so the Dock icon follows it either way.
+    let window = MainWindow(&app);
+    window::dock_setting_changed(&window, held.get().show_in_dock, window.is_open());
+    saved
 }
 
 /// The settings could not be written, or the thread that writes them broke. The change holds until the app quits.
@@ -232,6 +246,7 @@ mod tests {
         Settings {
             editor: editor.map(str::to_owned),
             terminal: terminal.to_owned(),
+            show_in_dock: true,
         }
     }
 
@@ -308,6 +323,42 @@ mod tests {
             .expect("the write");
 
         assert_eq!(store.get(), chosen(Some("Sublime Text"), "WezTerm"));
+    }
+
+    #[test]
+    fn the_dock_icon_shows_while_the_window_is_open_until_the_developer_turns_it_off() {
+        let (_dir, path) = settings_file();
+
+        assert!(SettingsStore::open(path).get().show_in_dock);
+    }
+
+    #[test]
+    fn the_dock_setting_persists_in_the_file_and_is_read_back_after_a_restart() {
+        let (_dir, path) = settings_file();
+        let store = SettingsStore::open(path.clone());
+
+        store
+            .set(Settings {
+                show_in_dock: false,
+                ..Settings::default()
+            })
+            .expect("the write");
+
+        assert!(!store.get().show_in_dock);
+        assert!(!SettingsStore::open(path.clone()).get().show_in_dock);
+        let written = fs::read_to_string(path).expect("the file");
+        assert!(written.contains("\"show_in_dock\": false"), "{written}");
+    }
+
+    #[test]
+    fn a_file_written_before_the_dock_setting_existed_keeps_the_icon_on() {
+        let (_dir, path) = settings_file();
+        fs::write(&path, r#"{"editor": "Zed", "terminal": "iTerm"}"#).expect("the file is written");
+
+        let settings = SettingsStore::open(path).get();
+
+        assert!(settings.show_in_dock);
+        assert_eq!(settings.editor.as_deref(), Some("Zed"));
     }
 
     #[test]
