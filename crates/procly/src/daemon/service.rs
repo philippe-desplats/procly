@@ -224,7 +224,14 @@ impl Services {
             Arc::clone(&self.records),
             self.outputs.clone(),
         )?;
-        self.table().insert(key, Arc::clone(&service));
+        let mut table = self.table();
+        if let Relation::Group { covers } = relation {
+            // The Group now stands for the Services it covers: an ended row of one would offer a Restart that restarts
+            // the whole Group. None of them runs, the check above refused the start otherwise.
+            table.retain(|(path, service_name), _| path != worktree || !covers.contains(service_name));
+        }
+        table.insert(key, Arc::clone(&service));
+        drop(table);
         Ok(Start::Ready {
             service,
             outcome: StartOutcome::Started,

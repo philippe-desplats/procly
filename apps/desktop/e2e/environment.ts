@@ -149,6 +149,7 @@ export async function writeScene(name: string, service: string): Promise<Scene> 
 interface ReportedService {
   service: string;
   state: string;
+  port: number | null;
   started_at: number;
 }
 

@@ -19,6 +19,7 @@ describe("a Service restarted from the Worktree screen", () => {
     expect(up.code).toBe(0);
     const before = await reportedService(scene, scene.service);
     expect(before?.state).toBe("healthy");
+    expect(before?.port).not.toBeNull();
 
     // The scene's branch is `main`, which is what the sidebar names the Worktree.
     await browser.waitUntil(() => openWorktree("main"), { timeout: 60_000, interval: 500 });
@@ -32,5 +33,7 @@ describe("a Service restarted from the Worktree screen", () => {
       },
       { timeout: 60_000, interval: 500, timeoutMsg: "the Service did not start again with a new started_at" },
     );
+    const after = await reportedService(scene, scene.service);
+    expect(after?.port).toBe(before?.port);
   });
 });
