@@ -34,6 +34,7 @@ use needs_you::{Attention, FailureKey, Presented, SeenError};
 use notifications::Notifier;
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
+use tauri::menu::MenuEvent;
 use tauri::{AppHandle, Emitter as _, Manager as _, Runtime, State, Window, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 use tray::Tray;
@@ -122,6 +123,21 @@ fn window_state<R: Runtime>(window: &Window<R>) -> WindowState {
         flag(window.is_minimized()),
         flag(window.is_focused()),
     )
+}
+
+/// Handles a choice in the native menu: Refresh asks the poller for an answer at once, Settings opens that screen.
+fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
+    if menu::is_refresh(event) {
+        if let Some(poller) = app.try_state::<Poller>() {
+            poller.refresh();
+        }
+        // The window runs doctor again on a Refresh, and this one did not go through it.
+        let _ = app.emit(REFRESH_REQUESTED, ());
+    }
+    if menu::is_settings(event) {
+        // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
+        let _ = app.emit(OPEN_SETTINGS, ());
+    }
 }
 
 /// Handles a window event of the app. Closing the window hides it instead of ending the app, which stays in the menu
@@ -242,17 +258,7 @@ pub fn run() {
         // Banners are sent from Rust and the window is granted no permission of the plugin.
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
-            if menu::is_refresh(&event) {
-                if let Some(poller) = app.try_state::<Poller>() {
-                    poller.refresh();
-                }
-                // The window runs doctor again on a Refresh, and this one did not go through it.
-                let _ = app.emit(REFRESH_REQUESTED, ());
-            }
-            if menu::is_settings(&event) {
-                // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
-                let _ = app.emit(OPEN_SETTINGS, ());
-            }
+            on_menu_event(app, &event);
         })
         .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
