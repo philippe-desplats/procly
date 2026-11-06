@@ -20,7 +20,7 @@ import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectableRow, SelectionContext } from "./selectable";
-import { resolve, selectedKey, type Selected, type Selection } from "./selection";
+import { foreignId, resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
@@ -651,7 +651,7 @@ function lineKey(line: NeedsYou): string {
     case "job":
       return `job:${line.id}`;
     case "foreign":
-      return `foreign:${line.worktree}:${line.process.kind === "process" ? line.process.pid : line.process.name}`;
+      return `foreign:${line.worktree}:${foreignId(line.process)}`;
     default: {
       const unhandled: never = line;
       throw new Error(`unhandled line: ${JSON.stringify(unhandled)}`);
@@ -659,15 +659,15 @@ function lineKey(line: NeedsYou): string {
   }
 }
 
-/** The item a line of Needs you picks for the inspector, nothing for a Foreign process, which has no inspector yet. */
-function targetOfLine(line: NeedsYou): Selection | null {
+/** The item a line of Needs you picks for the inspector. */
+function targetOfLine(line: NeedsYou): Selection {
   switch (line.kind) {
     case "service":
       return { kind: "service", worktree: line.worktree, service: line.service };
     case "job":
       return { kind: "job", id: line.id };
     case "foreign":
-      return null;
+      return { kind: "foreign", worktree: line.worktree, process: foreignId(line.process) };
     default: {
       const unhandled: never = line;
       throw new Error(`unhandled line: ${JSON.stringify(unhandled)}`);
@@ -676,17 +676,12 @@ function targetOfLine(line: NeedsYou): Selection | null {
 }
 
 /**
- * A failure is picked like any row, and its inspector holds Mark as Seen. A line that is Seen leaves Needs you, so a
- * line here is never dimmed.
+ * A failure is picked like any row, and its inspector holds Mark as Seen. A Foreign process is picked too, and its
+ * inspector gives the command to stop it. A line that is Seen leaves Needs you, so a line here is never dimmed.
  */
 function NeedsYouLine({ line, labelOf }: { line: NeedsYou; labelOf: (path: string) => string }) {
-  const target = targetOfLine(line);
-  return target === null ? (
-    <li className="item">
-      <NeedsYouWhat line={line} labelOf={labelOf} />
-    </li>
-  ) : (
-    <SelectableRow target={target} seen={false}>
+  return (
+    <SelectableRow target={targetOfLine(line)} seen={false}>
       <NeedsYouWhat line={line} labelOf={labelOf} />
     </SelectableRow>
   );
@@ -767,6 +762,8 @@ function Inspector({
           <WorktreeActions
             key={selected.worktree.path}
             path={selected.worktree.path}
+            // The inspector of a Foreign process draws none of them, the Worktree menu still opens its Worktree.
+            buttons={selected.kind !== "foreign"}
             onNeedEditor={onNeedEditor}
           />
         )}
@@ -788,7 +785,16 @@ function Inspector({
  * Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. Open in Editor and
  * Open in Terminal of the menu bar open it here, so that a failure shows under the buttons.
  */
-function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: () => void }) {
+function WorktreeActions({
+  path,
+  buttons = true,
+  onNeedEditor,
+}: {
+  path: string;
+  /** Whether the buttons are drawn. Without them the menu bar still opens the Worktree, and a failure still shows. */
+  buttons?: boolean;
+  onNeedEditor: () => void;
+}) {
   const [error, setError] = useState<string | null>(null);
 
   function run(action: Promise<void>): void {
@@ -813,33 +819,37 @@ function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: (
 
   return (
     <div className="worktree-actions">
-      <button
-        type="button"
-        className="button"
-        onClick={() => {
-          run(openWorktree(path, "editor"));
-        }}
-      >
-        Open in editor
-      </button>
-      <button
-        type="button"
-        className="button"
-        onClick={() => {
-          run(openWorktree(path, "terminal"));
-        }}
-      >
-        Open in terminal
-      </button>
-      <button
-        type="button"
-        className="button"
-        onClick={() => {
-          run(revealWorktree(path));
-        }}
-      >
-        Reveal in Finder
-      </button>
+      {buttons ? (
+        <>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(openWorktree(path, "editor"));
+            }}
+          >
+            Open in editor
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(openWorktree(path, "terminal"));
+            }}
+          >
+            Open in terminal
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(revealWorktree(path));
+            }}
+          >
+            Reveal in Finder
+          </button>
+        </>
+      ) : null}
       {error === null ? null : (
         <p role="alert" className="error">
           {error}

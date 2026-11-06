@@ -64,7 +64,7 @@ const scene: Response = {
               end: { kind: "exited", code: 3 },
             },
           ],
-          foreign: [],
+          foreign: [{ kind: "process", pid: 4812, command: "node server.js", ports: [3000] }],
           containers: [{ service: "cache", project: "web_fix", compose: "redis", port: 18740 }],
         },
       ],
@@ -214,6 +214,18 @@ describe("the menu bar", () => {
       });
     });
 
+    // Procly neither follows nor stops a Foreign process, so the menu offers it nothing but the Worktree.
+    pick(center, /node server\.js/);
+    await waitFor(() => {
+      expect(lastContext(calls)).toEqual({
+        logs_command: null,
+        restart: false,
+        stop: false,
+        mark_seen: false,
+        worktree: PATH,
+      });
+    });
+
     pick(center, /sh -c/);
     await waitFor(() => {
       expect(lastContext(calls)).toEqual({
@@ -284,6 +296,21 @@ describe("the menu bar", () => {
     await choose("release");
     await waitFor(() => {
       expect(calls).toContainEqual({ command: "preview_release", args: { path: PATH } });
+    });
+  });
+
+  it("opens the Worktree of a Foreign process from the Worktree menu, though its inspector has no buttons", async () => {
+    const calls = rust();
+    const center = await openWorktree();
+    pick(center, /node server\.js/);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "node server.js" })).toBeInTheDocument();
+    });
+
+    await choose("open-in-terminal");
+
+    await waitFor(() => {
+      expect(calls).toContainEqual({ command: "open_worktree", args: { path: PATH, with: "terminal" } });
     });
   });
 });

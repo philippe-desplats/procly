@@ -295,6 +295,37 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* A short list of facts as a grid of a label and its value, as the inspector of a Foreign process draws it. */
+.facts-grid {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 6px 10px;
+  align-items: center;
+  margin: 12px 0;
+}
+
+.facts-grid dt {
+  color: var(--muted);
+}
+
+/* A port as a chip. */
+.port {
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--side);
+}
+
+.port + .port {
+  margin-left: 6px;
+}
+
+/* The line under the title of an inspector that names where the item is, close to the title. */
+.foreign-where {
+  margin: -8px 0 12px;
+}
+
 .toolbar {
   display: flex;
   align-items: baseline;

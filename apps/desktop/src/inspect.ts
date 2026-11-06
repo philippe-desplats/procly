@@ -3,7 +3,7 @@ import type { JobEnd } from "./protocol/JobEnd";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceEnd } from "./protocol/ServiceEnd";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
-import { jobWord, serviceWord, type StateWord } from "./state";
+import { foreignWord, jobWord, serviceWord, type StateWord } from "./state";
 
 /** What the inspector says of the selection: its state, what happened to it in words, and what to do next. */
 export interface Statement {
@@ -191,5 +191,17 @@ export function composeStatement(container: ContainerStatus): Statement {
     state: { word: "running", tone: "ok", glyph: "healthy" },
     summary: `Running as the Compose service ${container.compose} of the project ${container.project}.`,
     next: "Its output is a snapshot, press Refresh to read it again.",
+  };
+}
+
+/**
+ * What to say of a Foreign process: Procly did not start it and never stops it, so the developer does. It has no next
+ * step of its own, the inspector holds the command to stop it right under the sentence.
+ */
+export function foreignStatement(): Pick<Statement, "state" | "summary"> {
+  return {
+    state: foreignWord(),
+    summary:
+      "Started outside Procly in this Worktree, often by an agent the Guard did not steer. Procly never stops a process it did not start.",
   };
 }
