@@ -109,12 +109,20 @@ fn publish(app: &AppHandle, presented: &Presented) {
 /// Shows the banners an answer calls for. Every answer is followed, but a banner shows only while "Notify on failure"
 /// is on.
 fn notify(app: &AppHandle, notifier: &mut Notifier, presented: &Presented) {
-    let enabled = app
-        .try_state::<SettingsStore>()
-        .is_some_and(|settings| settings.get().notify_on_failure);
-    for banner in notifier.banners(presented, enabled) {
+    for banner in banners_to_show(app.try_state::<SettingsStore>().as_deref(), notifier, presented) {
         notifications::show(app, &banner);
     }
+}
+
+/// The banners an answer calls for while "Notify on failure" is on in `settings`, none while it is off or when the
+/// settings are not there yet. The answer is followed either way.
+fn banners_to_show(
+    settings: Option<&SettingsStore>,
+    notifier: &mut Notifier,
+    presented: &Presented,
+) -> Vec<notifications::Banner> {
+    let enabled = settings.is_some_and(|settings| settings.get().notify_on_failure);
+    notifier.banners(presented, enabled)
 }
 
 /// Asks the poller for a tick now. It never starts, stops or restarts anything.
@@ -319,6 +327,82 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use procly_client::protocol::{
+        RepositoryStatus, Response, ServiceEnd, ServiceState, ServiceStatus, StatusReport, Worktree, WorktreeStatus,
+    };
+
+    use super::*;
+    use crate::poller::{Answer, Update};
+
+    /// An answer whose Worktree runs the Services `services`.
+    fn answer(services: Vec<ServiceStatus>) -> Arc<Update> {
+        Arc::new(Update {
+            at_ms: 1,
+            answer: Answer::Response(Response::Status(StatusReport {
+                repositories: vec![RepositoryStatus {
+                    git_common_dir: PathBuf::from("/p/work/acme/web/.git"),
+                    worktrees: vec![WorktreeStatus {
+                        worktree: Worktree {
+                            path: PathBuf::from("/p/work/acme/web"),
+                            slug: "web".to_owned(),
+                            main: true,
+                        },
+                        branch: Some("main".to_owned()),
+                        listed: true,
+                        services,
+                        jobs: Vec::new(),
+                        foreign: Vec::new(),
+                        containers: Vec::new(),
+                    }],
+                }],
+                jobs_outside_repositories: Vec::new(),
+            })),
+        })
+    }
+
+    fn crashed(name: &str) -> ServiceStatus {
+        ServiceStatus {
+            service: name.to_owned(),
+            port: None,
+            reattached: false,
+            started_at: 1_000,
+            restartable: true,
+            state: ServiceState::Ended {
+                end: ServiceEnd::Exited { code: 1 },
+            },
+        }
+    }
+
+    /// The banners of a failure that enters "Needs you" after a first answer, with the settings in `settings`.
+    fn banners_with(settings: Option<&SettingsStore>) -> Vec<notifications::Banner> {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let attention = Attention::open(dir.path().join(SEEN_FILE));
+        let mut notifier = Notifier::default();
+        banners_to_show(settings, &mut notifier, &attention.present_update(answer(Vec::new())));
+        banners_to_show(
+            settings,
+            &mut notifier,
+            &attention.present_update(answer(vec![crashed("api")])),
+        )
+    }
+
+    #[test]
+    fn a_failure_makes_a_banner_only_while_notify_on_failure_is_on() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let settings = SettingsStore::open(dir.path().join(SETTINGS_FILE));
+        assert!(!settings.get().notify_on_failure, "the setting starts off");
+
+        assert_eq!(banners_with(Some(&settings)), []);
+        assert_eq!(banners_with(None), [], "no banner before the settings are read");
+
+        settings.set_notify_on_failure(true).expect("the setting is written");
+        let shown = banners_with(Some(&settings));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].title, "api: exited 1");
+    }
+
     /// The permissions the capability of the window lists, whether they are written as a name or with a scope.
     fn granted() -> Vec<String> {
         let capability: serde_json::Value =
