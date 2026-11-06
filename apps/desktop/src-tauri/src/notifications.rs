@@ -704,7 +704,7 @@ mod tests {
             service: "api".to_owned(),
             started_at: 1_000,
         };
-        let (after_mark, _) = rig.attention.mark(key, update);
+        let (after_mark, _) = rig.attention.mark(key, update, || None);
         assert_eq!(rig.notifier.banners(&after_mark, true), []);
         assert_eq!(rig.answer(both(), true), []);
     }

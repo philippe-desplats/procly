@@ -26,7 +26,7 @@ mod tray;
 mod tray_menu;
 mod window;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use daemon::DaemonClient;
 use dock::DockIcon;
@@ -72,18 +72,29 @@ async fn mark_seen(
     app: AppHandle,
     poller: State<'_, Poller>,
     attention: State<'_, Attention>,
+    publishing: State<'_, Publishing>,
 ) -> Result<(), SeenError> {
+    // The task that publishes the answers waits for this mark, so that neither publishes an older answer last.
+    let _turn = publishing.0.lock().await;
     let Some(last) = poller.last() else {
         return Ok(());
     };
     let attention = attention.inner().clone();
-    // Writing the file blocks, so it leaves the task that serves the window.
-    let (presented, saved) = tauri::async_runtime::spawn_blocking(move || attention.mark(key, last))
-        .await
-        .map_err(|error| SeenError::task(&error))?;
+    let updates = poller.subscribe();
+    // Writing the file blocks, so it leaves the task that serves the window. An answer that comes meanwhile is the one
+    // presented.
+    let (presented, saved) =
+        tauri::async_runtime::spawn_blocking(move || attention.mark(key, last, || updates.borrow().clone()))
+            .await
+            .map_err(|error| SeenError::task(&error))?;
     publish(&app, &presented);
     saved
 }
+
+/// One publish at a time: the answers of the poller and a mark as Seen are presented and published in turn, so that
+/// the last one the window and the menu receive holds the newest answer with the newest Seen set.
+#[derive(Debug, Clone, Default)]
+struct Publishing(Arc<tokio::sync::Mutex<()>>);
 
 /// Tells the window and the menu bar icon about an answer.
 fn publish(app: &AppHandle, presented: &Presented) {
@@ -219,6 +230,8 @@ pub fn run() {
             let mut updates = poller.subscribe();
             let handle = app.handle().clone();
             let seen = attention.clone();
+            let publishing = Publishing::default();
+            let turns = publishing.clone();
             // A click on a banner is reported only for banners shown after this, and none shows before the first answer.
             notifications::open_on_click(app.handle());
             tauri::async_runtime::spawn(async move {
@@ -226,6 +239,7 @@ pub fn run() {
                 while updates.changed().await.is_ok() {
                     let update = updates.borrow_and_update().clone();
                     if let Some(update) = update {
+                        let _turn = turns.0.lock().await;
                         let seen = seen.clone();
                         // Pruning the Seen set may write its file, which blocks.
                         let Ok((presented, saved)) =
@@ -244,6 +258,7 @@ pub fn run() {
             app.manage(client);
             app.manage(poller);
             app.manage(attention);
+            app.manage(publishing);
             app.manage(Follower::new());
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())

@@ -365,13 +365,20 @@ impl Attention {
     }
 
     /// The developer marked `key` as Seen. `last` is the answer on screen, which says whether `key` is a failure.
-    pub(crate) fn mark(&self, key: FailureKey, last: Arc<Update>) -> (Presented, Result<(), SeenError>) {
+    /// What is presented is the newest answer `newest` gives once the set is written, `last` when it gives none, so
+    /// that an answer that came during the write is not replaced by an older one.
+    pub(crate) fn mark(
+        &self,
+        key: FailureKey,
+        last: Arc<Update>,
+        newest: impl FnOnce() -> Option<Arc<Update>>,
+    ) -> (Presented, Result<(), SeenError>) {
         let mut seen = self.seen();
         let saved = match report_of(&last) {
             Some(report) if seen.mark(key, report) => seen.save(&self.inner.path),
             Some(_) | None => Ok(()),
         };
-        (Self::present(last, &seen), saved)
+        (Self::present(newest().unwrap_or(last), &seen), saved)
     }
 }
 
@@ -767,7 +774,7 @@ mod tests {
     fn the_seen_set_survives_a_restart_of_the_app() {
         let (_dir, path) = state_file();
         let first = Attention::open(path.clone());
-        let (_, saved) = first.mark(key(1_000), update(failed_at(1_000)));
+        let (_, saved) = first.mark(key(1_000), update(failed_at(1_000)), || None);
         saved.expect("the set is written, creating its directory");
         drop(first);
 
@@ -779,11 +786,41 @@ mod tests {
     }
 
     #[test]
+    fn a_mark_presents_the_answer_that_came_while_the_set_was_written_and_not_the_older_one() {
+        let (_dir, path) = state_file();
+        let attention = Attention::open(path);
+        let on_screen = update(failed_at(1_000));
+        // A tick during the write: the same failure, and a Job that failed since.
+        let mut later = failed_at(1_000);
+        later.jobs_outside_repositories = vec![job(
+            "j-red",
+            JobState::Ended {
+                end: JobEnd::Exited { code: 1 },
+            },
+        )];
+        let newer = Arc::new(Update {
+            at_ms: 2,
+            answer: Answer::Response(Response::Status(later)),
+        });
+
+        let (presented, _) = attention.mark(key(1_000), on_screen, || Some(Arc::clone(&newer)));
+
+        assert_eq!(presented.update().at_ms, 2);
+        // The mark holds on the newer answer too.
+        assert_eq!(presented.seen, [key(1_000)]);
+        assert!(
+            matches!(presented.needs_you[..], [NeedsYou::Job { ref id, .. }] if id == "j-red"),
+            "{:?}",
+            presented.needs_you
+        );
+    }
+
+    #[test]
     fn a_pruned_key_is_gone_from_the_file_too() {
         let (_dir, path) = state_file();
         let attention = Attention::open(path.clone());
         attention
-            .mark(key(1_000), update(failed_at(1_000)))
+            .mark(key(1_000), update(failed_at(1_000)), || None)
             .1
             .expect("the set is written");
 
@@ -799,7 +836,7 @@ mod tests {
         let (_dir, path) = state_file();
         let attention = Attention::open(path.clone());
         attention
-            .mark(key(1_000), update(failed_at(1_000)))
+            .mark(key(1_000), update(failed_at(1_000)), || None)
             .1
             .expect("the set is written");
         let bytes = fs::read(&path).expect("the set was written");
@@ -856,7 +893,7 @@ mod tests {
     fn the_window_receives_the_answer_unchanged_next_to_needs_you_and_the_seen_keys() {
         let (_dir, path) = state_file();
         let attention = Attention::open(path);
-        let (presented, _) = attention.mark(key(1_000), update(failed_at(1_000)));
+        let (presented, _) = attention.mark(key(1_000), update(failed_at(1_000)), || None);
 
         let json = serde_json::to_value(&presented).expect("the update serializes");
 
