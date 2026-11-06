@@ -106,9 +106,12 @@ function serviceEnd(end: ServiceEnd): Pick<Statement, "summary" | "next"> {
   }
 }
 
-/** What to say of a Service, from its state and, once it ended, how it ended. */
-export function serviceStatement(service: ServiceStatus): Statement {
-  const state = serviceWord(service);
+/**
+ * What to say of a Service, from its state and, once it ended, how it ended. `failed` says whether that end is a
+ * failure, as Rust decided it.
+ */
+export function serviceStatement(service: ServiceStatus, failed: boolean): Statement {
+  const state = serviceWord(service, failed);
   switch (service.state) {
     case "starting":
       return {
@@ -163,9 +166,9 @@ function jobEnd(end: JobEnd): Pick<Statement, "summary" | "next"> {
   }
 }
 
-/** What to say of a Job. */
-export function jobStatement(job: JobStatus): Statement {
-  const state = jobWord(job);
+/** What to say of a Job. `failed` says whether its end is a failure, as Rust decided it. */
+export function jobStatement(job: JobStatus, failed: boolean): Statement {
+  const state = jobWord(job, failed);
   switch (job.state) {
     case "running":
       return { state, summary: "Running.", next: "Follow its output below." };

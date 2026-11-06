@@ -6,7 +6,7 @@ import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon
 import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { failureKey } from "./needs-you";
+import { failureKey, FailuresContext, failuresOf } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
@@ -47,6 +47,11 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     setSelection(null);
   }, []);
   const control = useMemo(() => ({ selection, select: setSelection }), [selection]);
+  // Which ends are failures is Rust's to say, the rows and the inspector draw them from this.
+  const failures = useMemo(
+    () => (snapshot.kind === "status" ? failuresOf(snapshot.needsYou, snapshot.seen) : []),
+    [snapshot],
+  );
   const [doctor] = useState(() => given ?? createDoctorStore());
   // The Worktree whose release sheet is open. The app holds it, since the status may stop reporting the Worktree once
   // it is released, and the screen that opened the sheet goes with it.
@@ -163,107 +168,109 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
 
   return (
     <SelectionContext.Provider value={control}>
-      <div className={wide ? "window window-settings" : "window"}>
-        <nav className="pane sidebar" aria-label="Worktrees">
-          <h1 className="pane-title">Procly</h1>
-          <Sidebar
-            snapshot={snapshot}
-            repositories={repositories}
-            current={current}
-            settings={settings}
-            checking={checking}
-            orphans={orphans}
-            outside={outside}
-            outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
-            onSelect={(path) => {
-              setView({ kind: "worktree", path });
-            }}
-            onOverview={() => {
-              setView({ kind: "overview" });
-            }}
-            onOrphans={() => {
-              setView({ kind: "orphans" });
-            }}
-            onOutside={() => {
-              setView({ kind: "outside" });
-            }}
-            onDoctor={() => {
-              setView({ kind: "doctor" });
-            }}
-            onSettings={() => {
-              setView({ kind: "settings", focusEditor: false });
-            }}
-          />
-        </nav>
-        <main className="pane center">
-          {view.kind === "settings" ? (
-            <SettingsScreen focusEditor={view.focusEditor} />
-          ) : view.kind === "orphans" && snapshot.kind === "status" ? (
-            <OrphansScreen />
-          ) : view.kind === "outside" && snapshot.kind === "status" ? (
-            <OutsideRepositoriesScreen
-              jobs={snapshot.report.jobs_outside_repositories}
-              seen={snapshot.seen}
-            />
-          ) : (
-            <>
-              <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
-              {snapshot.kind === "status" ? (
-                <ReleaseBanner
-                  store={doctor}
-                  onOpenDoctor={() => {
-                    setView({ kind: "doctor" });
-                  }}
-                />
-              ) : null}
-              {view.kind === "doctor" ? (
-                <DoctorScreen store={doctor} />
-              ) : (
-                <Center
-                  snapshot={snapshot}
-                  current={current}
-                  store={store}
-                  doctor={doctor}
-                  onRelease={(worktree) => {
-                    setReleasing({
-                      path: worktree.path,
-                      label: worktreeLabel(worktree),
-                      listed: worktree.listed,
-                      ended: endedIn(worktree),
-                    });
-                  }}
-                />
-              )}
-            </>
-          )}
-        </main>
-        {wide ? null : (
-          <aside className="pane inspector" aria-label="Inspector">
-            <Inspector
+      <FailuresContext.Provider value={failures}>
+        <div className={wide ? "window window-settings" : "window"}>
+          <nav className="pane sidebar" aria-label="Worktrees">
+            <h1 className="pane-title">Procly</h1>
+            <Sidebar
+              snapshot={snapshot}
+              repositories={repositories}
               current={current}
-              selected={selected}
-              hint={outside ? "Select a Job." : "Select a Worktree."}
-              at={snapshot.kind === "loading" ? 0 : snapshot.at}
-              onChanged={refresh}
-              onNeedEditor={() => {
-                setView({ kind: "settings", focusEditor: true });
+              settings={settings}
+              checking={checking}
+              orphans={orphans}
+              outside={outside}
+              outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
+              onSelect={(path) => {
+                setView({ kind: "worktree", path });
+              }}
+              onOverview={() => {
+                setView({ kind: "overview" });
+              }}
+              onOrphans={() => {
+                setView({ kind: "orphans" });
+              }}
+              onOutside={() => {
+                setView({ kind: "outside" });
+              }}
+              onDoctor={() => {
+                setView({ kind: "doctor" });
+              }}
+              onSettings={() => {
+                setView({ kind: "settings", focusEditor: false });
               }}
             />
-          </aside>
+          </nav>
+          <main className="pane center">
+            {view.kind === "settings" ? (
+              <SettingsScreen focusEditor={view.focusEditor} />
+            ) : view.kind === "orphans" && snapshot.kind === "status" ? (
+              <OrphansScreen />
+            ) : view.kind === "outside" && snapshot.kind === "status" ? (
+              <OutsideRepositoriesScreen
+                jobs={snapshot.report.jobs_outside_repositories}
+                seen={snapshot.seen}
+              />
+            ) : (
+              <>
+                <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
+                {snapshot.kind === "status" ? (
+                  <ReleaseBanner
+                    store={doctor}
+                    onOpenDoctor={() => {
+                      setView({ kind: "doctor" });
+                    }}
+                  />
+                ) : null}
+                {view.kind === "doctor" ? (
+                  <DoctorScreen store={doctor} />
+                ) : (
+                  <Center
+                    snapshot={snapshot}
+                    current={current}
+                    store={store}
+                    doctor={doctor}
+                    onRelease={(worktree) => {
+                      setReleasing({
+                        path: worktree.path,
+                        label: worktreeLabel(worktree),
+                        listed: worktree.listed,
+                        ended: endedIn(worktree),
+                      });
+                    }}
+                  />
+                )}
+              </>
+            )}
+          </main>
+          {wide ? null : (
+            <aside className="pane inspector" aria-label="Inspector">
+              <Inspector
+                current={current}
+                selected={selected}
+                hint={outside ? "Select a Job." : "Select a Worktree."}
+                at={snapshot.kind === "loading" ? 0 : snapshot.at}
+                onChanged={refresh}
+                onNeedEditor={() => {
+                  setView({ kind: "settings", focusEditor: true });
+                }}
+              />
+            </aside>
+          )}
+        </div>
+        {releasing === null ? null : (
+          <ReleaseSheet
+            path={releasing.path}
+            label={releasing.label}
+            listed={releasing.listed}
+            ended={releasing.ended}
+            onClose={() => {
+              setReleasing(null);
+            }}
+            onChanged={refresh}
+          />
         )}
-      </div>
-      {releasing === null ? null : (
-        <ReleaseSheet
-          path={releasing.path}
-          label={releasing.label}
-          listed={releasing.listed}
-          ended={releasing.ended}
-          onClose={() => {
-            setReleasing(null);
-          }}
-          onChanged={refresh}
-        />
-      )}
+      </FailuresContext.Provider>
     </SelectionContext.Provider>
   );
 }
@@ -617,7 +624,8 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
       return (
         <>
           <span className="item-name">{line.service}</span>
-          <State {...serviceEndWord(line.end)} />
+          {/* A line of "Needs you" that is not a Foreign process is a failure: Rust put it there. */}
+          <State {...serviceEndWord(line.end, true)} />
           <span className="caption">{labelOf(line.worktree)}</span>
         </>
       );
@@ -625,7 +633,7 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
       return (
         <>
           <span className="item-name mono">{line.command}</span>
-          <State {...jobEndWord(line.end)} />
+          <State {...jobEndWord(line.end, true)} />
           <span className="caption mono">{line.id}</span>
           {line.worktree === null ? null : <span className="caption">{labelOf(line.worktree)}</span>}
         </>

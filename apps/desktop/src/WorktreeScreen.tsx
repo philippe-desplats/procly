@@ -2,7 +2,7 @@ import type { FailureKey } from "./daemon";
 import type { DoctorStore } from "./doctor";
 import { WorktreeChecks } from "./DoctorScreen";
 import { worktreeLabel, worktreeTooltip } from "./labels";
-import { isSeen } from "./needs-you";
+import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
@@ -131,10 +131,12 @@ export function WorktreeScreen({
  * which follows its output as for any other Job.
  */
 function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
-  const marked = isSeen(seen, { kind: "job", id: job.id });
+  const key: FailureKey = { kind: "job", id: job.id };
+  const marked = isSeen(seen, key);
+  const failed = useFailed(key);
   return (
     <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
-      <State {...jobWord(job)} />
+      <State {...jobWord(job, failed)} />
       <span className="item-name mono">{job.command}</span>
       <span className="caption mono">{job.id}</span>
       <span className="caption mono">{job.cwd}</span>

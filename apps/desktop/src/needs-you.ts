@@ -1,3 +1,5 @@
+import { createContext, useContext } from "react";
+
 import type { FailureKey, NeedsYou } from "./daemon";
 
 /** Whether two keys name the same failure: a Service that started again is another one. */
@@ -38,4 +40,21 @@ export function failureKey(line: NeedsYou): FailureKey | null {
       throw new Error(`unhandled line: ${JSON.stringify(unhandled)}`);
     }
   }
+}
+
+/**
+ * The failures of the answer on screen, as Rust decided them: every line of "Needs you" that is a failure, and every
+ * failure marked as Seen. An ended Service or Job that is in neither ended in a routine way.
+ */
+export function failuresOf(needsYou: NeedsYou[], seen: FailureKey[]): FailureKey[] {
+  return [...needsYou.flatMap((line) => failureKey(line) ?? []), ...seen];
+}
+
+/** The failures of the answer on screen, which the window provides to the rows and the inspector that draw an end. */
+export const FailuresContext = createContext<FailureKey[]>([]);
+
+/** Whether the item `key` names ended in a failure, as Rust said it. */
+export function useFailed(key: FailureKey | null): boolean {
+  const failures = useContext(FailuresContext);
+  return key !== null && failures.some((failure) => sameFailure(failure, key));
 }

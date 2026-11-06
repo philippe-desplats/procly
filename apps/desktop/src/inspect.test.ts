@@ -156,16 +156,16 @@ describe("what the inspector says of a Service", () => {
       "Restart it.",
     ],
   ])("%s", (_name, status, word, summary, next) => {
-    const statement = serviceStatement(status);
+    const statement = serviceStatement(status, false);
 
     expect(statement.state.word).toBe(word);
     expect(statement.summary).toBe(summary);
     expect(statement.next).toBe(next);
   });
 
-  it("calls a failure a failure and a routine end routine", () => {
-    expect(serviceStatement(ended({ kind: "exited", code: 3 })).state.tone).toBe("fail");
-    expect(serviceStatement(ended({ kind: "stopped" })).state.tone).toBe("ended");
+  it("calls an end a failure when Rust says it is one, and routine otherwise", () => {
+    expect(serviceStatement(ended({ kind: "exited", code: 3 }), true).state.tone).toBe("fail");
+    expect(serviceStatement(ended({ kind: "stopped" }), false).state.tone).toBe("ended");
   });
 });
 
@@ -201,7 +201,7 @@ describe("what the inspector says of a Job", () => {
       "Read its output to see where it was stuck.",
     ],
   ])("%s", (_name, status, word, summary, next) => {
-    const statement = jobStatement(status);
+    const statement = jobStatement(status, false);
 
     expect(statement.state.word).toBe(word);
     expect(statement.summary).toBe(summary);

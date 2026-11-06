@@ -436,6 +436,28 @@ describe("Needs you", () => {
     expect(within(needs).getAllByRole("button", { name: "Mark as Seen" })).toHaveLength(1);
   });
 
+  it("draws an ended row as a failure when Rust lists it, unseen or Seen, and as routine otherwise", async () => {
+    /** The tone of the state of the ended `api` row of the Overview. */
+    const toneOfApi = (): string | undefined =>
+      serviceRows()
+        .find((row) => row.textContent?.startsWith("apiexited 1"))
+        ?.querySelector(".state")
+        ?.className.split(" ")
+        .find((name) => name.startsWith("tone-"));
+
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("region", { name: "Overview" });
+    expect(toneOfApi()).toBe("tone-fail");
+
+    await tick(answered(many, { seen: [API_KEY] }));
+    expect(toneOfApi()).toBe("tone-fail");
+
+    // Rust lists no failure: the window keeps no list of its own that would call `exited 1` one.
+    await tick(answered(many));
+    expect(toneOfApi()).toBe("tone-ended");
+  });
+
   it("is left out when nothing needs the developer, however many Services ended", async () => {
     poller(answered(many));
 
