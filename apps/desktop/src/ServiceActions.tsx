@@ -2,6 +2,8 @@ import { useState } from "react";
 
 import { CopyBox } from "./CopyBox";
 import { failureMessage } from "./daemon";
+import { useTauriEvent } from "./doctor";
+import { MENU_CHOICE, type MenuChoice } from "./menu";
 import { commandIn, restartService, stopService } from "./services";
 
 /**
@@ -38,6 +40,18 @@ export function ServiceActions({
         onChanged();
       });
   }
+
+  // Restart and Stop of the menu bar act on the selection, which is this Service, as these buttons do.
+  useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
+    if (busy) {
+      return;
+    }
+    if (choice === "restart" && restartable) {
+      run(restartService(name, cwd));
+    } else if (choice === "stop" && running) {
+      run(stopService(name, cwd));
+    }
+  });
 
   return (
     <div className="controls">
