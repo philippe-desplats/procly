@@ -80,6 +80,7 @@ function reasonOfLine(line: NeedsYou): Reason {
       return { text: `${line.command} ${word}`, tone, glyph };
     }
     case "foreign": {
+      // The line reads alone under a label, with no process name before it, so it names the process instead of its state.
       const { tone, glyph } = foreignWord();
       return { text: "a process outside Procly", tone, glyph };
     }

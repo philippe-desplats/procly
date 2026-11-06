@@ -498,7 +498,7 @@ function SidebarWorktrees({
               <li key={worktree.path}>
                 <WorktreeEntry
                   worktree={worktree}
-                  open={worktree.path === current?.path}
+                  current={worktree.path === current?.path}
                   reason={reasonOf(needsYou, worktree.path)}
                   onSelect={onSelect}
                 />
@@ -514,12 +514,13 @@ function SidebarWorktrees({
 /** A Worktree of the sidebar: its label, and under it why it needs the developer when something does. */
 function WorktreeEntry({
   worktree,
-  open,
+  current,
   reason,
   onSelect,
 }: {
   worktree: WorktreeStatus;
-  open: boolean;
+  /** Whether this Worktree is the one open in the center. */
+  current: boolean;
   reason: Reason | null;
   onSelect: (path: string) => void;
 }) {
@@ -528,7 +529,7 @@ function WorktreeEntry({
       type="button"
       className="row row-worktree"
       title={worktreeTooltip(worktree)}
-      aria-current={open ? "true" : undefined}
+      aria-current={current ? "true" : undefined}
       onClick={() => {
         onSelect(worktree.path);
       }}

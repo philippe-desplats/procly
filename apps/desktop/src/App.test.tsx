@@ -749,7 +749,7 @@ describe("the reason line of a Worktree in the sidebar", () => {
     clearMocks();
   });
 
-  const WEB_LOGIN = "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end";
+  const LONG_BRANCH = "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end";
 
   /** The sidebar entry of the Worktree whose folder is `folder`, found by the tooltip that names it. */
   async function entryOf(folder: string): Promise<HTMLElement> {
@@ -779,7 +779,7 @@ describe("the reason line of a Worktree in the sidebar", () => {
     expect(reason).toHaveTextContent("api exited 1");
     expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
     // The label stays on its own line, above the reason.
-    expect(entry.querySelector(".row-line")).toHaveTextContent(WEB_LOGIN);
+    expect(entry.querySelector(".row-line")).toHaveTextContent(LONG_BRANCH);
     expect(entry.querySelector(".row-line")).not.toContainElement(reason as HTMLElement);
     // The glyph carries the state, the colour class repeats it.
     expect(reason).toHaveClass("tone-fail");
@@ -857,14 +857,38 @@ describe("the reason line of a Worktree in the sidebar", () => {
     ]);
   });
 
-  it("keeps the whole reason in one text node run so that it is cut at the end, never wrapped", async () => {
-    poller(answered(many, { needsYou: [API_FAILURE] }));
+  it("keeps a long reason whole in one cut-off text, for the stylesheet to end it with an ellipsis", async () => {
+    const long: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web-login",
+      id: "j-10",
+      command: "cargo test --workspace --locked -- --test-threads 1 --nocapture some_very_long_test_name",
+      end: { kind: "exited", code: 101 },
+    };
+    poller(answered(many, { needsYou: [long] }));
 
     render(<App store={createDaemonStore()} />);
 
     const reason = (await entryOf("web-login")).querySelector(".row-reason");
     expect(reason?.querySelectorAll(".row-reason-text")).toHaveLength(1);
-    expect(reason?.querySelector(".row-reason-text")).toHaveTextContent("api exited 1");
+    expect(reason?.querySelector(".row-reason-text")).toHaveTextContent(`${long.command} exited 101`);
+    // One line of its own: the reason is not part of the label's line, which the entry cuts separately.
+    expect(reason?.parentElement?.querySelectorAll(".row-line")).toHaveLength(1);
+  });
+
+  it("draws no reason line while the Daemon does not answer", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+    render(<App store={createDaemonStore()} />);
+    await entryOf("web-login");
+
+    await tick({
+      at_ms: AT,
+      failure: { kind: "unreachable", message: "no socket" },
+      needs_you: [],
+      seen: [],
+    });
+
+    expect(reasons()).toHaveLength(0);
   });
 
   it("names the reason in the accessible name of the entry, after the label", async () => {
@@ -873,7 +897,7 @@ describe("the reason line of a Worktree in the sidebar", () => {
     render(<App store={createDaemonStore()} />);
 
     const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
-    const entry = await within(sidebar).findByRole("button", { name: new RegExp(`^${WEB_LOGIN}`) });
+    const entry = await within(sidebar).findByRole("button", { name: new RegExp(`^${LONG_BRANCH}`) });
     expect(entry).toHaveAccessibleName(/api exited 1$/);
   });
 
@@ -892,7 +916,7 @@ describe("the reason line of a Worktree in the sidebar", () => {
     await waitFor(() => {
       expect(reasons()).toHaveLength(0);
     });
-    expect((await entryOf("web-login")).querySelector(".row-line")).toHaveTextContent(WEB_LOGIN);
+    expect((await entryOf("web-login")).querySelector(".row-line")).toHaveTextContent(LONG_BRANCH);
   });
 
   it("moves to the next item of the Worktree when the first one is marked as Seen", async () => {

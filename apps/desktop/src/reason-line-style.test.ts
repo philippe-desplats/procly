@@ -14,7 +14,8 @@ function declarations(selector: string): string {
 
 describe("the reason line under a Worktree", () => {
   // jsdom loads no stylesheet, so the look of the line is read from the CSS text.
-  it("is set in the small size and the muted colour, as the mockup draws it", () => {
+  it("is set in the 11 px size and the muted colour, as the mockup draws it", () => {
+    expect(declarations(":root")).toMatch(/--size-small:\s*11px\s*;/);
     const line = declarations(".row-reason");
     expect(line).toMatch(/font-size:\s*var\(--size-small\)\s*;/);
     expect(line).toMatch(/color:\s*var\(--muted\)\s*;/);
