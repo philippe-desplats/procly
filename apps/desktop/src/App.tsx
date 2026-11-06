@@ -181,6 +181,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               orphans={orphans}
               outside={outside}
               outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
+              needsYou={snapshot.kind === "status" ? snapshot.needsYou.length : 0}
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
               }}
@@ -303,6 +304,11 @@ function Toolbar({
   );
 }
 
+/** "3 need you", "1 needs you": the size of Needs you, said on the Overview entry. */
+function needsYouCount(count: number): string {
+  return `${count} ${count === 1 ? "needs" : "need"} you`;
+}
+
 function Sidebar({
   snapshot,
   repositories,
@@ -312,6 +318,7 @@ function Sidebar({
   orphans,
   outside,
   outsideJobs,
+  needsYou,
   onSelect,
   onOverview,
   onOrphans,
@@ -328,6 +335,8 @@ function Sidebar({
   outside: boolean;
   /** How many Jobs started outside any Repository, so the entry says whether it holds something. */
   outsideJobs: number;
+  /** How many items are in Needs you, the same list the Overview pins on top. */
+  needsYou: number;
   onSelect: (path: string) => void;
   onOverview: () => void;
   onOrphans: () => void;
@@ -344,7 +353,7 @@ function Sidebar({
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
-        <span className="caption">⌘0</span>
+        {needsYou === 0 ? null : <span className="caption">{needsYouCount(needsYou)}</span>}
       </button>
       <SidebarWorktrees
         snapshot={snapshot}
