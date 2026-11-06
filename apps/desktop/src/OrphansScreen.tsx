@@ -107,7 +107,7 @@ function ScanView({
                 return (
                   <li key={index} className="item item-block">
                     <span className="item-name">{line.what}</span>
-                    <span className="muted">{line.drops}</span>
+                    <span className={line.loss ? "loss" : "muted"}>{line.drops}</span>
                   </li>
                 );
               })}
@@ -157,6 +157,7 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
     return <ResultSheet report={state.report} onDone={onClose} />;
   }
   const pending = state.kind === "deleting";
+  const effects = collectionEffects(shown);
   return (
     <div className="overlay">
       <div
@@ -175,13 +176,13 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
         </h2>
         <p>Each one is deleted from the Daemon and from disk:</p>
         <ul aria-label="What it deletes" className="list">
-          {collectionEffects(shown).map((effect) => (
-            <li key={effect} className="item">
-              {effect}
+          {effects.map((effect) => (
+            <li key={effect.text} className={effect.loss ? "item loss" : "item"}>
+              {effect.text}
             </li>
           ))}
         </ul>
-        <p>This cannot be undone.</p>
+        <p className={effects.some((effect) => effect.loss) ? "loss" : undefined}>This cannot be undone.</p>
         <p className="caption">From a terminal, which deletes every Orphan it finds, not only these:</p>
         <CopyBox text={COLLECT_COMMAND} />
         {state.kind === "confirm" && state.error !== null ? (

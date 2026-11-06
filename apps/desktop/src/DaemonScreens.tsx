@@ -193,7 +193,7 @@ function RestartSheet({ store, onCancel }: { store: DaemonStore; onCancel: () =>
           Restart the Daemon
         </h2>
         <p>This stops the Daemon, then starts the one this app embeds.</p>
-        <p>Every running Service will stop, in every Worktree.</p>
+        <p className="loss">Every running Service will stop, in every Worktree.</p>
         <p className="caption">The same, from a terminal:</p>
         <CopyBox text={STOP_DAEMON} />
         {restart.error === null ? null : (

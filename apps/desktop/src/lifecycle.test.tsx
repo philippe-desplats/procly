@@ -303,6 +303,19 @@ describe("a Daemon of another protocol version", () => {
     expect(commands).toEqual(["last_update"]);
   });
 
+  it("shows the loss of a restart in red, and nothing else in the sheet", async () => {
+    rust(failed(mismatch(21)));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+
+    const sheet = within(await screen.findByRole("dialog", { name: "Restart the Daemon" }));
+    expect(sheet.getByText("Every running Service will stop, in every Worktree.")).toHaveClass("loss");
+    expect(sheet.getByText("This stops the Daemon, then starts the one this app embeds.")).not.toHaveClass(
+      "loss",
+    );
+  });
+
   it("restarts nothing when the developer cancels, or presses Escape", async () => {
     const commands = rust(failed(mismatch(21)));
     render(<App store={createDaemonStore()} />);

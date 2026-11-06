@@ -19,6 +19,8 @@ export interface OrphanGroup {
 export interface OrphanLine {
   what: string;
   drops: string;
+  /** Whether what it drops is data lost for good, which the window shows in red. */
+  loss: boolean;
 }
 
 function reportOf(response: Response): GcReport {
@@ -94,19 +96,44 @@ const EFFECTS: Record<Orphan["kind"], (count: number) => string> = {
       : `${count} volumes: removed, with the data in them.`,
 };
 
+/**
+ * Whether deleting an Orphan of a kind loses data that nothing regenerates: a database, a volume and the anonymous
+ * volumes of a container. A Lease only gives a port back, and the output and setup directories hold logs and files a
+ * Service writes again.
+ */
+const DROPS_DATA: Record<Orphan["kind"], boolean> = {
+  lease: false,
+  logical_resource: true,
+  output_directory: false,
+  setup_directory: false,
+  isolated_container: true,
+  isolated_volume: true,
+};
+
+/** One line of what a collection deletes, and whether the data it drops is lost for good. */
+export interface OrphanEffect {
+  text: string;
+  loss: boolean;
+}
+
 /** What a collection of `orphans` deletes: one line per kind it holds, with how many and the data they drop. */
-export function collectionEffects(orphans: Orphan[]): string[] {
+export function collectionEffects(orphans: Orphan[]): OrphanEffect[] {
   const counts = new Map<Orphan["kind"], number>();
   for (const orphan of orphans) {
     counts.set(orphan.kind, (counts.get(orphan.kind) ?? 0) + 1);
   }
   return (Object.keys(EFFECTS) as Orphan["kind"][]).flatMap((kind) => {
     const count = counts.get(kind) ?? 0;
-    return count === 0 ? [] : [EFFECTS[kind](count)];
+    return count === 0 ? [] : [{ text: EFFECTS[kind](count), loss: DROPS_DATA[kind] }];
   });
 }
 
 export function describeOrphan(orphan: Orphan): OrphanLine {
+  const line = describeKind(orphan);
+  return { ...line, loss: DROPS_DATA[orphan.kind] };
+}
+
+function describeKind(orphan: Orphan): Pick<OrphanLine, "what" | "drops"> {
   switch (orphan.kind) {
     case "lease":
       return {
