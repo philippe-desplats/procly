@@ -8,13 +8,13 @@ import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
 import { SelectableRow } from "./selectable";
-import { jobWord } from "./state";
+import { foreignWord, jobWord } from "./state";
 import { State } from "./StateMark";
 
 function ForeignRow({ process }: { process: ForeignProcess }) {
   return (
     <li className="item">
-      <span className="mark">Foreign</span>
+      <State {...foreignWord()} />
       <span className="item-name mono">{process.kind === "process" ? process.command : process.name}</span>
       {process.kind === "process" ? (
         <span className="caption">{`pid ${process.pid}`}</span>

@@ -187,6 +187,20 @@ describe("the Worktree screen", () => {
     }
   });
 
+  it("draws the glyph of each state in front of its row: a diamond, a ring, a dot", async () => {
+    app();
+
+    const center = await openWorktree();
+
+    /** The glyph drawn on the row that holds `text`. */
+    const glyphOn = (text: string): string | null | undefined =>
+      within(center).getByText(text).closest("li")?.querySelector("svg")?.getAttribute("data-glyph");
+    expect(glyphOn("node server.js")).toBe("foreign");
+    expect(glyphOn("legacy-db")).toBe("foreign");
+    expect(glyphOn("cache")).toBe("healthy");
+    expect(glyphOn("sleep 61")).toBe("job");
+  });
+
   it("draws no Lease and no Logical resource, only what the protocol returns", async () => {
     app();
 

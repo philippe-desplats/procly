@@ -426,8 +426,14 @@ describe("Needs you", () => {
       .map((line) => line.textContent);
     expect(lines).toEqual([
       "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-endMark as Seen",
-      "Foreignnode server.js:3000main",
+      "started outside Proclynode server.js:3000main",
     ]);
+    // The same glyph as everywhere else: a cross for the failure, a diamond for the Foreign process.
+    expect(
+      within(needs)
+        .getAllByRole("listitem")
+        .map((line) => line.querySelector("svg")?.getAttribute("data-glyph")),
+    ).toEqual(["failure", "foreign"]);
     const firstService = within(overviewPane).getAllByText("healthy")[0];
     expect(
       needs.compareDocumentPosition(firstService as Node) & Node.DOCUMENT_POSITION_FOLLOWING,

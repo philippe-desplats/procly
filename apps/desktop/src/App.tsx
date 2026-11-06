@@ -19,7 +19,7 @@ import { State } from "./StateMark";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ContainerRow, RemovedMark, ServiceRow } from "./Rows";
-import { jobEndWord, serviceEndWord } from "./state";
+import { foreignWord, jobEndWord, serviceEndWord } from "./state";
 import { formatMoment } from "./time";
 import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
 
@@ -641,7 +641,7 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
     case "foreign":
       return (
         <>
-          <span className="mark">Foreign</span>
+          <State {...foreignWord()} />
           <span className="item-name mono">
             {line.process.kind === "process" ? line.process.command : line.process.name}
           </span>

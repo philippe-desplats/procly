@@ -81,7 +81,7 @@ export function ContainerRow({
       seen={false}
     >
       <span className="item-name">{container.service}</span>
-      <State word="running" tone="ok" />
+      <State word="running" tone="ok" glyph="healthy" />
       {container.port === null ? null : <span className="caption">{`:${container.port}`}</span>}
     </SelectableRow>
   );

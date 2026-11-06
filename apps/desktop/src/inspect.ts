@@ -188,7 +188,7 @@ export function jobStatement(job: JobStatus, failed: boolean): Statement {
 /** What to say of an Isolated Compose service: it is listed because it runs. */
 export function composeStatement(container: ContainerStatus): Statement {
   return {
-    state: { word: "running", tone: "ok" },
+    state: { word: "running", tone: "ok", glyph: "healthy" },
     summary: `Running as the Compose service ${container.compose} of the project ${container.project}.`,
     next: "Its output is a snapshot, press Refresh to read it again.",
   };

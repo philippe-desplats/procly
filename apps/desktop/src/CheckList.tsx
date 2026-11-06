@@ -8,17 +8,17 @@ import type { StateWord } from "./state";
 function statusWord(status: CheckStatus): StateWord {
   switch (status) {
     case "failed":
-      return { word: "failed", tone: "fail" };
+      return { word: "failed", tone: "fail", glyph: "failure" };
     case "warning":
-      return { word: "warning", tone: "warn" };
+      return { word: "warning", tone: "warn", glyph: "warning" };
     case "passed":
-      return { word: "passed", tone: "ok" };
+      return { word: "passed", tone: "ok", glyph: "passed" };
     case "skipped":
-      return { word: "skipped", tone: "muted" };
+      return { word: "skipped", tone: "muted", glyph: "skipped" };
     default: {
       // A status a newer procly may add counts as no problem, as the JSON reference says.
       const unknown: never = status;
-      return { word: String(unknown), tone: "muted" };
+      return { word: String(unknown), tone: "muted", glyph: "skipped" };
     }
   }
 }
