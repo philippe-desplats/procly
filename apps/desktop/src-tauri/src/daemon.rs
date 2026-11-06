@@ -31,8 +31,8 @@ pub(crate) enum SetupError {
 
 /// What a Tauri command fails with. It reaches the webview as a rejected promise holding a [`ClientFailure`], or the
 /// same shape with another kind: `task` when the thread that talks to the Daemon broke, `sidecar` when the embedded
-/// `procly` cannot run, `daemon_stop` when `procly daemon stop` failed, and `protocol_mismatch` when the Daemon
-/// speaks another protocol version.
+/// `procly` cannot run, `daemon_stop` when `procly daemon stop` failed, `doctor` when `procly doctor` gave no document,
+/// and `protocol_mismatch` when the Daemon speaks another protocol version.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CommandError {
     #[error(transparent)]
@@ -48,6 +48,9 @@ pub(crate) enum CommandError {
     /// `procly daemon stop` failed, `message` is what it wrote on its standard error.
     #[error("{message}")]
     Stop { message: String },
+    /// `procly doctor` could not give its document, `message` says why.
+    #[error("{message}")]
+    Doctor { message: String },
 }
 
 impl CommandError {
@@ -80,6 +83,11 @@ impl Serialize for CommandError {
             .serialize(serializer),
             Self::Stop { .. } => OtherFailure {
                 kind: "daemon_stop",
+                message: self.to_string(),
+            }
+            .serialize(serializer),
+            Self::Doctor { .. } => OtherFailure {
+                kind: "doctor",
                 message: self.to_string(),
             }
             .serialize(serializer),

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "result": "problems",
+  "checks": [
+    { "name": "docker_compose", "status": "passed", "message": "docker compose 2.29.1", "fix": null },
+    {
+      "name": "daemon",
+      "status": "passed",
+      "message": "the Daemon answers and runs procly 0.5.0",
+      "fix": null
+    },
+    {
+      "name": "session_unit",
+      "status": "passed",
+      "message": "the Session unit is installed and loaded",
+      "fix": null
+    },
+    {
+      "name": "state_documents",
+      "status": "passed",
+      "message": "every state document can be read",
+      "fix": null
+    },
+    {
+      "name": "configuration",
+      "status": "failed",
+      "message": "/p/work/acme/web-fix/procly.toml is invalid: unknown key `servcies`",
+      "fix": "${EDITOR:-vi} /p/work/acme/web-fix/procly.toml"
+    },
+    {
+      "name": "guard",
+      "status": "skipped",
+      "message": "/p/work/acme/web-fix/.claude/settings.json holds no Guard, `procly agent install` writes it if you want your agents steered",
+      "fix": null
+    },
+    {
+      "name": "portless",
+      "status": "skipped",
+      "message": "settings.portless is not on, nothing calls portless",
+      "fix": null
+    },
+    {
+      "name": "worktrunk_hooks",
+      "status": "passed",
+      "message": "the Worktrunk hooks are the ones procly recorded",
+      "fix": null
+    },
+    {
+      "name": "leased_ports",
+      "status": "passed",
+      "message": "every port a Lease holds is free or its own",
+      "fix": null
+    },
+    { "name": "orphans", "status": "passed", "message": "no Orphan", "fix": null },
+    {
+      "name": "portless_aliases",
+      "status": "passed",
+      "message": "every Portless alias Procly made is held by a Lease",
+      "fix": null
+    }
+  ],
+  "prompt": "`procly doctor` checked this machine and found 1 problem listed below.\n\n1. configuration: /p/work/acme/web-fix/procly.toml is invalid\n   Commands:\n   - ${EDITOR:-vi} /p/work/acme/web-fix/procly.toml\n",
+  "agent": null
+}

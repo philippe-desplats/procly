@@ -2,6 +2,8 @@ import { useState } from "react";
 
 import { CopyBox } from "./CopyBox";
 import { failureMessage, type DaemonStore } from "./daemon";
+import type { DoctorStore } from "./doctor";
+import { ChecksWithoutDaemon } from "./DoctorScreen";
 
 /** The command that has a session manager keep the Daemon running, which the developer runs in a terminal. */
 const INSTALL_UNIT = "procly unit install";
@@ -29,9 +31,10 @@ function useAction(run: () => Promise<void>): { start: () => void; pending: bool
 
 /**
  * No Daemon answers. The app never starts one on its own: the developer does, with the button, and the window
- * recovers on the next answer of the poller.
+ * recovers on the next answer of the poller. Beside the button, the checks of the installation that run without a
+ * Daemon, which doctor ran when the app entered this state.
  */
-export function DaemonNotRunning({ store }: { store: DaemonStore }) {
+export function DaemonNotRunning({ store, doctor }: { store: DaemonStore; doctor: DoctorStore }) {
   const start = useAction(() => store.startDaemon());
   return (
     <section>
@@ -49,6 +52,7 @@ export function DaemonNotRunning({ store }: { store: DaemonStore }) {
       )}
       <p className="caption">To have the Daemon start with every session, run in a terminal:</p>
       <CopyBox text={INSTALL_UNIT} />
+      <ChecksWithoutDaemon store={doctor} />
     </section>
   );
 }
