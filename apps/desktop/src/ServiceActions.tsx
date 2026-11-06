@@ -3,7 +3,8 @@ import { useState } from "react";
 import { CopyBox } from "./CopyBox";
 import { failureMessage } from "./daemon";
 import { useTauriEvent } from "./doctor";
-import { MENU_CHOICE, type MenuChoice } from "./menu";
+import { MENU_CHOICE } from "./menu";
+import type { MenuChoice } from "./protocol/MenuChoice";
 import { commandIn, restartService, stopService } from "./services";
 
 /**

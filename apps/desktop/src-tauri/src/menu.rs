@@ -7,12 +7,17 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{HELP_SUBMENU_ID, Menu, MenuEvent, MenuItem, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID};
 use tauri::{AppHandle, State, Wry};
 
 /// An item of the menu bar the app handles itself, as opposed to the standard items macOS handles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The window receives a choice it carries out as its id, and reads it through the type ts-rs exports from this enum
+/// (ADR 0015), so the ids cannot drift between the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export, rename = "MenuChoice"))]
 pub(crate) enum Choice {
     /// Opens Settings.
     Settings,
@@ -526,6 +531,18 @@ mod tests {
             assert_eq!(Choice::from_id(choice.id()), Some(choice));
         }
         assert_eq!(Choice::from_id("about"), None);
+    }
+
+    #[test]
+    fn every_choice_reaches_the_window_as_the_id_of_its_item() {
+        // The window reads the choice through the type ts-rs exports from this enum, so its ids are the ones of Rust.
+        for choice in CHOICES {
+            assert_eq!(
+                serde_json::to_value(choice).expect("a choice serializes"),
+                serde_json::Value::from(choice.id()),
+                "{choice:?}"
+            );
+        }
     }
 
     #[test]

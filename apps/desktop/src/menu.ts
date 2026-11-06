@@ -8,20 +8,11 @@ import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import type { Selected } from "./selection";
 import { inWorktree } from "./shell";
 
-/** The event Rust sends when an item of the menu bar the window carries out is chosen. */
+/**
+ * The event Rust sends when an item of the menu bar the window carries out is chosen, with the id of the item as a
+ * `MenuChoice`, the type ts-rs exports from the items of Rust.
+ */
 export const MENU_CHOICE = "menu-choice";
-
-/** The items of the menu bar the window carries out, by the id Rust gives them. */
-export type MenuChoice =
-  | "overview"
-  | "doctor"
-  | "orphans"
-  | "restart"
-  | "stop"
-  | "mark-seen"
-  | "open-in-editor"
-  | "open-in-terminal"
-  | "release";
 
 /** What holds while nothing is selected, which is also what Rust starts from. */
 const NOTHING: MenuContext = {

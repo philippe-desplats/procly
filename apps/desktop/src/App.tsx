@@ -14,7 +14,7 @@ import {
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { GlyphMark } from "./Glyph";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { MENU_CHOICE, menuContext, useMenuContext, type MenuChoice } from "./menu";
+import { MENU_CHOICE, menuContext, useMenuContext } from "./menu";
 import { failureKey, FailuresContext, failuresOf, reasonOf, type Reason } from "./needs-you";
 import { createOrphanScanStore, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import { OrphansScreen } from "./OrphansScreen";
@@ -27,6 +27,7 @@ import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
+import type { MenuChoice } from "./protocol/MenuChoice";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ContainerRow, RemovedMark, ServiceRow } from "./Rows";
@@ -220,6 +221,12 @@ export function App({
       case "stop":
       case "open-in-editor":
       case "open-in-terminal":
+        break;
+      // Rust carries these out without the window, so it never sends them.
+      case "settings":
+      case "refresh":
+      case "copy-logs-command":
+      case "copy-path":
         break;
       default: {
         const unhandled: never = choice;
