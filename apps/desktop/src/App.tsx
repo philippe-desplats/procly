@@ -6,13 +6,14 @@ import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon
 import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { FailuresContext, failuresOf } from "./needs-you";
+import { MENU_CHOICE, menuContext, useMenuContext, type MenuChoice } from "./menu";
+import { failureKey, FailuresContext, failuresOf } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectableRow, SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
-import { SelectedPanel, WorktreeNames } from "./SelectedPanel";
+import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
@@ -89,18 +90,6 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     void doctor.refresh();
   });
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if ((event.metaKey || event.ctrlKey) && event.key === "0") {
-        setView({ kind: "overview" });
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [setView]);
-
   // The native menu sends Settings, which `⌘,` triggers.
   useEffect(() => {
     let stopped = false;
@@ -154,6 +143,64 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
 
   // The Daemon may stop reporting what was picked, an ended Job it evicted for one.
   const selected = snapshot.kind === "status" ? resolve(selection, snapshot.report) : null;
+  // The Worktree the inspector offers to open, which the Worktree menu acts on.
+  const inspected = selected === null ? current : selected.worktree;
+  const failure = selected === null ? null : failureKeyOf(selected);
+  useMenuContext(
+    menuContext(
+      selected,
+      current,
+      failure,
+      snapshot.kind === "status" ? snapshot.needsYou.flatMap((line) => failureKey(line) ?? []) : [],
+    ),
+  );
+  const release = (worktree: WorktreeStatus): void => {
+    setReleasing({
+      path: worktree.path,
+      label: worktreeLabel(worktree),
+      listed: worktree.listed,
+      ended: endedIn(worktree),
+    });
+  };
+
+  const onMarkSeen = (key: FailureKey): void => {
+    // Rust answers with a new update, so a mark that could not be saved still shows.
+    store.markSeen(key).catch(() => undefined);
+  };
+
+  // Restart, Stop and the opening of the Worktree are carried out by the inspector, which shows how they went.
+  useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
+    switch (choice) {
+      case "overview":
+        setView({ kind: "overview" });
+        break;
+      case "doctor":
+        setView({ kind: "doctor" });
+        break;
+      case "orphans":
+        setView({ kind: "orphans" });
+        break;
+      case "mark-seen":
+        if (failure !== null) {
+          onMarkSeen(failure);
+        }
+        break;
+      case "release":
+        if (inspected !== null) {
+          release(inspected);
+        }
+        break;
+      case "restart":
+      case "stop":
+      case "open-in-editor":
+      case "open-in-terminal":
+        break;
+      default: {
+        const unhandled: never = choice;
+        throw new Error(`unhandled choice: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  });
 
   const settings = view.kind === "settings";
   const checking = view.kind === "doctor";
@@ -165,17 +212,13 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
   };
-  const onMarkSeen = (key: FailureKey): void => {
-    // Rust answers with a new update, so a mark that could not be saved still shows.
-    store.markSeen(key).catch(() => undefined);
-  };
 
   return (
     <SelectionContext.Provider value={control}>
       <FailuresContext.Provider value={failures}>
         <div className={wide ? "window window-settings" : "window"}>
           <nav className="pane sidebar" aria-label="Worktrees">
-            <h1 className="pane-title">Procly</h1>
+            <div className="drag-strip" data-tauri-drag-region />
             <Sidebar
               snapshot={snapshot}
               repositories={repositories}
@@ -185,6 +228,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               orphans={orphans}
               outside={outside}
               outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
+              needsYou={snapshot.kind === "status" ? snapshot.needsYou.length : 0}
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
               }}
@@ -234,14 +278,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
                     current={current}
                     store={store}
                     doctor={doctor}
-                    onRelease={(worktree) => {
-                      setReleasing({
-                        path: worktree.path,
-                        label: worktreeLabel(worktree),
-                        listed: worktree.listed,
-                        ended: endedIn(worktree),
-                      });
-                    }}
+                    onRelease={release}
                   />
                 )}
               </>
@@ -309,6 +346,11 @@ function Toolbar({
   );
 }
 
+/** "3 need you", "1 needs you": the size of Needs you, said on the Overview entry. */
+function needsYouCount(count: number): string {
+  return `${count} ${count === 1 ? "needs" : "need"} you`;
+}
+
 function Sidebar({
   snapshot,
   repositories,
@@ -318,6 +360,7 @@ function Sidebar({
   orphans,
   outside,
   outsideJobs,
+  needsYou,
   onSelect,
   onOverview,
   onOrphans,
@@ -334,6 +377,8 @@ function Sidebar({
   outside: boolean;
   /** How many Jobs started outside any Repository, so the entry says whether it holds something. */
   outsideJobs: number;
+  /** How many items are in Needs you, the same list the Overview pins on top. */
+  needsYou: number;
   onSelect: (path: string) => void;
   onOverview: () => void;
   onOrphans: () => void;
@@ -350,7 +395,7 @@ function Sidebar({
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
-        <span className="caption">⌘0</span>
+        {needsYou === 0 ? null : <span className="row-count">{needsYouCount(needsYou)}</span>}
       </button>
       <SidebarWorktrees
         snapshot={snapshot}
@@ -705,7 +750,10 @@ function Inspector({
   );
 }
 
-/** Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. */
+/**
+ * Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. Open in Editor and
+ * Open in Terminal of the menu bar open it here, so that a failure shows under the buttons.
+ */
 function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: () => void }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -720,6 +768,14 @@ function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: (
       }
     });
   }
+
+  useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
+    if (choice === "open-in-editor") {
+      run(openWorktree(path, "editor"));
+    } else if (choice === "open-in-terminal") {
+      run(openWorktree(path, "terminal"));
+    }
+  });
 
   return (
     <div className="worktree-actions">

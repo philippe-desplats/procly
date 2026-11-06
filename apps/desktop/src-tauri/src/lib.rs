@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use daemon::DaemonClient;
 use dock::DockIcon;
 use follow::{Follower, WINDOW_VISIBLE};
+use menu::{Choice, MenuBar};
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use notifications::Notifier;
 use poller::{Poller, WindowState};
@@ -47,6 +48,9 @@ const DAEMON_UPDATE: &str = "daemon-update";
 
 /// The event that tells the window the menu refreshed, so that it runs doctor again as it does on its own Refresh.
 const REFRESH_REQUESTED: &str = "refresh-requested";
+
+/// The event that carries a choice of the menu bar the window carries out, as the id of its item.
+const MENU_CHOICE: &str = "menu-choice";
 
 /// The file the Seen failures survive a restart in, inside the data directory of the app.
 const SEEN_FILE: &str = "seen.json";
@@ -146,18 +150,46 @@ fn window_state<R: Runtime>(window: &Window<R>) -> WindowState {
     )
 }
 
-/// Handles a choice in the native menu: Refresh asks the poller for an answer at once, Settings opens that screen.
+/// Handles a choice in the native menu bar. Refresh asks the poller for an answer at once, the copy items copy what the
+/// window last said the selection holds, and every other item is carried out by the window.
 fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
-    if menu::is_refresh(event) {
-        if let Some(poller) = app.try_state::<Poller>() {
-            poller.refresh();
+    let Some(choice) = Choice::of(event) else {
+        return;
+    };
+    match choice {
+        Choice::Refresh => {
+            if let Some(poller) = app.try_state::<Poller>() {
+                poller.refresh();
+            }
+            // The window runs doctor again on a Refresh, and this one did not go through it.
+            let _ = app.emit(REFRESH_REQUESTED, ());
         }
-        // The window runs doctor again on a Refresh, and this one did not go through it.
-        let _ = app.emit(REFRESH_REQUESTED, ());
-    }
-    if menu::is_settings(event) {
-        // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
-        let _ = app.emit(OPEN_SETTINGS, ());
+        Choice::Settings => {
+            // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
+            let _ = app.emit(OPEN_SETTINGS, ());
+        }
+        Choice::CopyLogsCommand | Choice::CopyPath => {
+            let copied = app
+                .try_state::<MenuBar>()
+                .and_then(|bar| bar.context().copied(choice).map(ToOwned::to_owned));
+            if let Some(text) = copied
+                && let Err(error) = clipboard::copy(&text)
+            {
+                eprintln!("procly: cannot copy {text}: {error}");
+            }
+        }
+        Choice::Overview
+        | Choice::Doctor
+        | Choice::Orphans
+        | Choice::Restart
+        | Choice::Stop
+        | Choice::MarkSeen
+        | Choice::OpenInEditor
+        | Choice::OpenInTerminal
+        | Choice::Release => {
+            // A window that is gone has nothing selected to act on.
+            let _ = app.emit(MENU_CHOICE, choice.id());
+        }
     }
 }
 
@@ -269,7 +301,7 @@ pub fn run() {
             app.manage(attention);
             app.manage(publishing);
             app.manage(Follower::new());
-            app.set_menu(menu::build(app.handle())?)?;
+            app.manage(menu::install(app.handle())?);
             Ok(())
         })
         // The window reopens where it was left, with no visible setting. Whether it shows is not part of what is
@@ -282,14 +314,13 @@ pub fn run() {
         .plugin(login_item::plugin())
         // Banners are sent from Rust and the window is granted no permission of the plugin.
         .plugin(tauri_plugin_notification::init())
-        .on_menu_event(|app, event| {
-            on_menu_event(app, &event);
-        })
+        .on_menu_event(|app, event| on_menu_event(app, &event))
         .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             last_update,
             mark_seen,
             refresh,
+            menu::set_menu_context,
             follow::follow_logs,
             follow::stop_follow,
             follow::service_logs,
@@ -474,6 +505,31 @@ mod tests {
 
         assert_eq!(config["app"]["windows"][0]["visible"], false);
         assert_eq!(config["app"]["windows"][0]["label"], "main");
+    }
+
+    #[test]
+    fn the_title_bar_is_an_overlay_so_that_the_sidebar_runs_under_the_traffic_lights() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("the Tauri configuration");
+        let window = &config["app"]["windows"][0];
+
+        assert_eq!(window["titleBarStyle"], "Overlay");
+        assert_eq!(window["hiddenTitle"], true, "no title is drawn above the sidebar");
+        assert!(
+            window.get("trafficLightPosition").is_none(),
+            "the traffic lights keep their native position"
+        );
+    }
+
+    #[test]
+    fn the_window_is_granted_one_window_permission_to_drag_itself_by_the_top_of_the_sidebar() {
+        // Without it a `data-tauri-drag-region` element does nothing, and the overlay leaves no title bar to drag.
+        let window: Vec<_> = granted()
+            .into_iter()
+            .filter(|name| name.starts_with("core:window:"))
+            .collect();
+
+        assert_eq!(window, ["core:window:allow-start-dragging"]);
     }
 
     #[test]

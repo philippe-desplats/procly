@@ -88,6 +88,18 @@ body {
 .sidebar {
   background: var(--side);
   border-right: 1px solid var(--line);
+  /* The drag strip starts at the top edge of the window, under the traffic lights. */
+  padding-top: 0;
+}
+
+/* The overlay title bar leaves the top of the sidebar to the traffic lights. The strip clears them and moves the window. */
+.drag-strip {
+  position: sticky;
+  top: 0;
+  flex: none;
+  height: 52px;
+  margin: 0 -16px 4px;
+  background: var(--side);
 }
 
 .center {
@@ -97,12 +109,6 @@ body {
 .inspector {
   background: var(--panel);
   border-left: 1px solid var(--line);
-}
-
-.pane-title {
-  margin: 0 0 16px;
-  font-size: var(--size-body);
-  font-weight: 600;
 }
 
 .title {
@@ -166,6 +172,16 @@ body {
 }
 
 .row[aria-current="true"] .caption {
+  color: inherit;
+}
+
+.row-count {
+  color: var(--muted);
+  font-size: var(--size-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.row[aria-current="true"] .row-count {
   color: inherit;
 }
 
