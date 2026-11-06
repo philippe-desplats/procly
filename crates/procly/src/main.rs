@@ -59,8 +59,13 @@ const EXIT_DOCTOR_FAILED: u8 = 7;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
-/// The arguments of `logs`.
+/// The arguments of `logs`. Its `--json` says what it prints with `--follow`, which is no longer one document.
 #[derive(Debug, Args)]
+#[command(mut_arg("json", |json| json.help(
+    "Print one JSON document carrying a `schema_version` on stdout instead of text, and with --follow, one JSON \
+     document per line (NDJSON). A command that fails still reports on stderr and exits with the same code. See \
+     docs/json.md."
+)))]
 struct LogsArgs {
     #[command(flatten)]
     json: JsonFlag,
