@@ -308,13 +308,7 @@ export function App({
                 {view.kind === "doctor" ? (
                   <DoctorScreen store={doctor} />
                 ) : (
-                  <Center
-                    snapshot={snapshot}
-                    current={current}
-                    store={store}
-                    doctor={doctor}
-                    onRelease={release}
-                  />
+                  <Center snapshot={snapshot} current={current} doctor={doctor} onRelease={release} />
                 )}
               </>
             )}
@@ -522,13 +516,11 @@ function SidebarWorktrees({
 function Center({
   snapshot,
   current,
-  store,
   doctor,
   onRelease,
 }: {
   snapshot: Exclude<DaemonSnapshot, BlockingSnapshot>;
   current: WorktreeStatus | null;
-  store: DaemonStore;
   doctor: DoctorStore;
   onRelease: (worktree: WorktreeStatus) => void;
 }) {
