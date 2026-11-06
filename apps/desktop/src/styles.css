@@ -386,6 +386,12 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* A caution that comes before the effects of a sheet, which is not a failure. */
+.warning {
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
 .copybox-block {
   align-items: flex-start;
 }

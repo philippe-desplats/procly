@@ -37,11 +37,17 @@ export function WorktreeScreen({
   at,
   seen,
   doctor,
+  onRelease,
 }: {
   worktree: WorktreeStatus;
   at: number;
   seen: FailureKey[];
   doctor: DoctorStore;
+  /**
+   * Opens the release sheet. The app holds the sheet, not this screen: a release can leave the Daemon with nothing to
+   * report for the Worktree, and the screen is gone by then while the sheet still shows the result.
+   */
+  onRelease: (worktree: WorktreeStatus) => void;
 }) {
   const foreign = worktree.foreign ?? [];
   const containers = worktree.containers ?? [];
@@ -56,6 +62,17 @@ export function WorktreeScreen({
         <span title={worktreeTooltip(worktree)}>{worktreeLabel(worktree)}</span>{" "}
         <RemovedMark worktree={worktree} />
       </h2>
+      <div className="actions-row">
+        <button
+          type="button"
+          className="button"
+          onClick={() => {
+            onRelease(worktree);
+          }}
+        >
+          Release…
+        </button>
+      </div>
       {empty ? <p className="muted">Nothing runs in this Worktree.</p> : null}
       {foreign.length > 0 ? (
         <>

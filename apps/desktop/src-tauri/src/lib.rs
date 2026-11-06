@@ -19,6 +19,7 @@ mod notifications;
 mod opening;
 mod orphans;
 mod poller;
+mod release;
 mod services;
 mod settings;
 mod tray;
@@ -276,6 +277,8 @@ pub fn run() {
             opening::reveal_worktree,
             orphans::list_orphans,
             orphans::delete_orphans,
+            release::preview_release,
+            release::release_worktree,
             services::stop_service,
             services::restart_service,
             settings::get_settings,
