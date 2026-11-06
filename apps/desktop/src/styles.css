@@ -13,6 +13,7 @@
   --fail: #b42318;
   --ended: #6f767e;
   --accent: #007aff;
+  --selected: color-mix(in srgb, var(--accent) 14%, transparent);
   --brand-lime: #d7f23c;
   --brand-lime-deep: #a8bf22;
   --brand-ink: #14161a;
@@ -39,6 +40,7 @@
     --fail: #ff6b6b;
     --ended: #7b828b;
     --accent: #0a84ff;
+    --selected: color-mix(in srgb, var(--accent) 22%, transparent);
   }
 }
 
@@ -586,8 +588,20 @@ body {
   outline-offset: 1px;
 }
 
+/* The picked row takes the system accent tint, in every list. */
 .item[data-selected="true"] {
-  background: var(--raise);
+  background: var(--selected);
+}
+
+/* The state phrase of the inspector, with Mark as Seen at the far end of the same line. */
+.state-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.state-line .button {
+  margin-left: auto;
 }
 
 /* The output of a Service or a Job, drawn as text on the panel so that every colour holds its contrast. */

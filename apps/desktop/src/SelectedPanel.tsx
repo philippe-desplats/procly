@@ -4,7 +4,7 @@ import { CopyBox } from "./CopyBox";
 import type { FailureKey } from "./daemon";
 import { composeStatement, jobStatement, serviceStatement, type Statement } from "./inspect";
 import { worktreeLabel, worktreeNames } from "./labels";
-import { useFailed } from "./needs-you";
+import { isSeen, useFailed } from "./needs-you";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
 import type { Selected } from "./selection";
@@ -119,18 +119,38 @@ function Actions({ selected, onChanged }: { selected: Selected; onChanged: () =>
 export function SelectedPanel({
   selected,
   at,
+  seen,
+  onMarkSeen,
   onChanged,
 }: {
   selected: Selected;
   at: number;
+  /** The failures the developer marked as Seen, which offer no mark any more. */
+  seen: FailureKey[];
+  onMarkSeen: (key: FailureKey) => void;
   onChanged: () => void;
 }) {
-  const statement = statementOf(selected, useFailed(failureKeyOf(selected)));
+  const key = failureKeyOf(selected);
+  const failed = useFailed(key);
+  const statement = statementOf(selected, failed);
   const output = useOutput(targetOf(selected));
   return (
     <section aria-label="Selection">
       <Heading selected={selected} />
-      <State {...statement.state} />
+      <div className="state-line">
+        <State {...statement.state} />
+        {key !== null && failed && !isSeen(seen, key) ? (
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              onMarkSeen(key);
+            }}
+          >
+            Mark as Seen
+          </button>
+        ) : null}
+      </div>
       <p>{statement.summary}</p>
       <p>
         <span className="caption">Next</span> {statement.next}

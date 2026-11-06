@@ -49,7 +49,14 @@ function poller(last: Update | null = null, onMarkSeen?: (key: unknown) => Updat
         }
         return undefined;
       }
-      return command === "refresh" ? undefined : Promise.reject(new Error(`unexpected command ${command}`));
+      if (command === "refresh" || command === "stop_follow") {
+        return undefined;
+      }
+      // The inspector follows what is picked: it waits for output that never comes.
+      if (command === "follow_logs") {
+        return new Promise<void>(() => undefined);
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`));
     },
     { shouldMockEvents: true },
   );
@@ -431,6 +438,14 @@ describe("Needs you", () => {
     clearMocks();
   });
 
+  /** Picks the row of Needs you whose name starts with `name`, then marks it as Seen from the inspector. */
+  async function markAsSeen(name: RegExp): Promise<void> {
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+    fireEvent.click(within(needs).getByRole("button", { name }));
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Mark as Seen" }));
+  }
+
   /** The rows of the Overview that are not in "Needs you". */
   function serviceRows(): HTMLElement[] {
     const overviewPane = screen.getByRole("region", { name: "Overview" });
@@ -452,7 +467,7 @@ describe("Needs you", () => {
       .getAllByRole("listitem")
       .map((line) => line.textContent);
     expect(lines).toEqual([
-      "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-endMark as Seen",
+      "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
       "started outside Proclynode server.js:3000main",
     ]);
     // The same glyph as everywhere else: a cross for the failure, a diamond for the Foreign process.
@@ -465,8 +480,65 @@ describe("Needs you", () => {
     expect(
       needs.compareDocumentPosition(firstService as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // A Foreign process is not an ended failure, there is nothing to mark.
-    expect(within(needs).getAllByRole("button", { name: "Mark as Seen" })).toHaveLength(1);
+    // No row carries the button, it lives in the inspector of the selection.
+    expect(screen.queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+  });
+
+  it("selects a failed Service of Needs you into the inspector, which offers Mark as Seen", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE, FOREIGN] }));
+    render(<App store={createDaemonStore()} />);
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+    const inspector = screen.getByRole("complementary", { name: "Inspector" });
+    expect(within(inspector).getByText("Select a Worktree.")).toBeInTheDocument();
+
+    fireEvent.click(within(needs).getByRole("button", { name: /^api/ }));
+
+    const panel = await within(inspector).findByRole("region", { name: "Selection" });
+    expect(within(panel).getByRole("heading", { name: "api" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Mark as Seen" })).toBeInTheDocument();
+    expect(within(needs).getByRole("button", { name: /^api/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(needs).getByRole("button", { name: /^api/ }).closest("li")).toHaveAttribute(
+      "data-selected",
+      "true",
+    );
+  });
+
+  it("puts Mark as Seen beside the state phrase of the inspector", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+    render(<App store={createDaemonStore()} />);
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+
+    fireEvent.click(within(needs).getByRole("button", { name: /^api/ }));
+
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    const button = within(panel).getByRole("button", { name: "Mark as Seen" });
+    expect(button.parentElement).toContainElement(panel.querySelector(".state"));
+  });
+
+  it("offers no Mark as Seen for a Service that ended in a routine way, or a failure already Seen", async () => {
+    poller(answered(many, { seen: [API_KEY] }));
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("region", { name: "Overview" });
+
+    const seenRow = (): HTMLElement | undefined =>
+      screen.getAllByRole("listitem").find((row) => row.textContent?.startsWith("apiexited 1"));
+    fireEvent.click(within(seenRow() as HTMLElement).getByRole("button"));
+
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    expect(within(panel).getByRole("heading", { name: "api" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+
+    // Rust lists no failure any more: the same Service ended in a routine way.
+    await tick(answered(many));
+    expect(within(panel).queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+  });
+
+  it("leaves a Foreign process unselectable, it has no inspector yet", async () => {
+    poller(answered(many, { needsYou: [FOREIGN] }));
+    render(<App store={createDaemonStore()} />);
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+
+    expect(within(needs).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("draws an ended row as a failure when Rust lists it, unseen or Seen, and as routine otherwise", async () => {
@@ -508,9 +580,7 @@ describe("Needs you", () => {
       return answered(many, { needsYou: [FOREIGN], seen: [API_KEY] });
     });
     render(<App store={createDaemonStore()} />);
-    const needs = await screen.findByRole("region", { name: "Needs you" });
-
-    fireEvent.click(within(needs).getByRole("button", { name: "Mark as Seen" }));
+    await markAsSeen(/^api/);
 
     await waitFor(() => {
       expect(within(screen.getByRole("region", { name: "Needs you" })).getAllByRole("listitem")).toHaveLength(
@@ -535,7 +605,7 @@ describe("Needs you", () => {
     );
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+    await markAsSeen(/^api/);
 
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
@@ -617,7 +687,7 @@ describe("Needs you", () => {
       render(<App store={createDaemonStore()} />);
       expect(within(await overviewEntry()).getByText("3 need you")).toBeInTheDocument();
 
-      fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+      await markAsSeen(/^api/);
 
       await waitFor(() => {
         expect(
@@ -660,7 +730,8 @@ describe("Needs you", () => {
     });
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+    // The inspector of a failed Job offers it as well.
+    await markAsSeen(/^make test/);
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
     });

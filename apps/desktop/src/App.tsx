@@ -11,7 +11,7 @@ import { failureKey, FailuresContext, failuresOf } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
-import { SelectionContext } from "./selectable";
+import { SelectableRow, SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
@@ -163,6 +163,11 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     });
   };
 
+  const onMarkSeen = (key: FailureKey): void => {
+    // Rust answers with a new update, so a mark that could not be saved still shows.
+    store.markSeen(key).catch(() => undefined);
+  };
+
   // Restart, Stop and the opening of the Worktree are carried out by the inspector, which shows how they went.
   useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
     switch (choice) {
@@ -177,8 +182,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
         break;
       case "mark-seen":
         if (failure !== null) {
-          // Rust answers with a new update, so a mark that could not be saved still shows.
-          store.markSeen(failure).catch(() => undefined);
+          onMarkSeen(failure);
         }
         break;
       case "release":
@@ -287,6 +291,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
                 selected={selected}
                 hint={outside ? "Select a Job." : "Select a Worktree."}
                 at={snapshot.kind === "loading" ? 0 : snapshot.at}
+                seen={snapshot.kind === "status" ? snapshot.seen : []}
+                onMarkSeen={onMarkSeen}
                 onChanged={refresh}
                 onNeedEditor={() => {
                   setView({ kind: "settings", focusEditor: true });
@@ -480,10 +486,6 @@ function Center({
   doctor: DoctorStore;
   onRelease: (worktree: WorktreeStatus) => void;
 }) {
-  const onMarkSeen = (key: FailureKey): void => {
-    // Rust answers with a new update, so a mark that could not be saved still shows.
-    store.markSeen(key).catch(() => undefined);
-  };
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
@@ -505,7 +507,6 @@ function Center({
           at={snapshot.at}
           needsYou={snapshot.needsYou}
           seen={snapshot.seen}
-          onMarkSeen={onMarkSeen}
         />
       ) : (
         <WorktreeScreen
@@ -533,13 +534,11 @@ function Overview({
   at,
   needsYou,
   seen,
-  onMarkSeen,
 }: {
   repositories: RepositoryStatus[];
   at: number;
   needsYou: NeedsYou[];
   seen: FailureKey[];
-  onMarkSeen: (key: FailureKey) => void;
 }) {
   const groups = repositories
     .map((repository) => ({
@@ -555,7 +554,6 @@ function Overview({
       <NeedsYouSection
         lines={needsYou}
         worktrees={repositories.flatMap((repository) => repository.worktrees)}
-        onMarkSeen={onMarkSeen}
       />
       {groups.length === 0 ? <p className="muted">No Service is known.</p> : null}
       {groups.map(({ repository, worktrees }) => (
@@ -590,15 +588,7 @@ function Overview({
 }
 
 /** What the developer has to look at, pinned on top of the Overview: nothing is drawn when nothing needs them. */
-function NeedsYouSection({
-  lines,
-  worktrees,
-  onMarkSeen,
-}: {
-  lines: NeedsYou[];
-  worktrees: WorktreeStatus[];
-  onMarkSeen: (key: FailureKey) => void;
-}) {
+function NeedsYouSection({ lines, worktrees }: { lines: NeedsYou[]; worktrees: WorktreeStatus[] }) {
   if (lines.length === 0) {
     return null;
   }
@@ -613,7 +603,7 @@ function NeedsYouSection({
       </h3>
       <ul className="list">
         {lines.map((line) => (
-          <NeedsYouLine key={lineKey(line)} line={line} labelOf={labelOf} onMarkSeen={onMarkSeen} />
+          <NeedsYouLine key={lineKey(line)} line={line} labelOf={labelOf} />
         ))}
       </ul>
     </section>
@@ -635,31 +625,36 @@ function lineKey(line: NeedsYou): string {
   }
 }
 
-function NeedsYouLine({
-  line,
-  labelOf,
-  onMarkSeen,
-}: {
-  line: NeedsYou;
-  labelOf: (path: string) => string;
-  onMarkSeen: (key: FailureKey) => void;
-}) {
-  const key = failureKey(line);
-  return (
+/** The item a line of Needs you picks for the inspector, nothing for a Foreign process, which has no inspector yet. */
+function targetOfLine(line: NeedsYou): Selection | null {
+  switch (line.kind) {
+    case "service":
+      return { kind: "service", worktree: line.worktree, service: line.service };
+    case "job":
+      return { kind: "job", id: line.id };
+    case "foreign":
+      return null;
+    default: {
+      const unhandled: never = line;
+      throw new Error(`unhandled line: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * A failure is picked like any row, and its inspector holds Mark as Seen. A line that is Seen leaves Needs you, so a
+ * line here is never dimmed.
+ */
+function NeedsYouLine({ line, labelOf }: { line: NeedsYou; labelOf: (path: string) => string }) {
+  const target = targetOfLine(line);
+  return target === null ? (
     <li className="item">
       <NeedsYouWhat line={line} labelOf={labelOf} />
-      {key === null ? null : (
-        <button
-          type="button"
-          className="button"
-          onClick={() => {
-            onMarkSeen(key);
-          }}
-        >
-          Mark as Seen
-        </button>
-      )}
     </li>
+  ) : (
+    <SelectableRow target={target} seen={false}>
+      <NeedsYouWhat line={line} labelOf={labelOf} />
+    </SelectableRow>
   );
 }
 
@@ -708,6 +703,8 @@ function Inspector({
   selected,
   hint,
   at,
+  seen,
+  onMarkSeen,
   onChanged,
   onNeedEditor,
 }: {
@@ -716,13 +713,22 @@ function Inspector({
   /** What the inspector says while nothing is picked and no Worktree is open. */
   hint: string;
   at: number;
+  seen: FailureKey[];
+  onMarkSeen: (key: FailureKey) => void;
   onChanged: () => void;
   onNeedEditor: () => void;
 }) {
   if (selected !== null) {
     return (
       <>
-        <SelectedPanel key={selectedKey(selected)} selected={selected} at={at} onChanged={onChanged} />
+        <SelectedPanel
+          key={selectedKey(selected)}
+          selected={selected}
+          at={at}
+          seen={seen}
+          onMarkSeen={onMarkSeen}
+          onChanged={onChanged}
+        />
         {selected.worktree === null ? null : (
           <WorktreeActions
             key={selected.worktree.path}
