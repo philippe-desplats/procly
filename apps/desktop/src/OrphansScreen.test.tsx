@@ -116,6 +116,55 @@ describe("the Orphans screen", () => {
     expect(search.getAllByRole("listitem")).toHaveLength(1);
   });
 
+  it("shows in red the rows of the Orphans that drop data, and only those", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    await openOrphans();
+
+    const login = within(await screen.findByRole("region", { name: "web-login" }));
+    expect(login.getByText(/Drops web__web_login in its postgres container/)).toHaveClass("loss");
+    expect(login.getByText(/Removes the Isolated container of cache/)).toHaveClass("loss");
+    expect(login.getByText(/Removes the volume web-web_login_data/)).toHaveClass("loss");
+    expect(login.getByText(/Returns port 24081 to the Range/)).not.toHaveClass("loss");
+    expect(login.getByText(/Deletes \/p\/state\/output\//)).not.toHaveClass("loss");
+  });
+
+  it("shows in red, in the sheet, the lines of the Orphans that drop data and `This cannot be undone.`", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    await openOrphans();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Delete 6 Orphans/ }));
+
+    const sheet = within(await screen.findByRole("dialog"));
+    expect(sheet.getByText(/^1 Logical resource: dropped in its container/)).toHaveClass("loss");
+    expect(sheet.getByText(/^1 Isolated container: removed/)).toHaveClass("loss");
+    expect(sheet.getByText(/^1 volume: removed/)).toHaveClass("loss");
+    expect(sheet.getByText(/^2 Leases: their ports go back/)).not.toHaveClass("loss");
+    expect(sheet.getByText(/^1 output directory: deleted/)).not.toHaveClass("loss");
+    expect(sheet.getByText("This cannot be undone.")).toHaveClass("loss");
+    // Cancel stays the default button and the command stays whole.
+    expect(sheet.getByRole("button", { name: "Cancel" })).toHaveClass("default");
+    expect(sheet.getByText("procly gc --apply")).toBeInTheDocument();
+  });
+
+  it("draws no red line in a sheet whose Orphans drop no data", async () => {
+    const leasesOnly = {
+      ...recordedGc,
+      orphans: recordedGc.orphans.filter((orphan) => orphan.kind === "lease"),
+    };
+    app({ listing: () => leasesOnly });
+    render(<App store={createDaemonStore()} />);
+    await openOrphans();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Delete 2 Orphans/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.querySelector(".loss")).toBeNull();
+    expect(within(dialog).getByText("This cannot be undone.")).toBeInTheDocument();
+  });
+
   it("says so when nothing is an Orphan, and offers no deletion", async () => {
     app({ listing: () => ({ ...recordedGc, orphans: [] }) });
     render(<App store={createDaemonStore()} />);

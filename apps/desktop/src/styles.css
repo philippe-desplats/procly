@@ -470,6 +470,13 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* What a destructive sheet loses, named in red. It is not an error: it only appears where something is lost. */
+.loss {
+  color: var(--fail);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 /* A caution that comes before the effects of a sheet, which is not a failure. */
 .warning {
   color: var(--warn);

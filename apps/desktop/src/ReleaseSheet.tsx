@@ -175,6 +175,8 @@ export function ReleaseSheet({
   const forgotten = endedWords(ended);
   const running = report !== null && !holdsNothing(report);
   const nothing = report !== null && !running && forgotten === "";
+  // Only a process that stops loses what it held in memory, a Lease or a Compose service let go of loses none.
+  const stops = report !== null && report.services.length + report.jobs.length > 0;
   return (
     <div className="overlay">
       <div
@@ -207,11 +209,11 @@ export function ReleaseSheet({
           <>
             {nothing ? (
               <p>Procly holds nothing in this Worktree, so there is nothing to release.</p>
-            ) : running ? (
-              <p>
-                Each Service and Job is stopped with its whole process tree, and what it held in memory is
-                lost.
-              </p>
+            ) : stops ? (
+              <>
+                <p>Each Service and Job is stopped with its whole process tree.</p>
+                <p className="loss">What it held in memory is lost.</p>
+              </>
             ) : (
               <p>Nothing runs in this Worktree.</p>
             )}
