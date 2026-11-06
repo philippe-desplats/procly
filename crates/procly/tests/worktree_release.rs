@@ -285,3 +285,227 @@ fn worktree_release_json_reports_what_was_stopped_released_and_kept() {
         ])
     );
 }
+
+/// The bytes of every document the Daemon keeps in its state directory, by file name, for a test that a command
+/// changes none of them.
+fn documents(procly: &Procly) -> Vec<(&'static str, Option<Vec<u8>>)> {
+    [
+        "leases.json",
+        "indexes.json",
+        "resources.json",
+        "services.json",
+        "containers.json",
+        "isolated.json",
+        "portless-aliases.json",
+    ]
+    .into_iter()
+    .map(|name| (name, std::fs::read(procly.state_dir().join(name)).ok()))
+    .collect()
+}
+
+#[test]
+fn a_dry_run_changes_nothing_and_a_real_release_then_gives_the_same_report() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let leftover = procly.scratch().join("leftover.pid");
+    let config = format!(
+        "{}[services.db]\ncompose = 'postgres'\ndriver = 'postgres'\nports = {{ db = {} }}\n\
+         [services.db.resources.dev]\nname = 'app'\n[pinned.develop]\n",
+        web_declaring(free_port()),
+        free_port()
+    );
+    let other = git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &config);
+    let in_other = port_of(&procly.procly_in(&other, &["up", "web"]));
+    let job = procly.procly_in(
+        &other,
+        &["run", &format!("sleep 60 & echo $! > {}; wait", leftover.display())],
+    );
+    assert_success(&job);
+    let leftover = common::read_pid(&leftover);
+    let develop = worktree_on(&main, "app-develop", "develop", true);
+    write(&develop, "procly.toml", &config);
+    port_of(&procly.procly_in(&develop, &["up", "web"]));
+    let before = documents(&procly);
+
+    let planned_other = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--dry-run", "--json"]));
+    let planned_develop = json_succeeded(&procly.procly_in(&develop, &["worktree", "release", "--dry-run", "--json"]));
+
+    assert_eq!(documents(&procly), before, "a dry run wrote a state file");
+    assert!(listens(in_other), "a dry run stopped the Service");
+    assert!(common::is_alive(leftover), "a dry run stopped the Job");
+    assert_eq!(
+        planned_other["stopped"]["services"],
+        serde_json::json!(["web"]),
+        "{planned_other}"
+    );
+    assert_eq!(planned_other["stopped"]["jobs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(planned_other["released"]["leases"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        planned_other["kept"]["logical_resources"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(planned_develop["kept"]["leases"].as_array().map(Vec::len), Some(1));
+
+    // Asking again changes nothing either, and the real release then does what the dry run said.
+    assert_eq!(
+        json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--dry-run", "--json"])),
+        planned_other
+    );
+    let released_other = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--json"]));
+    let released_develop = json_succeeded(&procly.procly_in(&develop, &["worktree", "release", "--json"]));
+    assert_eq!(released_other, planned_other);
+    assert_eq!(released_develop, planned_develop);
+    assert!(!listens(in_other));
+    common::wait_until_gone(leftover);
+}
+
+#[test]
+fn a_dry_run_says_what_it_would_stop_and_would_release() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    let leased = port_of(&procly.procly_in(&other, &["up", "web"]));
+    let job = procly.procly_in(&other, &["run", "sleep 60"]);
+    assert_success(&job);
+    let job = stdout(&job).trim().to_owned();
+
+    let output = procly.procly_in(&other, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("web would stop\njob {job} would stop\nlease web.http port {leased} would release\n")
+    );
+    let output = procly.procly_in(&other, &["worktree", "release"]);
+    assert_eq!(
+        stdout(&output),
+        format!("web stopped\njob {job} stopped\nlease web.http port {leased} released\n")
+    );
+    // Once released there is nothing left to say it would do.
+    let again = procly.procly_in(&other, &["worktree", "release", "--dry-run"]);
+    assert_eq!(stdout(&again), "nothing to release\n");
+}
+
+#[test]
+fn a_dry_run_leaves_a_lease_of_a_running_service_of_another_worktree_and_the_numbered_resources_alone() {
+    let procly = Procly::new();
+    let (start, _) = procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let used = git_worktree_add(&main, "app-used");
+    let config = format!(
+        "[services.cache]\ncompose = 'redis'\ndriver = 'redis'\nports = {{ redis = {} }}\n\
+         [services.cache.resources.main]\n\
+         [services.api]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {} }}\n\
+         [services.api.env]\nREDIS_URL = '{{services.cache.resources.main.url}}'\n",
+        free_port(),
+        test_server().display(),
+        free_port()
+    );
+    for worktree in [&main, &used] {
+        write(worktree, "procly.toml", &config);
+    }
+    assert_success(&procly.procly_in(&used, &["env", "api"]));
+    let before = documents(&procly);
+
+    let output = procly.procly_in(&used, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "lease api.http port {start} would release\n\
+             Logical resource 1 of cache (redis) kept, `procly gc` lists it once the Worktree is removed\n"
+        )
+    );
+    assert_eq!(documents(&procly), before, "a dry run wrote a state file");
+}
+
+#[test]
+fn a_worktree_release_forgets_the_ended_jobs_and_services_of_its_worktree_and_only_those() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&main, "procly.toml", &web_declaring(free_port()));
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    // Each Worktree has a Service and a Job that have ended, and the Worktree to release also has a Job that runs.
+    let ended_job = |dir: &Path| {
+        let job = stdout(&procly.procly_in(dir, &["run", "exit 3"])).trim().to_owned();
+        assert_eq!(procly.procly(&["wait", &job]).status.code(), Some(3));
+        job
+    };
+    let (released_job, kept_job) = (ended_job(&other), ended_job(&main));
+    for dir in [&other, &main] {
+        port_of(&procly.procly_in(dir, &["up", "web"]));
+        assert_success(&procly.procly_in(dir, &["down", "web"]));
+    }
+    let running = stdout(&procly.procly_in(&other, &["run", "sleep 60"]))
+        .trim()
+        .to_owned();
+
+    let before = procly.procly_in(&other, &["status", "--all"]);
+    assert!(stdout(&before).contains("service web ended"), "{}", stdout(&before));
+
+    assert_success(&procly.procly_in(&other, &["worktree", "release"]));
+
+    let status = stdout(&procly.procly_in(&other, &["status", "--all"]));
+    let worktrees: Vec<&str> = status.split("  worktree ").collect();
+    let (main_status, other_status) = (worktrees[1], worktrees[2]);
+    assert!(
+        main_status.contains("service web ended") && main_status.contains(&kept_job),
+        "{status}"
+    );
+    assert!(
+        !other_status.contains("service web") && !other_status.contains(&released_job),
+        "{status}"
+    );
+    assert_eq!(procly.procly(&["wait", &released_job]).status.code(), Some(125));
+    assert_eq!(procly.procly(&["wait", &kept_job]).status.code(), Some(3));
+    // The release stopped the running Job, which was forgotten with the rest.
+    assert_eq!(procly.procly(&["wait", &running]).status.code(), Some(125));
+}
+
+#[test]
+fn a_dry_run_leaves_the_ended_jobs_and_services_in_place_and_the_release_after_it_clears_them() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    let job = stdout(&procly.procly_in(&other, &["run", "exit 3"])).trim().to_owned();
+    assert_eq!(procly.procly(&["wait", &job]).status.code(), Some(3));
+    port_of(&procly.procly_in(&other, &["up", "web"]));
+    assert_success(&procly.procly_in(&other, &["down", "web"]));
+    let status = || stdout(&procly.procly_in(&other, &["status"]));
+    assert!(status().contains("service web ended"), "{}", status());
+
+    assert_success(&procly.procly_in(&other, &["worktree", "release", "--dry-run"]));
+
+    assert!(
+        status().contains("service web ended"),
+        "the dry run forgot the Service: {}",
+        status()
+    );
+    assert_eq!(
+        procly.procly(&["wait", &job]).status.code(),
+        Some(3),
+        "the dry run forgot the Job"
+    );
+
+    assert_success(&procly.procly_in(&other, &["worktree", "release"]));
+
+    assert!(
+        !status().contains("service web"),
+        "the release kept the Service: {}",
+        status()
+    );
+    assert_eq!(
+        procly.procly(&["wait", &job]).status.code(),
+        Some(125),
+        "the release kept the Job"
+    );
+}

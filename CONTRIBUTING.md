@@ -19,7 +19,8 @@ Small fixes (typos, docs, obvious bugs) can go straight to a pull request. For l
 
 A contribution is merged only once it meets all of the following:
 
-- **Checks**: `make check` passes. It runs `cargo fmt --all --check`, Clippy on every target with warnings denied (the `pedantic` group is on for the whole workspace), rustdoc with warnings denied, and the tests. The CI runs the same `make` targets on macOS and Linux.
+- **Checks**: `make check` passes. It runs `cargo fmt --all --check` and `oxfmt --check`, Clippy on every target with warnings denied (the `pedantic` group is on for the whole workspace), rustdoc with warnings denied, `oxlint` and `tsc --noEmit`, then the tests, Vitest and a check that the generated TypeScript types of the protocol are committed. The CI runs the same `make` targets on macOS and Linux.
+- **Protocol types**: a change to a type of `crates/procly-client/src/protocol.rs` lands with its regenerated TypeScript types in `apps/desktop/src/protocol/`. `cargo test --workspace` writes them, commit the result, or `make test` fails ([ADR 0015](docs/adr/0015-react-bun-and-oxc-for-the-desktop-frontend.md)).
 - **Lint exceptions**: silence a lint with `#[expect(<lint>, reason = "...")]` on the smallest item, never with a bare `#[allow]`, so the reason is recorded and the build fails once the exception is no longer needed. `unsafe_code` is denied, see [`docs/rules/rust.md`](docs/rules/rust.md).
 - **Tests**: new behavior and bug fixes ship with tests. The CLI is the contract, so integration tests in `crates/procly/tests/` drive the built binary, each against a Daemon of its own with an isolated state directory, and never touch the state directory of a Daemon you run. Pure logic gets unit tests in its module. A test that needs Docker is named `docker_*` and skips itself when `docker compose` v2 is unavailable.
 - **Vocabulary**: code, docs and messages use the terms of [`GLOSSARY.md`](GLOSSARY.md), such as Service, Job, Lease and Worktree, not their synonyms.
@@ -32,10 +33,23 @@ A contribution is merged only once it meets all of the following:
 
 The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), and `rustup` installs it with `rustfmt` and Clippy on the first build.
 
+`make check` also needs what the desktop app in `apps/desktop/` uses, even for a change that only touches the Daemon:
+
+- [bun](https://bun.sh), the one package manager of the app, at the version `packageManager` pins in `apps/desktop/package.json`. Run `bun install --frozen-lockfile` in `apps/desktop` once and after each change of `bun.lock`. Only `bun.lock` counts, `package-lock.json` and `pnpm-lock.yaml` are ignored by git.
+- Node, at the LTS version of `apps/desktop/.node-version`, because Vitest runs on it.
+- On Linux, the system packages Tauri links against: `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libxdo-dev` and `libssl-dev`.
+
+A fresh clone builds with `cargo` alone, but the app it builds shows a placeholder page until `bun run build` has run in `apps/desktop`.
+
+The app starts and restarts the Daemon with the `procly` beside its own executable. Run from the workspace, that is `target/debug/procly`, so build the CLI (`cargo build -p procly`) before using "Start the Daemon". `make bundle` builds a bundle that embeds the CLI as a sidecar, see `docs/rules/tauri.md`.
+
+`make e2e` builds the app with the `e2e` feature and drives its real window against an isolated Daemon, see [ADR 0016](docs/adr/0016-end-to-end-tests-drive-the-built-app-through-webdriver.md). The app runs under a temporary `HOME`, so its settings, its Seen set, its window state and its webview caches stay out of yours. The runner needs `node` on the `PATH`, Bun alone cannot run it, and `make e2e` stops at once when `node` is missing. It is not part of `make check`, it opens a window, so run it on a machine where you can spare the display. On Linux it needs a display, run it as `xvfb-run --auto-servernum make e2e`. The CI runs it on every pull request.
+
 ```sh
 make build        # cargo build --workspace --all-targets --locked
 make fmt          # apply the formatting
 make check        # what the CI runs, run it before pushing
+make e2e          # end-to-end tests of the desktop app, they open its window
 ```
 
 The project rules live in [`docs/rules/`](docs/rules): [`rust.md`](docs/rules/rust.md) for crate layout, errors, async and tests, [`processes.md`](docs/rules/processes.md) for spawning, stopping and output capture. The API of `process-wrap` and `portable-pty` at the pinned versions is vendored under [`docs/reference/`](docs/reference/README.md), regenerated with `make docs`.

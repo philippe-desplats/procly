@@ -2,24 +2,22 @@
 
 use std::path::{Path, PathBuf};
 
-use super::compose::Composes;
-use super::foreign;
-use super::job::Jobs;
-use super::service::Services;
+use super::{Registry, foreign};
 use crate::protocol::{JobStatus, RepositoryStatus, ServiceStatus, StatusReport, WorktreeStatus};
 use crate::topology::{self, Topology, Worktree};
 
 /// The Worktree holding `cwd`, or with `all` every Worktree of every Repository the Daemon ran a Service or a Job
 /// in, plus the Repository holding `cwd`. Outside any Repository, the Jobs started in `cwd` stand in for the
 /// Worktree. Each Worktree also lists its Foreign processes, which every process group and container Procly runs
-/// is not.
-pub(super) fn report(
-    jobs: &Jobs,
-    services: &Services,
-    composes: &Composes,
-    cwd: &Path,
-    all: bool,
-) -> anyhow::Result<StatusReport> {
+/// is not. A Service is `restartable` when an environment is `held` for it.
+pub(super) fn report(registry: &Registry, cwd: &Path, all: bool) -> anyhow::Result<StatusReport> {
+    let Registry {
+        jobs,
+        services,
+        composes,
+        held,
+        ..
+    } = registry;
     let cwd = topology::canonicalize(cwd)?;
     let here = topology::resolve(&cwd)?;
     let owned_groups = services
@@ -28,7 +26,10 @@ pub(super) fn report(
         .chain(jobs.process_groups())
         .collect();
     let statuses = jobs.statuses();
-    let services = services.statuses();
+    let mut services = services.statuses();
+    for (topology, status) in &mut services {
+        status.restartable = held.holds(&topology.worktree.path, &status.service);
+    }
     let containers = composes.isolated();
     // Every Worktree the Daemon ran something in.
     let known: Vec<&Topology> = services
@@ -48,24 +49,31 @@ pub(super) fn report(
         .into_iter()
         .map(|git_common_dir| {
             let worktrees = match (&here, all) {
-                (Some(here), false) => vec![here.worktree.clone()],
+                // One more git call, as the listing of every Worktree of the Repository is not made.
+                (Some(here), false) => vec![Placed {
+                    branch: topology::branch(&here.worktree.path).unwrap_or_default(),
+                    worktree: here.worktree.clone(),
+                    listed: true,
+                }],
                 _ => worktrees(git_common_dir, &known),
             };
             RepositoryStatus {
                 git_common_dir: git_common_dir.clone(),
                 worktrees: worktrees
                     .into_iter()
-                    .map(|worktree| WorktreeStatus {
-                        services: services_of(&services, &worktree.path),
+                    .map(|placed| WorktreeStatus {
+                        services: services_of(&services, &placed.worktree.path),
                         jobs: jobs_where(&statuses, |topology| {
-                            topology.is_some_and(|topology| topology.worktree.path == worktree.path)
+                            topology.is_some_and(|topology| topology.worktree.path == placed.worktree.path)
                         }),
                         containers: containers
                             .iter()
-                            .filter(|(root, _)| *root == worktree.path)
+                            .filter(|(root, _)| *root == placed.worktree.path)
                             .map(|(_, container)| container.clone())
                             .collect(),
-                        worktree,
+                        worktree: placed.worktree,
+                        branch: placed.branch,
+                        listed: placed.listed,
                         foreign: Vec::new(),
                     })
                     .collect(),
@@ -98,16 +106,37 @@ pub(super) fn report(
     })
 }
 
+/// A Worktree of a Repository, with the branch checked out in it and whether git lists it.
+struct Placed {
+    worktree: Worktree,
+    branch: Option<String>,
+    listed: bool,
+}
+
 /// The Worktrees git lists for a Repository, followed by the ones its Services and Jobs ran in that git no longer
 /// lists.
-fn worktrees(git_common_dir: &Path, known: &[&Topology]) -> Vec<Worktree> {
+fn worktrees(git_common_dir: &Path, known: &[&Topology]) -> Vec<Placed> {
     // A Repository deleted since its Jobs ran is still reported, through the Worktrees they recorded.
-    let mut worktrees = topology::worktrees(git_common_dir).unwrap_or_default();
+    let mut worktrees: Vec<Placed> = topology::worktrees_on_branches(git_common_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(worktree, branch)| Placed {
+            worktree,
+            branch,
+            listed: true,
+        })
+        .collect();
     for topology in known {
         if topology.git_common_dir == git_common_dir
-            && !worktrees.iter().any(|worktree| worktree.path == topology.worktree.path)
+            && !worktrees
+                .iter()
+                .any(|placed| placed.worktree.path == topology.worktree.path)
         {
-            worktrees.push(topology.worktree.clone());
+            worktrees.push(Placed {
+                worktree: topology.worktree.clone(),
+                branch: None,
+                listed: false,
+            });
         }
     }
     worktrees

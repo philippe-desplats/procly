@@ -1,6 +1,8 @@
 # JSON output
 
-Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, `mcp`, which speaks JSON-RPC and returns these documents as tool results, and `daemon`, which prints nothing.
+Every command that prints something accepts `--json` and then prints exactly 1 JSON document on stdout, so that an agent parses it instead of scraping text (ADR 0009). The only commands without it are `guard`, which answers a Claude Code hook in its own JSON, `mcp`, which speaks JSON-RPC and returns these documents as tool results, and `daemon` without a subcommand, which runs the Daemon in the foreground and prints nothing.
+
+The one exception to 1 document is `logs --follow`, which streams and prints 1 JSON document per line, see [`logs --follow`](#logs---follow).
 
 **The schema version is 1.** It is the `schema_version` of every document, the one `procly status --json` prints. This page is where it is defined, the examples in the other docs repeat the value. It is bumped on any incompatible change to any document, independently of the socket protocol between the CLI and the Daemon. Adding a key or a document is not incompatible, so a reader ignores the keys it does not know. Removing a key, renaming one or changing what it means bumps the version.
 
@@ -19,19 +21,22 @@ Every command that prints something accepts `--json` and then prints exactly 1 J
 | `run` | the Job and the outcome | below |
 | `wait` | how the Job ended, its exit code and its output | below |
 | `logs` | the recent output | below |
+| `logs --follow` | 1 document per line: the backlog, the output as it arrives, what was dropped, the end | below |
 | `status` | the Repositories, Worktrees, Services and Jobs | below |
 | `up` | the Services reached, or why one was not | below, and [Configuration](configuration.md#procly-up-without-arguments) |
 | `down` | the Services stopped and the Compose services let go of | below |
+| `restart` | the Services reached, or why one was not, as for `up` | [below](#restart) |
 | `env` | the variables of a Service | [`procly env`](configuration.md#procly-env) |
 | `init` | the proposal and whether it was written | [Proposing a configuration](init.md) |
 | `worktree init` | what was copied and what ran | [Preparing a Worktree](worktree-init.md) |
-| `worktree release` | what the Worktree release stopped, released and kept | [Releasing a Worktree](worktree-release.md#json) |
+| `worktree release` | what the Worktree release stopped, released and kept, or would, with `--dry-run` | [Releasing a Worktree](worktree-release.md#json) |
 | `worktree hooks` | what became of the Worktrunk hooks block | [below](#worktree-hooks), and [Preparing a Worktree](worktree-init.md#worktrunk) |
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
 | `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
 | `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
 | `doctor` | every check with its status, message and fix | below, and [Checking the installation](doctor.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |
+| `daemon stop` | whether a Daemon was stopped, its pid and how long it took | [below](#daemon-stop), and [The Daemon](daemon.md#stopping-the-daemon) |
 | `mcp` | none, it serves the documents above as MCP tools | [The MCP server](mcp.md) |
 
 ## `run`
@@ -50,7 +55,7 @@ $ procly wait --json 3f9a1c2e
 {"schema_version":1,"job":"3f9a1c2e","exit_code":3,"end":{"kind":"exited","code":3},"output":"hi\n"}
 ```
 
-`exit_code` is the code `wait` exits with: the Job's own, 128 + N for a Job killed by signal N, and 124 for a Job killed on its timeout. `end` tells how the Job ended, with a `kind` of `exited` (`code`), `signaled` (`signal`) or `timed_out` (`timeout_ms`). `output` is everything the Job printed.
+`exit_code` is the code `wait` exits with: the Job's own, 128 + N for a Job killed by signal N, and 124 for a Job killed on its timeout. `end` tells how the Job ended, with a `kind` of `exited` (`code`), `signaled` (`signal`) or `timed_out` (`timeout_ms`). `output` is everything the Job printed. A Job that ended long ago may be unknown by now, see [ended Jobs](daemon.md#ended-jobs): `wait` then fails with exit code 125 and `no job 3f9a1c2e` on stderr, as for an identifier that never existed.
 
 ## `logs`
 
@@ -59,7 +64,26 @@ $ procly logs --json 3f9a1c2e
 {"schema_version":1,"name":"3f9a1c2e","output":"hi\n"}
 ```
 
-`name` is the Job or the Service asked for. The `output` of a Compose service is the last 1000 lines of its container, as `docker compose logs` prints them.
+`name` is the Job or the Service asked for. The `output` of a Compose service is the last 1000 lines of its container, as `docker compose logs` prints them. The `output` of an ended Job is no longer there once the Daemon has evicted the Job, see [ended Jobs](daemon.md#ended-jobs).
+
+## `logs --follow`
+
+With `--follow`, `logs` prints NDJSON: 1 JSON document per line, the one exception to 1 document per command. Every line is self-contained, it carries `schema_version`, `name` and `event`, and a reader parses each line on its own as it arrives.
+
+```console
+$ procly logs --follow --json api
+{"schema_version":1,"name":"api","event":"backlog","output":"listening on 4100\n"}
+{"schema_version":1,"name":"api","event":"output","output":"GET /health 200\n"}
+{"schema_version":1,"name":"api","event":"dropped","bytes":4096}
+{"schema_version":1,"name":"api","event":"ended"}
+```
+
+- `backlog` comes first, once, with the recent output as `logs --json` gives it.
+- `output` carries what the Job or the Service printed since the line before. A Service that crashes goes on in the same stream through its automatic restart, the note of the restart included.
+- `dropped` tells how many bytes of output this reader missed because it read too slowly. The Daemon never waits for a reader, it drops what does not fit in the queue of the connection instead.
+- `ended` comes last, once the Job or the Service has ended and all of its output was printed, and `logs` then exits with 0.
+
+Ctrl-C also exits with 0 but prints no `ended` line, so a reader tells a real end from an interruption. A Compose service cannot be followed: `logs --follow` prints no document, exits with 125 and names the `docker compose logs -f` command to run on stderr.
 
 ## `up`
 
@@ -133,14 +157,36 @@ $ procly doctor --json
 
 A later version of procly may add a check. A reader that does not know a `name` should skip that check, and the schema version stays 1.
 
+## `restart`
+
+`procly restart --json <service>` prints the document of `procly up --json <service>`, with the same `result` values and exit codes. The Service restarted has an `outcome` of `started`, a Service it needs that was running is `reused`, and one that was not is `started`. A Service a Group covers is restarted through its Group, which is then the Service of the document, whether the Group runs or the Service ended, except a covered Service that runs on its own, which its Group cannot start over and which is restarted alone. A Compose service follows the path of `down` then `up`: the container of an Isolated one is stopped and started again, while a Shared or Logical one is let go of and reached again, so its container, which other Worktrees may use, keeps running and is `reused`. A Worktree release of the same Worktree that begins during a Restart wins, the Restart then exits with 125, and a release that begins while the Restart is starting a Compose service waits for that start to finish, see [Releasing a Worktree](worktree-release.md#what-it-does).
+
+```console
+$ procly restart --json web
+{"schema_version":1,"result":"healthy","services":[{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"urls":{"http":"http://localhost:4101"},"needed_by":null}]}
+```
+
+## `daemon stop`
+
+```console
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"stopped","pid":4242,"waited_ms":5310}
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"not_running","pid":null}
+```
+
+`outcome` is `stopped` when a Daemon ran and has gone, with the `pid` it was sent `SIGTERM` and `waited_ms`, the time it took to go in milliseconds. It is `not_running` when no Daemon held the lock of the state directory, a pid file left by a crash included, and `pid` is then `null` and there is no `waited_ms`. A Daemon still there after 10 s prints no document: the command exits with 125 and the reason on stderr, see [exit codes](exit-codes.md). The command never speaks the protocol, so the document is the same whatever version of Procly the Daemon runs, see [Stopping the Daemon](daemon.md#stopping-the-daemon).
+
 ## `status`
 
 ```console
 $ procly status --json
-{"schema_version":1,"repositories":[{"git_common_dir":"/home/me/app/.git","worktrees":[{"path":"/home/me/app","slug":"app","main":true,"services":[{"service":"web","port":4101,"reattached":false,"state":"healthy"}],"jobs":[{"id":"3f9a1c2e","command":"bun test","cwd":"/home/me/app","state":"ended","end":{"kind":"exited","code":3}}]}]}],"jobs_outside_repositories":[]}
+{"schema_version":1,"repositories":[{"git_common_dir":"/home/me/app/.git","worktrees":[{"path":"/home/me/app","slug":"app","main":true,"branch":"main","listed":true,"services":[{"service":"web","port":4101,"reattached":false,"started_at":1793900000123,"restartable":true,"state":"healthy"}],"jobs":[{"id":"3f9a1c2e","command":"bun test","cwd":"/home/me/app","state":"ended","end":{"kind":"exited","code":3}}]}]}],"jobs_outside_repositories":[]}
 ```
 
-`services` lists the Process services and Groups Procly started in the Worktree. A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Shared or Logical Compose service is not listed, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
+`services` lists the Process services and Groups Procly started in the Worktree. A Group stands for the Services it covers: they have no row of their own while it runs, and the ended rows they had are forgotten when the Group starts, see [Groups](configuration.md#groups). A Service has a `state` of `starting`, `healthy`, `restarting` or `ended`, and an ended one carries an `end` like the one of `up`. A Shared or Logical Compose service is not listed, in the text nor in the document: its container serves every Worktree of the Repository, `procly up <service>` answers `reused` while it runs, `procly down` tells how many Worktrees still need it, and `procly logs <service>` prints its recent output. A Worktree carries the `branch` checked out in it, as the short name git lists it under, and `listed`, whether `git worktree list` still lists it. `branch` is left out on a detached `HEAD`, and for a Worktree git no longer lists, which has `listed` set to `false` and shows as `(removed)` in the text. A Service carries `started_at`, the time it last started in milliseconds since the Unix epoch, set again by each automatic restart. For a Service a previous Daemon started, it is the time the Daemon found it running. The 3 keys were added without a change of the schema version. A Service also carries `restartable`, whether the Daemon holds the environment of its last `up`, which `procly restart` replays. It is `false` for a Service a previous Daemon started and after a Worktree release, and the environment itself is never part of the status. The key was added without a change of the schema version. In the text, `procly status` prints `  worktree app (main) /home/me/app on main`.
+
+A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
 
 A Worktree lists the Isolated containers Procly runs for it under `containers` when it has some, each with `service`, the compose `project` of the Worktree, the `compose` service and the `port` its health check probes, see [Isolated mode](configuration.md#isolated-mode). The key was added without a change of the schema version, and is left out when the list is empty:
 

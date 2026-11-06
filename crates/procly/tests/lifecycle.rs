@@ -144,6 +144,50 @@ fn crash(port: u16) {
     common::http_get(port, "/exit/1");
 }
 
+/// When `web` of the Worktree `dir` last started, as `status --json` reports it, once it is healthy.
+fn started_at(procly: &Procly, dir: &Path) -> Option<u64> {
+    let output = procly
+        .command()
+        .current_dir(dir)
+        .args(["status", "--json"])
+        .output()
+        .expect("the procly binary runs");
+    assert_success(&output);
+    let status: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status prints JSON");
+    let service = &status["repositories"][0]["worktrees"][0]["services"][0];
+    (service["state"] == "healthy").then(|| service["started_at"].as_u64().expect("started_at is a number"))
+}
+
+#[test]
+fn the_start_time_of_a_service_changes_after_an_automatic_restart() {
+    let procly = Procly::with_clock();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = 'exec {server} --port {port}'\nports = {{ http = {port} }}\n\
+             [services.web.restart]\nattempts = 2\ndelay = '1s'\n",
+            server = test_server().display()
+        ),
+    );
+    procly.advance_clock(Duration::from_secs(100));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let first = started_at(&procly, &main).expect("the Service is healthy after `up`");
+    assert_eq!(first, 100_000, "the test clock reads milliseconds since the epoch");
+
+    crash(port);
+    common::eventually("the daemon to plan the restart", || {
+        procly.daemon_log().contains("restarting in 1s (restart 1 of 2)")
+    });
+    procly.advance_clock(Duration::from_secs(1));
+    common::eventually("the Service to be healthy again, started later", || {
+        started_at(&procly, &main).is_some_and(|restarted| restarted > first)
+    });
+    assert_eq!(started_at(&procly, &main), Some(101_000));
+}
+
 #[test]
 fn a_crashed_service_restarts_with_increasing_delays_then_ends_failed() {
     let procly = Procly::with_clock();

@@ -160,6 +160,63 @@ fn a_group_and_a_service_it_covers_never_run_side_by_side() {
     assert_eq!(start_count(&starts), 1);
 }
 
+/// The names of the Services `procly status --json` lists for the Worktree `dir`, in the order it lists them.
+fn listed_services(procly: &Procly, dir: &Path) -> Vec<String> {
+    let output = procly.procly_in(dir, &["status", "--json"]);
+    assert_success(&output);
+    let status: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("a JSON status");
+    status["repositories"][0]["worktrees"][0]["services"]
+        .as_array()
+        .expect("a list of Services")
+        .iter()
+        .map(|service| service["service"].as_str().expect("a Service name").to_owned())
+        .collect()
+}
+
+#[test]
+fn a_group_starting_makes_the_daemon_forget_the_ended_rows_of_the_services_it_covers() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    assert_eq!(
+        listed_services(&procly, &main),
+        ["web"],
+        "the Service that ended alone keeps its ended row until a Group stands for it"
+    );
+
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+
+    assert_eq!(
+        listed_services(&procly, &main),
+        ["dev"],
+        "the Group is listed and no row of a Service it covers"
+    );
+}
+
+#[test]
+fn a_group_starting_leaves_the_ended_rows_of_the_services_it_does_not_cover() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api, worker) = (free_port(), free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    let config = format!(
+        "{}[services.worker]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {worker} }}\n",
+        monorepo(web, api, &starts, &seen),
+        test_server().display(),
+    );
+    write(&main, "procly.toml", &config);
+    assert_success(&procly.procly_in(&main, &["up", "worker"]));
+    assert_success(&procly.procly_in(&main, &["down", "worker"]));
+
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+
+    assert_eq!(listed_services(&procly, &main), ["dev", "worker"]);
+}
+
 #[test]
 fn stopping_a_covered_service_while_its_group_runs_points_to_the_group() {
     let procly = Procly::new();

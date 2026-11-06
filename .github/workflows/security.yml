@@ -1,12 +1,15 @@
 name: Security
 
-# Checks Cargo.lock against the RustSec advisory database with cargo-audit, which fails on a known vulnerability.
+# Checks Cargo.lock against the RustSec advisory database with cargo-audit, and the lockfile of the desktop app with
+# bun audit, which both fail on a known vulnerability. The second covers devDependencies too, since Vite, Vitest and
+# the oxc tools run in the release workflow that holds the signing secrets.
 on:
   push:
     branches: [main]
   pull_request:
     paths:
       - Cargo.lock
+      - apps/desktop/bun.lock
       - .github/workflows/security.yml
   schedule:
     - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC
@@ -35,3 +38,26 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Audit Cargo.lock
         run: cargo audit
+
+  bun-audit:
+    name: bun-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: apps/desktop/package.json
+      # WebdriverIO (ADR 0016) pulls `extract-zip` through `@puppeteer/browsers`, and no release of it fixes these 2
+      # advisories. It only unpacks browser downloads, which the end-to-end tests never ask for since they drive the
+      # app itself. Drop the flags once a fixed release exists.
+      - name: Audit apps/desktop/bun.lock
+        run: bun audit --audit-level=high --ignore GHSA-7pqw-9j4j-h8q3 --ignore GHSA-jmr9-qjv8-65gv
+        working-directory: apps/desktop

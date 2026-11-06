@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+pub(crate) use procly_client::protocol::Worktree;
 
 /// The longest Worktree slug, leaving room for a prefix and a suffix in a 63-byte Postgres identifier.
 pub(crate) const SLUG_MAX_LEN: usize = 32;
@@ -41,15 +41,6 @@ pub(crate) enum TopologyError {
 pub(crate) struct Topology {
     pub(crate) git_common_dir: PathBuf,
     pub(crate) worktree: Worktree,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Worktree {
-    /// The root directory of the Worktree, canonicalized.
-    pub(crate) path: PathBuf,
-    pub(crate) slug: String,
-    /// Whether this is the Main worktree, the first entry of `git worktree list`.
-    pub(crate) main: bool,
 }
 
 impl Topology {
@@ -129,6 +120,15 @@ pub(crate) fn branch(worktree: &Path) -> Result<Option<String>, TopologyError> {
 /// The first entry of a bare Repository is the bare directory itself, which is no Worktree and is skipped, so no
 /// Worktree of a bare Repository is the Main worktree.
 pub(crate) fn worktrees(git_common_dir: &Path) -> Result<Vec<Worktree>, TopologyError> {
+    Ok(worktrees_on_branches(git_common_dir)?
+        .into_iter()
+        .map(|(worktree, _)| worktree)
+        .collect())
+}
+
+/// [`worktrees`], each with the branch checked out in it as the same `git worktree list` call reports it: `None` on a
+/// detached `HEAD`.
+pub(crate) fn worktrees_on_branches(git_common_dir: &Path) -> Result<Vec<(Worktree, Option<String>)>, TopologyError> {
     let listed = parse_worktree_list(&git(git_common_dir, &["worktree", "list", "--porcelain", "-z"])?);
     let main = listed.first().map(|entry| entry.path.clone());
     Ok(listed
@@ -138,11 +138,12 @@ pub(crate) fn worktrees(git_common_dir: &Path) -> Result<Vec<Worktree>, Topology
             let is_main = main.as_ref() == Some(&entry.path);
             // git records the path as given to `worktree add`, which may go through a symlink.
             let path = std::fs::canonicalize(&entry.path).unwrap_or(entry.path);
-            Worktree {
+            let worktree = Worktree {
                 slug: slug_of(&path),
                 path,
                 main: is_main,
-            }
+            };
+            (worktree, entry.branch)
         })
         .collect())
 }
@@ -245,6 +246,8 @@ struct ListedWorktree {
     bare: bool,
     /// A Worktree whose directory is gone, waiting for `git worktree prune`.
     prunable: bool,
+    /// The short name of the branch checked out, `None` on a detached `HEAD`.
+    branch: Option<String>,
 }
 
 /// Parses NUL-separated attribute lines, with an empty field closing each entry, so any path survives.
@@ -258,12 +261,15 @@ fn parse_worktree_list(output: &[u8]) -> Vec<ListedWorktree> {
                 path: PathBuf::from(OsStr::from_bytes(path)),
                 bare: false,
                 prunable: false,
+                branch: None,
             });
         } else if let Some(entry) = current.as_mut() {
             if field == b"bare" {
                 entry.bare = true;
             } else if field.starts_with(b"prunable") {
                 entry.prunable = true;
+            } else if let Some(name) = field.strip_prefix(b"branch refs/heads/") {
+                entry.branch = Some(String::from_utf8_lossy(name).into_owned());
             }
         }
     }
@@ -280,19 +286,31 @@ mod tests {
         let output = b"worktree /src/app.git\0bare\0\0\
                        worktree /src/app main\0HEAD f181\0branch refs/heads/main\0\0\
                        worktree /src/gone\0HEAD f181\0detached\0prunable gitdir file points to non-existent location\0\0";
-        let listed = |path: &str, bare, prunable| ListedWorktree {
+        let listed = |path: &str, bare, prunable, branch: Option<&str>| ListedWorktree {
             path: PathBuf::from(path),
             bare,
             prunable,
+            branch: branch.map(str::to_owned),
         };
         assert_eq!(
             parse_worktree_list(output),
             [
-                listed("/src/app.git", true, false),
-                listed("/src/app main", false, false),
-                listed("/src/gone", false, true),
+                listed("/src/app.git", true, false, None),
+                listed("/src/app main", false, false, Some("main")),
+                listed("/src/gone", false, true, None),
             ]
         );
+    }
+
+    #[test]
+    fn the_worktree_list_gives_the_short_name_of_a_branch_with_slashes_and_none_on_a_detached_head() {
+        let output = b"worktree /src/login\0HEAD f181\0branch refs/heads/feature/login\0\0\
+                       worktree /src/detached\0HEAD f181\0detached\0\0";
+        let branches: Vec<Option<String>> = parse_worktree_list(output)
+            .into_iter()
+            .map(|entry| entry.branch)
+            .collect();
+        assert_eq!(branches, [Some("feature/login".to_owned()), None]);
     }
 
     #[test]

@@ -17,7 +17,9 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 - **ALWAYS** derive "Needs you" and hold the Seen set in Rust, once, and send the frontend the derived list next to the unchanged `Response`.
   - The native menu bar menu is built in Rust and must agree with the window, so a second copy of the rule in TypeScript would drift. It is the one derivation the app makes in Rust, and it is presentation, not supervision: it decides nothing in the Daemon.
   - A failure is keyed by (Worktree path, Service, `started_at`), or by the `id` of a Job, so a Service that fails again after a new start is not taken for the one already seen.
-  - Example: `needs_you(&report, &seen) -> Vec<NeedsYou>`, called by the poller on each answer, its result emitted with the `Response`.
+  - An end is routine only when it is `stopped`, `idle` or `exited` with code 0, and every other end is a failure, so an end kind the app does not know yet counts as one. The list of routine ends is the allowlist, never a list of failures.
+  - The Seen set is `seen.json` in `app_data_dir()`, written atomically. Each answer to `Status` drops the keys it holds no failure for, while an answer that is not a status leaves the set alone, so that a Daemon that stops does not bring every failure back.
+  - Example: `needs_you(&report, &seen) -> Vec<NeedsYou>`, called on each answer of the poller, its result emitted with the `Response` and the Seen keys, so the frontend dims a Seen row without deciding anything.
 
 - **NEVER** poll the Daemon from the frontend or from a command, every refresh goes through the one poller task the app spawns at startup.
   - A JavaScript timer in a hidden webview is throttled by WebKit and App Nap, and the menu must stay current with the window closed. Each `Status` spawns 4 processes plus 1 per Repository, so 2 pollers double that cost.
@@ -41,6 +43,12 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 - **NEVER** let the app guess the `procly` executable, pass the sidecar it embeds explicitly to `connect_or_start` and to every CLI command.
   - Inside a Tauri bundle `current_exe()` is the app, and starting it with `daemon` would launch a second app instead of the Daemon. A `procly` found on the `PATH` may be another release, whose Daemon the app could not talk to.
   - Example: `DaemonClient::connect_or_start(socket_path, &procly_exe)`, where `procly_exe` is `Procly.app/Contents/MacOS/procly`.
+
+- **ALWAYS** declare the sidecar in `src-tauri/tauri.bundle.conf.json` and build every bundle with `make bundle`, never put `bundle.externalBin` in `tauri.conf.json`.
+  - At each build of the app, tauri-build copies a declared sidecar over `target/<profile>/procly`, which is the CLI binary every test of `crates/procly/tests/` runs. A fresh clone has no sidecar to copy, so the build would need a placeholder, and that placeholder replaces the CLI until cargo links it again. Measured on Tauri 2.12.
+  - The app finds its `procly` beside its own executable, `Contents/MacOS/procly` in a bundle and `target/<profile>/procly`, the CLI itself, when it runs from the workspace.
+  - `make bundle` builds the CLI, places it at `src-tauri/binaries/procly-<target triple>` (git-ignored), then runs `tauri build --config src-tauri/tauri.bundle.conf.json`. The end-to-end build (ADR 0016) and the release workflow call it, with `PROFILE=release` for the latter, a plain `tauri build` yields a bundle without the sidecar.
+  - Example: `make bundle TAURI_ARGS="--bundles app"` leaves `target/debug/bundle/macos/Procly.app/Contents/MacOS/procly` next to `procly-desktop`.
 
 - **NEVER** start the Daemon implicitly, refresh with `connect` and call `connect_or_start` only from an action the developer took.
   - A Daemon the developer stopped must stay stopped, and a Session unit keeps it running anyway when one is installed.
@@ -117,3 +125,12 @@ How the desktop app is written. The official pages are vendored in [`docs/refere
 - **ALWAYS** test the frontend against `mockIPC` from `@tauri-apps/api/mocks`, and test the Rust side through the `procly-client` crate.
   - The commands hold no logic, so the frontend tests check rendering and the client tests check the protocol, without a running webview.
   - Example: `mockIPC((cmd, args) => cmd === 'restart' ? { response: 'up', service: 'web', outcome: 'started', port: 5173 } : undefined)`.
+
+- **ALWAYS** prove a screen that depends on the window, the sidecar and a real Daemon together with an end-to-end flow in `apps/desktop/e2e/specs/`, run by `make e2e`.
+  - ADR 0016: WebdriverIO drives the built app through an embedded WebDriver server. The layer is outside `make check` because it opens a window, so a ticket that needs live proof adds its flow there instead of widening the unit tests.
+  - A flow sets its scene with the embedded `procly` against the Daemon the runner isolated in temporary directories, reads and presses the page through `browser.execute`, and never reaches the Daemon of the developer.
+  - Example: `await procly(["up", "--json", "web"], scene.path)`, then `await showingText(OVERVIEW, ["web", `:${scene.port}`])`.
+
+- **NEVER** enable the `e2e` Cargo feature in a release build, or add its WebDriver server, the bridge plugin or their permissions to a build that ships.
+  - The feature runs a WebDriver server on a loopback port that can drive the window. The listener rule above covers the Daemon, this one covers the app, and a release build with the feature fails to compile.
+  - Example: `make e2e` builds with `TAURI_ARGS="--features e2e"`, while the release workflow runs `make bundle PROFILE=release` with no feature.

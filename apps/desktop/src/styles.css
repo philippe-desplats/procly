@@ -1,0 +1,584 @@
+/* The Ink palette of the spec. Colour only carries state, light and dark follow the system. */
+:root {
+  --bg: #e4e7ea;
+  --side: #f3f4f6;
+  --panel: #ffffff;
+  --raise: #eef0f2;
+  --line: #dfe2e6;
+  --text: #14161a;
+  --muted: #50575f;
+  --faint: #646b74;
+  --ok: #5c6b2f;
+  --warn: #8f5a00;
+  --fail: #b42318;
+  --ended: #6f767e;
+  --accent: #007aff;
+  --brand-lime: #d7f23c;
+  --brand-lime-deep: #a8bf22;
+  --brand-ink: #14161a;
+
+  --size-small: 11px;
+  --size-body: 13px;
+  --size-title: 17px;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101215;
+    --side: #1b1e23;
+    --panel: #17191d;
+    --raise: #23272d;
+    --line: #2a2f36;
+    --text: #e8eaed;
+    --muted: #a2a9b2;
+    --faint: #858d97;
+    --ok: #8fa05f;
+    --warn: #f0b042;
+    --fail: #ff6b6b;
+    --ended: #7b828b;
+    --accent: #0a84ff;
+  }
+}
+
+/* The system accent where WebKit provides it, the fallbacks above elsewhere. */
+@supports (color: -apple-system-control-accent) {
+  :root {
+    --accent: -apple-system-control-accent;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    var(--size-body) / 1.45 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.window {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 280px;
+  height: 100%;
+}
+
+.pane {
+  overflow: auto;
+  padding: 16px;
+  margin: 0;
+}
+
+.sidebar {
+  background: var(--side);
+  border-right: 1px solid var(--line);
+}
+
+.center {
+  background: var(--panel);
+}
+
+.inspector {
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+
+.pane-title {
+  margin: 0 0 16px;
+  font-size: var(--size-body);
+  font-weight: 600;
+}
+
+.title {
+  margin: 0 0 12px;
+  font-size: var(--size-title);
+  font-weight: 600;
+}
+
+.caption {
+  margin: 12px 0 4px;
+  color: var(--faint);
+  font-size: var(--size-small);
+  font-weight: 500;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: var(--size-small);
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.row .caption {
+  margin: 0;
+}
+
+.row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row[aria-current="true"] {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.row[aria-current="true"] .caption {
+  color: inherit;
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.item {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.item[data-seen="true"] {
+  opacity: 0.55;
+}
+
+.item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item .caption {
+  margin: 0;
+}
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 112px;
+  color: var(--muted);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.tone-ok .dot {
+  background: var(--ok);
+}
+
+.tone-warn .dot {
+  background: var(--warn);
+}
+
+.tone-fail .dot {
+  background: var(--fail);
+}
+
+.tone-ended .dot {
+  background: var(--ended);
+}
+
+.tone-muted .dot {
+  background: var(--faint);
+}
+
+.facts {
+  margin: 0;
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.toolbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 0 0 8px;
+}
+
+.toolbar .caption {
+  margin: 0;
+}
+
+.button {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: default;
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.subtitle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 12px 0 4px;
+  font-size: var(--size-body);
+  font-weight: 600;
+}
+
+.mark {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: var(--size-small);
+}
+
+/* Settings replaces the inspector, so the window has 2 panes. */
+.window-settings {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+/* Settings stays at the bottom of the sidebar, whatever the list above it holds. */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-foot {
+  margin-top: auto;
+  flex: none;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 320px;
+  margin: 0 0 12px;
+}
+
+.field .caption {
+  margin: 0;
+}
+
+/* A setting that is on or off: the box, then its words on one line. */
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.switch input {
+  accent-color: var(--accent);
+}
+
+.control {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The actions on a Worktree stand in a column under its facts. */
+.worktree-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.worktree-actions .error {
+  margin: 4px 0 0;
+}
+
+/* "Start the Daemon" is the one action drawn in the brand lime. */
+.button.brand {
+  border-color: var(--brand-lime-deep);
+  background: var(--brand-lime);
+  color: var(--brand-ink);
+}
+
+.button:disabled {
+  opacity: 0.5;
+}
+
+/* The default button of a sheet is the one Enter presses, and it is never a destructive one. */
+.button.default {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.copybox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raise);
+}
+
+.error {
+  color: var(--fail);
+  overflow-wrap: anywhere;
+}
+
+/* A caution that comes before the effects of a sheet, which is not a failure. */
+.warning {
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
+.copybox-block {
+  align-items: flex-start;
+}
+
+.copybox-block code {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.item.check {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.check-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.check-message {
+  margin: 0;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.fix {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prompt {
+  margin-top: 16px;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: var(--raise);
+  color: var(--text);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+  background: rgb(0 0 0 / 30%);
+}
+
+.sheet {
+  width: min(460px, calc(100% - 32px));
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 25%);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.actions-row {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+/* An item that states more than one line: what it is, then what it drops or why it failed. */
+.item-block {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+/* Stop and Restart of one Service in the inspector, and the command to copy when the app cannot restart it. Nothing here is red. */
+.controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  align-self: stretch;
+  margin: 4px 0;
+}
+
+.controls-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.controls .copybox {
+  align-self: stretch;
+}
+
+.controls .error {
+  margin: 0;
+}
+
+/* A row of the center is a button that picks the item for the inspector. */
+.item-select {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.item-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.item[data-selected="true"] {
+  background: var(--raise);
+}
+
+/* The output of a Service or a Job, drawn as text on the panel so that every colour holds its contrast. */
+.output {
+  max-height: 40vh;
+  margin: 8px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.output .bold {
+  font-weight: 700;
+}
+
+.output .note {
+  color: var(--faint);
+  font-style: italic;
+}
+
+/* Colour only carries state: the colours of a terminal that mean one are drawn in its token, the others in the text. */
+.output .fg-black {
+  color: var(--muted);
+}
+
+.output .fg-grey {
+  color: var(--faint);
+}
+
+.output .fg-red {
+  color: var(--fail);
+}
+
+.output .fg-green {
+  color: var(--ok);
+}
+
+.output .fg-yellow {
+  color: var(--warn);
+}
+
+.output .fg-blue,
+.output .fg-magenta,
+.output .fg-cyan,
+.output .fg-white {
+  color: var(--text);
+}

@@ -11,11 +11,21 @@ use crate::driver::{self, Driver};
 use crate::protocol::{KeptResource, ReleaseReport};
 use crate::topology::{self, Topology};
 
-/// Releases the Worktree holding `path`, logging who asked: stops its Services and Jobs with their whole trees, lets
-/// go of its Compose services, then releases its Leases, apart from those of its Pinned branch and those a container
-/// still runs on. Its Logical resources are kept and named. Running it again, or in a Worktree Procly never saw,
-/// releases nothing. It then applies the Retention policy of the Isolated containers of the Worktrees already removed.
-pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32>) -> anyhow::Result<ReleaseReport> {
+/// Releases the Worktree holding `path`, logging who asked: stops its Services and Jobs with their whole trees, drops
+/// the held environment of every Service of it, lets go of its Compose services, then releases its Leases, apart
+/// from those of its Pinned branch and those a container still runs on. The Daemon then forgets every ended Job and
+/// ended Service of the Worktree. Its Logical resources are kept and named. Running it again, or in a Worktree Procly
+/// never saw, releases nothing. It then applies the Retention policy of the Isolated containers of the Worktrees
+/// already removed.
+///
+/// With `dry_run` it answers with the report the same release would give and changes nothing, so it forgets no Job or
+/// Service and applies no Retention policy.
+pub(super) async fn run(
+    registry: Arc<Registry>,
+    path: PathBuf,
+    dry_run: bool,
+    peer: Option<i32>,
+) -> anyhow::Result<ReleaseReport> {
     // Resolving the Topology and the branch runs git, and naming the requester runs ps.
     let (topology, branch, who) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let topology = topology_of(&path)?;
@@ -30,8 +40,15 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
     .await
     .context("the request could not be read")??;
     let worktree = topology.worktree.path.clone();
+    if dry_run {
+        eprintln!("worktree release dry run of {} requested by {who}", worktree.display());
+        return dry_run_of(&registry, &topology, branch.as_deref());
+    }
     eprintln!("worktree release of {} requested by {who}", worktree.display());
 
+    // Before anything is stopped, so that a Restart under way starts nothing the release would miss, and a Restart
+    // after it has no environment to start with.
+    registry.held.release(&worktree).await;
     let services = registry.services.stop(&worktree, None);
     let jobs: Vec<_> = registry
         .jobs
@@ -78,6 +95,9 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
         let _ = stopping.await;
         report.jobs.push(id);
     }
+    // Everything that ran is stopped, so what the Daemon still holds of the Worktree is its ended Jobs and Services.
+    registry.jobs.remove_ended_in(&worktree);
+    registry.services.remove_ended_in(&worktree);
 
     // Once the Services are gone, so that only a container still running keeps a Lease of the Worktree.
     let (leases, kept_leases, logical_resources, warning) = {
@@ -110,6 +130,57 @@ pub(super) async fn run(registry: Arc<Registry>, path: PathBuf, peer: Option<i32
     report.logical_resources = logical_resources;
     report.warnings.extend(warning);
     log(&report);
+    Ok(report)
+}
+
+/// The report a release of the Worktree of `topology` would give, computed from what the Daemon holds and the disk
+/// without stopping, letting go of or writing anything. Blocking: it reads the disk.
+fn dry_run_of(registry: &Registry, topology: &Topology, branch: Option<&str>) -> anyhow::Result<ReleaseReport> {
+    let (repository, worktree) = (&topology.git_common_dir, &topology.worktree.path);
+    let mut report = ReleaseReport {
+        worktree: worktree.clone(),
+        services: registry.services.would_stop(worktree),
+        jobs: registry
+            .jobs
+            .running_in(worktree)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect(),
+        compose_services: registry.composes.would_release(repository, worktree, None),
+        ..ReleaseReport::default()
+    };
+    // The Isolated containers it stops count as Services of the report, those of other removed Worktrees are not its own.
+    let stopped_isolated = registry
+        .composes
+        .would_stop_isolated(registry.composes.isolated_released(repository, worktree, None));
+    // What still runs once the release is done: the Services of the Worktree and the Isolated containers are gone, so
+    // that only a container left to its Grace period keeps a Lease of the Worktree.
+    let mut running = registry.running();
+    running.retain(|(path, _)| path != worktree);
+    running.extend(registry.composes.running().into_iter().filter(|(path, service)| {
+        !stopped_isolated
+            .iter()
+            .any(|(_, name, owner)| name == service && owner.as_deref() == Some(path.as_path()))
+    }));
+    report.services.extend(
+        stopped_isolated
+            .into_iter()
+            .filter(|(_, _, owner)| owner.as_deref() == Some(worktree.as_path()))
+            .map(|(_, name, _)| name),
+    );
+    let (leases, kept_leases) = registry
+        .leases
+        .would_release_worktree(repository, worktree, branch, &running)?;
+    report.leases = leases;
+    report.kept_leases = kept_leases;
+    // A configuration that cannot be read only hides the resources, the Leases are released whatever it says.
+    match logical_resources(registry, topology) {
+        Ok(resources) => report.logical_resources = resources,
+        Err(error) => report.warnings.push(format!(
+            "cannot name the Logical resources of {}, they are kept: {error:#}",
+            worktree.display()
+        )),
+    }
     Ok(report)
 }
 

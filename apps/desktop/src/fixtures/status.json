@@ -1,0 +1,61 @@
+{
+  "response": "status",
+  "repositories": [
+    {
+      "git_common_dir": "/p/work/acme/web/.git",
+      "worktrees": [
+        {
+          "path": "/p/work/acme/web",
+          "slug": "web",
+          "main": true,
+          "branch": "main",
+          "listed": true,
+          "services": [
+            {
+              "service": "api",
+              "port": 18731,
+              "reattached": false,
+              "started_at": 1793907082159,
+              "state": "healthy"
+            }
+          ],
+          "jobs": [
+            {
+              "id": "ea79fa81",
+              "command": "sleep 60",
+              "cwd": "/p/work/acme/web",
+              "state": "running"
+            }
+          ]
+        },
+        {
+          "path": "/p/work/acme/web-fix",
+          "slug": "web_fix",
+          "main": false,
+          "branch": "web-fix",
+          "listed": true,
+          "services": [],
+          "jobs": [
+            {
+              "id": "a4e2ea77",
+              "command": "sh -c 'exit 3'",
+              "cwd": "/p/work/acme/web-fix",
+              "state": "ended",
+              "end": {
+                "kind": "exited",
+                "code": 3
+              }
+            },
+            {
+              "id": "9d3a1f1b",
+              "command": "sleep 61",
+              "cwd": "/p/work/acme/web-fix",
+              "state": "running"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "jobs_outside_repositories": []
+}

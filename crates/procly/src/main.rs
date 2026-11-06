@@ -1,11 +1,13 @@
 mod client;
 mod config;
 mod daemon;
+mod daemon_stop;
 mod derived;
 mod doctor;
 mod driver;
 mod duration;
 mod envfile;
+mod follow;
 mod guard;
 mod init;
 mod json;
@@ -15,9 +17,7 @@ mod output;
 mod placeholder;
 mod ports;
 mod proposal;
-mod protocol;
 mod shell;
-mod state_dir;
 mod status;
 mod topology;
 mod unit;
@@ -30,6 +30,9 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+// The protocol and the state directory live in `procly-client`, shared with the desktop app, and keep their paths
+// in this crate.
+use procly_client::{protocol, state_dir};
 
 use crate::protocol::{
     BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
@@ -56,6 +59,22 @@ const EXIT_DOCTOR_FAILED: u8 = 7;
 /// The exit code of a command that failed in Procly itself, the one `timeout(1)` uses for its own failures.
 const EXIT_PROCLY_FAILURE: u8 = 125;
 
+/// The arguments of `logs`. Its `--json` says what it prints with `--follow`, which is no longer one document.
+#[derive(Debug, Args)]
+#[command(mut_arg("json", |json| json.help(
+    "Print one JSON document carrying a `schema_version` on stdout instead of text, and with --follow, one JSON \
+     document per line (NDJSON). A command that fails still reports on stderr and exits with the same code. See \
+     docs/json.md."
+)))]
+struct LogsArgs {
+    #[command(flatten)]
+    json: JsonFlag,
+    /// Stream the output as it arrives, until the Job or the Service ends or Ctrl-C.
+    #[arg(long)]
+    follow: bool,
+    job_or_service: String,
+}
+
 /// The flag that turns the text of a command into one JSON document.
 #[derive(Debug, Clone, Copy, Args)]
 struct JsonFlag {
@@ -70,9 +89,10 @@ struct JsonFlag {
     name = "procly",
     version,
     about,
-    after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` finds the Service ended before it was \
-                  healthy, 4 when `up` finds a Port mismatch, 5 when `up` finds a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
-                  every Orphan, 7 when `doctor` found a problem, 124 when `wait` finds the Job timed out or `up` \
+    after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` or `restart` finds the Service ended \
+                  before it was healthy, 4 when `up` or `restart` finds a Port mismatch, 5 when `up` or `restart` finds \
+                  a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
+                  every Orphan, 7 when `doctor` found a problem, 124 when `wait` finds the Job timed out or `up` or `restart` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
                   docs/exit-codes.md."
@@ -139,6 +159,22 @@ enum Command {
         json: JsonFlag,
         service: Option<String>,
     },
+    /// Restart a Service of the current Worktree with the environment of its last `up`, which the Daemon holds in
+    /// memory, not the environment of this shell: stop it if it runs, start the Services it needs that do not run,
+    /// start it again on the same Lease and wait until it is healthy. Prints what `up` of the Service prints. A Service
+    /// covered by a Group that runs is restarted through its Group.
+    #[command(
+        after_help = "The Daemon holds no environment for a Service a previous Daemon started, nor after a Worktree \
+                      release: run `procly up <service>` from a shell in the Worktree first. Exit codes: those of \
+                      `procly up`, 0 when the Service is healthy, 3 when it stopped before it became healthy, 4 on a \
+                      Port mismatch, 5 on a conflict, 124 past its health timeout, 125 when Procly itself fails, such \
+                      as for a Service with no environment to restart with. See docs/exit-codes.md."
+    )]
+    Restart {
+        #[command(flatten)]
+        json: JsonFlag,
+        service: String,
+    },
     /// Wait for a Job to end, print its output and exit with its exit code (124 on timeout).
     Wait {
         #[command(flatten)]
@@ -149,15 +185,15 @@ enum Command {
     #[command(
         after_help = "A Job identifier printed by `procly run` names that Job, any other name a Service of the current \
                       Worktree, whose output is kept across a restart of the Daemon. The output of a Compose service \
-                      is the last 1000 lines of its container, read with `docker compose logs`. Exit codes: 0 on \
-                      success, 125 when Procly itself fails, such as for a name that is neither a Job nor a Service. \
-                      See docs/exit-codes.md."
+                      is the last 1000 lines of its container, read with `docker compose logs`. With `--follow` the \
+                      output streams as it arrives, through the automatic restarts of a Service, until the Job or the Service \
+                      ends or Ctrl-C, and `--json` then prints one JSON object per line, ended by an `ended` line \
+                      that Ctrl-C never prints. A Compose service cannot be followed, the error gives the \
+                      `docker compose logs -f` command to run. Exit codes: 0 on success, also on Ctrl-C, 125 when \
+                      Procly itself fails, such as for a name that is neither a Job nor a Service. See \
+                      docs/exit-codes.md and docs/json.md."
     )]
-    Logs {
-        #[command(flatten)]
-        json: JsonFlag,
-        job_or_service: String,
-    },
+    Logs(LogsArgs),
     /// Print the Repository, the current Worktree and its Jobs.
     Status {
         /// Report every Worktree of every Repository the Daemon knows, not only the current one.
@@ -282,9 +318,16 @@ enum Command {
                       that fails is a tool error carrying its exit code and its stderr. See docs/mcp.md."
     )]
     Mcp,
-    /// Run the Daemon in the foreground. Every other command starts it on demand.
-    #[command(hide = true)]
-    Daemon,
+    /// Run the Daemon in the foreground, or stop it with `daemon stop`. Every other command starts it on demand.
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "Exit codes: 0 for `daemon stop`, also when no Daemon runs, 125 when the Daemon is still there \
+                      after 10 s or Procly itself fails. See docs/daemon.md."
+    )]
+    Daemon {
+        #[command(subcommand)]
+        command: Option<DaemonCommand>,
+    },
     /// Append the standard input to the output file of a Service, keeping it bounded. The Daemon starts it.
     #[command(hide = true)]
     OutputFile { path: PathBuf },
@@ -361,16 +404,21 @@ enum WorktreeCommand {
     /// Run the Worktree release, before the Worktree is removed: stop its Services and Jobs with their whole process
     /// trees, let go of its Compose services as `down` does, and release its Leases so that another Worktree can be
     /// granted their ports at once. The Leases of a Pinned branch are kept, and so is every Logical resource, which
-    /// `procly gc` lists once the Worktree is removed. Nothing is deleted. The Daemon logs who asked.
+    /// `procly gc` lists once the Worktree is removed. Nothing is deleted. The Daemon logs who asked. With `--dry-run`,
+    /// print what the release would stop, let go of and release, and change nothing.
     #[command(
         after_help = "Run it from the pre-remove hook of a worktree manager. Running it again, or in a Worktree Procly \
-                      never saw, prints `nothing to release`. Exit codes: 0 when the Worktree is released, also when \
+                      never saw, prints `nothing to release`. `--dry-run` prints the same report with `would stop` \
+                      and `would release`, and stops and releases nothing. Exit codes: 0 when the Worktree is released, also when \
                       there was nothing to release, 125 when Procly itself fails, such as for a directory that is not \
                       in a git Repository. See docs/worktree-release.md and docs/exit-codes.md."
     )]
     Release {
         #[command(flatten)]
         json: JsonFlag,
+        /// Print what the release would do instead of doing it: nothing is stopped, released or written.
+        #[arg(long)]
+        dry_run: bool,
         /// The Worktree to release, or any directory in it. Defaults to the current directory.
         path: Option<PathBuf>,
     },
@@ -385,6 +433,16 @@ enum WorktreeCommand {
                       it runs them. See docs/worktree-init.md and docs/exit-codes.md."
     )]
     Hooks {
+        #[command(flatten)]
+        json: JsonFlag,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Stop the running Daemon with `SIGTERM`, which stops its Services and its Jobs, and wait until it has gone. It
+    /// never speaks the protocol, so it stops a Daemon of any version of Procly, and it never sends `SIGKILL`.
+    Stop {
         #[command(flatten)]
         json: JsonFlag,
     },
@@ -415,7 +473,7 @@ enum UnitCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     // A command of `procly mcp` stops with it. The Daemon outlives everything, and a server watches no server.
-    if !matches!(cli.command, Command::Daemon | Command::Mcp) {
+    if !matches!(cli.command, Command::Daemon { command: None } | Command::Mcp) {
         #[expect(
             unsafe_code,
             reason = "`watch` edits the environment, which is only sound before any thread starts"
@@ -483,6 +541,7 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         } => up(&state, service, gitignore, json.json),
         Command::Env { json, service } => env(&state, &service, json.json),
         Command::Down { json, service } => down(&state, service, json.json),
+        Command::Restart { json, service } => restart(&state, service, json.json),
         Command::Wait { json, job } => match client::send(&state, &Request::Wait { job: job.clone() })? {
             Response::Ended { output, end } => {
                 if json.json {
@@ -499,27 +558,14 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
             }
             other => unexpected(other),
         },
-        Command::Logs { json, job_or_service } => logs(&state, &job_or_service, json.json),
-        Command::Status { all, json } => {
-            let cwd = std::env::current_dir().context("cannot read the current directory")?;
-            match client::send(&state, &Request::Status { cwd, all })? {
-                Response::Status(report) => {
-                    print(&if json {
-                        status::json(&report)
-                    } else {
-                        status::text(&report)
-                    })?;
-                    Ok(ExitCode::SUCCESS)
-                }
-                other => unexpected(other),
-            }
-        }
+        Command::Logs(args) => logs(&state, &args),
+        Command::Status { all, json } => status_report(&state, all, json),
         Command::Worktree {
             command: WorktreeCommand::Init { json, path },
         } => worktree_init(&state, path, json.json),
         Command::Worktree {
-            command: WorktreeCommand::Release { json, path },
-        } => worktree_release(&state, path, json.json),
+            command: WorktreeCommand::Release { json, dry_run, path },
+        } => worktree_release(&state, path, dry_run, json.json),
         Command::Worktree {
             command: WorktreeCommand::Hooks { json },
         } => worktree_hooks(&state, json.json),
@@ -536,20 +582,41 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         Command::Guard => unreachable!("the Guard is answered before the state directory is resolved"),
         Command::Mcp => unreachable!("the MCP server is served before the state directory is resolved"),
         Command::OutputFile { .. } => unreachable!("the output file is written before the state directory is resolved"),
-        Command::Daemon => {
-            daemon::run(&state)?;
-            Ok(ExitCode::SUCCESS)
-        }
+        Command::Daemon { command } => daemon(&state, command.as_ref()),
     }
 }
 
-/// Prints the recent output of the Job or the Service `job_or_service`.
-fn logs(state: &StateDir, job_or_service: &str, json: bool) -> anyhow::Result<ExitCode> {
+/// Runs the Daemon in the foreground, or `daemon stop`, which signals the Daemon instead of asking it.
+fn daemon(state: &StateDir, command: Option<&DaemonCommand>) -> anyhow::Result<ExitCode> {
+    let Some(DaemonCommand::Stop { json }) = command else {
+        daemon::run(state)?;
+        return Ok(ExitCode::SUCCESS);
+    };
+    let json = json.json;
+    let outcome = daemon_stop::run(state)?;
+    if json {
+        json::print(&outcome)?;
+    } else {
+        match outcome {
+            daemon_stop::DaemonStop::NotRunning { .. } => eprintln!("procly: no Daemon running"),
+            daemon_stop::DaemonStop::Stopped { pid, .. } => eprintln!("procly: Daemon (pid {pid}) stopped"),
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints the recent output of the Job or the Service `job_or_service`, or with `follow` its output as it arrives.
+fn logs(state: &StateDir, args: &LogsArgs) -> anyhow::Result<ExitCode> {
+    let (job_or_service, json) = (args.job_or_service.as_str(), args.json.json);
+    if args.follow {
+        return follow::run(state, job_or_service, json);
+    }
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let request = Request::Logs {
         name: job_or_service.to_owned(),
         cwd,
         env: caller_env(),
+        follow: false,
     };
     match client::send(state, &request)? {
         Response::Logs { output } => {
@@ -593,7 +660,34 @@ fn up(state: &StateDir, service: Option<String>, gitignore: bool, json: bool) ->
         env: caller_env(),
         gitignore,
     };
-    match client::send(state, &request)? {
+    answer_up(state, &request, json)
+}
+
+/// Runs `status`, printing the report as text or as one JSON document.
+fn status_report(state: &StateDir, all: bool, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    match client::send(state, &Request::Status { cwd, all })? {
+        Response::Status(report) => {
+            print(&if json {
+                status::json(&report)
+            } else {
+                status::text(&report)
+            })?;
+            Ok(ExitCode::SUCCESS)
+        }
+        other => unexpected(other),
+    }
+}
+
+/// Runs `restart`, printing what `up` of the Service prints.
+fn restart(state: &StateDir, service: String, json: bool) -> anyhow::Result<ExitCode> {
+    let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    answer_up(state, &Request::Restart { service, cwd }, json)
+}
+
+/// Sends `request`, an `up` or a Restart, and prints where to reach the healthy Service, or why it is not.
+fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<ExitCode> {
+    match client::send(state, request)? {
         Response::Up {
             service,
             outcome,
@@ -891,7 +985,7 @@ fn down(state: &StateDir, service: Option<String>, json: bool) -> anyhow::Result
                         println!("{service} stopped");
                     }
                     for released in &released {
-                        println!("{}", let_go(released));
+                        println!("{}", let_go(released, false));
                     }
                 }
             }
@@ -952,20 +1046,25 @@ fn unit(state: &StateDir, command: &UnitCommand) -> anyhow::Result<ExitCode> {
 }
 
 /// What `down` tells about a Compose service the Worktree let go of: whether its container keeps running for others,
-/// or when it stops.
-fn let_go(released: &Released) -> String {
+/// or when it stops. With `dry_run` it tells what the release would do instead.
+fn let_go(released: &Released, dry_run: bool) -> String {
     let Released {
         service,
         others,
         grace_ms,
     } = released;
+    let (release, stops) = if dry_run {
+        ("would release", "it would stop")
+    } else {
+        ("released", "it stops")
+    };
     match others {
         0 => format!(
-            "{service} released, it stops after {} unless a Worktree needs it again",
+            "{service} {release}, {stops} after {} unless a Worktree needs it again",
             duration::format(Duration::from_millis(*grace_ms))
         ),
-        1 => format!("{service} released, 1 other Worktree still needs it"),
-        _ => format!("{service} released, {others} other Worktrees still need it"),
+        1 => format!("{service} {release}, 1 other Worktree still needs it"),
+        _ => format!("{service} {release}, {others} other Worktrees still need it"),
     }
 }
 
@@ -1036,7 +1135,7 @@ fn init(json: bool) -> anyhow::Result<ExitCode> {
 /// Runs `gc`, printing each Orphan, or with `apply` each deletion on stdout and each failure on stderr.
 fn gc(state: &StateDir, apply: bool, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    let report = match client::send(state, &Request::Gc { cwd, apply })? {
+    let report = match client::send(state, &Request::Gc { cwd, apply, only: None })? {
         Response::Gc(report) => report,
         other => return unexpected(other),
     };
@@ -1287,7 +1386,7 @@ fn guard_hook() -> ExitCode {
             Some(cwd) => cwd,
             None => std::env::current_dir().context("cannot read the current directory")?,
         };
-        Ok(client::send(&state, &Request::Guard { cwd })?)
+        client::send(&state, &Request::Guard { cwd })
     });
     match asked {
         Ok(Response::Guard {
@@ -1382,17 +1481,17 @@ fn worktree_init(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow:
 }
 
 /// Runs `worktree release`, printing one line per Service, Job, Compose service and Lease it released, then one per
-/// Lease and Logical resource it kept.
-fn worktree_release(state: &StateDir, path: Option<PathBuf>, json: bool) -> anyhow::Result<ExitCode> {
+/// Lease and Logical resource it kept. With `dry_run` the lines say what it would do.
+fn worktree_release(state: &StateDir, path: Option<PathBuf>, dry_run: bool, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
     let path = path.map_or(cwd.clone(), |path| cwd.join(path));
-    match client::send(state, &Request::WorktreeRelease { path })? {
+    match client::send(state, &Request::WorktreeRelease { path, dry_run })? {
         Response::WorktreeRelease(report) if json => {
             json::print(&json::WorktreeRelease::new(&report))?;
             Ok(ExitCode::SUCCESS)
         }
         Response::WorktreeRelease(report) => {
-            print(&release_summary(&report))?;
+            print(&release_summary(&report, dry_run))?;
             warn_all(&report.warnings);
             Ok(ExitCode::SUCCESS)
         }
@@ -1449,19 +1548,25 @@ fn worktree_hooks(state: &StateDir, json: bool) -> anyhow::Result<ExitCode> {
 }
 
 /// What `worktree release` prints: what it stopped, let go of and released, or `nothing to release`, then what it kept.
-fn release_summary(report: &ReleaseReport) -> String {
+/// With `dry_run` it says what it would stop and would release.
+fn release_summary(report: &ReleaseReport, dry_run: bool) -> String {
+    let (stopped, released) = if dry_run {
+        ("would stop", "would release")
+    } else {
+        ("stopped", "released")
+    };
     let mut text = String::new();
     if report.released_nothing() {
         text.push_str("nothing to release\n");
     }
     for service in &report.services {
-        let _ = writeln!(text, "{service} stopped");
+        let _ = writeln!(text, "{service} {stopped}");
     }
     for job in &report.jobs {
-        let _ = writeln!(text, "job {job} stopped");
+        let _ = writeln!(text, "job {job} {stopped}");
     }
     for released in &report.compose_services {
-        let _ = writeln!(text, "{}", let_go(released));
+        let _ = writeln!(text, "{}", let_go(released, dry_run));
     }
     for LeaseHeld {
         service,
@@ -1469,7 +1574,7 @@ fn release_summary(report: &ReleaseReport) -> String {
         port,
     } in &report.leases
     {
-        let _ = writeln!(text, "lease {service}.{port_name} port {port} released");
+        let _ = writeln!(text, "lease {service}.{port_name} port {port} {released}");
     }
     for KeptLease { lease, reason } in &report.kept_leases {
         let LeaseHeld {
@@ -1579,11 +1684,17 @@ mod tests {
             grace_ms: 300_000,
         };
         assert_eq!(
-            let_go(&released(0)),
+            let_go(&released(0), false),
             "db released, it stops after 5m unless a Worktree needs it again"
         );
-        assert_eq!(let_go(&released(1)), "db released, 1 other Worktree still needs it");
-        assert_eq!(let_go(&released(2)), "db released, 2 other Worktrees still need it");
+        assert_eq!(
+            let_go(&released(1), false),
+            "db released, 1 other Worktree still needs it"
+        );
+        assert_eq!(
+            let_go(&released(2), false),
+            "db released, 2 other Worktrees still need it"
+        );
     }
 
     fn reached(port: Option<u16>, ports: &[(&str, u16)], urls: &[(&str, &str)]) -> UpService {

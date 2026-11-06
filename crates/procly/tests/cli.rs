@@ -29,6 +29,24 @@ fn a_usage_error_exits_2() {
 }
 
 #[test]
+fn the_help_of_logs_says_json_prints_one_document_per_line_with_follow() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .args(["logs", "--help"])
+        .output()
+        .expect("the procly binary runs");
+
+    assert!(output.status.success(), "exit status: {}", output.status);
+    let help: String = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        help.contains("with --follow, one JSON document per line (NDJSON)"),
+        "{help}"
+    );
+}
+
+#[test]
 fn the_help_of_up_lists_its_exit_codes() {
     let output = Command::new(env!("CARGO_BIN_EXE_procly"))
         .args(["up", "--help"])
@@ -68,7 +86,25 @@ fn the_help_lists_every_exit_code() {
         .expect("the procly binary runs");
 
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("4 when `up` finds a Port mismatch"), "{help}");
+    assert!(
+        help.contains("4 when `up` or `restart` finds a Port mismatch"),
+        "{help}"
+    );
+}
+
+#[test]
+fn the_help_of_restart_says_it_exits_as_up_and_when_there_is_no_environment_to_restart_with() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .args(["restart", "--help"])
+        .output()
+        .expect("the procly binary runs");
+
+    assert!(output.status.success(), "exit status: {}", output.status);
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("Exit codes: those of `procly up`") && help.contains("no environment to restart with"),
+        "{help}"
+    );
 }
 
 #[test]

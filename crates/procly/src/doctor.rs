@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::client::{self, ClientError};
+use procly_client::ClientError;
+
+use crate::client;
 use crate::config;
 use crate::daemon;
 use crate::driver::{self, Driver};
@@ -95,7 +97,7 @@ fn daemon_checks(state: &StateDir, answer: Result<Response, ClientError>) -> (Ch
             .map(|name| Check::skipped(name, why))
             .collect()
     };
-    let restart = Some(format!("kill \"$(cat {})\"", state.pid().display()));
+    let restart = Some("procly daemon stop".to_owned());
     match answer {
         Ok(Response::Doctor(DaemonChecks {
             procly_version: version,

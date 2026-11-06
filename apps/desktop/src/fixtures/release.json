@@ -1,0 +1,17 @@
+{
+  "response": "worktree_release",
+  "worktree": "/p/work/acme/web-fix",
+  "services": ["web", "cache"],
+  "jobs": ["ea79fa81"],
+  "compose_services": [{ "service": "db", "others": 1, "grace_ms": 600000 }],
+  "leases": [
+    { "service": "web", "port_name": "http", "port": 24001 },
+    { "service": "api", "port_name": "http", "port": 24002 }
+  ],
+  "kept_leases": [
+    { "service": "web", "port_name": "debug", "port": 24003, "reason": "pinned_branch", "branch": "web-fix" },
+    { "service": "db", "port_name": "tcp", "port": 24004, "reason": "container_running" }
+  ],
+  "logical_resources": [{ "service": "db", "driver": "postgres", "resource": "dev", "name": "web__web_fix" }],
+  "warnings": []
+}

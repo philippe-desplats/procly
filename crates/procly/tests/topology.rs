@@ -3,7 +3,7 @@ mod common;
 use std::path::Path;
 use std::process::Stdio;
 
-use common::{Procly, assert_success, git_repository, git_worktree_add, stdout};
+use common::{Procly, assert_success, git, git_repository, git_worktree_add, stdout};
 use serde_json::{Value, json};
 
 fn status_json(procly: &Procly, dir: &Path, args: &[&str]) -> Value {
@@ -31,8 +31,14 @@ fn two_worktrees_of_one_repository_are_reported_under_it_with_the_main_worktree_
         json!([{
             "git_common_dir": main.join(".git"),
             "worktrees": [
-                {"path": main, "slug": "app", "main": true, "services": [], "jobs": []},
-                {"path": feature, "slug": "app_feature_2", "main": false, "services": [], "jobs": []},
+                {
+                    "path": main, "slug": "app", "main": true,
+                    "branch": "main", "listed": true, "services": [], "jobs": [],
+                },
+                {
+                    "path": feature, "slug": "app_feature_2", "main": false,
+                    "branch": "app-Feature.2", "listed": true, "services": [], "jobs": [],
+                },
             ],
         }])
     );
@@ -164,11 +170,68 @@ fn status_prints_compact_text_by_default_even_when_piped() {
     assert_eq!(
         stdout(&output),
         format!(
-            "repository {}\n  worktree app_feature {}\n    job {job} running: sleep 30\n",
+            "repository {}\n  worktree app_feature {} on app-feature\n    job {job} running: sleep 30\n",
             main.join(".git").display(),
             feature.display()
         )
     );
+}
+
+#[test]
+fn a_detached_head_reports_no_branch_whether_or_not_every_worktree_is_asked_for() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let feature = git_worktree_add(&main, "app-feature");
+    git(&feature, &["checkout", "--quiet", "--detach"]);
+
+    for args in [&[][..], &["--all"][..]] {
+        let status = status_json(&procly, &feature, args);
+        let detached = &status["repositories"][0]["worktrees"]
+            .as_array()
+            .expect("the worktrees are a list")
+            .iter()
+            .find(|worktree| worktree["path"] == feature.to_str().unwrap())
+            .expect("the detached worktree is reported")
+            .clone();
+        assert!(detached.get("branch").is_none(), "{args:?}: {detached}");
+        assert_eq!(detached["listed"], true, "{args:?}");
+    }
+}
+
+#[test]
+fn a_worktree_git_no_longer_lists_is_marked_removed_and_not_listed() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let feature = git_worktree_add(&main, "app-feature");
+    start_in(&procly, &feature, "sleep 30");
+    git(&main, &["worktree", "remove", "--force", &feature.to_string_lossy()]);
+
+    let status = status_json(&procly, &main, &["--all"]);
+    let worktrees = status["repositories"][0]["worktrees"].as_array().unwrap();
+    let removed = worktrees
+        .iter()
+        .find(|worktree| worktree["path"] == feature.to_str().unwrap())
+        .unwrap_or_else(|| panic!("the removed worktree is still reported: {status}"));
+    assert_eq!(removed["listed"], false, "{removed}");
+    assert!(removed.get("branch").is_none(), "{removed}");
+    let kept = worktrees
+        .iter()
+        .find(|worktree| worktree["path"] == main.to_str().unwrap());
+    assert_eq!(kept.map(|worktree| &worktree["listed"]), Some(&json!(true)));
+
+    let output = procly
+        .command()
+        .current_dir(&main)
+        .args(["status", "--all"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains(&format!("  worktree app_feature {} (removed)\n", feature.display())),
+        "{}",
+        stdout(&output)
+    );
+    assert!(stdout(&output).contains(&format!("  worktree app (main) {} on main\n", main.display())));
 }
 
 #[test]

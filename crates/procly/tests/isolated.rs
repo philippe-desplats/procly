@@ -323,6 +323,33 @@ fn docker_a_worktree_release_stops_the_container_of_the_worktree_at_once_and_rel
 }
 
 #[test]
+fn docker_a_dry_run_of_a_worktree_release_names_the_isolated_container_it_would_stop_and_stops_nothing() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    let other_port = printed_port(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+
+    let output = fixture
+        .procly
+        .procly_in(&fixture.other, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("db would stop\nlease db.db port {other_port} would release\n")
+    );
+    assert!(fixture.other_project.is_running(), "a dry run stopped the container");
+    assert!(listens(other_port));
+    let real = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+    assert_eq!(
+        stdout(&real),
+        format!("db stopped\nlease db.db port {other_port} released\n")
+    );
+}
+
+#[test]
 fn docker_status_shows_the_containers_of_the_worktree_and_its_json_lists_them() {
     let Some(_docker) = require_docker() else {
         return;
@@ -401,7 +428,17 @@ fn docker_logs_reads_the_container_of_the_worktree() {
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
 
-    let output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    // `up` answers once the container listens, which may be before Docker has delivered its first output.
+    let mut output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    common::eventually_within(
+        common::DOCKER_DEADLINE,
+        "the container to print its marker",
+        || {
+            output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+            stdout(&output).contains("procly-other-marker")
+        },
+        String::new,
+    );
 
     assert_success(&output);
     let logs = stdout(&output);
@@ -806,6 +843,32 @@ fn docker_a_retention_delete_removes_the_container_and_volume_of_a_removed_workt
 }
 
 #[test]
+fn docker_a_dry_run_of_a_worktree_release_applies_no_retention_policy_and_the_real_release_still_does() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "delete");
+
+    let planned = fixture
+        .procly
+        .procly_in(&fixture.main, &["worktree", "release", "--dry-run"]);
+
+    assert_success(&planned);
+    assert!(
+        !fixture.other_project.container().is_empty(),
+        "a dry run deleted the container"
+    );
+    assert!(fixture.other_project.volume_exists(), "a dry run deleted the volume");
+    assert!(!fixture.procly.daemon_log().contains("retention policy"));
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+}
+
+#[test]
 fn docker_the_retention_declared_when_the_container_last_came_up_is_the_one_applied() {
     let Some(_docker) = require_docker() else {
         return;
@@ -1014,4 +1077,110 @@ fn docker_a_retention_duration_deletes_that_long_after_the_worktree_was_found_re
         )),
         "{log}"
     );
+}
+
+/// When the container of service `db` of the compose project `project` last started, as Docker records it.
+fn started_at(project: &Project) -> String {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.StartedAt}}", &project.container()])
+        .output()
+        .expect("docker runs");
+    assert_success(&output);
+    stdout(&output).trim().to_owned()
+}
+
+#[test]
+fn docker_a_restart_of_an_isolated_service_stops_its_container_and_starts_it_again_on_the_same_lease() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    let up = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_success(&up);
+    let port = printed_port(&up);
+    let before = started_at(&fixture.other_project);
+
+    let output = fixture.procly.procly_in(&fixture.other, &["restart", "db"]);
+
+    assert_success(&output);
+    // Down then up: the container was stopped, then started again, with its data and on its Lease.
+    assert!(stdout(&output).starts_with("db started"), "{}", stdout(&output));
+    assert_eq!(printed_port(&output), port);
+    assert_ne!(started_at(&fixture.other_project), before);
+    assert!(fixture.other_project.is_running());
+    assert!(fixture.other_project.volume_exists());
+    assert!(listens(port));
+    assert!(fixture.procly.daemon_log().contains("down db of"));
+}
+
+/// Removes the compose project `name` of `dir`, whose compose file needs `PCL_MARKER`, when the test ends.
+struct NeedsMarker<'a>(&'a Project);
+
+impl Drop for NeedsMarker<'_> {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["compose", "-p", &self.0.name, "down", "--volumes", "--remove-orphans"])
+            .current_dir(&self.0.dir)
+            .env("DB_PORT", "1")
+            .env("PCL_MARKER", "procly-cleanup")
+            .output();
+    }
+}
+
+#[test]
+fn docker_logs_of_a_compose_service_reads_its_container_in_the_environment_of_its_last_up() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    // The compose file of the Worktree needs a variable that only the shell of its `up` sets.
+    write(
+        &fixture.other,
+        &compose_file(&fixture.main_project.name, "").replace(
+            "command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]",
+            "command: [\"sh\", \"-c\", \"echo ${PCL_MARKER:?set by the shell of up}; exec nc -lk -p 80 -e /bin/cat\"]",
+        ),
+    );
+    let _cleanup = NeedsMarker(&fixture.other_project);
+    let up = fixture
+        .procly
+        .command()
+        .current_dir(&fixture.other)
+        .env("PCL_MARKER", "procly-held-marker")
+        .args(["up", "db"])
+        .output()
+        .expect("the procly binary runs");
+    assert_success(&up);
+
+    // This shell has no `PCL_MARKER`, the environment of the `up` interpolates the compose file.
+    // `up` answers once the container listens, which may be before Docker has delivered its first output.
+    let mut output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    common::eventually_within(
+        common::DOCKER_DEADLINE,
+        "the container to print its marker",
+        || {
+            output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+            stdout(&output).contains("procly-held-marker")
+        },
+        String::new,
+    );
+
+    assert_success(&output);
+    assert!(stdout(&output).contains("procly-held-marker"), "{}", stdout(&output));
+
+    // A Daemon that holds no environment reads the container in the environment of the caller.
+    fixture.procly.stop_daemon();
+    let without = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    assert_eq!(without.status.code(), Some(125), "{}", stdout(&without));
+    assert!(stderr(&without).contains("PCL_MARKER"), "{}", stderr(&without));
+    let with = fixture
+        .procly
+        .command()
+        .current_dir(&fixture.other)
+        .env("PCL_MARKER", "procly-caller-marker")
+        .args(["logs", "db"])
+        .output()
+        .expect("the procly binary runs");
+    assert_success(&with);
+    assert!(stdout(&with).contains("procly-held-marker"), "{}", stdout(&with));
 }

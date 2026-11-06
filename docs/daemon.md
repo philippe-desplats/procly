@@ -78,6 +78,30 @@ $ procly unit remove --json
 {"schema_version":1,"path":"/home/me/Library/LaunchAgents/io.github.philippe-desplats.procly.plist","removed":true}
 ```
 
+## Stopping the Daemon
+
+```console
+$ procly daemon stop
+procly: Daemon (pid 4242) stopped
+$ procly daemon stop
+procly: no Daemon running
+```
+
+`procly daemon stop` sends `SIGTERM` to the Daemon, which stops its Jobs and its Services before it exits, and waits until its socket has gone and nothing holds the lock of the state directory any more. The next command then starts a new Daemon, which is what an upgrade needs: it is the remedy [`procly doctor`](doctor.md) offers for a Daemon of another version of Procly.
+
+The command never speaks the protocol, so it stops a Daemon of any version, which would refuse every request of this one. Whether a Daemon runs is read from the lock it holds on its state directory, not from the pid file alone, since the pid of a Daemon that crashed may now belong to another process. A pid file left behind by a crash counts as no Daemon, and the command signals nobody.
+
+The Daemon stops its Services in parallel, so the command waits at most 10 s, twice the 5 s the Daemon gives a process to stop. Past that it exits with 125 and `the Daemon (pid <pid>) did not stop within 10 s` on stderr, prints no document, and never sends `SIGKILL`: what holds the Daemon is yours to look at. It stops no Compose container, as the Daemon does not on exit, see [Containers after a crash or a restart](#containers-after-a-crash-or-a-restart).
+
+With `--json` it prints the `outcome` and the `pid` it signalled, plus the time it waited for a Daemon it stopped. See [JSON output](json.md).
+
+```console
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"stopped","pid":4242,"waited_ms":5310}
+$ procly daemon stop --json
+{"schema_version":1,"outcome":"not_running","pid":null}
+```
+
 ## Foreign processes
 
 `procly status` lists under each Worktree what runs in it without Procly having started it, so that an agent that bypassed Procly shows up:
@@ -86,3 +110,16 @@ $ procly unit remove --json
 - a running container of a compose project whose directory is in the Worktree, unless Procly started or adopted it, as `foreign container <name> (compose project <project>, service <service>) port <port>`
 
 `procly status --json` carries them in the `foreign` list of each Worktree that has some, with a `kind` of `process` or `container`, and leaves the list out of a Worktree that has none. Processes are found with `lsof`, which on macOS sees only the processes of your user, and containers with `docker ps`. Without `lsof` or a running Docker engine, the list is empty. Procly never stops a Foreign process, see [Containers started outside Procly](configuration.md#containers-started-outside-procly) for the ones in the way of a Compose service.
+
+## Ended Jobs
+
+The Daemon keeps a Job after it ended, so that `procly wait` and `procly logs` can still answer for it. It keeps a bounded number of them, so that its memory stays bounded however long it runs:
+
+- at most 20 ended Jobs per Worktree, the Jobs started outside any Worktree counting as one group of their own
+- at most 200 ended Jobs in all, whatever their Worktrees
+
+When a Job ends and a bound is exceeded, the oldest Job that ended with exit code 0 goes first. A Job that failed, was killed by a signal or reached its timeout goes only once no success is left, so that a failure nobody has looked at stays visible as long as possible. The Job that has just ended is never the one evicted, so in a Worktree holding 20 ended failures, a Job that ends with exit code 0 is kept and the oldest failure goes. A Job that runs is never evicted, and there is no age limit and no timer. The bounds are fixed, they are not settings.
+
+`wait` and `logs` on an evicted Job fail as for an identifier that never existed, with exit code 125 and `no job <id>` on stderr. The Daemon also forgets its ended Jobs when it restarts, and a [Worktree release](worktree-release.md) forgets those of its Worktree.
+
+Ended Services are not bounded. Each stays reported by `procly status` under its Worktree and name until `up` starts it again, a Worktree release forgets it, or the Daemon restarts.

@@ -5,6 +5,8 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use common::{Procly, assert_success, free_port, git, git_repository, stderr, stdout, test_server};
+use procly_client::protocol::{GcReport, Orphan, OrphanId, Request, Response};
+use procly_client::state_dir::StateDir;
 
 /// A `procly.toml` declaring `web`, which runs the test server on its leased `http` port, then `extra`.
 fn web(extra: &str) -> String {
@@ -66,6 +68,35 @@ fn worktree_dir(procly: &Procly, kind: &str, slug: &str) -> PathBuf {
 
 fn leases(procly: &Procly) -> String {
     fs::read_to_string(procly.state_dir().join("leases.json")).expect("the Leases are stored")
+}
+
+/// What the Daemon answers to a `Gc` request the CLI cannot send, `only` being the one field it offers no flag for.
+fn gc_report(procly: &Procly, apply: bool, only: Option<Vec<OrphanId>>) -> GcReport {
+    let state = StateDir::at(procly.state_dir());
+    let request = Request::Gc {
+        cwd: procly.scratch().to_owned(),
+        apply,
+        only,
+    };
+    let answer = procly_client::connect(&state)
+        .expect("the Daemon runs")
+        .send(&request)
+        .expect("send the request")
+        .answer(|_| {})
+        .expect("the Daemon answers");
+    match answer {
+        Response::Gc(report) => report,
+        other => panic!("not a Gc answer: {other:?}"),
+    }
+}
+
+/// The identities of `orphans` that belong to `worktree`, as a client keeps them from a dry run.
+fn ids_of(orphans: &[Orphan], worktree: &Path) -> Vec<OrphanId> {
+    orphans
+        .iter()
+        .filter(|orphan| orphan.id.worktree == worktree)
+        .map(|orphan| orphan.id.clone())
+        .collect()
 }
 
 fn remove_worktree(main: &Path, worktree: &Path) {
@@ -316,4 +347,100 @@ fn gc_and_gc_apply_answer_with_one_json_document() {
         common::json_succeeded(&procly.procly(&["gc", "--json"]))["orphans"],
         serde_json::json!([])
     );
+}
+
+#[test]
+fn gc_apply_limited_to_the_listed_orphans_deletes_only_those() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let (first, second) = (
+        common::git_worktree_add(&main, "app-first"),
+        common::git_worktree_add(&main, "app-second"),
+    );
+    let (first_port, second_port) = (
+        leave_behind(&procly, &first, &web("")),
+        leave_behind(&procly, &second, &web("")),
+    );
+    remove_worktree(&main, &first);
+    remove_worktree(&main, &second);
+    let shown = gc_report(&procly, false, None);
+    assert_eq!(shown.orphans.len(), 4, "{shown:?}");
+    let only = ids_of(&shown.orphans, &first);
+    assert_eq!(only.len(), 2, "{only:?}");
+
+    let applied = gc_report(&procly, true, Some(only));
+
+    assert!(applied.applied);
+    assert_eq!(applied.orphans.len(), 2, "{applied:?}");
+    assert!(
+        applied
+            .orphans
+            .iter()
+            .all(|orphan| orphan.id.worktree == first && orphan.deleted && orphan.error.is_none()),
+        "{applied:?}"
+    );
+    let leases = leases(&procly);
+    assert!(!leases.contains(&format!("\"port\": {first_port}")), "{leases}");
+    assert!(leases.contains(&format!("\"port\": {second_port}")), "{leases}");
+    assert_eq!(worktree_dirs(&procly, "output").len(), 1);
+    let left = gc_report(&procly, false, None);
+    assert_eq!(left.orphans.len(), 2, "{left:?}");
+    assert!(left.orphans.iter().all(|orphan| orphan.id.worktree == second));
+}
+
+#[test]
+fn an_orphan_of_only_that_no_longer_is_one_is_reported_as_not_deleted_with_its_reason() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let (gone, later) = (
+        common::git_worktree_add(&main, "app-gone"),
+        common::git_worktree_add(&main, "app-later"),
+    );
+    leave_behind(&procly, &gone, &web(""));
+    remove_worktree(&main, &gone);
+    let shown = gc_report(&procly, false, None).orphans;
+    // Collected by someone else after the sheet showed it, and a Worktree that is removed since.
+    assert_success(&procly.procly(&["gc", "--apply"]));
+    let later_port = leave_behind(&procly, &later, &web(""));
+    remove_worktree(&main, &later);
+    let mut only: Vec<OrphanId> = shown.iter().map(|orphan| orphan.id.clone()).collect();
+    let still = gc_report(&procly, false, None).orphans;
+    only.extend(still.iter().take(1).map(|orphan| orphan.id.clone()));
+
+    let applied = gc_report(&procly, true, Some(only));
+
+    let (gone_ones, deleted): (Vec<&Orphan>, Vec<&Orphan>) =
+        applied.orphans.iter().partition(|orphan| orphan.id.worktree == gone);
+    assert_eq!(gone_ones.len(), shown.len(), "{applied:?}");
+    assert!(
+        gone_ones
+            .iter()
+            .all(|orphan| !orphan.deleted && orphan.error.as_deref() == Some("no longer an Orphan")),
+        "{applied:?}"
+    );
+    assert_eq!(deleted.len(), 1, "{applied:?}");
+    assert!(deleted[0].deleted && deleted[0].error.is_none(), "{applied:?}");
+    assert!(applied.failed());
+    // What `only` did not list stays.
+    let left = gc_report(&procly, false, None).orphans;
+    assert_eq!(left.len(), still.len() - 1, "{left:?}");
+    // The Lease comes first among the Orphans, and is the one `only` listed.
+    assert!(!leases(&procly).contains(&format!("\"port\": {later_port}")));
+}
+
+#[test]
+fn only_lists_nothing_to_delete_when_none_of_its_orphans_remains() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let gone = common::git_worktree_add(&main, "app-gone");
+    leave_behind(&procly, &gone, &web(""));
+    remove_worktree(&main, &gone);
+
+    let none = gc_report(&procly, true, Some(Vec::new()));
+
+    assert!(none.orphans.is_empty(), "{none:?}");
+    assert_eq!(gc_report(&procly, false, None).orphans.len(), 2);
 }

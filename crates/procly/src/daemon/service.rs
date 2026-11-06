@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use super::output_file::{self, OutputFiles, Tail};
 use super::process_group::{self, Pid, kill_group, stop_tree};
 use super::record::{ServiceRecord, ServiceRecords};
 use crate::config::RestartPolicy;
-use crate::output::{self, OutputBuffer};
+use crate::output::{self, Follow, OutputBuffer};
 use crate::protocol::{self, ServiceEnd, ServiceStatus, StartOutcome};
 use crate::topology::Topology;
 
@@ -115,6 +116,9 @@ pub(crate) struct Service {
     covers: Vec<String>,
     /// Whether a previous Daemon started the Service, and this one found it running when it started.
     reattached: bool,
+    /// When the Service last started, in milliseconds since the Unix epoch on the clock of the Daemon. Set again by
+    /// each automatic restart. For a Service a previous Daemon started, when this Daemon found it.
+    started_at: AtomicU64,
     /// The output of every run of the Service, restarts included.
     output: Arc<Mutex<OutputBuffer>>,
     state: watch::Sender<ServiceState>,
@@ -220,7 +224,14 @@ impl Services {
             Arc::clone(&self.records),
             self.outputs.clone(),
         )?;
-        self.table().insert(key, Arc::clone(&service));
+        let mut table = self.table();
+        if let Relation::Group { covers } = relation {
+            // The Group now stands for the Services it covers: an ended row of one would offer a Restart that restarts
+            // the whole Group. None of them runs, the check above refused the start otherwise.
+            table.retain(|(path, service_name), _| path != worktree || !covers.contains(service_name));
+        }
+        table.insert(key, Arc::clone(&service));
+        drop(table);
         Ok(Start::Ready {
             service,
             outcome: StartOutcome::Started,
@@ -231,6 +242,20 @@ impl Services {
     /// The recent output of the Service `name` of `worktree`, running or ended, or else of the running Group covering
     /// it, whose process prints for it. `None` when the Daemon knows no such Service.
     pub(crate) fn output_of(&self, worktree: &Path, name: &str) -> Option<String> {
+        self.find(worktree, name).map(|service| service.output())
+    }
+
+    /// Follows the output of the Service `name` of `worktree`, found as [`Services::output_of`] finds it, and returns
+    /// the Service whose end ends the follow.
+    pub(crate) fn follow(&self, worktree: &Path, name: &str) -> Option<(Arc<Service>, Follow)> {
+        self.find(worktree, name).map(|service| {
+            let follow = output::follow(&service.output);
+            (service, follow)
+        })
+    }
+
+    /// The Service `name` of `worktree`, running or ended, or else the running Group covering it.
+    fn find(&self, worktree: &Path, name: &str) -> Option<Arc<Service>> {
         let table = self.table();
         table
             .get(&(worktree.to_owned(), name.to_owned()))
@@ -242,7 +267,7 @@ impl Services {
                     })
                     .map(|(_, group)| group)
             })
-            .map(|service| service.output())
+            .map(Arc::clone)
     }
 
     /// Whether the Service `name` of `worktree` runs.
@@ -255,7 +280,24 @@ impl Services {
     /// Asks every running Service of `worktree`, or only the one named `name`, to stop, and returns them sorted by
     /// name. Wait for each with [`Service::ended`].
     pub(crate) fn stop(&self, worktree: &Path, name: Option<&str>) -> Vec<(String, Arc<Service>)> {
-        let mut stopping: Vec<_> = self
+        let stopping = self.running_in(worktree, name);
+        for (_, service) in &stopping {
+            service.request_stop(ServiceEnd::Stopped);
+        }
+        stopping
+    }
+
+    /// The names of the Services of `worktree` that [`Services::stop`] would ask to stop, sorted, without asking.
+    pub(crate) fn would_stop(&self, worktree: &Path) -> Vec<String> {
+        self.running_in(worktree, None)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Every running Service of `worktree`, or only the one named `name`, sorted by name.
+    fn running_in(&self, worktree: &Path, name: Option<&str>) -> Vec<(String, Arc<Service>)> {
+        let mut running: Vec<_> = self
             .table()
             .iter()
             .filter(|((path, service_name), service)| {
@@ -263,11 +305,15 @@ impl Services {
             })
             .map(|((_, service_name), service)| (service_name.clone(), Arc::clone(service)))
             .collect();
-        stopping.sort_by(|(a, _), (b, _)| a.cmp(b));
-        for (_, service) in &stopping {
-            service.request_stop(ServiceEnd::Stopped);
-        }
-        stopping
+        running.sort_by(|(a, _), (b, _)| a.cmp(b));
+        running
+    }
+
+    /// Forgets every ended Service of `worktree`, for a Worktree release that has stopped what ran. A Service that
+    /// runs stays, and is keyed by its name again once started.
+    pub(crate) fn remove_ended_in(&self, worktree: &Path) {
+        self.table()
+            .retain(|(path, _), service| path != worktree || service.is_running());
     }
 
     /// Asks every running Service of the Repository whose common git directory is `git_common_dir` to stop, whatever
@@ -351,6 +397,7 @@ impl Services {
             topology: record.topology(),
             covers: record.covers.clone(),
             reattached: true,
+            started_at: AtomicU64::new(epoch_millis(&self.clock)),
             output,
             state: watch::Sender::new(ServiceState::Healthy),
             stop: watch::Sender::new(None),
@@ -376,6 +423,7 @@ impl Services {
             topology: record.topology(),
             covers: record.covers.clone(),
             reattached: false,
+            started_at: AtomicU64::new(epoch_millis(&self.clock)),
             output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
             state: watch::Sender::new(ServiceState::Ended(end)),
             stop: watch::Sender::new(None),
@@ -400,6 +448,9 @@ impl Services {
                     service: name.clone(),
                     port: service.port,
                     reattached: service.reattached,
+                    started_at: service.started_at.load(Ordering::Relaxed),
+                    // The Services know nothing of the held environments, the status report tells.
+                    restartable: false,
                     state,
                 };
                 ((worktree.clone(), name.clone()), service.topology.clone(), status)
@@ -498,6 +549,7 @@ fn spawn(
         topology: spec.topology.clone(),
         covers: spec.covers.clone(),
         reattached: false,
+        started_at: AtomicU64::new(epoch_millis(&clock)),
         output,
         state: watch::Sender::new(ServiceState::Starting),
         stop: watch::Sender::new(None),
@@ -731,8 +783,14 @@ async fn supervise(
             }
         };
         process = next;
+        service.started_at.store(epoch_millis(&clock), Ordering::Relaxed);
         service.state.send_replace(ServiceState::Starting);
     }
+}
+
+/// The reading of `clock` as milliseconds since the Unix epoch, saturating far beyond any date a clock shows.
+fn epoch_millis(clock: &Clock) -> u64 {
+    u64::try_from(clock.since_epoch().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What a process did, for the Daemon log.

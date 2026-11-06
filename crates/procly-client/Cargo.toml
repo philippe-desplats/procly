@@ -1,0 +1,24 @@
+[package]
+name = "procly-client"
+description = "The client side of the Procly Daemon socket: the protocol, the framing and the state directory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Generates the TypeScript types of the desktop app (ADR 0015), only with the `ts` feature.
+ts-rs = { workspace = true, optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

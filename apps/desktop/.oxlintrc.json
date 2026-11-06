@@ -1,0 +1,6 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "react-hooks", "typescript"],
+  "categories": { "correctness": "error" },
+  "ignorePatterns": ["dist", "node_modules", "src/protocol"]
+}

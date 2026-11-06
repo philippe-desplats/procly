@@ -537,21 +537,41 @@ impl Composes {
         Ok(docker.logs(RECENT_LOG_LINES).await)
     }
 
+    /// The command following the output of the container of the Compose service `name`, which Procly does not follow
+    /// itself: `docker compose logs -f` in `project_dir`, under the project name [`Composes::logs`] reads it with.
+    pub(crate) async fn follow_command(
+        &self,
+        name: &str,
+        compose: &str,
+        project_dir: PathBuf,
+        isolated: Option<&Isolated>,
+        env: Vec<(String, String)>,
+    ) -> Result<String, ComposeError> {
+        let mut docker = Docker {
+            service: name.to_owned(),
+            compose: compose.to_owned(),
+            project_dir,
+            project: String::new(),
+            env,
+            recorded_env: Vec::new(),
+        };
+        docker.check_available().await?;
+        docker.stack(isolated).await?;
+        Ok(format!(
+            "cd {} && docker compose --project-name {} logs -f {}",
+            shell_word(&docker.project_dir.to_string_lossy()),
+            shell_word(&docker.project),
+            shell_word(compose)
+        ))
+    }
+
     /// Lets `worktree` go of the containers every Worktree of the Repository `repository` shares, of the Compose
     /// service `name` only when given. A Worktree whose directory no longer exists stops counting too. A container no
     /// Worktree needs anymore stops once its Grace period has passed on the clock. Blocking, it reads the disk and
     /// writes the record.
     pub(crate) fn release(&self, repository: &Path, worktree: &Path, name: Option<&str>) -> Vec<Released> {
         let mut released = Vec::new();
-        let containers: Vec<_> = self
-            .table()
-            .iter()
-            .filter(|((path, service, isolated), _)| {
-                path == repository && isolated.is_none() && name.is_none_or(|name| name == service)
-            })
-            .map(|(key, container)| (key.clone(), Arc::clone(container)))
-            .collect();
-        for (key, container) in containers {
+        for (key, container) in self.shared(repository, name) {
             let let_go = {
                 let mut state = container.state();
                 let Some(grace) = state.alive.as_ref().map(|alive| alive.grace) else {
@@ -588,6 +608,39 @@ impl Composes {
         released
     }
 
+    /// What [`Composes::release`] would answer for the same arguments, without letting go of anything: no Worktree is
+    /// forgotten, no stop is scheduled, nothing is recorded. Blocking, it reads the disk.
+    pub(crate) fn would_release(&self, repository: &Path, worktree: &Path, name: Option<&str>) -> Vec<Released> {
+        let mut released: Vec<_> = self
+            .shared(repository, name)
+            .into_iter()
+            .filter_map(|(key, container)| {
+                let state = container.state();
+                let grace = state.alive.as_ref()?.grace;
+                // The Worktrees whose directory is gone stop counting, the one asking included.
+                let mut worktrees: BTreeSet<_> = state.worktrees.iter().filter(|path| path.exists()).cloned().collect();
+                worktrees.remove(worktree).then(|| Released {
+                    service: key.1.clone(),
+                    others: worktrees.len(),
+                    grace_ms: millis(grace),
+                })
+            })
+            .collect();
+        released.sort_by(|a, b| a.service.cmp(&b.service));
+        released
+    }
+
+    /// The containers the Worktrees of the Repository `repository` share, of the Compose service `name` only when given.
+    fn shared(&self, repository: &Path, name: Option<&str>) -> Vec<(ComposeKey, Arc<Container>)> {
+        self.table()
+            .iter()
+            .filter(|((path, service, isolated), _)| {
+                path == repository && isolated.is_none() && name.is_none_or(|name| name == service)
+            })
+            .map(|(key, container)| (key.clone(), Arc::clone(container)))
+            .collect()
+    }
+
     /// The Isolated containers of the Repository `repository` that `worktree` lets go of: its own, of the Compose
     /// service `name` only when given, and those of every Worktree whose directory no longer exists, removed without
     /// `procly down`. Blocking, it reads the disk.
@@ -604,6 +657,22 @@ impl Composes {
                 (isolated == worktree && name.is_none_or(|name| name == service)) || !isolated.exists()
             })
             .collect()
+    }
+
+    /// The keys among `keys` whose Isolated container runs, which [`Composes::stop_isolated`] would stop, without
+    /// stopping any.
+    pub(crate) fn would_stop_isolated(&self, keys: Vec<ComposeKey>) -> Vec<ComposeKey> {
+        let table = self.table();
+        let mut running: Vec<_> = keys
+            .into_iter()
+            .filter(|key| {
+                table
+                    .get(key)
+                    .is_some_and(|container| container.state().alive.is_some())
+            })
+            .collect();
+        running.sort();
+        running
     }
 
     /// Stops the Isolated containers `keys` at once, and returns the keys of those that were running.
@@ -1756,6 +1825,19 @@ pub(crate) fn major(version: &str) -> Option<u32> {
 }
 
 /// The output of a command as trimmed text, an invalid UTF-8 sequence read as a replacement character.
+/// `text` as one word of a shell command, single quoted unless it holds only characters a shell reads as they are.
+pub(super) fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_./-:@%+=,".contains(character))
+    {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
+}
+
 fn trimmed_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_owned()
 }
@@ -1763,6 +1845,14 @@ fn trimmed_output(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_word_of_the_follow_command_is_quoted_only_when_a_shell_would_misread_it() {
+        assert_eq!(shell_word("/src/app-feature"), "/src/app-feature");
+        assert_eq!(shell_word("/src/my app"), "'/src/my app'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word(""), "''");
+    }
 
     fn service(ports: &str) -> StackService {
         serde_json::from_str(&format!("{{\"ports\": {ports}}}")).unwrap()

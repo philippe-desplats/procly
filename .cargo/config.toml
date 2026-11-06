@@ -1,0 +1,5 @@
+# ts-rs writes the TypeScript types of the protocol while `cargo test` runs, with the `ts` feature of procly-client
+# the desktop app turns on. 64-bit integers are plain numbers, as JSON carries them (ADR 0015).
+[env]
+TS_RS_EXPORT_DIR = { value = "apps/desktop/src/protocol", relative = true }
+TS_RS_LARGE_INT = "number"
