@@ -477,6 +477,31 @@ mod tests {
     }
 
     #[test]
+    fn the_title_bar_is_an_overlay_so_that_the_sidebar_runs_under_the_traffic_lights() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("the Tauri configuration");
+        let window = &config["app"]["windows"][0];
+
+        assert_eq!(window["titleBarStyle"], "Overlay");
+        assert_eq!(window["hiddenTitle"], true, "no title is drawn above the sidebar");
+        assert!(
+            window.get("trafficLightPosition").is_none(),
+            "the traffic lights keep their native position"
+        );
+    }
+
+    #[test]
+    fn the_window_is_granted_one_window_permission_to_drag_itself_by_the_top_of_the_sidebar() {
+        // Without it a `data-tauri-drag-region` element does nothing, and the overlay leaves no title bar to drag.
+        let window: Vec<_> = granted()
+            .into_iter()
+            .filter(|name| name.starts_with("core:window:"))
+            .collect();
+
+        assert_eq!(window, ["core:window:allow-start-dragging"]);
+    }
+
+    #[test]
     fn the_window_is_granted_nothing_to_move_or_restore_itself() {
         // The window reopens where it was left through the plugin, which needs no call from the window.
         let state: Vec<_> = granted()
