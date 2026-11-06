@@ -241,6 +241,28 @@ describe("the Worktree release sheet", () => {
     expect(sheet.getByRole("button", { name: "Release" })).toBeEnabled();
   });
 
+  it("copies exactly the command the box shows, whole", async () => {
+    const copied: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: (text: string) => {
+          copied.push(text);
+          return Promise.resolve();
+        },
+      },
+    });
+    app();
+
+    const sheet = within(await openSheet());
+    await sheet.findByRole("heading", { name: "Will stop" });
+    const command = `(cd ${PATH} && procly worktree release)`;
+    expect(sheet.getByText(command)).toBeInTheDocument();
+    fireEvent.click(sheet.getByRole("button", { name: "Copy" }));
+
+    expect(copied).toEqual([command]);
+  });
+
   it("keeps Release enabled when nothing runs but ended Jobs and Services are left to forget", async () => {
     const calls = app({
       ended: true,
