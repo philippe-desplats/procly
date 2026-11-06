@@ -392,14 +392,20 @@ body {
   overflow-wrap: anywhere;
 }
 
-.copybox-block {
-  align-items: flex-start;
-}
-
-.copybox-block code {
+/* The command takes the room the button leaves and wraps, so a long path never pushes Copy out of its box. */
+.copybox code {
+  flex: 1;
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.copybox .button {
+  flex: none;
+}
+
+.copybox-block {
+  align-items: flex-start;
 }
 
 .item.check {
