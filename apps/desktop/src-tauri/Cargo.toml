@@ -40,6 +40,8 @@ tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# The mock runtime lets a test send the window events of the app to its handler without opening a window.
+tauri = { workspace = true, features = ["test"] }
 # The paused clock runs the poller's timers without waiting for them.
 tokio = { workspace = true, features = ["test-util"] }
 

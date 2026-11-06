@@ -2,6 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{self, BufRead as _, BufReader, Write as _};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -178,7 +179,34 @@ pub struct Responses {
     ended: bool,
 }
 
+/// A handle that closes the connection of a [`Responses`] from another thread, which ends the stream even while a
+/// reader waits on a Daemon that says nothing. It is how a caller cancels a followed request.
+#[derive(Debug)]
+pub struct Closer {
+    stream: UnixStream,
+}
+
+impl Closer {
+    /// Closes both halves of the connection. The reader blocked on it sees the end of the stream, and the Daemon sees
+    /// its client gone. Closing a connection already closed does nothing.
+    pub fn close(&self) {
+        // A connection the Daemon already closed has nothing left to shut down.
+        let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
 impl Responses {
+    /// A handle that closes this connection from another thread.
+    ///
+    /// # Errors
+    ///
+    /// When the socket cannot be duplicated.
+    pub fn closer(&self) -> io::Result<Closer> {
+        Ok(Closer {
+            stream: self.reader.get_ref().try_clone()?,
+        })
+    }
+
     /// Returns the answer, the first response that is not a [`Response::SetupProgress`], handing each one sent ahead
     /// of it to `on_progress`.
     ///

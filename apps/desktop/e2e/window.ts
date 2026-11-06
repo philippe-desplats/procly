@@ -67,3 +67,24 @@ export async function showingText(selector: string, parts: string[], within = 60
     within,
   );
 }
+
+/** The first worktree of the sidebar, once a Daemon reports one. A scene has one, so it is the scene's. */
+export const FIRST_WORKTREE = 'nav[aria-label="Worktrees"] section.group ul.list li button';
+
+/** The output pane of the inspector. */
+export const OUTPUT = 'pre[aria-label="Output"]';
+
+/** Presses the first element `selector` matches whose text holds `text`, and tells whether there was one. */
+export async function pick(selector: string, text = ""): Promise<boolean> {
+  return browser.execute(
+    (css: string, wanted: string) => {
+      const target = Array.from(document.querySelectorAll<HTMLElement>(css)).find((candidate) =>
+        (candidate.textContent ?? "").includes(wanted),
+      );
+      target?.click();
+      return target !== undefined;
+    },
+    selector,
+    text,
+  );
+}

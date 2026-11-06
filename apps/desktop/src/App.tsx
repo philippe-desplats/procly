@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
@@ -8,9 +8,13 @@ import { DoctorScreen, ReleaseBanner, WorktreeChecks } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey, isSeen } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
+import { SelectableRow, SelectionContext } from "./selectable";
+import { resolve, selectedKey, type Selected, type Selection } from "./selection";
+import { SelectedPanel } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
 import { State } from "./StateMark";
+import type { ContainerStatus } from "./protocol/ContainerStatus";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
@@ -33,7 +37,14 @@ type View =
 /** `doctor` is the store of the checks, a window makes its own unless a test hands it one. */
 export function App({ store, doctor: given }: { store: DaemonStore; doctor?: DoctorStore }) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  const [view, setView] = useState<View>({ kind: "overview" });
+  const [view, setCurrentView] = useState<View>({ kind: "overview" });
+  const [selection, setSelection] = useState<Selection | null>(null);
+  // Another screen shows another set of items, so what was picked in the one before is no longer on show.
+  const setView = useCallback((next: View): void => {
+    setCurrentView(next);
+    setSelection(null);
+  }, []);
+  const control = useMemo(() => ({ selection, select: setSelection }), [selection]);
   const [doctor] = useState(() => given ?? createDoctorStore());
 
   // The poller of the app keeps the snapshot current, the window only follows it.
@@ -62,7 +73,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, []);
+  }, [setView]);
 
   // The native menu sends Settings, which `⌘,` triggers.
   useEffect(() => {
@@ -81,13 +92,16 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
       stopped = true;
       unlisten?.();
     };
-  }, []);
+  }, [setView]);
 
   const repositories = snapshot.kind === "status" ? snapshot.report.repositories : [];
   const worktrees = repositories.flatMap((repository) => repository.worktrees);
   // A Worktree that is no longer reported leaves the Overview in its place.
   const current =
     view.kind === "worktree" ? (worktrees.find((worktree) => worktree.path === view.path) ?? null) : null;
+
+  // The Daemon may stop reporting what was picked, an ended Job it evicted for one.
+  const selected = snapshot.kind === "status" ? resolve(selection, snapshot.report) : null;
 
   const settings = view.kind === "settings";
   const checking = view.kind === "doctor";
@@ -96,68 +110,72 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   const wide = settings || orphans;
 
   return (
-    <div className={wide ? "window window-settings" : "window"}>
-      <nav className="pane sidebar" aria-label="Worktrees">
-        <h1 className="pane-title">Procly</h1>
-        <Sidebar
-          snapshot={snapshot}
-          repositories={repositories}
-          current={current}
-          settings={settings}
-          checking={checking}
-          orphans={orphans}
-          onSelect={(path) => {
-            setView({ kind: "worktree", path });
-          }}
-          onOverview={() => {
-            setView({ kind: "overview" });
-          }}
-          onOrphans={() => {
-            setView({ kind: "orphans" });
-          }}
-          onDoctor={() => {
-            setView({ kind: "doctor" });
-          }}
-          onSettings={() => {
-            setView({ kind: "settings", focusEditor: false });
-          }}
-        />
-      </nav>
-      <main className="pane center">
-        {view.kind === "settings" ? (
-          <SettingsScreen focusEditor={view.focusEditor} />
-        ) : view.kind === "orphans" && snapshot.kind === "status" ? (
-          <OrphansScreen />
-        ) : (
-          <>
-            <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
-            {snapshot.kind === "status" ? (
-              <ReleaseBanner
-                store={doctor}
-                onOpenDoctor={() => {
-                  setView({ kind: "doctor" });
-                }}
-              />
-            ) : null}
-            {view.kind === "doctor" ? (
-              <DoctorScreen store={doctor} />
-            ) : (
-              <Center snapshot={snapshot} current={current} store={store} doctor={doctor} />
-            )}
-          </>
-        )}
-      </main>
-      {wide ? null : (
-        <aside className="pane inspector" aria-label="Inspector">
-          <Inspector
+    <SelectionContext.Provider value={control}>
+      <div className={wide ? "window window-settings" : "window"}>
+        <nav className="pane sidebar" aria-label="Worktrees">
+          <h1 className="pane-title">Procly</h1>
+          <Sidebar
+            snapshot={snapshot}
+            repositories={repositories}
             current={current}
-            onNeedEditor={() => {
-              setView({ kind: "settings", focusEditor: true });
+            settings={settings}
+            checking={checking}
+            orphans={orphans}
+            onSelect={(path) => {
+              setView({ kind: "worktree", path });
+            }}
+            onOverview={() => {
+              setView({ kind: "overview" });
+            }}
+            onOrphans={() => {
+              setView({ kind: "orphans" });
+            }}
+            onDoctor={() => {
+              setView({ kind: "doctor" });
+            }}
+            onSettings={() => {
+              setView({ kind: "settings", focusEditor: false });
             }}
           />
-        </aside>
-      )}
-    </div>
+        </nav>
+        <main className="pane center">
+          {view.kind === "settings" ? (
+            <SettingsScreen focusEditor={view.focusEditor} />
+          ) : view.kind === "orphans" && snapshot.kind === "status" ? (
+            <OrphansScreen />
+          ) : (
+            <>
+              <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
+              {snapshot.kind === "status" ? (
+                <ReleaseBanner
+                  store={doctor}
+                  onOpenDoctor={() => {
+                    setView({ kind: "doctor" });
+                  }}
+                />
+              ) : null}
+              {view.kind === "doctor" ? (
+                <DoctorScreen store={doctor} />
+              ) : (
+                <Center snapshot={snapshot} current={current} store={store} doctor={doctor} />
+              )}
+            </>
+          )}
+        </main>
+        {wide ? null : (
+          <aside className="pane inspector" aria-label="Inspector">
+            <Inspector
+              current={current}
+              selected={selected}
+              at={snapshot.kind === "loading" ? 0 : snapshot.at}
+              onNeedEditor={() => {
+                setView({ kind: "settings", focusEditor: true });
+              }}
+            />
+          </aside>
+        )}
+      </div>
+    </SelectionContext.Provider>
   );
 }
 
@@ -546,25 +564,41 @@ function ServiceRow({
     started_at: service.started_at,
   });
   return (
-    <li className="item" data-seen={marked ? "true" : undefined}>
+    <SelectableRow
+      target={{ kind: "service", worktree: worktreePath, service: service.service }}
+      seen={marked}
+    >
       <span className="item-name">{service.service}</span>
       <State {...serviceWord(service)} />
       {service.port === null ? null : <span className="caption">{`:${service.port}`}</span>}
       <span className="caption">{formatMoment(service.started_at, at)}</span>
       <SeenMark seen={marked} />
-    </li>
+    </SelectableRow>
   );
 }
 
 function JobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
   const marked = isSeen(seen, { kind: "job", id: job.id });
   return (
-    <li className="item" data-seen={marked ? "true" : undefined}>
+    <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
       <State {...jobWord(job)} />
       <span className="item-name mono">{job.command}</span>
       <span className="caption mono">{job.id}</span>
       <SeenMark seen={marked} />
-    </li>
+    </SelectableRow>
+  );
+}
+
+function ContainerRow({ container, worktreePath }: { container: ContainerStatus; worktreePath: string }) {
+  return (
+    <SelectableRow
+      target={{ kind: "compose", worktree: worktreePath, service: container.service }}
+      seen={false}
+    >
+      <span className="item-name">{container.service}</span>
+      <State word="running" tone="ok" />
+      {container.port === null ? null : <span className="caption">{`:${container.port}`}</span>}
+    </SelectableRow>
   );
 }
 
@@ -603,6 +637,16 @@ function WorktreeView({
           </ul>
         </>
       ) : null}
+      {(worktree.containers ?? []).length > 0 ? (
+        <>
+          <h3 className="caption">Compose services</h3>
+          <ul className="list">
+            {(worktree.containers ?? []).map((container) => (
+              <ContainerRow key={container.service} container={container} worktreePath={worktree.path} />
+            ))}
+          </ul>
+        </>
+      ) : null}
       {worktree.jobs.length > 0 ? (
         <>
           <h3 className="caption">Jobs</h3>
@@ -618,7 +662,31 @@ function WorktreeView({
   );
 }
 
-function Inspector({ current, onNeedEditor }: { current: WorktreeStatus | null; onNeedEditor: () => void }) {
+function Inspector({
+  current,
+  selected,
+  at,
+  onNeedEditor,
+}: {
+  current: WorktreeStatus | null;
+  selected: Selected | null;
+  at: number;
+  onNeedEditor: () => void;
+}) {
+  if (selected !== null) {
+    return (
+      <>
+        <SelectedPanel key={selectedKey(selected)} selected={selected} at={at} />
+        {selected.worktree === null ? null : (
+          <WorktreeActions
+            key={selected.worktree.path}
+            path={selected.worktree.path}
+            onNeedEditor={onNeedEditor}
+          />
+        )}
+      </>
+    );
+  }
   if (current === null) {
     return <p className="caption">Select a Worktree.</p>;
   }

@@ -9,6 +9,7 @@ mod clipboard;
 mod daemon;
 mod dock;
 mod doctor;
+mod follow;
 mod glyph;
 mod lifecycle;
 mod login_item;
@@ -26,10 +27,11 @@ use std::sync::Mutex;
 
 use daemon::DaemonClient;
 use dock::DockIcon;
+use follow::{Follower, WINDOW_VISIBLE};
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
-use tauri::{AppHandle, Emitter as _, Manager as _, State, Window, WindowEvent};
+use tauri::{AppHandle, Emitter as _, Manager as _, Runtime, State, Window, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 use tray::Tray;
 use window::{Host as _, MainWindow};
@@ -98,7 +100,7 @@ fn refresh(poller: State<'_, Poller>) {
 }
 
 /// Where the window stands, from what Tauri reports about it.
-fn window_state(window: &Window) -> WindowState {
+fn window_state<R: Runtime>(window: &Window<R>) -> WindowState {
     // A window that is being destroyed answers nothing: nobody looks at it.
     let flag = |read: tauri::Result<bool>| read.unwrap_or(false);
     WindowState::from_flags(
@@ -108,15 +110,21 @@ fn window_state(window: &Window) -> WindowState {
     )
 }
 
-/// Tells the poller about a window event that changes where the window stands. Closing the window hides it instead of
-/// ending the app, which stays in the menu bar until the developer quits it.
-fn follow_window(window: &Window, event: &WindowEvent) {
+/// Handles a window event of the app. Closing the window hides it instead of ending the app, which stays in the menu
+/// bar until the developer quits it. Then every event that changes where the window stands is followed.
+fn on_window_event(window: &Window, event: &WindowEvent) {
     if let WindowEvent::CloseRequested { api, .. } = event
         && window.label() == window::MAIN
     {
         api.prevent_close();
         window::close(&MainWindow(window.app_handle()));
     }
+    follow_window(window, event);
+}
+
+/// Tells the poller and the follow about a window event that changes where the window stands. A window that is hidden,
+/// minimized or closed cancels the follow, and the window starts it again from a fresh backlog once it comes back.
+fn follow_window<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     let state = match event {
         WindowEvent::Focused(_) | WindowEvent::Resized(_) => window_state(window),
         WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => WindowState::Closed,
@@ -124,6 +132,13 @@ fn follow_window(window: &Window, event: &WindowEvent) {
     };
     if let Some(poller) = window.try_state::<Poller>() {
         poller.window(state);
+    }
+    // A hidden window cancels the follow, and the window starts it again from a fresh backlog once it comes back.
+    if let Some(follower) = window.try_state::<Follower>()
+        && let Some(visible) = follower.window(state)
+    {
+        // A window that is gone has nothing to be told.
+        let _ = window.emit(WINDOW_VISIBLE, visible);
     }
 }
 
@@ -194,6 +209,7 @@ pub fn run() {
             app.manage(client);
             app.manage(poller);
             app.manage(attention);
+            app.manage(Follower::new());
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())
         })
@@ -218,11 +234,14 @@ pub fn run() {
                 let _ = app.emit(OPEN_SETTINGS, ());
             }
         })
-        .on_window_event(follow_window)
+        .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             last_update,
             mark_seen,
             refresh,
+            follow::follow_logs,
+            follow::stop_follow,
+            follow::service_logs,
             lifecycle::start_daemon,
             lifecycle::restart_daemon,
             doctor::doctor,
