@@ -9,6 +9,7 @@ mod clipboard;
 mod daemon;
 mod dock;
 mod doctor;
+mod failure;
 mod follow;
 mod glyph;
 mod lifecycle;

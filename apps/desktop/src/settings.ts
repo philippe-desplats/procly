@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { AppFailure } from "./protocol/AppFailure";
+
 /** What the developer chose. An app is the name `open -a` takes, and the editor is null until one is chosen. */
 export interface Settings {
   editor: string | null;
@@ -21,12 +23,6 @@ export interface DetectedApps {
 
 /** What a Worktree is opened with. */
 export type OpenWith = "editor" | "terminal";
-
-/** Why a Worktree did not open. `no_editor` sends the developer to Settings, every other kind is shown as it is. */
-export interface OpenFailure {
-  kind: "no_editor" | "missing" | "launch" | "reveal" | "task" | "settings" | "login_item" | "notifications";
-  message: string;
-}
 
 /** The event the native menu sends when Settings is chosen, `⌘,` included. */
 export const OPEN_SETTINGS = "open-settings";
@@ -80,10 +76,13 @@ export const openWorktree = (path: string, withApp: OpenWith): Promise<void> =>
 /** Asks Rust to show the Worktree at `path` in the Finder. */
 export const revealWorktree = (path: string): Promise<void> => invoke("reveal_worktree", { path });
 
-/** The error of a command as Rust sent it: an object with a kind and a message, or whatever else rejected. */
-export function failureOf(error: unknown): OpenFailure {
+/**
+ * The error of a command of the app as Rust sent it, or whatever else rejected as a `task` failure. `no_editor` sends
+ * the developer to Settings, every other kind is shown as it is.
+ */
+export function failureOf(error: unknown): AppFailure {
   if (typeof error === "object" && error !== null && "kind" in error && "message" in error) {
-    return error as OpenFailure;
+    return error as AppFailure;
   }
   return { kind: "task", message: error instanceof Error ? error.message : String(error) };
 }

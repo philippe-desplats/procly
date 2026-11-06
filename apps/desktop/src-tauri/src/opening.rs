@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize, Serializer};
 use tauri::State;
 
+use crate::failure::{self, AppFailureKind};
 use crate::settings::{Settings, SettingsStore};
 
 /// What the window asks to open a Worktree with.
@@ -73,29 +74,20 @@ impl OpenError {
         Self::Task(error.to_string())
     }
 
-    fn kind(&self) -> &'static str {
+    fn kind(&self) -> AppFailureKind {
         match self {
-            Self::NoEditor => "no_editor",
-            Self::Missing { .. } => "missing",
-            Self::Launch { .. } => "launch",
-            Self::Reveal { .. } => "reveal",
-            Self::Task(_) => "task",
+            Self::NoEditor => AppFailureKind::NoEditor,
+            Self::Missing { .. } => AppFailureKind::Missing,
+            Self::Launch { .. } => AppFailureKind::Launch,
+            Self::Reveal { .. } => AppFailureKind::Reveal,
+            Self::Task(_) => AppFailureKind::Task,
         }
     }
 }
 
 impl Serialize for OpenError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Failure {
-            kind: &'static str,
-            message: String,
-        }
-        Failure {
-            kind: self.kind(),
-            message: self.to_string(),
-        }
-        .serialize(serializer)
+        failure::serialize(self.kind(), self, serializer)
     }
 }
 

@@ -13,6 +13,7 @@ use serde::{Serialize, Serializer};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_notification::{NotificationExt as _, PermissionState};
 
+use crate::failure::{self, AppFailureKind};
 use crate::needs_you::{FailureKey, NeedsYou, Place, Presented, report_of};
 use crate::poller::Answer;
 use crate::settings::{SettingsError, SettingsStore};
@@ -252,18 +253,11 @@ impl NotifyError {
 
 impl Serialize for NotifyError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Failure {
-            kind: &'static str,
-            message: String,
-        }
         match self {
             Self::Settings(error) => error.serialize(serializer),
-            Self::Permission(_) | Self::Open(_) | Self::Task(_) => Failure {
-                kind: "notifications",
-                message: self.to_string(),
+            Self::Permission(_) | Self::Open(_) | Self::Task(_) => {
+                failure::serialize(AppFailureKind::Notifications, self, serializer)
             }
-            .serialize(serializer),
         }
     }
 }

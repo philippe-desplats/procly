@@ -9,6 +9,7 @@ use procly_client::state_dir::{StateDir, StateDirError};
 use procly_client::{ClientError, connect};
 use serde::{Serialize, Serializer};
 
+use crate::failure::{self, AppFailureKind, PROTOCOL_MISMATCH, ProtocolMismatch};
 use crate::poller::Source;
 
 /// The name of the embedded `procly`, which sits beside the executable of the app.
@@ -29,10 +30,10 @@ pub(crate) enum SetupError {
     Executable(#[source] io::Error),
 }
 
-/// What a Tauri command fails with. It reaches the webview as a rejected promise holding a [`ClientFailure`], or the
-/// same shape with another kind: `task` when the thread that talks to the Daemon broke, `sidecar` when the embedded
-/// `procly` cannot run, `daemon_stop` when `procly daemon stop` failed, `doctor` when `procly doctor` gave no document,
-/// and `protocol_mismatch` when the Daemon speaks another protocol version.
+/// What a Tauri command fails with. It reaches the webview as a rejected promise holding a `ClientFailure`, an
+/// [`AppFailure`](crate::failure::AppFailure) when the thread that talks to the Daemon broke, the embedded `procly`
+/// cannot run, `procly daemon stop` failed or `procly doctor` gave no document, or a [`ProtocolMismatch`] when the
+/// Daemon speaks another protocol version.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CommandError {
     #[error(transparent)]
@@ -62,54 +63,24 @@ impl CommandError {
 
 impl Serialize for CommandError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Client(ClientError::Decode(DecodeError::Version(daemon))) => ProtocolMismatch {
-                kind: "protocol_mismatch",
-                message: self.to_string(),
-                daemon_protocol: *daemon,
-                app_protocol: PROTOCOL_VERSION,
+        let kind = match self {
+            Self::Client(ClientError::Decode(DecodeError::Version(daemon))) => {
+                return ProtocolMismatch {
+                    kind: PROTOCOL_MISMATCH,
+                    message: self.to_string(),
+                    daemon_protocol: *daemon,
+                    app_protocol: PROTOCOL_VERSION,
+                }
+                .serialize(serializer);
             }
-            .serialize(serializer),
-            Self::Client(error) => error.serialize(serializer),
-            Self::Task(_) => OtherFailure {
-                kind: "task",
-                message: self.to_string(),
-            }
-            .serialize(serializer),
-            Self::Sidecar { .. } => OtherFailure {
-                kind: "sidecar",
-                message: self.to_string(),
-            }
-            .serialize(serializer),
-            Self::Stop { .. } => OtherFailure {
-                kind: "daemon_stop",
-                message: self.to_string(),
-            }
-            .serialize(serializer),
-            Self::Doctor { .. } => OtherFailure {
-                kind: "doctor",
-                message: self.to_string(),
-            }
-            .serialize(serializer),
-        }
+            Self::Client(error) => return error.serialize(serializer),
+            Self::Task(_) => AppFailureKind::Task,
+            Self::Sidecar { .. } => AppFailureKind::Sidecar,
+            Self::Stop { .. } => AppFailureKind::DaemonStop,
+            Self::Doctor { .. } => AppFailureKind::Doctor,
+        };
+        failure::serialize(kind, self, serializer)
     }
-}
-
-/// The shape of a [`ClientFailure`] for a failure that is not the client's.
-#[derive(Serialize)]
-struct OtherFailure {
-    kind: &'static str,
-    message: String,
-}
-
-/// A Daemon that answers in another protocol version. The window compares the 2 numbers to tell an older Daemon, which
-/// can be restarted, from a newer one, which asks for an update of the app.
-#[derive(Serialize)]
-struct ProtocolMismatch {
-    kind: &'static str,
-    message: String,
-    daemon_protocol: u32,
-    app_protocol: u32,
 }
 
 /// The connection point of the app to the Daemon, managed by Tauri and shared by every command.

@@ -15,6 +15,7 @@ use procly_client::protocol::{
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::atomic;
+use crate::failure::{self, AppFailureKind};
 use crate::poller::{Answer, Update};
 
 /// What identifies a failure, so that one that happens again is not taken for the one already seen.
@@ -225,7 +226,7 @@ impl Seen {
 
     /// Writes the set to `path` so that a reader sees the old file or the new one, never half of it.
     fn save(&self, path: &Path) -> Result<(), SeenError> {
-        let write = |source| SeenError {
+        let write = |source| SeenError::Write {
             path: path.to_path_buf(),
             source,
         };
@@ -236,35 +237,27 @@ impl Seen {
 
 /// The Seen set could not be written, or the thread that writes it broke. The mark holds until the app quits.
 #[derive(Debug, thiserror::Error)]
-#[error("cannot save the Seen failures to {}: {source}", path.display())]
-pub(crate) struct SeenError {
-    path: PathBuf,
-    #[source]
-    source: io::Error,
+pub(crate) enum SeenError {
+    #[error("cannot save the Seen failures to {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot save the Seen failures: {0}")]
+    Task(String),
 }
 
 impl SeenError {
     /// The thread that writes the set stopped before it could.
     pub(crate) fn task(error: &tauri::Error) -> Self {
-        Self {
-            path: PathBuf::new(),
-            source: io::Error::other(error.to_string()),
-        }
+        Self::Task(error.to_string())
     }
 }
 
 impl Serialize for SeenError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Failure {
-            kind: &'static str,
-            message: String,
-        }
-        Failure {
-            kind: "seen",
-            message: self.to_string(),
-        }
-        .serialize(serializer)
+        failure::serialize(AppFailureKind::Seen, self, serializer)
     }
 }
 
@@ -813,6 +806,16 @@ mod tests {
             "{:?}",
             presented.needs_you
         );
+    }
+
+    #[test]
+    fn a_thread_that_broke_says_so_without_an_empty_path_and_reaches_the_window_as_seen() {
+        let error = SeenError::Task("the thread panicked".to_owned());
+
+        let json = serde_json::to_value(&error).expect("serializes");
+
+        assert_eq!(json["kind"], "seen");
+        assert_eq!(json["message"], "cannot save the Seen failures: the thread panicked");
     }
 
     #[test]

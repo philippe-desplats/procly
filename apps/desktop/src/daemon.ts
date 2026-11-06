@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import type { AppFailure } from "./protocol/AppFailure";
 import type { ClientFailure } from "./protocol/ClientFailure";
 import type { ClientFailureKind } from "./protocol/ClientFailureKind";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobEnd } from "./protocol/JobEnd";
+import type { ProtocolMismatch } from "./protocol/ProtocolMismatch";
 import type { Response } from "./protocol/Response";
 import type { ServiceEnd } from "./protocol/ServiceEnd";
 import type { StatusReport } from "./protocol/StatusReport";
@@ -29,20 +31,10 @@ export type DaemonSnapshot =
   | { kind: "failure"; message: string; at: number };
 
 /**
- * A command failure as the Rust side sends it: a `ClientFailure`, or the same shape with another kind: `task` for a
- * broken thread, `sidecar` when the embedded `procly` cannot run, `daemon_stop` when `procly daemon stop` failed.
+ * A command failure as the Rust side sends it: a `ClientFailure`, an `AppFailure` for a failure that is not the
+ * client's, or a `ProtocolMismatch`. All 3 are exported from Rust, so the kinds cannot drift from what it writes.
  */
-export type Failure =
-  | (Omit<ClientFailure, "kind"> & { kind: ClientFailureKind | "task" | "sidecar" | "daemon_stop" })
-  | ProtocolMismatch;
-
-/** A Daemon that answers in another protocol version, with the version it speaks and the one of this app. */
-export interface ProtocolMismatch {
-  kind: "protocol_mismatch";
-  message: string;
-  daemon_protocol: number;
-  app_protocol: number;
-}
+export type Failure = ClientFailure | AppFailure | ProtocolMismatch;
 
 /** What a rejected command says, whether the Rust side sent a `Failure` or something else broke. */
 export function failureMessage(error: unknown): string {
