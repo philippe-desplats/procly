@@ -92,11 +92,13 @@ function reasonOfLine(line: NeedsYou): Reason {
 }
 
 /**
- * Why the Worktree at `path` needs the developer: the first item of "Needs you" that sits in it, nothing when none
- * does. A Job outside every Repository sits in no Worktree. A failure marked as Seen has left the list, so it says
+ * Why the Worktree at `path` needs the developer: its first failure in "Needs you", else its first Foreign process,
+ * nothing when none sits in it. A failure comes first since it is what broke, a Foreign process only stands in the
+ * way. A Job outside every Repository sits in no Worktree. A failure marked as Seen has left the list, so it says
  * nothing here either.
  */
 export function reasonOf(needsYou: NeedsYou[], path: string): Reason | null {
-  const first = needsYou.find((line) => line.worktree === path);
+  const here = needsYou.filter((line) => line.worktree === path);
+  const first = here.find((line) => failureKey(line) !== null) ?? here[0];
   return first === undefined ? null : reasonOfLine(first);
 }

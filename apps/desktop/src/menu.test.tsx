@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type NeedsYou, type Update } from "./daemon";
-import { MENU_CHOICE, type MenuChoice } from "./menu";
+import { MENU_CHOICE } from "./menu";
+import type { MenuChoice } from "./protocol/MenuChoice";
 import type { MenuContext } from "./protocol/MenuContext";
 import type { Response } from "./protocol/Response";
 

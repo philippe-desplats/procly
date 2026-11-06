@@ -60,7 +60,7 @@ export function SidebarFooter({
 }) {
   const run = lastRun(doctor);
   const orphaned = orphanCount(orphans);
-  const version = run?.version ?? null;
+  const version = daemonVersionOf(doctor);
   return (
     <div className="sidebar-foot">
       <button type="button" className="row" aria-current={checking ? "true" : undefined} onClick={onDoctor}>
@@ -78,17 +78,38 @@ export function SidebarFooter({
         <span className="row-name">Orphans</span>
         {orphaned === null || orphaned === 0 ? null : <span className="row-count">{orphaned}</span>}
       </button>
-      {updatedAt === null ? null : (
-        <p className="daemon-line">
-          <GlyphMark glyph="healthy" />
-          <span>{`Daemon${version === null ? "" : ` ${version}`}, updated at ${formatMoment(updatedAt, updatedAt)}`}</span>
-        </p>
-      )}
+      {updatedAt === null ? null : <DaemonLine version={version} updatedAt={updatedAt} answering />}
       <button type="button" className="row" aria-current={settings ? "true" : undefined} onClick={onSettings}>
         <span className="row-name">Settings</span>
         <span className="caption">⌘,</span>
       </button>
     </div>
+  );
+}
+
+/** The release the last doctor run found the Daemon on, `null` while no run named one. */
+export function daemonVersionOf(doctor: DoctorState): string | null {
+  return lastRun(doctor)?.version ?? null;
+}
+
+/**
+ * The line of the Daemon: its release when doctor named one, and the absolute time of the last Status that answered.
+ * The quiet glyph says it answers, so a Daemon that no longer does keeps the time and loses the glyph.
+ */
+export function DaemonLine({
+  version,
+  updatedAt,
+  answering,
+}: {
+  version: string | null;
+  updatedAt: number;
+  answering: boolean;
+}) {
+  return (
+    <p className="daemon-line">
+      {answering ? <GlyphMark glyph="healthy" /> : null}
+      <span>{`Daemon${version === null ? "" : ` ${version}`}, updated at ${formatMoment(updatedAt, updatedAt)}`}</span>
+    </p>
   );
 }
 

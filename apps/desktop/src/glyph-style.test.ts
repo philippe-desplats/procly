@@ -66,6 +66,11 @@ describe("the glyph stylesheet", () => {
     expect(css).not.toMatch(/data-seen[^{]*\.(glyph|state)\s*\{/);
   });
 
+  it("draws the cross of a failure in its own token, and the cut of a warning in the colour of the pane", () => {
+    expect(rule(".glyph-cross")).toContain("stroke: var(--fail-cut)");
+    expect(rule(".glyph-cut")).toContain("stroke: var(--panel)");
+  });
+
   it("no longer draws the 8 px dot", () => {
     expect(css).not.toMatch(/\.dot\b/);
   });

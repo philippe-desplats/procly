@@ -1,14 +1,14 @@
 import { browser, expect } from "@wdio/globals";
 
+import { NOT_RUNNING, showingTitle } from "../window";
+
 /** The label of the one window, as `tauri.conf.json` names it. */
 const MAIN = "main";
 
 describe("the close button of the window", () => {
   it("hides the window and leaves the app running in the menu bar", async () => {
-    await browser.waitUntil(
-      async () => browser.execute(() => document.querySelector('nav[aria-label="Worktrees"]') !== null),
-      { timeout: 60_000, timeoutMsg: "the window did not draw" },
-    );
+    // The suite starts with no Daemon, so the window draws the full-window state screen, which has no sidebar.
+    await showingTitle(NOT_RUNNING);
     expect(await browser.execute(() => document.visibilityState)).toBe("visible");
 
     // Close Window asks the window to close as its close button does, through the CloseRequested handler of the app,

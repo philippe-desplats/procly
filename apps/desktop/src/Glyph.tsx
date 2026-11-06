@@ -30,7 +30,7 @@ function shape(glyph: Glyph): ReactElement {
       return (
         <>
           <circle cx="6" cy="6" r="5.4" fill="currentColor" />
-          <path className="glyph-cut" d="M4 4l4 4M8 4l-4 4" strokeWidth="1.5" strokeLinecap="round" />
+          <path className="glyph-cross" d="M4 4l4 4M8 4l-4 4" strokeWidth="1.5" strokeLinecap="round" />
         </>
       );
     case "job":

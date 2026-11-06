@@ -49,4 +49,8 @@ describe("the state screen layout", () => {
   it("leaves the top of the window to the traffic lights, and lets it move the window", () => {
     expect(declarations(".state-drag")).toMatch(/position:\s*fixed\s*;/);
   });
+
+  it("centers the line of the Daemon in the column, as the text around it", () => {
+    expect(declarations(".state-column > .daemon-line")).toMatch(/justify-content:\s*center\s*;/);
+  });
 });

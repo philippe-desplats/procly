@@ -12,6 +12,7 @@
   --warn: #8f5a00;
   --fail: #b42318;
   --ended: #6f767e;
+  --fail-cut: #ffffff;
   --accent: #007aff;
   --selected: color-mix(in srgb, var(--accent) 14%, transparent);
   --brand-lime: #d7f23c;
@@ -39,6 +40,8 @@
     --warn: #f0b042;
     --fail: #ff6b6b;
     --ended: #7b828b;
+    /* White on this red is 2.78:1, under the 3:1 of a graphical object, so the cross takes the colour of the pane. */
+    --fail-cut: #17191d;
     --accent: #0a84ff;
     --selected: color-mix(in srgb, var(--accent) 22%, transparent);
   }
@@ -251,6 +254,16 @@ body {
   margin: 0;
 }
 
+/* Where a row runs, a directory that can be long. It gives way first, cut at its end, so the name keeps its width. */
+.item-where {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .state {
   display: inline-flex;
   align-items: center;
@@ -294,7 +307,13 @@ body {
   color: var(--fail);
 }
 
-/* The mark cut out of a filled glyph is drawn in the colour of the pane, so it reads in both themes. */
+/* The cross of a failure is white as in the mockup, except where white falls under 3:1 on the red disc. */
+.glyph-cross {
+  fill: none;
+  stroke: var(--fail-cut);
+}
+
+/* The mark cut out of a warning is drawn in the colour of the pane, so it reads in both themes. */
 .glyph-cut {
   fill: none;
   stroke: var(--panel);
@@ -788,6 +807,11 @@ body {
 .state-column > :not(.overlay) {
   width: 100%;
   margin: 0;
+}
+
+/* The line of a Daemon that no longer answers well, centered as the text around it. */
+.state-column > .daemon-line {
+  justify-content: center;
 }
 
 .state-column > .brand-mark {

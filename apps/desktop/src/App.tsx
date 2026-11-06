@@ -14,7 +14,7 @@ import {
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { GlyphMark } from "./Glyph";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { MENU_CHOICE, menuContext, useMenuContext, type MenuChoice } from "./menu";
+import { MENU_CHOICE, menuContext, useMenuContext } from "./menu";
 import { failureKey, FailuresContext, failuresOf, reasonOf, type Reason } from "./needs-you";
 import { createOrphanScanStore, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import { OrphansScreen } from "./OrphansScreen";
@@ -27,6 +27,7 @@ import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
+import type { MenuChoice } from "./protocol/MenuChoice";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ContainerRow, RemovedMark, ServiceRow } from "./Rows";
@@ -87,6 +88,13 @@ export function App({
 
   // The poller of the app keeps the snapshot current, the window only follows it.
   useEffect(() => store.start(), [store]);
+
+  // When a Status last answered, which the screen of a Daemon that no longer answers well still names.
+  const [lastAnswer, setLastAnswer] = useState<number | null>(null);
+  // Kept while rendering, as React advises for state that follows a prop, so a failure never shows a stale time.
+  if (snapshot.kind === "status" && snapshot.at !== lastAnswer) {
+    setLastAnswer(snapshot.at);
+  }
 
   // Doctor runs when the app enters "Daemon not running", not on each tick that finds it still not running.
   const notRunning = snapshot.kind === "no-daemon";
@@ -221,6 +229,12 @@ export function App({
       case "open-in-editor":
       case "open-in-terminal":
         break;
+      // Rust carries these out without the window, so it never sends them.
+      case "settings":
+      case "refresh":
+      case "copy-logs-command":
+      case "copy-path":
+        break;
       default: {
         const unhandled: never = choice;
         throw new Error(`unhandled choice: ${JSON.stringify(unhandled)}`);
@@ -243,7 +257,7 @@ export function App({
 
   // Without a Daemon to read there is nothing for a sidebar or an inspector to hold, so the window is one screen.
   if (isBlocking(snapshot)) {
-    return <DaemonStateScreen snapshot={snapshot} store={store} doctor={doctor} />;
+    return <DaemonStateScreen snapshot={snapshot} store={store} doctor={doctor} lastAnswer={lastAnswer} />;
   }
 
   return (
@@ -562,13 +576,6 @@ function Center({
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
-    case "failure":
-      return (
-        <section>
-          <h2 className="title">The Daemon did not answer</h2>
-          <p className="muted">{snapshot.message}</p>
-        </section>
-      );
     case "status":
       return current === null ? (
         <Overview

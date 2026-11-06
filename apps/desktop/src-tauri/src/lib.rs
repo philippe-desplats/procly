@@ -188,7 +188,7 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
         | Choice::OpenInTerminal
         | Choice::Release => {
             // A window that is gone has nothing selected to act on.
-            let _ = app.emit(MENU_CHOICE, choice.id());
+            let _ = app.emit(MENU_CHOICE, choice);
         }
     }
 }

@@ -66,6 +66,12 @@ describe("the state glyph", () => {
     expect(container.querySelector(".state .word svg")).toBeNull();
   });
 
+  it("draws the cross of a failure apart from the cut of a warning, so each takes its own colour", () => {
+    const failure = render(<State {...SIX.failure!} />).container;
+    expect(failure.querySelector("svg .glyph-cross")).not.toBeNull();
+    expect(failure.querySelector("svg .glyph-cut")).toBeNull();
+  });
+
   it("keeps the tone class on the state, which the stylesheet colours the glyph and the word with", () => {
     const { container } = render(<State {...SIX.failure!} />);
 
