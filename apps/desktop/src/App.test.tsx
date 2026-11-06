@@ -426,7 +426,7 @@ describe("Needs you", () => {
       .map((line) => line.textContent);
     expect(lines).toEqual([
       "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-endMark as Seen",
-      "started outside Procly" + "node server.js:3000main",
+      "started outside Proclynode server.js:3000main",
     ]);
     // The same glyph as everywhere else: a cross for the failure, a diamond for the Foreign process.
     expect(
