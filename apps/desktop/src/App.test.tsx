@@ -833,6 +833,23 @@ describe("the reason line of a Worktree in the sidebar", () => {
     expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
   });
 
+  it("puts a failure before a Foreign process of the same Worktree, whatever their order in Needs you", async () => {
+    const job: NeedsYou = {
+      kind: "job",
+      worktree: FOREIGN.worktree,
+      id: "j-7",
+      command: "make test",
+      end: { kind: "exited", code: 2 },
+    };
+    poller(answered(many, { needsYou: [FOREIGN, job] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web")).querySelector(".row-reason");
+    expect(reason).toHaveTextContent("make test exited 2");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
+  });
+
   it("gives a Worktree with nothing in Needs you a single line, and its neighbours too", async () => {
     poller(answered(many, { needsYou: [API_FAILURE] }));
 
