@@ -144,7 +144,7 @@ function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
       <State {...jobWord(job, failed)} />
       <span className="item-name mono">{job.command}</span>
       <span className="caption mono">{job.id}</span>
-      <span className="caption mono">{job.cwd}</span>
+      <span className="caption mono item-where">{job.cwd}</span>
       <SeenMark seen={marked} />
     </SelectableRow>
   );

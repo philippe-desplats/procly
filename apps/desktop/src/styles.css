@@ -251,6 +251,16 @@ body {
   margin: 0;
 }
 
+/* Where a row runs, a directory that can be long. It gives way first, cut at its end, so the name keeps its width. */
+.item-where {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .state {
   display: inline-flex;
   align-items: center;

@@ -530,6 +530,19 @@ describe("the Outside Repositories screen", () => {
     expect(within(center).queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
   });
 
+  it("gives the directory of a Job the caption that gives way first, so a long one never hides the command", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+
+    const center = screen.getByRole("main");
+    const command = await within(center).findByText("make watch");
+    expect(command).toHaveClass("item-name");
+    // The stylesheet cuts the directory with an ellipsis before the command loses any width.
+    expect(within(center).getByText("/p/tmp/scratch")).toHaveClass("item-where");
+  });
+
   it("picks a Job for the inspector, which follows its output from the directory it started in", async () => {
     const calls = app();
     render(<App store={createDaemonStore()} />);
