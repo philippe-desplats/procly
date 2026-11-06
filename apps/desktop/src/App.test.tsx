@@ -533,12 +533,32 @@ describe("Needs you", () => {
     expect(within(panel).queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
   });
 
-  it("leaves a Foreign process unselectable, it has no inspector yet", async () => {
-    poller(answered(many, { needsYou: [FOREIGN] }));
+  it("picks a Foreign process of Needs you for the inspector, with the kill command and no Mark as Seen", async () => {
+    const withForeign: Response = JSON.parse(JSON.stringify(many)) as Response;
+    if (withForeign.response !== "status") {
+      throw new Error("the recorded answer is a status");
+    }
+    const web = withForeign.repositories
+      .flatMap((repository) => repository.worktrees)
+      .find((worktree) => worktree.path === FOREIGN.worktree);
+    if (web === undefined || FOREIGN.kind !== "foreign") {
+      throw new Error("the recorded answer holds the Worktree of the Foreign process");
+    }
+    web.foreign = [FOREIGN.process];
+    poller(answered(withForeign, { needsYou: [FOREIGN] }));
     render(<App store={createDaemonStore()} />);
     const needs = await screen.findByRole("region", { name: "Needs you" });
 
-    expect(within(needs).queryByRole("button")).not.toBeInTheDocument();
+    const row = within(needs).getByRole("button");
+    expect(row).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(row);
+
+    expect(row).toHaveAttribute("aria-pressed", "true");
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    expect(within(panel).getByRole("heading", { name: "node server.js" })).toBeInTheDocument();
+    expect(within(panel).getByText("kill 4242")).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: /^Stop/ })).not.toBeInTheDocument();
   });
 
   it("draws an ended row as a failure when Rust lists it, unseen or Seen, and as routine otherwise", async () => {

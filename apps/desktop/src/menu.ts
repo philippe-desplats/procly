@@ -32,8 +32,8 @@ const NOTHING: MenuContext = {
   worktree: null,
 };
 
-/** The `procly logs` command of the selection, run where the selection runs. */
-function logsCommand(selected: Selected): string {
+/** The `procly logs` command of the selection, run where the selection runs. A Foreign process has no logs of Procly's. */
+function logsCommand(selected: Selected): string | null {
   switch (selected.kind) {
     case "service":
       return inWorktree(selected.worktree.path, ["logs", selected.service.service]);
@@ -41,6 +41,8 @@ function logsCommand(selected: Selected): string {
       return inWorktree(selected.worktree.path, ["logs", selected.container.service]);
     case "job":
       return inWorktree(selected.job.cwd, ["logs", selected.job.id]);
+    case "foreign":
+      return null;
     default: {
       const unhandled: never = selected;
       throw new Error(`unhandled selection: ${JSON.stringify(unhandled)}`);

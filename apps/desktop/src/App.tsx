@@ -12,7 +12,7 @@ import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectableRow, SelectionContext } from "./selectable";
-import { resolve, selectedKey, type Selected, type Selection } from "./selection";
+import { foreignId, resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
@@ -617,7 +617,7 @@ function lineKey(line: NeedsYou): string {
     case "job":
       return `job:${line.id}`;
     case "foreign":
-      return `foreign:${line.worktree}:${line.process.kind === "process" ? line.process.pid : line.process.name}`;
+      return `foreign:${line.worktree}:${foreignId(line.process)}`;
     default: {
       const unhandled: never = line;
       throw new Error(`unhandled line: ${JSON.stringify(unhandled)}`);
@@ -625,15 +625,15 @@ function lineKey(line: NeedsYou): string {
   }
 }
 
-/** The item a line of Needs you picks for the inspector, nothing for a Foreign process, which has no inspector yet. */
-function targetOfLine(line: NeedsYou): Selection | null {
+/** The item a line of Needs you picks for the inspector. */
+function targetOfLine(line: NeedsYou): Selection {
   switch (line.kind) {
     case "service":
       return { kind: "service", worktree: line.worktree, service: line.service };
     case "job":
       return { kind: "job", id: line.id };
     case "foreign":
-      return null;
+      return { kind: "foreign", worktree: line.worktree, process: foreignId(line.process) };
     default: {
       const unhandled: never = line;
       throw new Error(`unhandled line: ${JSON.stringify(unhandled)}`);
@@ -642,17 +642,12 @@ function targetOfLine(line: NeedsYou): Selection | null {
 }
 
 /**
- * A failure is picked like any row, and its inspector holds Mark as Seen. A line that is Seen leaves Needs you, so a
- * line here is never dimmed.
+ * A failure is picked like any row, and its inspector holds Mark as Seen. A Foreign process is picked too, and its
+ * inspector gives the command to stop it. A line that is Seen leaves Needs you, so a line here is never dimmed.
  */
 function NeedsYouLine({ line, labelOf }: { line: NeedsYou; labelOf: (path: string) => string }) {
-  const target = targetOfLine(line);
-  return target === null ? (
-    <li className="item">
-      <NeedsYouWhat line={line} labelOf={labelOf} />
-    </li>
-  ) : (
-    <SelectableRow target={target} seen={false}>
+  return (
+    <SelectableRow target={targetOfLine(line)} seen={false}>
       <NeedsYouWhat line={line} labelOf={labelOf} />
     </SelectableRow>
   );
