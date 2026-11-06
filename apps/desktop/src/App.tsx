@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
-import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
+import { DaemonStateScreen, isBlocking, type BlockingSnapshot } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import {
   createDoctorStore,
@@ -240,6 +240,11 @@ export function App({
     store.refresh().catch(() => undefined);
   };
 
+  // Without a Daemon to read there is nothing for a sidebar or an inspector to hold, so the window is one screen.
+  if (isBlocking(snapshot)) {
+    return <DaemonStateScreen snapshot={snapshot} store={store} doctor={doctor} />;
+  }
+
   return (
     <SelectionContext.Provider value={control}>
       <FailuresContext.Provider value={failures}>
@@ -303,13 +308,7 @@ export function App({
                 {view.kind === "doctor" ? (
                   <DoctorScreen store={doctor} />
                 ) : (
-                  <Center
-                    snapshot={snapshot}
-                    current={current}
-                    store={store}
-                    doctor={doctor}
-                    onRelease={release}
-                  />
+                  <Center snapshot={snapshot} current={current} doctor={doctor} onRelease={release} />
                 )}
               </>
             )}
@@ -517,23 +516,17 @@ function SidebarWorktrees({
 function Center({
   snapshot,
   current,
-  store,
   doctor,
   onRelease,
 }: {
-  snapshot: DaemonSnapshot;
+  snapshot: Exclude<DaemonSnapshot, BlockingSnapshot>;
   current: WorktreeStatus | null;
-  store: DaemonStore;
   doctor: DoctorStore;
   onRelease: (worktree: WorktreeStatus) => void;
 }) {
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
-    case "no-daemon":
-      return <DaemonNotRunning store={store} doctor={doctor} />;
-    case "protocol-mismatch":
-      return <DaemonOfAnotherVersion daemon={snapshot.daemon} app={snapshot.app} store={store} />;
     case "failure":
       return (
         <section>
