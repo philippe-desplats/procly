@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use procly_client::protocol::{Response, StatusReport};
 use serde::{Serialize, Serializer};
@@ -17,7 +17,7 @@ use tauri_plugin_notification::{NotificationExt as _, PermissionState};
 use crate::needs_you::{FailureKey, NeedsYou, Presented, report_of};
 use crate::poller::Answer;
 use crate::settings::{SettingsError, SettingsStore};
-use crate::tray_menu::{job_end, name_of, service_end, short};
+use crate::tray_menu::{job_end, label_of, service_end, short};
 use crate::window::MainWindow;
 
 /// The most failures of one answer that get a banner each. More than that give one banner for all of them.
@@ -139,17 +139,6 @@ fn banner_of(item: &NeedsYou, report: &StatusReport) -> Option<Banner> {
         }),
         NeedsYou::Foreign { .. } => None,
     }
-}
-
-/// How a Worktree is named in a banner: its branch, or the last name of its path.
-fn label_of(report: &StatusReport, path: &Path) -> String {
-    report
-        .repositories
-        .iter()
-        .flat_map(|repository| &repository.worktrees)
-        .find(|worktree| worktree.worktree.path == path)
-        .and_then(|worktree| worktree.branch.clone())
-        .unwrap_or_else(|| name_of(path))
 }
 
 /// Shows `banner`. A click on it brings the window back, on its Worktree.
