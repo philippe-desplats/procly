@@ -1,5 +1,4 @@
 import type { ContainerStatus } from "./protocol/ContainerStatus";
-import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobEnd } from "./protocol/JobEnd";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceEnd } from "./protocol/ServiceEnd";
@@ -196,17 +195,13 @@ export function composeStatement(container: ContainerStatus): Statement {
 }
 
 /**
- * What to say of a Foreign process: Procly did not start it and never stops it, so the developer does. A container has
- * no pid to give a command for.
+ * What to say of a Foreign process: Procly did not start it and never stops it, so the developer does. It has no next
+ * step of its own, the inspector holds the command to stop it right under the sentence.
  */
-export function foreignStatement(process: ForeignProcess): Statement {
+export function foreignStatement(): Pick<Statement, "state" | "summary"> {
   return {
     state: foreignWord(),
     summary:
       "Started outside Procly in this Worktree, often by an agent the Guard did not steer. Procly never stops a process it did not start.",
-    next:
-      process.kind === "process"
-        ? "Stop it yourself with the command below, then start it through Procly."
-        : "Stop it yourself, then start it through Procly.",
   };
 }

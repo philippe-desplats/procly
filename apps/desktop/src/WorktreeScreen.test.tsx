@@ -214,10 +214,11 @@ describe("the Worktree screen", () => {
     expect(row).toHaveAttribute("aria-pressed", "true");
     const panel = within(inspector());
     expect(panel.getByRole("heading", { name: "node server.js" })).toBeInTheDocument();
+    expect(panel.getByText("Foreign process in web-fix")).toBeInTheDocument();
     expect(panel.getByText("started outside Procly")).toBeInTheDocument();
     expect(panel.getByText(/Procly never stops a process it did not start/)).toBeInTheDocument();
-    expect(panel.getByText(":3000")).toBeInTheDocument();
-    expect(panel.getByText("pid 4812")).toBeInTheDocument();
+    expect(panel.getByText("3000")).toHaveClass("port");
+    expect(panel.getByText("Process").nextElementSibling).toHaveTextContent("node server.js, pid 4812");
     expect(panel.getByText("Stop it yourself")).toBeInTheDocument();
     expect(panel.queryByRole("button", { name: /^Stop/ })).not.toBeInTheDocument();
     expect(panel.queryByRole("button", { name: /^Restart/ })).not.toBeInTheDocument();
@@ -226,6 +227,33 @@ describe("the Worktree screen", () => {
     expect(box).not.toBeNull();
     fireEvent.click(within(box as HTMLElement).getByRole("button", { name: /^Copy/ }));
     expect(texts).toEqual(["kill 4812"]);
+  });
+
+  it("lays the Foreign process inspector out as the mockup does: facts, then the sentence, then the copy box", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    const panel = within(inspector());
+    const port = panel.getByText("Port");
+    const process = panel.getByText("Process");
+    const sentence = panel.getByText(/Procly never stops a process it did not start/);
+    const label = panel.getByText("Stop it yourself");
+    /** Whether `first` comes before `second` in the document. */
+    const before = (first: HTMLElement, second: HTMLElement): boolean =>
+      (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(before(port, process)).toBe(true);
+    expect(before(process, sentence)).toBe(true);
+    expect(before(sentence, label)).toBe(true);
+    // The mockup has no Next line, and none of the facts and buttons every Worktree inspector carries.
+    expect(panel.queryByText("Next")).not.toBeInTheDocument();
+    for (const fact of ["Worktree", "Branch", "Folder", "Slug"]) {
+      expect(panel.queryByText(fact)).not.toBeInTheDocument();
+    }
+    for (const name of ["Open in editor", "Open in terminal", "Reveal in Finder"]) {
+      expect(panel.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
   });
 
   it("picks a Foreign container too, which has no pid and so no kill command", async () => {
@@ -237,7 +265,9 @@ describe("the Worktree screen", () => {
     const panel = within(inspector());
     expect(panel.getByRole("heading", { name: "legacy-db" })).toBeInTheDocument();
     expect(panel.getByText("started outside Procly")).toBeInTheDocument();
-    expect(panel.getByText(":5432")).toBeInTheDocument();
+    expect(panel.getByText("Foreign process in web-fix")).toBeInTheDocument();
+    expect(panel.getByText("5432")).toHaveClass("port");
+    expect(panel.getByText("Compose").nextElementSibling).toHaveTextContent("project legacy, service db");
     expect(panel.queryByText(/kill/)).not.toBeInTheDocument();
     expect(panel.queryByRole("button", { name: /^Stop/ })).not.toBeInTheDocument();
     // Nothing is followed: a Foreign process has no output of Procly's.

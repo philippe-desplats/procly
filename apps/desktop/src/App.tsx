@@ -728,6 +728,8 @@ function Inspector({
           <WorktreeActions
             key={selected.worktree.path}
             path={selected.worktree.path}
+            // The inspector of a Foreign process draws none of them, the Worktree menu still opens its Worktree.
+            buttons={selected.kind !== "foreign"}
             onNeedEditor={onNeedEditor}
           />
         )}
@@ -749,7 +751,16 @@ function Inspector({
  * Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. Open in Editor and
  * Open in Terminal of the menu bar open it here, so that a failure shows under the buttons.
  */
-function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: () => void }) {
+function WorktreeActions({
+  path,
+  buttons = true,
+  onNeedEditor,
+}: {
+  path: string;
+  /** Whether the buttons are drawn. Without them the menu bar still opens the Worktree, and a failure still shows. */
+  buttons?: boolean;
+  onNeedEditor: () => void;
+}) {
   const [error, setError] = useState<string | null>(null);
 
   function run(action: Promise<void>): void {
@@ -774,33 +785,37 @@ function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: (
 
   return (
     <div className="worktree-actions">
-      <button
-        type="button"
-        className="button"
-        onClick={() => {
-          run(openWorktree(path, "editor"));
-        }}
-      >
-        Open in editor
-      </button>
-      <button
-        type="button"
-        className="button"
-        onClick={() => {
-          run(openWorktree(path, "terminal"));
-        }}
-      >
-        Open in terminal
-      </button>
-      <button
-        type="button"
-        className="button"
-        onClick={() => {
-          run(revealWorktree(path));
-        }}
-      >
-        Reveal in Finder
-      </button>
+      {buttons ? (
+        <>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(openWorktree(path, "editor"));
+            }}
+          >
+            Open in editor
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(openWorktree(path, "terminal"));
+            }}
+          >
+            Open in terminal
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(revealWorktree(path));
+            }}
+          >
+            Reveal in Finder
+          </button>
+        </>
+      ) : null}
       {error === null ? null : (
         <p role="alert" className="error">
           {error}

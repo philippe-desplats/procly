@@ -298,4 +298,19 @@ describe("the menu bar", () => {
       expect(calls).toContainEqual({ command: "preview_release", args: { path: PATH } });
     });
   });
+
+  it("opens the Worktree of a Foreign process from the Worktree menu, though its inspector has no buttons", async () => {
+    const calls = rust();
+    const center = await openWorktree();
+    pick(center, /node server\.js/);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "node server.js" })).toBeInTheDocument();
+    });
+
+    await choose("open-in-terminal");
+
+    await waitFor(() => {
+      expect(calls).toContainEqual({ command: "open_worktree", args: { path: PATH, with: "terminal" } });
+    });
+  });
 });

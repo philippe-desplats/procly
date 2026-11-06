@@ -231,45 +231,54 @@ export function WorktreeNames({ worktree }: { worktree: WorktreeStatus }) {
  * has no command.
  */
 function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process: ForeignProcess }) {
-  const statement = foreignStatement(process);
+  const statement = foreignStatement();
   return (
     <section aria-label="Selection">
-      <h2 className="title mono">{process.kind === "process" ? process.command : process.name}</h2>
+      <h2 className="title">{process.kind === "process" ? process.command : process.name}</h2>
+      <p className="caption foreign-where">{`Foreign process in ${worktreeLabel(worktree)}`}</p>
       <div className="state-line">
         <State {...statement.state} />
       </div>
-      <p>{statement.summary}</p>
-      <p>
-        <span className="caption">Next</span> {statement.next}
-      </p>
+      <dl className="facts facts-grid">
+        {process.ports.length === 0 ? null : (
+          <>
+            <dt>Port</dt>
+            <dd>
+              {process.ports.map((port) => (
+                <span key={port} className="port mono">
+                  {String(port)}
+                </span>
+              ))}
+            </dd>
+          </>
+        )}
+        {process.kind === "process" ? (
+          <>
+            <dt>Process</dt>
+            <dd>
+              <code className="mono">{process.command}</code>
+              {`, pid ${String(process.pid)}`}
+            </dd>
+          </>
+        ) : (
+          <>
+            <dt>Compose</dt>
+            <dd>
+              {"project "}
+              <code className="mono">{process.project}</code>
+              {", service "}
+              <code className="mono">{process.service}</code>
+            </dd>
+          </>
+        )}
+      </dl>
+      <p className="muted">{statement.summary}</p>
       {process.kind === "process" ? (
         <>
           <p className="caption">Stop it yourself</p>
           <CopyBox text={`kill ${String(process.pid)}`} />
         </>
       ) : null}
-      <dl className="facts">
-        <dt className="caption">Worktree</dt>
-        <dd>{worktreeLabel(worktree)}</dd>
-        <WorktreeNames worktree={worktree} />
-        {process.ports.length === 0 ? null : (
-          <>
-            <dt className="caption">Port</dt>
-            <dd className="mono">{process.ports.map((port) => `:${String(port)}`).join(" ")}</dd>
-          </>
-        )}
-        {process.kind === "process" ? (
-          <>
-            <dt className="caption">Process</dt>
-            <dd className="mono">{`pid ${String(process.pid)}`}</dd>
-          </>
-        ) : (
-          <>
-            <dt className="caption">Compose</dt>
-            <dd className="mono">{`${process.project} / ${process.service}`}</dd>
-          </>
-        )}
-      </dl>
     </section>
   );
 }
