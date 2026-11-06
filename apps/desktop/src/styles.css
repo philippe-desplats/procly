@@ -190,6 +190,52 @@ body {
   outline-offset: 1px;
 }
 
+/* A Worktree of the sidebar: its label on the first line, and why it needs the developer under it, when it does. */
+.row-worktree {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 1px;
+}
+
+.row-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row-reason {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--size-small);
+}
+
+.row-reason .glyph {
+  width: 10px;
+  height: 10px;
+}
+
+/* One line, cut at its end with an ellipsis: a long reason is never wrapped. */
+.row-reason-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row[aria-current="true"] .row-reason {
+  color: inherit;
+}
+
+.row[aria-current="true"] .row-reason .glyph {
+  color: inherit;
+}
+
 .item {
   display: flex;
   align-items: baseline;

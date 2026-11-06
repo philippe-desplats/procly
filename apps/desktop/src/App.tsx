@@ -12,9 +12,10 @@ import {
   type DoctorStore,
 } from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
+import { GlyphMark } from "./Glyph";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { MENU_CHOICE, menuContext, useMenuContext, type MenuChoice } from "./menu";
-import { failureKey, FailuresContext, failuresOf } from "./needs-you";
+import { failureKey, FailuresContext, failuresOf, reasonOf, type Reason } from "./needs-you";
 import { createOrphanScanStore, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
@@ -258,7 +259,7 @@ export function App({
               updatedAt={snapshot.kind === "status" ? snapshot.at : null}
               doctor={doctorRun}
               orphanScan={orphanDryRun}
-              needsYou={snapshot.kind === "status" ? snapshot.needsYou.length : 0}
+              needsYou={snapshot.kind === "status" ? snapshot.needsYou : []}
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
               }}
@@ -422,8 +423,8 @@ function Sidebar({
   doctor: DoctorState;
   /** The last dry run of `Gc`, which the footer counts the Orphans of. */
   orphanScan: OrphanScan;
-  /** How many items are in Needs you, the same list the Overview pins on top. */
-  needsYou: number;
+  /** The items of Needs you, the same list the Overview pins on top. */
+  needsYou: NeedsYou[];
   onSelect: (path: string) => void;
   onOverview: () => void;
   onOrphans: () => void;
@@ -440,12 +441,13 @@ function Sidebar({
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
-        {needsYou === 0 ? null : <span className="row-count">{needsYouCount(needsYou)}</span>}
+        {needsYou.length === 0 ? null : <span className="row-count">{needsYouCount(needsYou.length)}</span>}
       </button>
       <SidebarWorktrees
         snapshot={snapshot}
         repositories={repositories}
         current={current}
+        needsYou={needsYou}
         onSelect={onSelect}
       />
       <button type="button" className="row" aria-current={outside ? "true" : undefined} onClick={onOutside}>
@@ -471,11 +473,13 @@ function SidebarWorktrees({
   snapshot,
   repositories,
   current,
+  needsYou,
   onSelect,
 }: {
   snapshot: DaemonSnapshot;
   repositories: RepositoryStatus[];
   current: WorktreeStatus | null;
+  needsYou: NeedsYou[];
   onSelect: (path: string) => void;
 }) {
   if (snapshot.kind === "loading") {
@@ -492,25 +496,55 @@ function SidebarWorktrees({
           <ul className="list">
             {repository.worktrees.map((worktree) => (
               <li key={worktree.path}>
-                <button
-                  type="button"
-                  className="row"
-                  title={worktreeTooltip(worktree)}
-                  aria-current={worktree.path === current?.path ? "true" : undefined}
-                  onClick={() => {
-                    onSelect(worktree.path);
-                  }}
-                >
-                  <span className="row-name">{worktreeLabel(worktree)}</span>
-                  <RemovedMark worktree={worktree} />
-                  {worktree.main ? <span className="caption">main</span> : null}
-                </button>
+                <WorktreeEntry
+                  worktree={worktree}
+                  open={worktree.path === current?.path}
+                  reason={reasonOf(needsYou, worktree.path)}
+                  onSelect={onSelect}
+                />
               </li>
             ))}
           </ul>
         </section>
       ))}
     </>
+  );
+}
+
+/** A Worktree of the sidebar: its label, and under it why it needs the developer when something does. */
+function WorktreeEntry({
+  worktree,
+  open,
+  reason,
+  onSelect,
+}: {
+  worktree: WorktreeStatus;
+  open: boolean;
+  reason: Reason | null;
+  onSelect: (path: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="row row-worktree"
+      title={worktreeTooltip(worktree)}
+      aria-current={open ? "true" : undefined}
+      onClick={() => {
+        onSelect(worktree.path);
+      }}
+    >
+      <span className="row-line">
+        <span className="row-name">{worktreeLabel(worktree)}</span>
+        <RemovedMark worktree={worktree} />
+        {worktree.main ? <span className="caption">main</span> : null}
+      </span>
+      {reason === null ? null : (
+        <span className={`row-reason tone-${reason.tone}`}>
+          <GlyphMark glyph={reason.glyph} />
+          <span className="row-reason-text">{reason.text}</span>
+        </span>
+      )}
+    </button>
   );
 }
 
