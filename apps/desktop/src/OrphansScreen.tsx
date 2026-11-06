@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CopyBox } from "./CopyBox";
 import { failureMessage } from "./daemon";
 import {
+  collectionEffects,
   COLLECT_COMMAND,
   deleteOrphans,
   describeOrphan,
@@ -174,7 +175,14 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
         <h2 id="collect-title" className="title">
           {label}
         </h2>
-        <p>Each one is deleted from the Daemon and from disk, with the data listed on the screen.</p>
+        <p>Each one is deleted from the Daemon and from disk:</p>
+        <ul aria-label="What it deletes" className="list">
+          {collectionEffects(shown).map((effect) => (
+            <li key={effect} className="item">
+              {effect}
+            </li>
+          ))}
+        </ul>
         <p>This cannot be undone.</p>
         <p className="caption">From a terminal, which deletes every Orphan it finds, not only these:</p>
         <CopyBox text={COLLECT_COMMAND} />

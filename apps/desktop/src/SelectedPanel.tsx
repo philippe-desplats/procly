@@ -1,8 +1,11 @@
-import { memo, useLayoutEffect, useRef } from "react";
+import { Fragment, memo, useLayoutEffect, useRef } from "react";
 
 import { CopyBox } from "./CopyBox";
+import type { FailureKey } from "./daemon";
 import { composeStatement, jobStatement, serviceStatement, type Statement } from "./inspect";
-import { worktreeLabel } from "./labels";
+import { worktreeLabel, worktreeNames } from "./labels";
+import { useFailed } from "./needs-you";
+import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
 import type { Selected } from "./selection";
 import { ServiceActions } from "./ServiceActions";
@@ -37,12 +40,33 @@ function targetOf(selected: Selected): OutputTarget {
   }
 }
 
-function statementOf(selected: Selected): Statement {
+/** The key of the failure the selection may be, nothing for a Compose service, which is listed because it runs. */
+function failureKeyOf(selected: Selected): FailureKey | null {
   switch (selected.kind) {
     case "service":
-      return serviceStatement(selected.service);
+      return {
+        kind: "service",
+        worktree: selected.worktree.path,
+        service: selected.service.service,
+        started_at: selected.service.started_at,
+      };
     case "job":
-      return jobStatement(selected.job);
+      return { kind: "job", id: selected.job.id };
+    case "compose":
+      return null;
+    default: {
+      const unhandled: never = selected;
+      throw new Error(`unhandled selection: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+function statementOf(selected: Selected, failed: boolean): Statement {
+  switch (selected.kind) {
+    case "service":
+      return serviceStatement(selected.service, failed);
+    case "job":
+      return jobStatement(selected.job, failed);
     case "compose":
       return composeStatement(selected.container);
     default: {
@@ -101,7 +125,7 @@ export function SelectedPanel({
   at: number;
   onChanged: () => void;
 }) {
-  const statement = statementOf(selected);
+  const statement = statementOf(selected, useFailed(failureKeyOf(selected)));
   const output = useOutput(targetOf(selected));
   return (
     <section aria-label="Selection">
@@ -133,6 +157,20 @@ function Heading({ selected }: { selected: Selected }) {
   }
 }
 
+/** The branch, the folder and the slug of a Worktree, as terms of a list of facts. */
+export function WorktreeNames({ worktree }: { worktree: WorktreeStatus }) {
+  return (
+    <>
+      {worktreeNames(worktree).map(([name, value]) => (
+        <Fragment key={name}>
+          <dt className="caption">{name}</dt>
+          <dd className={name === "Branch" ? undefined : "mono"}>{value}</dd>
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
 function Facts({ selected, at }: { selected: Selected; at: number }) {
   return (
     <dl className="facts">
@@ -140,6 +178,7 @@ function Facts({ selected, at }: { selected: Selected; at: number }) {
         <>
           <dt className="caption">Worktree</dt>
           <dd>{worktreeLabel(selected.worktree)}</dd>
+          <WorktreeNames worktree={selected.worktree} />
         </>
       )}
       {selected.kind === "service" ? (

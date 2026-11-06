@@ -11,52 +11,72 @@ export interface StateWord {
   tone: Tone;
 }
 
-/** A state this app does not know, which a newer Daemon may send: it counts as a failure, as the spec says. */
-function unknownState(_state: never): StateWord {
-  return { word: "unknown", tone: "fail" };
+/** A state this app does not know, which a newer Daemon may send. */
+function unknownWord(_state: never): string {
+  return "unknown";
 }
 
-export function serviceEndWord(end: ServiceEnd): StateWord {
+/**
+ * The tone of an end. Whether an end is a failure is Rust's to say, through "Needs you" and the Seen set (see
+ * `useFailed`), so that the window keeps no copy of the list of routine ends.
+ */
+function endTone(failed: boolean): Tone {
+  return failed ? "fail" : "ended";
+}
+
+/** How a Service ended, in a word. */
+export function serviceEndText(end: ServiceEnd): string {
   switch (end.kind) {
     case "exited":
-      return { word: `exited ${end.code}`, tone: end.code === 0 ? "ended" : "fail" };
+      return `exited ${end.code}`;
     case "signaled":
-      return { word: `signaled ${end.signal}`, tone: "fail" };
+      return `signaled ${end.signal}`;
     case "health_timeout":
-      return { word: "health timeout", tone: "fail" };
+      return "health timeout";
     case "stopped":
-      return { word: "stopped", tone: "ended" };
+      return "stopped";
     case "idle":
-      return { word: "idle", tone: "ended" };
+      return "idle";
     case "failed":
-      return { word: "failed", tone: "fail" };
+      return "failed";
     case "port_mismatch":
-      return { word: "port mismatch", tone: "fail" };
+      return "port mismatch";
     case "lost":
-      return { word: "lost", tone: "fail" };
+      return "lost";
     case "orphaned":
-      return { word: "orphaned", tone: "fail" };
+      return "orphaned";
     case "not_listening":
-      return { word: "not listening", tone: "fail" };
+      return "not listening";
     default:
-      return unknownState(end);
+      return unknownWord(end);
   }
 }
 
-export function jobEndWord(end: JobEnd): StateWord {
+/** How a Service ended, drawn as a failure when `failed`. */
+export function serviceEndWord(end: ServiceEnd, failed: boolean): StateWord {
+  return { word: serviceEndText(end), tone: endTone(failed) };
+}
+
+function jobEndText(end: JobEnd): string {
   switch (end.kind) {
     case "exited":
-      return { word: `exited ${end.code}`, tone: end.code === 0 ? "ended" : "fail" };
+      return `exited ${end.code}`;
     case "signaled":
-      return { word: `signaled ${end.signal}`, tone: "fail" };
+      return `signaled ${end.signal}`;
     case "timed_out":
-      return { word: "timed out", tone: "fail" };
+      return "timed out";
     default:
-      return unknownState(end);
+      return unknownWord(end);
   }
 }
 
-export function serviceWord(service: ServiceStatus): StateWord {
+/** How a Job ended, drawn as a failure when `failed`. */
+export function jobEndWord(end: JobEnd, failed: boolean): StateWord {
+  return { word: jobEndText(end), tone: endTone(failed) };
+}
+
+/** The state of a Service. `failed` says whether its end, once it ended, is a failure. */
+export function serviceWord(service: ServiceStatus, failed: boolean): StateWord {
   switch (service.state) {
     case "starting":
       return { word: "starting", tone: "muted" };
@@ -65,19 +85,20 @@ export function serviceWord(service: ServiceStatus): StateWord {
     case "restarting":
       return { word: "restarting", tone: "warn" };
     case "ended":
-      return serviceEndWord(service.end);
+      return serviceEndWord(service.end, failed);
     default:
-      return unknownState(service);
+      return { word: unknownWord(service), tone: "fail" };
   }
 }
 
-export function jobWord(job: JobStatus): StateWord {
+/** The state of a Job. `failed` says whether its end, once it ended, is a failure. */
+export function jobWord(job: JobStatus, failed: boolean): StateWord {
   switch (job.state) {
     case "running":
       return { word: "running", tone: "ok" };
     case "ended":
-      return jobEndWord(job.end);
+      return jobEndWord(job.end, failed);
     default:
-      return unknownState(job);
+      return { word: unknownWord(job), tone: "fail" };
   }
 }

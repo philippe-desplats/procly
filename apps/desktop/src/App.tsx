@@ -1,31 +1,31 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { failureKey } from "./needs-you";
+import { failureKey, FailuresContext, failuresOf } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
-import { SelectedPanel } from "./SelectedPanel";
+import { SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
-import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
+import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { RemovedMark, ServiceRow } from "./Rows";
+import { ContainerRow, RemovedMark, ServiceRow } from "./Rows";
 import { jobEndWord, serviceEndWord } from "./state";
 import { formatMoment } from "./time";
 import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
 
 /**
  * What the center shows: the Overview of every Service, one Worktree, the Jobs outside any Repository, the Orphans,
- * Doctor, or Settings. The Jobs outside any Repository, the Orphans and Settings hide the inspector. `focusEditor`
+ * Doctor, or Settings. The Orphans and Settings hide the inspector. `focusEditor`
  * sends the developer to the editor field, because "Open in editor" found none set.
  */
 type View =
@@ -47,6 +47,11 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     setSelection(null);
   }, []);
   const control = useMemo(() => ({ selection, select: setSelection }), [selection]);
+  // Which ends are failures is Rust's to say, the rows and the inspector draw them from this.
+  const failures = useMemo(
+    () => (snapshot.kind === "status" ? failuresOf(snapshot.needsYou, snapshot.seen) : []),
+    [snapshot],
+  );
   const [doctor] = useState(() => given ?? createDoctorStore());
   // The Worktree whose release sheet is open. The app holds it, since the status may stop reporting the Worktree once
   // it is released, and the screen that opened the sheet goes with it.
@@ -67,6 +72,17 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
       void doctor.run(null);
     }
   }, [doctor, notRunning]);
+
+  // The release banner reads the machine checks, so they run once when the Daemon first answers, on no timer, rather
+  // than waiting for a visit to Doctor or a Refresh.
+  const answering = snapshot.kind === "status";
+  const launched = useRef(false);
+  useEffect(() => {
+    if (answering && !launched.current) {
+      launched.current = true;
+      void doctor.run(null);
+    }
+  }, [doctor, answering]);
 
   // The menu refreshes without the window, so Rust says so.
   useTauriEvent(REFRESH_REQUESTED, () => {
@@ -104,9 +120,30 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     };
   }, [setView]);
 
-  // A clicked banner brings the window back on the Worktree of its failure, or on the Overview when it names none.
-  useTauriEvent<string | null>(OPEN_FAILURE, (worktree) => {
-    setView(worktree === null ? { kind: "overview" } : { kind: "worktree", path: worktree });
+  // A clicked banner or line of the menu brings the window back on its item, selected in the inspector, or on the
+  // Overview when it names none.
+  useTauriEvent<Place | null>(OPEN_FAILURE, (place) => {
+    if (place === null) {
+      setView({ kind: "overview" });
+      return;
+    }
+    switch (place.kind) {
+      case "worktree":
+        setView({ kind: "worktree", path: place.worktree });
+        break;
+      case "service":
+        setView({ kind: "worktree", path: place.worktree });
+        setSelection({ kind: "service", worktree: place.worktree, service: place.service });
+        break;
+      case "job":
+        setView(place.worktree === null ? { kind: "outside" } : { kind: "worktree", path: place.worktree });
+        setSelection({ kind: "job", id: place.id });
+        break;
+      default: {
+        const unhandled: never = place;
+        throw new Error(`unhandled place: ${JSON.stringify(unhandled)}`);
+      }
+    }
   });
 
   const repositories = snapshot.kind === "status" ? snapshot.report.repositories : [];
@@ -122,8 +159,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   const checking = view.kind === "doctor";
   const orphans = view.kind === "orphans";
   const outside = view.kind === "outside";
-  // A screen that is not about one Worktree has no inspector.
-  const wide = settings || orphans || outside;
+  // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
+  const wide = settings || orphans;
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
@@ -131,106 +168,109 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
 
   return (
     <SelectionContext.Provider value={control}>
-      <div className={wide ? "window window-settings" : "window"}>
-        <nav className="pane sidebar" aria-label="Worktrees">
-          <h1 className="pane-title">Procly</h1>
-          <Sidebar
-            snapshot={snapshot}
-            repositories={repositories}
-            current={current}
-            settings={settings}
-            checking={checking}
-            orphans={orphans}
-            outside={outside}
-            outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
-            onSelect={(path) => {
-              setView({ kind: "worktree", path });
-            }}
-            onOverview={() => {
-              setView({ kind: "overview" });
-            }}
-            onOrphans={() => {
-              setView({ kind: "orphans" });
-            }}
-            onOutside={() => {
-              setView({ kind: "outside" });
-            }}
-            onDoctor={() => {
-              setView({ kind: "doctor" });
-            }}
-            onSettings={() => {
-              setView({ kind: "settings", focusEditor: false });
-            }}
-          />
-        </nav>
-        <main className="pane center">
-          {view.kind === "settings" ? (
-            <SettingsScreen focusEditor={view.focusEditor} />
-          ) : view.kind === "orphans" && snapshot.kind === "status" ? (
-            <OrphansScreen />
-          ) : view.kind === "outside" && snapshot.kind === "status" ? (
-            <OutsideRepositoriesScreen
-              jobs={snapshot.report.jobs_outside_repositories}
-              seen={snapshot.seen}
-            />
-          ) : (
-            <>
-              <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
-              {snapshot.kind === "status" ? (
-                <ReleaseBanner
-                  store={doctor}
-                  onOpenDoctor={() => {
-                    setView({ kind: "doctor" });
-                  }}
-                />
-              ) : null}
-              {view.kind === "doctor" ? (
-                <DoctorScreen store={doctor} />
-              ) : (
-                <Center
-                  snapshot={snapshot}
-                  current={current}
-                  store={store}
-                  doctor={doctor}
-                  onRelease={(worktree) => {
-                    setReleasing({
-                      path: worktree.path,
-                      label: worktreeLabel(worktree),
-                      listed: worktree.listed,
-                      ended: endedIn(worktree),
-                    });
-                  }}
-                />
-              )}
-            </>
-          )}
-        </main>
-        {wide ? null : (
-          <aside className="pane inspector" aria-label="Inspector">
-            <Inspector
+      <FailuresContext.Provider value={failures}>
+        <div className={wide ? "window window-settings" : "window"}>
+          <nav className="pane sidebar" aria-label="Worktrees">
+            <h1 className="pane-title">Procly</h1>
+            <Sidebar
+              snapshot={snapshot}
+              repositories={repositories}
               current={current}
-              selected={selected}
-              at={snapshot.kind === "loading" ? 0 : snapshot.at}
-              onChanged={refresh}
-              onNeedEditor={() => {
-                setView({ kind: "settings", focusEditor: true });
+              settings={settings}
+              checking={checking}
+              orphans={orphans}
+              outside={outside}
+              outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
+              onSelect={(path) => {
+                setView({ kind: "worktree", path });
+              }}
+              onOverview={() => {
+                setView({ kind: "overview" });
+              }}
+              onOrphans={() => {
+                setView({ kind: "orphans" });
+              }}
+              onOutside={() => {
+                setView({ kind: "outside" });
+              }}
+              onDoctor={() => {
+                setView({ kind: "doctor" });
+              }}
+              onSettings={() => {
+                setView({ kind: "settings", focusEditor: false });
               }}
             />
-          </aside>
+          </nav>
+          <main className="pane center">
+            {view.kind === "settings" ? (
+              <SettingsScreen focusEditor={view.focusEditor} />
+            ) : view.kind === "orphans" && snapshot.kind === "status" ? (
+              <OrphansScreen />
+            ) : view.kind === "outside" && snapshot.kind === "status" ? (
+              <OutsideRepositoriesScreen
+                jobs={snapshot.report.jobs_outside_repositories}
+                seen={snapshot.seen}
+              />
+            ) : (
+              <>
+                <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
+                {snapshot.kind === "status" ? (
+                  <ReleaseBanner
+                    store={doctor}
+                    onOpenDoctor={() => {
+                      setView({ kind: "doctor" });
+                    }}
+                  />
+                ) : null}
+                {view.kind === "doctor" ? (
+                  <DoctorScreen store={doctor} />
+                ) : (
+                  <Center
+                    snapshot={snapshot}
+                    current={current}
+                    store={store}
+                    doctor={doctor}
+                    onRelease={(worktree) => {
+                      setReleasing({
+                        path: worktree.path,
+                        label: worktreeLabel(worktree),
+                        listed: worktree.listed,
+                        ended: endedIn(worktree),
+                      });
+                    }}
+                  />
+                )}
+              </>
+            )}
+          </main>
+          {wide ? null : (
+            <aside className="pane inspector" aria-label="Inspector">
+              <Inspector
+                current={current}
+                selected={selected}
+                hint={outside ? "Select a Job." : "Select a Worktree."}
+                at={snapshot.kind === "loading" ? 0 : snapshot.at}
+                onChanged={refresh}
+                onNeedEditor={() => {
+                  setView({ kind: "settings", focusEditor: true });
+                }}
+              />
+            </aside>
+          )}
+        </div>
+        {releasing === null ? null : (
+          <ReleaseSheet
+            path={releasing.path}
+            label={releasing.label}
+            listed={releasing.listed}
+            ended={releasing.ended}
+            onClose={() => {
+              setReleasing(null);
+            }}
+            onChanged={refresh}
+          />
         )}
-      </div>
-      {releasing === null ? null : (
-        <ReleaseSheet
-          path={releasing.path}
-          label={releasing.label}
-          listed={releasing.listed}
-          ended={releasing.ended}
-          onClose={() => {
-            setReleasing(null);
-          }}
-          onChanged={refresh}
-        />
-      )}
+      </FailuresContext.Provider>
     </SelectionContext.Provider>
   );
 }
@@ -439,8 +479,9 @@ function Center({
 }
 
 /**
- * "Needs you" pinned on top, then every Service of every Worktree, grouped under the Worktree, with its port. `at` is
- * when the answer was read, the day the times are compared with.
+ * "Needs you" pinned on top, then every Service of every Worktree, grouped under the Worktree, with its port: its
+ * Process services and Groups, then its Isolated Compose services. `at` is when the answer was read, the day the times
+ * are compared with.
  */
 function Overview({
   repositories,
@@ -458,7 +499,9 @@ function Overview({
   const groups = repositories
     .map((repository) => ({
       repository,
-      worktrees: repository.worktrees.filter((worktree) => worktree.services.length > 0),
+      worktrees: repository.worktrees.filter(
+        (worktree) => worktree.services.length > 0 || (worktree.containers ?? []).length > 0,
+      ),
     }))
     .filter((group) => group.worktrees.length > 0);
   return (
@@ -488,6 +531,9 @@ function Overview({
                     at={at}
                     seen={seen}
                   />
+                ))}
+                {(worktree.containers ?? []).map((container) => (
+                  <ContainerRow key={container.service} container={container} worktreePath={worktree.path} />
                 ))}
               </ul>
             </div>
@@ -578,7 +624,8 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
       return (
         <>
           <span className="item-name">{line.service}</span>
-          <State {...serviceEndWord(line.end)} />
+          {/* A line of "Needs you" that is not a Foreign process is a failure: Rust put it there. */}
+          <State {...serviceEndWord(line.end, true)} />
           <span className="caption">{labelOf(line.worktree)}</span>
         </>
       );
@@ -586,7 +633,7 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
       return (
         <>
           <span className="item-name mono">{line.command}</span>
-          <State {...jobEndWord(line.end)} />
+          <State {...jobEndWord(line.end, true)} />
           <span className="caption mono">{line.id}</span>
           {line.worktree === null ? null : <span className="caption">{labelOf(line.worktree)}</span>}
         </>
@@ -614,12 +661,15 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
 function Inspector({
   current,
   selected,
+  hint,
   at,
   onChanged,
   onNeedEditor,
 }: {
   current: WorktreeStatus | null;
   selected: Selected | null;
+  /** What the inspector says while nothing is picked and no Worktree is open. */
+  hint: string;
   at: number;
   onChanged: () => void;
   onNeedEditor: () => void;
@@ -639,7 +689,7 @@ function Inspector({
     );
   }
   if (current === null) {
-    return <p className="caption">Select a Worktree.</p>;
+    return <p className="caption">{hint}</p>;
   }
   return (
     <>
@@ -706,10 +756,9 @@ function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: (
 function WorktreeFacts({ current }: { current: WorktreeStatus }) {
   return (
     <dl className="facts">
+      <WorktreeNames worktree={current} />
       <dt className="caption">Path</dt>
       <dd className="mono">{current.path}</dd>
-      <dt className="caption">Slug</dt>
-      <dd className="mono">{current.slug}</dd>
       <dt className="caption">Kind</dt>
       <dd>{current.main ? "Main worktree" : "Worktree"}</dd>
       <dt className="caption">Services</dt>

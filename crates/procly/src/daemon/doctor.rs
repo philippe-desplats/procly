@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::compose::shell_word;
 use super::container_record::ContainerDocument;
 use super::hook::{self, Standing};
 use super::index::IndexDocument;
@@ -73,6 +74,16 @@ fn checks(registry: &Registry, reconciled: Result<(), String>) -> Vec<Check> {
     }
 }
 
+/// The command that prints the Lease of `service` from its Worktree, as the developer pastes it: the path is quoted
+/// when the shell would split it.
+fn port_mismatch_fix(worktree: &Path, service: &str) -> String {
+    format!(
+        "cd {} && procly env {}",
+        shell_word(&worktree.to_string_lossy()),
+        shell_word(service)
+    )
+}
+
 /// Whether a Service ended on a Port mismatch, and whether something Procly did not start holds a port a Lease holds.
 fn leased_ports(registry: &Registry) -> Check {
     let mut problems = Vec::new();
@@ -87,7 +98,7 @@ fn leased_ports(registry: &Registry) -> Check {
                 "service {} of {worktree} listened on port {actual} instead of its Lease, port {leased} (Port mismatch)",
                 status.service
             ));
-            fixes.push(format!("cd {worktree} && procly env {}", status.service));
+            fixes.push(port_mismatch_fix(&topology.worktree.path, &status.service));
         }
     }
     let leases = match registry.leases.bound_to_worktrees() {
@@ -325,5 +336,26 @@ pub(crate) fn portless_binary(on: Option<bool>) -> Check {
             ),
             Some(format!("npm install --global {}", portless::BINARY)),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fix_of_a_port_mismatch_quotes_a_worktree_path_the_shell_would_split() {
+        assert_eq!(
+            port_mismatch_fix(Path::new("/p/work/acme/my web"), "web"),
+            "cd '/p/work/acme/my web' && procly env web"
+        );
+        assert_eq!(
+            port_mismatch_fix(Path::new("/p/work/it's"), "web"),
+            r"cd '/p/work/it'\''s' && procly env web"
+        );
+        assert_eq!(
+            port_mismatch_fix(Path::new("/p/work/acme/web"), "web"),
+            "cd /p/work/acme/web && procly env web"
+        );
     }
 }

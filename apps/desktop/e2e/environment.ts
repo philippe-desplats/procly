@@ -56,9 +56,15 @@ export async function isolate(): Promise<void> {
   mkdirSync(join(root, "state"));
   mkdirSync(join(root, "config"));
   mkdirSync(join(root, "work"));
+  mkdirSync(join(root, "home"));
   process.env[ROOT] = root;
   process.env["PROCLY_STATE_DIR"] = join(root, "state");
   process.env["PROCLY_CONFIG_DIR"] = join(root, "config");
+  // The app runs under a home of its own, so that its settings, its Seen set, its window state and the caches of its
+  // webview never land in the developer's. Tauri finds the data directories through `HOME`, and the system frameworks
+  // that WebKit writes its caches with through `CFFIXED_USER_HOME`.
+  process.env["HOME"] = join(root, "home");
+  process.env["CFFIXED_USER_HOME"] = join(root, "home");
   process.env["TAURI_WEBDRIVER_PORT"] = String(await freePort());
 }
 

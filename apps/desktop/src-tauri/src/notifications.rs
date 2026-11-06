@@ -5,30 +5,30 @@
 //! developer turns "Notify on failure" on. The desktop plugin answers granted whatever the system says, so macOS
 //! decides whether a banner shows (`docs/rules/tauri.md`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
-use std::path::{Path, PathBuf};
 
 use procly_client::protocol::{Response, StatusReport};
 use serde::{Serialize, Serializer};
 use tauri::{AppHandle, Emitter as _, State};
 use tauri_plugin_notification::{NotificationExt as _, PermissionState};
 
-use crate::needs_you::{FailureKey, NeedsYou, Presented, report_of};
+use crate::failure::{self, AppFailureKind};
+use crate::needs_you::{FailureKey, NeedsYou, Place, Presented, report_of};
 use crate::poller::Answer;
 use crate::settings::{SettingsError, SettingsStore};
-use crate::tray_menu::{job_end, name_of, service_end, short};
+use crate::tray_menu::{job_end, label_of, service_end, short};
 use crate::window::MainWindow;
 
 /// The most failures of one answer that get a banner each. More than that give one banner for all of them.
 const SEPARATE_BANNERS: usize = 3;
 
-/// The event that tells the window a banner was clicked. Its payload is the path of the Worktree the banner was about,
-/// or nothing for a banner about several failures or about a Job started outside any Repository.
+/// The event that tells the window a banner or a line of "Needs you" in the menu was clicked. Its payload is the
+/// [`Place`] of the item it was about, or nothing for a banner about several failures.
 pub(crate) const OPEN_FAILURE: &str = "open-failure";
 
-/// The field of a banner that carries the path of its Worktree back when the banner is clicked.
-const WORKTREE_FIELD: &str = "worktree";
+/// The field of a banner that carries the [`Place`] of its failure back when the banner is clicked.
+const PLACE_FIELD: &str = "place";
 
 /// What the plugin reports for a click on the banner itself.
 const TAP: &str = "tap";
@@ -41,15 +41,17 @@ const SYSTEM_NOTIFICATION_SETTINGS: &str = "x-apple.systempreferences:com.apple.
 pub(crate) struct Banner {
     pub(crate) title: String,
     pub(crate) body: String,
-    /// The Worktree a click opens the window on.
-    pub(crate) worktree: Option<PathBuf>,
+    /// The failure a click opens the window on, nothing for a banner about several of them.
+    pub(crate) place: Option<Place>,
 }
 
 /// Which failures an answer brings that the previous answer did not hold.
 ///
-/// The first answer after launch is a baseline, and so is the first one after the Daemon did not answer, since a
-/// Daemon that restarted starts every Service again and all its failures would look new. The set is replaced by each
-/// answer, so a failure that leaves "Needs you", marked as Seen or gone, comes back as new if it enters again.
+/// The first answer after launch is a baseline, and so is the first one after a connection the Daemon refused, since a
+/// Daemon that restarted starts every Service again and all its failures would look new. A Daemon that accepted the
+/// connection and answered badly, or too late, still runs, so the baseline stays and a failure that enters meanwhile
+/// is announced with the next answer. The set is replaced by each answer, so a failure that leaves "Needs you", marked
+/// as Seen or gone, comes back as new if it enters again.
 #[derive(Debug, Default)]
 struct Tracker {
     known: Option<BTreeSet<FailureKey>>,
@@ -59,8 +61,8 @@ impl Tracker {
     /// The keys of `current` that entered "Needs you" with this answer, in the order of `current`.
     fn entering(&mut self, answer: &Answer, current: &[FailureKey]) -> Vec<FailureKey> {
         match answer {
-            // The Daemon did not answer, so what it answers next is read as a first answer again.
-            Answer::Failure(_) => {
+            // No Daemon accepted the connection, so what one answers next is read as a first answer again.
+            Answer::Failure(error) if error.is_unreachable() => {
                 self.known = None;
                 Vec::new()
             }
@@ -71,8 +73,9 @@ impl Tracker {
                 self.known = Some(current.iter().cloned().collect());
                 entered
             }
-            // Only a `Status` says what fails, any other answer leaves the set as it is.
-            Answer::Response(_) => Vec::new(),
+            // Only a `Status` says what fails, and a Daemon that answered badly or too late still runs: any other
+            // answer leaves the set as it is.
+            Answer::Failure(_) | Answer::Response(_) => Vec::new(),
         }
     }
 }
@@ -112,7 +115,7 @@ fn banners_of(failed: &[&NeedsYou], report: &StatusReport) -> Vec<Banner> {
         return vec![Banner {
             title: format!("{} failures need you", each.len()),
             body: "Open Procly to see them.".to_owned(),
-            worktree: None,
+            place: None,
         }];
     }
     each
@@ -126,7 +129,7 @@ fn banner_of(item: &NeedsYou, report: &StatusReport) -> Option<Banner> {
         } => Some(Banner {
             title: format!("{service}: {}", service_end(*end)),
             body: label_of(report, worktree),
-            worktree: Some(worktree.clone()),
+            place: Some(item.place()),
         }),
         NeedsYou::Job {
             worktree, command, end, ..
@@ -135,35 +138,38 @@ fn banner_of(item: &NeedsYou, report: &StatusReport) -> Option<Banner> {
             body: worktree
                 .as_deref()
                 .map_or_else(|| "Outside any Worktree".to_owned(), |path| label_of(report, path)),
-            worktree: worktree.clone(),
+            place: Some(item.place()),
         }),
         NeedsYou::Foreign { .. } => None,
     }
 }
 
-/// How a Worktree is named in a banner: its branch, or the last name of its path.
-fn label_of(report: &StatusReport, path: &Path) -> String {
-    report
-        .repositories
-        .iter()
-        .flat_map(|repository| &repository.worktrees)
-        .find(|worktree| worktree.worktree.path == path)
-        .and_then(|worktree| worktree.branch.clone())
-        .unwrap_or_else(|| name_of(path))
+/// The fields a banner carries back when it is clicked.
+fn extra_of(banner: &Banner) -> Option<(&'static str, serde_json::Value)> {
+    let place = banner.place.as_ref()?;
+    serde_json::to_value(place).ok().map(|value| (PLACE_FIELD, value))
 }
 
-/// Shows `banner`. A click on it brings the window back, on its Worktree.
+/// The failure a clicked banner was about, from the fields it carried back. Nothing for a grouped banner, or one this
+/// app did not write.
+fn place_of(extra: &HashMap<String, serde_json::Value>) -> Option<Place> {
+    extra
+        .get(PLACE_FIELD)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+/// Shows `banner`. A click on it brings the window back, on its failure.
 pub(crate) fn show(app: &AppHandle, banner: &Banner) {
     let mut builder = app.notification().builder().title(&banner.title).body(&banner.body);
-    if let Some(worktree) = &banner.worktree {
-        builder = builder.extra(WORKTREE_FIELD, worktree.to_string_lossy());
+    if let Some((field, value)) = extra_of(banner) {
+        builder = builder.extra(field, value);
     }
     if let Err(error) = builder.show() {
         eprintln!("procly: cannot show a notification: {error}");
     }
 }
 
-/// Opens the window on the Worktree of a clicked banner. Registered once, before any banner shows, since the plugin
+/// Opens the window on the failure of a clicked banner. Registered once, before any banner shows, since the plugin
 /// reports a click only for banners shown after a handler exists.
 pub(crate) fn open_on_click(app: &AppHandle) {
     let handle = app.clone();
@@ -171,14 +177,10 @@ pub(crate) fn open_on_click(app: &AppHandle) {
         if performed.action_id() != TAP {
             return;
         }
-        let worktree = performed
-            .notification()
-            .and_then(|banner| banner.extra().get(WORKTREE_FIELD))
-            .and_then(|value| value.as_str())
-            .map(str::to_owned);
+        let place = performed.notification().and_then(|banner| place_of(banner.extra()));
         MainWindow(&handle).open();
-        // The window listens while it is hidden too, and shows the Worktree once it is back.
-        let _ = handle.emit(OPEN_FAILURE, worktree);
+        // The window listens while it is hidden too, and shows the failure once it is back.
+        let _ = handle.emit(OPEN_FAILURE, place);
     });
     if let Err(error) = registered {
         eprintln!("procly: banners cannot be clicked: {error}");
@@ -251,18 +253,11 @@ impl NotifyError {
 
 impl Serialize for NotifyError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Failure {
-            kind: &'static str,
-            message: String,
-        }
         match self {
             Self::Settings(error) => error.serialize(serializer),
-            Self::Permission(_) | Self::Open(_) | Self::Task(_) => Failure {
-                kind: "notifications",
-                message: self.to_string(),
+            Self::Permission(_) | Self::Open(_) | Self::Task(_) => {
+                failure::serialize(AppFailureKind::Notifications, self, serializer)
             }
-            .serialize(serializer),
         }
     }
 }
@@ -301,6 +296,7 @@ pub(crate) async fn open_notification_settings() -> Result<(), NotifyError> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use procly_client::protocol::{
@@ -419,9 +415,38 @@ mod tests {
             [Banner {
                 title: "api: exited 1".to_owned(),
                 body: "fix-login".to_owned(),
-                worktree: Some(PathBuf::from("/p/work/acme/web")),
+                place: Some(Place::Service {
+                    worktree: PathBuf::from("/p/work/acme/web"),
+                    service: "api".to_owned(),
+                }),
             }]
         );
+    }
+
+    #[test]
+    fn a_clicked_banner_gives_back_the_failure_it_was_about_and_a_grouped_one_gives_nothing() {
+        let place = Place::Job {
+            worktree: None,
+            id: "job-2".to_owned(),
+        };
+        let banner = Banner {
+            title: "make test: exited 2".to_owned(),
+            body: "Outside any Worktree".to_owned(),
+            place: Some(place.clone()),
+        };
+        let grouped = Banner {
+            place: None,
+            ..banner.clone()
+        };
+
+        let carried: HashMap<String, serde_json::Value> = extra_of(&banner)
+            .map(|(field, value)| (field.to_owned(), value))
+            .into_iter()
+            .collect();
+
+        assert_eq!(place_of(&carried), Some(place));
+        assert_eq!(extra_of(&grouped), None);
+        assert_eq!(place_of(&HashMap::new()), None);
     }
 
     #[test]
@@ -456,6 +481,24 @@ mod tests {
         // The answer after the baseline notifies as usual.
         let banners = rig.answer(with_services(vec![crashed("api", 2_000), crashed("web", 2_500)]), true);
         assert_eq!(titles(&banners), ["web: exited 1"]);
+    }
+
+    #[test]
+    fn a_status_that_times_out_keeps_the_baseline_so_a_failure_that_enters_meanwhile_is_announced() {
+        let mut rig = Rig::new();
+        rig.answer(with_services(vec![]), true);
+        // The Daemon accepted the connection and did not answer in time: it still runs, nothing restarted.
+        let timeout = rig.presented(Answer::Failure(crate::daemon::CommandError::Client(
+            procly_client::ClientError::Connection {
+                path: PathBuf::from("/p/state/procly.sock"),
+                source: io::Error::from(io::ErrorKind::TimedOut),
+            },
+        )));
+        assert_eq!(rig.notifier.banners(&timeout, true), []);
+
+        let banners = rig.answer(with_services(vec![crashed("api", 1_000)]), true);
+
+        assert_eq!(titles(&banners), ["api: exited 1"]);
     }
 
     #[test]
@@ -562,7 +605,7 @@ mod tests {
             [Banner {
                 title: "4 failures need you".to_owned(),
                 body: "Open Procly to see them.".to_owned(),
-                worktree: None,
+                place: None,
             }]
         );
     }
@@ -586,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_job_makes_a_banner_with_its_command_and_an_outside_job_has_no_worktree() {
+    fn a_failed_job_makes_a_banner_with_its_command_and_an_outside_job_opens_with_no_worktree() {
         let mut rig = Rig::new();
         rig.answer(with_services(vec![]), true);
         let job = |id: &str| JobStatus {
@@ -610,12 +653,18 @@ mod tests {
                 Banner {
                     title: "make test: exited 2".to_owned(),
                     body: "web".to_owned(),
-                    worktree: Some(PathBuf::from("/p/work/acme/web")),
+                    place: Some(Place::Job {
+                        worktree: Some(PathBuf::from("/p/work/acme/web")),
+                        id: "job-1".to_owned(),
+                    }),
                 },
                 Banner {
                     title: "make test: exited 2".to_owned(),
                     body: "Outside any Worktree".to_owned(),
-                    worktree: None,
+                    place: Some(Place::Job {
+                        worktree: None,
+                        id: "job-2".to_owned(),
+                    }),
                 },
             ]
         );
@@ -670,7 +719,7 @@ mod tests {
             service: "api".to_owned(),
             started_at: 1_000,
         };
-        let (after_mark, _) = rig.attention.mark(key, update);
+        let (after_mark, _) = rig.attention.mark(key, update, || None);
         assert_eq!(rig.notifier.banners(&after_mark, true), []);
         assert_eq!(rig.answer(both(), true), []);
     }

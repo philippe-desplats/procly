@@ -1,5 +1,5 @@
 import type { FailureKey } from "./daemon";
-import { isSeen } from "./needs-you";
+import { isSeen, useFailed } from "./needs-you";
 import type { ContainerStatus } from "./protocol/ContainerStatus";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
@@ -31,19 +31,21 @@ export function ServiceRow({
   at: number;
   seen: FailureKey[];
 }) {
-  const marked = isSeen(seen, {
+  const key: FailureKey = {
     kind: "service",
     worktree: worktreePath,
     service: service.service,
     started_at: service.started_at,
-  });
+  };
+  const marked = isSeen(seen, key);
+  const failed = useFailed(key);
   return (
     <SelectableRow
       target={{ kind: "service", worktree: worktreePath, service: service.service }}
       seen={marked}
     >
       <span className="item-name">{service.service}</span>
-      <State {...serviceWord(service)} />
+      <State {...serviceWord(service, failed)} />
       {service.port === null ? null : <span className="caption">{`:${service.port}`}</span>}
       <span className="caption">{formatMoment(service.started_at, at)}</span>
       <SeenMark seen={marked} />
@@ -52,10 +54,12 @@ export function ServiceRow({
 }
 
 export function JobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
-  const marked = isSeen(seen, { kind: "job", id: job.id });
+  const key: FailureKey = { kind: "job", id: job.id };
+  const marked = isSeen(seen, key);
+  const failed = useFailed(key);
   return (
     <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
-      <State {...jobWord(job)} />
+      <State {...jobWord(job, failed)} />
       <span className="item-name mono">{job.command}</span>
       <span className="caption mono">{job.id}</span>
       <SeenMark seen={marked} />

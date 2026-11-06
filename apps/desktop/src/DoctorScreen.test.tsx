@@ -136,7 +136,8 @@ describe("the Doctor screen", () => {
       "daemon",
       "state_documents",
     ]);
-    expect(doctorCalls(calls)).toEqual([{ cwd: null }]);
+    // Once at launch for the banner, then once for the screen.
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
   });
 
   it("leaves out the checks that belong to a Worktree, which a run from no directory only skips", async () => {
@@ -224,12 +225,12 @@ describe("the Doctor screen", () => {
     failing = false;
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(await within(doctor).findByText("orphans")).toBeInTheDocument();
-    expect(doctorCalls(calls)).toHaveLength(2);
+    expect(doctorCalls(calls)).toHaveLength(3);
   });
 });
 
 describe("when doctor runs", () => {
-  it("runs on no screen that does not show it, and on no tick of the poller", async () => {
+  it("runs once at launch for the banner, then on no screen that does not show it, and on no tick of the poller", async () => {
     const calls = rust(answered(), () => MACHINE);
     render(<App store={createDaemonStore()} />);
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
@@ -237,7 +238,7 @@ describe("when doctor runs", () => {
     await emit("daemon-update", answered(AT + 2000));
     await settle();
 
-    expect(doctorCalls(calls)).toEqual([]);
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }]);
   });
 
   it("runs once when the Doctor screen opens, from no directory", async () => {
@@ -247,7 +248,8 @@ describe("when doctor runs", () => {
     await openDoctor();
     await screen.findByText("orphans");
 
-    expect(doctorCalls(calls)).toEqual([{ cwd: null }]);
+    // The first is the run at launch.
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
   });
 
   it("runs once when a Worktree screen opens, from the directory of that Worktree", async () => {
@@ -257,26 +259,27 @@ describe("when doctor runs", () => {
     fireEvent.click(await screen.findByRole("button", { name: /web_fix|web-fix/ }));
     await screen.findByText("configuration");
 
-    expect(doctorCalls(calls)).toEqual([{ cwd: WORKTREE_PATH }]);
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: WORKTREE_PATH }]);
   });
 
   it("runs when the app enters Daemon not running, and only then", async () => {
     const calls = rust(answered(), () => NO_DAEMON);
     render(<App store={createDaemonStore()} />);
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
-    expect(doctorCalls(calls)).toEqual([]);
+    // The run at launch.
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }]);
 
     await act(async () => {
       await emit("daemon-update", failed(NOT_RUNNING));
     });
     expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
-    expect(doctorCalls(calls)).toEqual([{ cwd: null }]);
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
 
     // The poller keeps finding no Daemon, which is not entering the state again.
     await act(async () => {
       await emit("daemon-update", failed(NOT_RUNNING));
     });
-    expect(doctorCalls(calls)).toEqual([{ cwd: null }]);
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
   });
 
   it("runs again on Refresh, for the machine and for the Worktree on screen", async () => {
@@ -288,7 +291,12 @@ describe("when doctor runs", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await settle();
 
-    expect(doctorCalls(calls)).toEqual([{ cwd: WORKTREE_PATH }, { cwd: null }, { cwd: WORKTREE_PATH }]);
+    expect(doctorCalls(calls)).toEqual([
+      { cwd: null },
+      { cwd: WORKTREE_PATH },
+      { cwd: null },
+      { cwd: WORKTREE_PATH },
+    ]);
     expect(calls.map((call) => call.command)).toContain("refresh");
   });
 
@@ -303,7 +311,7 @@ describe("when doctor runs", () => {
     });
     await settle();
 
-    expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }, { cwd: null }]);
   });
 
   it("installs no timer from the Doctor code, at mount or later, whatever the time that passes", async () => {
@@ -488,15 +496,13 @@ describe("Daemon not running", () => {
 });
 
 describe("a Daemon of another release", () => {
-  it("shows a banner from doctor and blocks nothing", async () => {
-    rust(answered(), () => DRIFT);
+  it("shows a banner from doctor at launch, without a Refresh or a visit to Doctor, and blocks nothing", async () => {
+    const calls = rust(answered(), () => DRIFT);
     render(<App store={createDaemonStore()} />);
-    expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
     const banner = await screen.findByRole("status");
+    // Once at launch, on no timer: the machine checks, and only them.
+    expect(doctorCalls(calls)).toEqual([{ cwd: null }]);
     expect(banner).toHaveTextContent("the Daemon runs procly 0.4.0, this is procly 0.5.0");
     // Everything stays usable: the Overview is still there, and so is every button.
     expect(screen.getByRole("region", { name: "Overview" })).toBeInTheDocument();

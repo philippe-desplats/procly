@@ -83,13 +83,13 @@ describe("the window", () => {
     expect(commands).toContain("last_update");
   });
 
-  it("never asks the Daemon for anything itself, the poller does", async () => {
+  it("never asks the Daemon for anything itself, the poller does, and runs doctor once at launch", async () => {
     const commands = poller(answered(status));
 
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("button", { name: "web-fix" });
 
-    expect(commands).toEqual(["last_update"]);
+    expect(commands).toEqual(["last_update", "doctor"]);
   });
 
   it("follows the poller: a new answer replaces the one on screen without a request", async () => {
@@ -145,7 +145,7 @@ describe("the window", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(commands).toEqual(["last_update", "refresh", "doctor"]);
+    expect(commands).toEqual(["last_update", "doctor", "refresh", "doctor"]);
   });
 });
 
@@ -171,6 +171,41 @@ describe("the Overview", () => {
     ]);
     // A Service without a port shows none instead of a placeholder.
     expect(rows[1]?.textContent).not.toMatch(/:\d{4,5}/);
+  });
+
+  it("lists the Isolated Compose services of each Worktree with their port, a Worktree with nothing else included", async () => {
+    const withContainers = structuredClone(many);
+    if (withContainers.response !== "status") {
+      throw new Error("the recorded answer is a status");
+    }
+    const worktrees = withContainers.repositories.flatMap((repository) => repository.worktrees);
+    const db = { service: "db", project: "acme-web", compose: "postgres", port: 24050 };
+    const cache = { service: "cache", project: "acme-infra", compose: "redis", port: null };
+    const web = worktrees.find((worktree) => worktree.path === "/p/work/acme/web");
+    const infra = worktrees.find((worktree) => worktree.path === "/p/work/acme/infra");
+    if (web === undefined || infra === undefined) {
+      throw new Error("the recorded answer has the web and infra Worktrees");
+    }
+    web.containers = [db];
+    // The infra Worktree runs no Process service, only this container.
+    infra.containers = [cache];
+    poller(answered(withContainers));
+
+    render(<App store={createDaemonStore()} />);
+
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    const rows = within(overviewPane)
+      .getAllByRole("listitem")
+      .map((row) => row.textContent);
+    expect(rows).toEqual([
+      "apihealthy:1873119:31:22",
+      "workerrestarting19:31:22",
+      "dbrunning:24050",
+      "apiexited 1:187422026-11-04 19:31:22",
+      "sitestarting:1875519:31:40",
+      "sitestopped:1876019:30:00",
+      "cacherunning",
+    ]);
   });
 
   it("groups the Services under the label of their Worktree", async () => {
@@ -220,6 +255,58 @@ describe("the Overview", () => {
     fireEvent.keyDown(window, { key: "0", metaKey: true });
 
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
+  });
+});
+
+describe("the inspector of a Worktree", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  const BRANCH = "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end";
+
+  /** The facts the inspector lists, as `name: value` pairs in the order it lists them. */
+  function facts(): string[] {
+    const inspector = screen.getByRole("complementary", { name: "Inspector" });
+    return within(inspector)
+      .getAllByRole("term")
+      .map((term) => `${term.textContent}: ${term.nextElementSibling?.textContent ?? ""}`);
+  }
+
+  it("names the branch, the folder and the slug of the Worktree on screen", async () => {
+    poller(answered(many));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
+    await screen.findByRole("heading", { name: BRANCH, level: 2 });
+
+    expect(facts()).toEqual(
+      expect.arrayContaining([`Branch: ${BRANCH}`, "Folder: web-login", "Slug: web_login"]),
+    );
+  });
+
+  it("names the branch, the folder and the slug of the Worktree of the item picked", async () => {
+    poller(answered(many));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
+    const center = screen.getByRole("main");
+
+    fireEvent.click(await within(center).findByRole("button", { name: /^api/ }));
+
+    expect(facts()).toEqual(
+      expect.arrayContaining([`Branch: ${BRANCH}`, "Folder: web-login", "Slug: web_login"]),
+    );
+  });
+
+  it("says a Worktree with no branch has none", async () => {
+    poller(answered(many));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "docs-preview" }));
+    await screen.findByRole("heading", { name: "docs-preview", level: 2 });
+
+    expect(facts()).toEqual(expect.arrayContaining(["Branch: none", "Folder: docs-preview"]));
   });
 });
 
@@ -347,6 +434,28 @@ describe("Needs you", () => {
     ).toBeTruthy();
     // A Foreign process is not an ended failure, there is nothing to mark.
     expect(within(needs).getAllByRole("button", { name: "Mark as Seen" })).toHaveLength(1);
+  });
+
+  it("draws an ended row as a failure when Rust lists it, unseen or Seen, and as routine otherwise", async () => {
+    /** The tone of the state of the ended `api` row of the Overview. */
+    const toneOfApi = (): string | undefined =>
+      serviceRows()
+        .find((row) => row.textContent?.startsWith("apiexited 1"))
+        ?.querySelector(".state")
+        ?.className.split(" ")
+        .find((name) => name.startsWith("tone-"));
+
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("region", { name: "Overview" });
+    expect(toneOfApi()).toBe("tone-fail");
+
+    await tick(answered(many, { seen: [API_KEY] }));
+    expect(toneOfApi()).toBe("tone-fail");
+
+    // Rust lists no failure: the window keeps no list of its own that would call `exited 1` one.
+    await tick(answered(many));
+    expect(toneOfApi()).toBe("tone-ended");
   });
 
   it("is left out when nothing needs the developer, however many Services ended", async () => {

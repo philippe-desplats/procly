@@ -8,6 +8,7 @@ use serde::{Serialize, Serializer};
 use tauri::AppHandle;
 use tauri_plugin_autostart::{AutoLaunchManager, ManagerExt as _};
 
+use crate::failure::{self, AppFailureKind};
 use crate::window::HIDDEN_FLAG;
 
 /// The switch of the login item, as the system holds it.
@@ -32,16 +33,7 @@ impl LoginItemError {
 
 impl Serialize for LoginItemError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Failure {
-            kind: &'static str,
-            message: String,
-        }
-        Failure {
-            kind: "login_item",
-            message: self.to_string(),
-        }
-        .serialize(serializer)
+        failure::serialize(AppFailureKind::LoginItem, self, serializer)
     }
 }
 

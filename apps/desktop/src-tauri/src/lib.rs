@@ -9,6 +9,7 @@ mod clipboard;
 mod daemon;
 mod dock;
 mod doctor;
+mod failure;
 mod follow;
 mod glyph;
 mod lifecycle;
@@ -26,7 +27,7 @@ mod tray;
 mod tray_menu;
 mod window;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use daemon::DaemonClient;
 use dock::DockIcon;
@@ -72,18 +73,29 @@ async fn mark_seen(
     app: AppHandle,
     poller: State<'_, Poller>,
     attention: State<'_, Attention>,
+    publishing: State<'_, Publishing>,
 ) -> Result<(), SeenError> {
+    // The task that publishes the answers waits for this mark, so that neither publishes an older answer last.
+    let _turn = publishing.0.lock().await;
     let Some(last) = poller.last() else {
         return Ok(());
     };
     let attention = attention.inner().clone();
-    // Writing the file blocks, so it leaves the task that serves the window.
-    let (presented, saved) = tauri::async_runtime::spawn_blocking(move || attention.mark(key, last))
-        .await
-        .map_err(|error| SeenError::task(&error))?;
+    let updates = poller.subscribe();
+    // Writing the file blocks, so it leaves the task that serves the window. An answer that comes meanwhile is the one
+    // presented.
+    let (presented, saved) =
+        tauri::async_runtime::spawn_blocking(move || attention.mark(key, last, || updates.borrow().clone()))
+            .await
+            .map_err(|error| SeenError::task(&error))?;
     publish(&app, &presented);
     saved
 }
+
+/// One publish at a time: the answers of the poller and a mark as Seen are presented and published in turn, so that
+/// the last one the window and the menu receive holds the newest answer with the newest Seen set.
+#[derive(Debug, Clone, Default)]
+struct Publishing(Arc<tokio::sync::Mutex<()>>);
 
 /// Tells the window and the menu bar icon about an answer.
 fn publish(app: &AppHandle, presented: &Presented) {
@@ -97,12 +109,20 @@ fn publish(app: &AppHandle, presented: &Presented) {
 /// Shows the banners an answer calls for. Every answer is followed, but a banner shows only while "Notify on failure"
 /// is on.
 fn notify(app: &AppHandle, notifier: &mut Notifier, presented: &Presented) {
-    let enabled = app
-        .try_state::<SettingsStore>()
-        .is_some_and(|settings| settings.get().notify_on_failure);
-    for banner in notifier.banners(presented, enabled) {
+    for banner in banners_to_show(app.try_state::<SettingsStore>().as_deref(), notifier, presented) {
         notifications::show(app, &banner);
     }
+}
+
+/// The banners an answer calls for while "Notify on failure" is on in `settings`, none while it is off or when the
+/// settings are not there yet. The answer is followed either way.
+fn banners_to_show(
+    settings: Option<&SettingsStore>,
+    notifier: &mut Notifier,
+    presented: &Presented,
+) -> Vec<notifications::Banner> {
+    let enabled = settings.is_some_and(|settings| settings.get().notify_on_failure);
+    notifier.banners(presented, enabled)
 }
 
 /// Asks the poller for a tick now. It never starts, stops or restarts anything.
@@ -219,6 +239,8 @@ pub fn run() {
             let mut updates = poller.subscribe();
             let handle = app.handle().clone();
             let seen = attention.clone();
+            let publishing = Publishing::default();
+            let turns = publishing.clone();
             // A click on a banner is reported only for banners shown after this, and none shows before the first answer.
             notifications::open_on_click(app.handle());
             tauri::async_runtime::spawn(async move {
@@ -226,6 +248,7 @@ pub fn run() {
                 while updates.changed().await.is_ok() {
                     let update = updates.borrow_and_update().clone();
                     if let Some(update) = update {
+                        let _turn = turns.0.lock().await;
                         let seen = seen.clone();
                         // Pruning the Seen set may write its file, which blocks.
                         let Ok((presented, saved)) =
@@ -244,6 +267,7 @@ pub fn run() {
             app.manage(client);
             app.manage(poller);
             app.manage(attention);
+            app.manage(publishing);
             app.manage(Follower::new());
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())
@@ -303,6 +327,82 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use procly_client::protocol::{
+        RepositoryStatus, Response, ServiceEnd, ServiceState, ServiceStatus, StatusReport, Worktree, WorktreeStatus,
+    };
+
+    use super::*;
+    use crate::poller::{Answer, Update};
+
+    /// An answer whose Worktree runs the Services `services`.
+    fn answer(services: Vec<ServiceStatus>) -> Arc<Update> {
+        Arc::new(Update {
+            at_ms: 1,
+            answer: Answer::Response(Response::Status(StatusReport {
+                repositories: vec![RepositoryStatus {
+                    git_common_dir: PathBuf::from("/p/work/acme/web/.git"),
+                    worktrees: vec![WorktreeStatus {
+                        worktree: Worktree {
+                            path: PathBuf::from("/p/work/acme/web"),
+                            slug: "web".to_owned(),
+                            main: true,
+                        },
+                        branch: Some("main".to_owned()),
+                        listed: true,
+                        services,
+                        jobs: Vec::new(),
+                        foreign: Vec::new(),
+                        containers: Vec::new(),
+                    }],
+                }],
+                jobs_outside_repositories: Vec::new(),
+            })),
+        })
+    }
+
+    fn crashed(name: &str) -> ServiceStatus {
+        ServiceStatus {
+            service: name.to_owned(),
+            port: None,
+            reattached: false,
+            started_at: 1_000,
+            restartable: true,
+            state: ServiceState::Ended {
+                end: ServiceEnd::Exited { code: 1 },
+            },
+        }
+    }
+
+    /// The banners of a failure that enters "Needs you" after a first answer, with the settings in `settings`.
+    fn banners_with(settings: Option<&SettingsStore>) -> Vec<notifications::Banner> {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let attention = Attention::open(dir.path().join(SEEN_FILE));
+        let mut notifier = Notifier::default();
+        banners_to_show(settings, &mut notifier, &attention.present_update(answer(Vec::new())));
+        banners_to_show(
+            settings,
+            &mut notifier,
+            &attention.present_update(answer(vec![crashed("api")])),
+        )
+    }
+
+    #[test]
+    fn a_failure_makes_a_banner_only_while_notify_on_failure_is_on() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let settings = SettingsStore::open(dir.path().join(SETTINGS_FILE));
+        assert!(!settings.get().notify_on_failure, "the setting starts off");
+
+        assert_eq!(banners_with(Some(&settings)), []);
+        assert_eq!(banners_with(None), [], "no banner before the settings are read");
+
+        settings.set_notify_on_failure(true).expect("the setting is written");
+        let shown = banners_with(Some(&settings));
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].title, "api: exited 1");
+    }
+
     /// The permissions the capability of the window lists, whether they are written as a name or with a scope.
     fn granted() -> Vec<String> {
         let capability: serde_json::Value =

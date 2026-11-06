@@ -2,11 +2,15 @@
 //! Port item can copy, and the last state of the Daemon with its time of day. The native items are built from it
 //! (`tray.rs`), so what the menu holds is tested without a menu.
 
+use std::path::Path;
+
 use chrono::{DateTime, TimeZone};
-use procly_client::protocol::{ForeignProcess, JobEnd, Response, ServiceEnd, ServiceState, StatusReport};
+use procly_client::protocol::{
+    ForeignProcess, JobEnd, Response, ServiceEnd, ServiceState, StatusReport, WorktreeStatus,
+};
 
 use crate::glyph::Glyph;
-use crate::needs_you::NeedsYou;
+use crate::needs_you::{NeedsYou, Place};
 use crate::poller::{Answer, Update};
 
 /// The longest a command is shown in a line of the menu.
@@ -20,6 +24,8 @@ pub(crate) struct Snapshot {
     at_ms: u64,
     /// One line per thing that needs the developer, in the order of "Needs you".
     needs_you: Vec<String>,
+    /// Where a click on each line of `needs_you` opens the window, in the same order.
+    places: Vec<Place>,
     /// The ports of what runs, which Copy Port copies.
     ports: Vec<CopyPort>,
 }
@@ -38,6 +44,8 @@ pub(crate) struct Model {
     pub(crate) header: String,
     /// The lines of "Needs you".
     pub(crate) needs_you: Vec<String>,
+    /// Where a click on each line of "Needs you" opens the window, in the same order.
+    pub(crate) places: Vec<Place>,
     /// The entries of Copy Port.
     pub(crate) ports: Vec<CopyPort>,
 }
@@ -50,12 +58,32 @@ impl Model {
     }
 }
 
-/// The last name of a path, which names a Worktree in a line.
-pub(crate) fn name_of(path: &std::path::Path) -> String {
+/// The last name of a path, which names a Worktree that has no branch to name it.
+fn name_of(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// How a Worktree is named in the menu and in a banner, as the window names it: its branch, or the last name of its
+/// path when it has none.
+fn worktree_label(worktree: &WorktreeStatus) -> String {
+    worktree
+        .branch
+        .clone()
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or_else(|| name_of(&worktree.worktree.path))
+}
+
+/// The name of the Worktree at `path` in `report`, the last name of the path when the answer does not hold it.
+pub(crate) fn label_of(report: &StatusReport, path: &Path) -> String {
+    report
+        .repositories
+        .iter()
+        .flat_map(|repository| &repository.worktrees)
+        .find(|worktree| worktree.worktree.path == path)
+        .map_or_else(|| name_of(path), worktree_label)
 }
 
 pub(crate) fn service_end(end: ServiceEnd) -> String {
@@ -99,8 +127,9 @@ fn ports(ports: &[u16]) -> String {
         .join(" ")
 }
 
-/// The line of one thing that needs the developer.
-pub(crate) fn line(item: &NeedsYou) -> String {
+/// The line of one thing that needs the developer, its Worktree named as `report` names it.
+fn line(item: &NeedsYou, report: &StatusReport) -> String {
+    let name_of = |path: &Path| label_of(report, path);
     match item {
         NeedsYou::Service {
             worktree, service, end, ..
@@ -134,7 +163,7 @@ pub(crate) fn line(item: &NeedsYou) -> String {
 fn copy_ports(report: &StatusReport) -> Vec<CopyPort> {
     let mut found = Vec::new();
     for worktree in report.repositories.iter().flat_map(|repository| &repository.worktrees) {
-        let name = name_of(&worktree.worktree.path);
+        let name = worktree_label(worktree);
         for service in &worktree.services {
             if let (Some(port), ServiceState::Starting | ServiceState::Healthy | ServiceState::Restarting) =
                 (service.port, service.state)
@@ -164,7 +193,8 @@ pub(crate) fn snapshot(update: &Update, needs_you: &[NeedsYou]) -> Option<Snapsh
     };
     Some(Snapshot {
         at_ms: update.at_ms,
-        needs_you: needs_you.iter().map(line).collect(),
+        needs_you: needs_you.iter().map(|item| line(item, report)).collect(),
+        places: needs_you.iter().map(NeedsYou::place).collect(),
         ports: copy_ports(report),
     })
 }
@@ -206,6 +236,7 @@ pub(crate) fn model(glyph: Glyph, last: Option<&Snapshot>, when: impl Fn(u64) ->
     Model {
         header: header(glyph, last, when),
         needs_you: last.map_or_else(Vec::new, |last| last.needs_you.clone()),
+        places: last.map_or_else(Vec::new, |last| last.places.clone()),
         ports: last.map_or_else(Vec::new, |last| last.ports.clone()),
     }
 }
@@ -215,6 +246,8 @@ pub(crate) fn model(glyph: Glyph, last: Option<&Snapshot>, when: impl Fn(u64) ->
 pub(crate) enum Action {
     /// Open the window.
     Open,
+    /// Open the window on the line of "Needs you" at this index, see [`Model::places`].
+    OpenOn(usize),
     /// Open the window on Settings.
     Settings,
     /// Quit the app, which stops nothing in the Daemon.
@@ -228,7 +261,7 @@ pub(crate) const OPEN_ID: &str = "tray-open";
 pub(crate) const SETTINGS_ID: &str = "tray-settings";
 pub(crate) const QUIT_ID: &str = "tray-quit";
 
-/// The id of the line of "Needs you" at `index`, which opens the window.
+/// The id of the line of "Needs you" at `index`, which opens the window on what it names.
 pub(crate) fn needs_you_id(index: usize) -> String {
     format!("tray-needs-you-{index}")
 }
@@ -315,11 +348,14 @@ pub(crate) fn action(id: &str) -> Option<Action> {
         OPEN_ID => Some(Action::Open),
         SETTINGS_ID => Some(Action::Settings),
         QUIT_ID => Some(Action::Quit),
-        _ if id.starts_with("tray-needs-you-") => Some(Action::Open),
-        _ => id
-            .strip_prefix("tray-copy-port-")
-            .and_then(|port| port.parse().ok())
-            .map(Action::CopyPort),
+        _ => {
+            if let Some(index) = id.strip_prefix("tray-needs-you-") {
+                return index.parse().ok().map(Action::OpenOn);
+            }
+            id.strip_prefix("tray-copy-port-")
+                .and_then(|port| port.parse().ok())
+                .map(Action::CopyPort)
+        }
     }
 }
 
@@ -395,9 +431,17 @@ mod tests {
         }
     }
 
+    /// An answer that holds no Worktree, so that a line names its Worktree by the last name of its path.
+    fn nothing() -> StatusReport {
+        StatusReport {
+            repositories: Vec::new(),
+            jobs_outside_repositories: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_failed_service_is_one_line_with_its_worktree_and_how_it_ended() {
-        assert_eq!(line(&failed_service()), "web-fix: api exited 1");
+        assert_eq!(line(&failed_service(), &nothing()), "web-fix: api exited 1");
     }
 
     #[test]
@@ -409,7 +453,7 @@ mod tests {
             end: JobEnd::TimedOut { timeout_ms: 5_000 },
         };
 
-        let text = line(&job);
+        let text = line(&job, &nothing());
 
         assert!(
             text.starts_with("web-fix: cargo test --workspace --locked -- --no…"),
@@ -429,7 +473,7 @@ mod tests {
             end: JobEnd::Exited { code: 2 },
         };
 
-        assert_eq!(line(&job), "make exited 2");
+        assert_eq!(line(&job, &nothing()), "make exited 2");
     }
 
     #[test]
@@ -452,8 +496,11 @@ mod tests {
             },
         };
 
-        assert_eq!(line(&process), "web-fix: foreign node server.js :3000 :3001");
-        assert_eq!(line(&container), "web-fix: foreign container db");
+        assert_eq!(
+            line(&process, &nothing()),
+            "web-fix: foreign node server.js :3000 :3001"
+        );
+        assert_eq!(line(&container, &nothing()), "web-fix: foreign container db");
     }
 
     #[test]
@@ -522,6 +569,32 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_worktree_is_named_by_its_branch_in_needs_you_and_copy_port() {
+        let mut web = worktree(
+            "/p/work/acme/web-fix",
+            vec![service("api", Some(24001), ServiceState::Healthy)],
+        );
+        web.branch = Some("fix-login".to_owned());
+        let answer = update(vec![web], at(19, 0, 0));
+
+        let snapshot = snapshot(&answer, &[failed_service()]).expect("a Status answer");
+
+        assert_eq!(snapshot.needs_you, ["fix-login: api exited 1"]);
+        assert_eq!(snapshot.ports[0].label, "fix-login: api 24001");
+    }
+
+    #[test]
+    fn a_worktree_without_a_branch_is_named_by_the_last_name_of_its_path() {
+        let mut detached = worktree("/p/work/acme/web-fix", Vec::new());
+        detached.branch = Some(String::new());
+        let answer = update(vec![detached], at(19, 0, 0));
+
+        let snapshot = snapshot(&answer, &[failed_service()]).expect("a Status answer");
+
+        assert_eq!(snapshot.needs_you, ["web-fix: api exited 1"]);
     }
 
     #[test]
@@ -602,8 +675,27 @@ mod tests {
         assert_eq!(action(OPEN_ID), Some(Action::Open));
         assert_eq!(action(SETTINGS_ID), Some(Action::Settings));
         assert_eq!(action(QUIT_ID), Some(Action::Quit));
-        assert_eq!(action(&needs_you_id(3)), Some(Action::Open));
+        assert_eq!(action(&needs_you_id(3)), Some(Action::OpenOn(3)));
         assert_eq!(action(&copy_port_id(24001)), Some(Action::CopyPort(24001)));
+    }
+
+    #[test]
+    fn a_line_of_needs_you_opens_the_window_on_the_item_it_names() {
+        let model = model(Glyph::NeedsYou, Some(&known(&[failed_service()])), clock);
+
+        let index = match action(&needs_you_id(0)) {
+            Some(Action::OpenOn(index)) => index,
+            other => panic!("a line of Needs you opens on its item: {other:?}"),
+        };
+
+        assert_eq!(
+            model.places.get(index),
+            Some(&Place::Service {
+                worktree: PathBuf::from("/p/work/acme/web-fix"),
+                service: "api".to_owned(),
+            })
+        );
+        assert_eq!(model.places.len(), model.needs_you.len());
     }
 
     #[test]
@@ -612,6 +704,7 @@ mod tests {
         assert_eq!(action("settings"), None);
         assert_eq!(action("tray-copy-port-lots"), None);
         assert_eq!(action("tray-copy-port-99999"), None);
+        assert_eq!(action("tray-needs-you-first"), None);
     }
 
     fn item(id: &str, label: &str) -> Entry {

@@ -69,7 +69,10 @@ endif
 
 .PHONY: e2e
 
+# The runner, WebdriverIO, runs on Node, which has to be on the `PATH`: run by Bun 1.4.3 alone it fails with "The
+# superclass is not a constructor". The app runs under a temporary `HOME` the runner makes (`e2e/environment.ts`).
 e2e:
+	@command -v node >/dev/null || { echo "make e2e needs node on the PATH, see CONTRIBUTING.md"; exit 1; }
 	$(MAKE) bundle TAURI_ARGS="--features e2e $(E2E_BUNDLES)"
 	cd $(APP) && PROCLY_E2E_APP="$(E2E_APP)" PROCLY_E2E_TEST_SERVER="$(CURDIR)/target/debug/procly-test-server" $(BUN) run e2e
 

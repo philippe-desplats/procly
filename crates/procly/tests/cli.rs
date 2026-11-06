@@ -29,6 +29,24 @@ fn a_usage_error_exits_2() {
 }
 
 #[test]
+fn the_help_of_logs_says_json_prints_one_document_per_line_with_follow() {
+    let output = Command::new(env!("CARGO_BIN_EXE_procly"))
+        .args(["logs", "--help"])
+        .output()
+        .expect("the procly binary runs");
+
+    assert!(output.status.success(), "exit status: {}", output.status);
+    let help: String = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        help.contains("with --follow, one JSON document per line (NDJSON)"),
+        "{help}"
+    );
+}
+
+#[test]
 fn the_help_of_up_lists_its_exit_codes() {
     let output = Command::new(env!("CARGO_BIN_EXE_procly"))
         .args(["up", "--help"])

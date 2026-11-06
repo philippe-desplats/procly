@@ -14,14 +14,21 @@ export function worktreeLabel(worktree: Named): string {
   return branch === "" ? basename(worktree.path) : branch;
 }
 
-/** What the tooltip of a Worktree shows: the 3 names it goes by. */
-export function worktreeTooltip(worktree: Named): string {
+/** The 3 names a Worktree goes by, each with what it is, as the tooltip and the inspector list them. */
+export function worktreeNames(worktree: Named): [name: string, value: string][] {
   const branch = worktree.branch ?? "";
   return [
-    `Branch: ${branch === "" ? "none" : branch}`,
-    `Folder: ${basename(worktree.path)}`,
-    `Slug: ${worktree.slug}`,
-  ].join("\n");
+    ["Branch", branch === "" ? "none" : branch],
+    ["Folder", basename(worktree.path)],
+    ["Slug", worktree.slug],
+  ];
+}
+
+/** What the tooltip of a Worktree shows: the 3 names it goes by. */
+export function worktreeTooltip(worktree: Named): string {
+  return worktreeNames(worktree)
+    .map(([name, value]) => `${name}: ${value}`)
+    .join("\n");
 }
 
 /** A Repository is named after the directory that holds its `.git`. */

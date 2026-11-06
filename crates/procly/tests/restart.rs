@@ -225,6 +225,55 @@ fn a_service_a_group_covers_is_restarted_through_its_group() {
     assert_eq!(lines(&starts), ["start", "start"]);
 }
 
+/// A Group `dev` covering `web`, which counts its starts in `starts` and serves on the Lease of `web`.
+fn covered_web(main: &Path, starts: &Path) {
+    let server = test_server();
+    write(
+        main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {web} }}\n\
+             [services.dev]\ncovers = ['web']\n\
+             run = 'echo start >> {starts}; exec {server} --port $PORT_WEB_HTTP'\n",
+            server = server.display(),
+            starts = starts.display(),
+            web = free_port(),
+        ),
+    );
+}
+
+#[test]
+fn a_covered_service_that_ended_while_its_group_does_not_run_is_restarted_through_its_group() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    covered_web(&main, &starts);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    assert_eq!(service_status(&procly, &main, "web")["state"], "ended");
+
+    let output = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert_eq!(lines(&starts), ["start"]);
+}
+
+#[test]
+fn a_covered_service_that_runs_on_its_own_is_restarted_alone_since_its_group_cannot_start_over_it() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    covered_web(&main, &starts);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    let output = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("web started"), "{}", stdout(&output));
+    assert_eq!(lines(&starts), Vec::<String>::new());
+}
+
 #[test]
 fn a_service_that_never_became_healthy_can_be_restarted_once_its_cause_is_fixed() {
     let procly = Procly::new();

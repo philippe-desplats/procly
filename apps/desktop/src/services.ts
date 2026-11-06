@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { Response } from "./protocol/Response";
-import { serviceEndWord } from "./state";
+import { serviceEndText } from "./state";
 
 const SAFE_PATH = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
@@ -27,7 +27,7 @@ function refusalOf(response: Response, expected: "down" | "up"): string | null {
     case "error":
       return response.message;
     case "unhealthy":
-      return `${response.service} did not become healthy: ${serviceEndWord(response.end).word}`;
+      return `${response.service} did not become healthy: ${serviceEndText(response.end)}`;
     case "conflict":
       return `${response.service} cannot start, a process outside Procly holds what it needs`;
     default:

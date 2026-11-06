@@ -15,6 +15,7 @@ use procly_client::protocol::{
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::atomic;
+use crate::failure::{self, AppFailureKind};
 use crate::poller::{Answer, Update};
 
 /// What identifies a failure, so that one that happens again is not taken for the one already seen.
@@ -54,6 +55,44 @@ pub(crate) enum NeedsYou {
     },
     /// A process or a container that runs in a Worktree without Procly having started it.
     Foreign { worktree: PathBuf, process: ForeignProcess },
+}
+
+/// What a click on a line of "Needs you", in the menu or on its banner, opens the window on: the item itself, which the
+/// window selects in the inspector, or the Worktree of a Foreign process, which the inspector does not explain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Place {
+    Service {
+        worktree: PathBuf,
+        service: String,
+    },
+    /// `worktree` is empty for a Job started outside any Repository.
+    Job {
+        worktree: Option<PathBuf>,
+        id: String,
+    },
+    Worktree {
+        worktree: PathBuf,
+    },
+}
+
+impl NeedsYou {
+    /// Where a click on this line opens the window.
+    pub(crate) fn place(&self) -> Place {
+        match self {
+            Self::Service { worktree, service, .. } => Place::Service {
+                worktree: worktree.clone(),
+                service: service.clone(),
+            },
+            Self::Job { worktree, id, .. } => Place::Job {
+                worktree: worktree.clone(),
+                id: id.clone(),
+            },
+            Self::Foreign { worktree, .. } => Place::Worktree {
+                worktree: worktree.clone(),
+            },
+        }
+    }
 }
 
 /// Whether a Service ended in a way that needs the developer.
@@ -187,7 +226,7 @@ impl Seen {
 
     /// Writes the set to `path` so that a reader sees the old file or the new one, never half of it.
     fn save(&self, path: &Path) -> Result<(), SeenError> {
-        let write = |source| SeenError {
+        let write = |source| SeenError::Write {
             path: path.to_path_buf(),
             source,
         };
@@ -198,35 +237,27 @@ impl Seen {
 
 /// The Seen set could not be written, or the thread that writes it broke. The mark holds until the app quits.
 #[derive(Debug, thiserror::Error)]
-#[error("cannot save the Seen failures to {}: {source}", path.display())]
-pub(crate) struct SeenError {
-    path: PathBuf,
-    #[source]
-    source: io::Error,
+pub(crate) enum SeenError {
+    #[error("cannot save the Seen failures to {}: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot save the Seen failures: {0}")]
+    Task(String),
 }
 
 impl SeenError {
     /// The thread that writes the set stopped before it could.
     pub(crate) fn task(error: &tauri::Error) -> Self {
-        Self {
-            path: PathBuf::new(),
-            source: io::Error::other(error.to_string()),
-        }
+        Self::Task(error.to_string())
     }
 }
 
 impl Serialize for SeenError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Failure {
-            kind: &'static str,
-            message: String,
-        }
-        Failure {
-            kind: "seen",
-            message: self.to_string(),
-        }
-        .serialize(serializer)
+        failure::serialize(AppFailureKind::Seen, self, serializer)
     }
 }
 
@@ -327,13 +358,20 @@ impl Attention {
     }
 
     /// The developer marked `key` as Seen. `last` is the answer on screen, which says whether `key` is a failure.
-    pub(crate) fn mark(&self, key: FailureKey, last: Arc<Update>) -> (Presented, Result<(), SeenError>) {
+    /// What is presented is the newest answer `newest` gives once the set is written, `last` when it gives none, so
+    /// that an answer that came during the write is not replaced by an older one.
+    pub(crate) fn mark(
+        &self,
+        key: FailureKey,
+        last: Arc<Update>,
+        newest: impl FnOnce() -> Option<Arc<Update>>,
+    ) -> (Presented, Result<(), SeenError>) {
         let mut seen = self.seen();
         let saved = match report_of(&last) {
             Some(report) if seen.mark(key, report) => seen.save(&self.inner.path),
             Some(_) | None => Ok(()),
         };
-        (Self::present(last, &seen), saved)
+        (Self::present(newest().unwrap_or(last), &seen), saved)
     }
 }
 
@@ -577,6 +615,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_click_on_a_failure_opens_on_the_item_and_one_on_a_foreign_process_on_its_worktree() {
+        let service = NeedsYou::Service {
+            worktree: PathBuf::from("/p/work/acme/web"),
+            service: "api".to_owned(),
+            started_at: 1,
+            end: ServiceEnd::Exited { code: 1 },
+        };
+        let stray = NeedsYou::Job {
+            worktree: None,
+            id: "j-red".to_owned(),
+            command: "make".to_owned(),
+            end: JobEnd::Exited { code: 2 },
+        };
+        let foreign = NeedsYou::Foreign {
+            worktree: PathBuf::from("/p/work/acme/web"),
+            process: ForeignProcess::Process {
+                pid: 7,
+                command: "node".to_owned(),
+                ports: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(service.place()).expect("serializes"),
+            serde_json::json!({ "kind": "service", "worktree": "/p/work/acme/web", "service": "api" })
+        );
+        assert_eq!(
+            serde_json::to_value(stray.place()).expect("serializes"),
+            serde_json::json!({ "kind": "job", "worktree": null, "id": "j-red" })
+        );
+        assert_eq!(
+            serde_json::to_value(foreign.place()).expect("serializes"),
+            serde_json::json!({ "kind": "worktree", "worktree": "/p/work/acme/web" })
+        );
+    }
+
     fn key(started_at: u64) -> FailureKey {
         FailureKey::Service {
             worktree: PathBuf::from("/p/work/acme/web"),
@@ -692,7 +767,7 @@ mod tests {
     fn the_seen_set_survives_a_restart_of_the_app() {
         let (_dir, path) = state_file();
         let first = Attention::open(path.clone());
-        let (_, saved) = first.mark(key(1_000), update(failed_at(1_000)));
+        let (_, saved) = first.mark(key(1_000), update(failed_at(1_000)), || None);
         saved.expect("the set is written, creating its directory");
         drop(first);
 
@@ -704,11 +779,51 @@ mod tests {
     }
 
     #[test]
+    fn a_mark_presents_the_answer_that_came_while_the_set_was_written_and_not_the_older_one() {
+        let (_dir, path) = state_file();
+        let attention = Attention::open(path);
+        let on_screen = update(failed_at(1_000));
+        // A tick during the write: the same failure, and a Job that failed since.
+        let mut later = failed_at(1_000);
+        later.jobs_outside_repositories = vec![job(
+            "j-red",
+            JobState::Ended {
+                end: JobEnd::Exited { code: 1 },
+            },
+        )];
+        let newer = Arc::new(Update {
+            at_ms: 2,
+            answer: Answer::Response(Response::Status(later)),
+        });
+
+        let (presented, _) = attention.mark(key(1_000), on_screen, || Some(Arc::clone(&newer)));
+
+        assert_eq!(presented.update().at_ms, 2);
+        // The mark holds on the newer answer too.
+        assert_eq!(presented.seen, [key(1_000)]);
+        assert!(
+            matches!(presented.needs_you[..], [NeedsYou::Job { ref id, .. }] if id == "j-red"),
+            "{:?}",
+            presented.needs_you
+        );
+    }
+
+    #[test]
+    fn a_thread_that_broke_says_so_without_an_empty_path_and_reaches_the_window_as_seen() {
+        let error = SeenError::Task("the thread panicked".to_owned());
+
+        let json = serde_json::to_value(&error).expect("serializes");
+
+        assert_eq!(json["kind"], "seen");
+        assert_eq!(json["message"], "cannot save the Seen failures: the thread panicked");
+    }
+
+    #[test]
     fn a_pruned_key_is_gone_from_the_file_too() {
         let (_dir, path) = state_file();
         let attention = Attention::open(path.clone());
         attention
-            .mark(key(1_000), update(failed_at(1_000)))
+            .mark(key(1_000), update(failed_at(1_000)), || None)
             .1
             .expect("the set is written");
 
@@ -724,7 +839,7 @@ mod tests {
         let (_dir, path) = state_file();
         let attention = Attention::open(path.clone());
         attention
-            .mark(key(1_000), update(failed_at(1_000)))
+            .mark(key(1_000), update(failed_at(1_000)), || None)
             .1
             .expect("the set is written");
         let bytes = fs::read(&path).expect("the set was written");
@@ -781,7 +896,7 @@ mod tests {
     fn the_window_receives_the_answer_unchanged_next_to_needs_you_and_the_seen_keys() {
         let (_dir, path) = state_file();
         let attention = Attention::open(path);
-        let (presented, _) = attention.mark(key(1_000), update(failed_at(1_000)));
+        let (presented, _) = attention.mark(key(1_000), update(failed_at(1_000)), || None);
 
         let json = serde_json::to_value(&presented).expect("the update serializes");
 

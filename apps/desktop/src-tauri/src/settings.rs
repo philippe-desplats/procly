@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use tauri::{AppHandle, State};
 
 use crate::atomic;
+use crate::failure::{self, AppFailureKind};
 use crate::window::{self, MainWindow};
 
 /// The terminal `Open in terminal` uses until the developer picks another one.
@@ -189,16 +190,7 @@ impl SettingsError {
 
 impl Serialize for SettingsError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Failure {
-            kind: &'static str,
-            message: String,
-        }
-        Failure {
-            kind: "settings",
-            message: self.to_string(),
-        }
-        .serialize(serializer)
+        failure::serialize(AppFailureKind::Settings, self, serializer)
     }
 }
 
