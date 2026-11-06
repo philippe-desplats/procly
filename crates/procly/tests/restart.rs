@@ -89,7 +89,12 @@ fn a_restart_replays_the_environment_of_the_last_up_on_the_same_lease_with_a_new
         "{before} then {after}"
     );
     // The output of the run the Restart started, which saw the environment of the `up`, not the one of its caller.
-    let logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+    // The Restart answers once the Service is healthy, which may be before the Daemon has captured its first output.
+    let mut logs = String::new();
+    common::eventually("the restarted run to print its greeting", || {
+        logs = stdout(&procly.procly_in(&main, &["logs", "web"]));
+        logs.lines().any(|line| line.starts_with("greeting="))
+    });
     let greetings: Vec<&str> = logs.lines().filter(|line| line.starts_with("greeting=")).collect();
     assert_eq!(greetings, ["greeting=first"], "{logs}");
     // The held environment may carry secrets, the status never tells it.
