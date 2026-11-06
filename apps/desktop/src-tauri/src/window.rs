@@ -3,8 +3,12 @@
 //! The app has no Dock icon unless its window is open (`LSUIElement` is `true`), and closing the window leaves the
 //! app in the menu bar. The steps go through a [`Host`] so that their order is tested without a window.
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use tauri::{AppHandle, Manager as _};
 
+use crate::dock::{self, DockIcon};
 use crate::settings::SettingsStore;
 
 /// The label of the one window, as `tauri.conf.json` names it.
@@ -43,10 +47,12 @@ pub(crate) fn close(host: &impl Host) {
 }
 
 /// The developer changed "Show in Dock while the window is open". It applies at once when the window is open, and
-/// waits for the next time the window opens when it is not.
+/// waits for the next time the window opens when it is not. Changing the Dock icon takes the focus away from the app,
+/// so the window takes it back.
 pub(crate) fn dock_setting_changed(host: &impl Host, show_in_dock: bool, window_is_open: bool) {
     if window_is_open {
         host.set_dock_visibility(show_in_dock);
+        host.focus();
     }
 }
 
@@ -72,14 +78,48 @@ impl MainWindow<'_> {
     }
 }
 
-impl Host for MainWindow<'_> {
-    fn set_dock_visibility(&self, visible: bool) {
+/// The Dock icon as tao shows and hides it. Only macOS has one.
+struct MacDock<'a>(&'a AppHandle);
+
+impl dock::Raw for MacDock<'_> {
+    fn set_visible(&self, visible: bool) {
         #[cfg(target_os = "macos")]
         if let Err(error) = self.0.set_dock_visibility(visible) {
             eprintln!("procly: cannot change the Dock icon: {error}");
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = visible;
+        let _ = (self.0, visible);
+    }
+}
+
+/// Asks again for a hide of the Dock icon that came too soon after a show, once the system lets it through, then puts
+/// the window back in front since the change took the focus away.
+fn settle_dock_later(app: AppHandle, first: Duration) {
+    tauri::async_runtime::spawn(async move {
+        let mut wait = Some(first);
+        while let Some(left) = wait {
+            tokio::time::sleep(left).await;
+            wait = app
+                .try_state::<Mutex<DockIcon>>()
+                .and_then(|icon| dock::settle(&icon, &MacDock(&app), Instant::now()));
+        }
+        let window = MainWindow(&app);
+        if window.is_open() {
+            window.focus();
+        }
+    });
+}
+
+impl Host for MainWindow<'_> {
+    fn set_dock_visibility(&self, visible: bool) {
+        let raw = MacDock(self.0);
+        let Some(icon) = self.0.try_state::<Mutex<DockIcon>>() else {
+            dock::Raw::set_visible(&raw, visible);
+            return;
+        };
+        if let Some(wait) = dock::request(&icon, &raw, visible, Instant::now()) {
+            settle_dock_later(self.0.clone(), wait);
+        }
     }
 
     fn show(&self) {
@@ -173,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_of_the_dock_setting_applies_at_once_while_the_window_is_open() {
+    fn a_change_of_the_dock_setting_applies_at_once_while_the_window_is_open_and_keeps_the_focus() {
         let host = Recorder::default();
 
         dock_setting_changed(&host, false, true);
@@ -181,7 +221,12 @@ mod tests {
 
         assert_eq!(
             host.calls(),
-            ["set_dock_visibility(false)", "set_dock_visibility(true)"]
+            [
+                "set_dock_visibility(false)",
+                "set_focus",
+                "set_dock_visibility(true)",
+                "set_focus"
+            ]
         );
     }
 

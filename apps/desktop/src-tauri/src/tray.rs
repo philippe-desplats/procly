@@ -1,7 +1,8 @@
 //! The menu bar extra: a tray icon with a native menu, fed by the poller. Never a webview popover.
 //!
-//! What the menu says and which glyph shows are decided in `tray_menu.rs` and `glyph.rs`, which are tested. This file
-//! only draws their result and runs what the developer chooses, so a closed window still lets them see what needs them.
+//! What the menu says, which items it holds and which glyph shows are decided in `tray_menu.rs` and `glyph.rs`, which
+//! are tested. This file only draws their result and runs what the developer chooses, so a closed window still lets
+//! them see what needs them.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,14 +16,11 @@ use crate::clipboard;
 use crate::glyph::{Glyph, GlyphTracker};
 use crate::needs_you::Presented;
 use crate::settings::OPEN_SETTINGS;
-use crate::tray_menu::{self, Action, Model, Snapshot};
+use crate::tray_menu::{self, Action, Entry, Item, Model, Snapshot};
 use crate::window::MainWindow;
 
 /// The id of the one tray icon.
 const TRAY_ID: &str = "procly";
-
-/// The header of a menu, which is only text and does nothing when chosen.
-const HEADER_ID: &str = "tray-header";
 
 /// What is on screen: the glyph, the model the native items were built from, and the header to change in place.
 struct Drawn {
@@ -62,31 +60,32 @@ fn image(glyph: Glyph) -> tauri::Result<Image<'static>> {
     Image::from_bytes(glyph.png())
 }
 
-/// The native menu of `model`, and its header.
+/// The native item of `item`.
+fn native(app: &AppHandle, item: &Item) -> tauri::Result<MenuItem<Wry>> {
+    MenuItemBuilder::with_id(&item.id, &item.label)
+        .enabled(item.enabled)
+        .build(app)
+}
+
+/// The native menu of `model`, and its header. Which items it holds is decided by `tray_menu::layout`.
 fn menu(app: &AppHandle, model: &Model) -> tauri::Result<(Menu<Wry>, MenuItem<Wry>)> {
-    let header = MenuItemBuilder::with_id(HEADER_ID, &model.header)
-        .enabled(false)
-        .build(app)?;
+    let layout = tray_menu::layout(model);
+    let header = native(app, &layout.header)?;
     let menu = Menu::new(app)?;
     menu.append(&header)?;
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
-    for (index, line) in model.needs_you.iter().enumerate() {
-        menu.append(&MenuItemBuilder::with_id(tray_menu::needs_you_id(index), line).build(app)?)?;
+    for entry in &layout.entries {
+        match entry {
+            Entry::Item(item) => menu.append(&native(app, item)?)?,
+            Entry::Separator => menu.append(&PredefinedMenuItem::separator(app)?)?,
+            Entry::Submenu { label, enabled, items } => {
+                let mut submenu = SubmenuBuilder::new(app, *label).enabled(*enabled);
+                for item in items {
+                    submenu = submenu.item(&native(app, item)?);
+                }
+                menu.append(&submenu.build()?)?;
+            }
+        }
     }
-    if !model.needs_you.is_empty() {
-        menu.append(&PredefinedMenuItem::separator(app)?)?;
-    }
-    let mut copy_port = SubmenuBuilder::new(app, "Copy Port").enabled(!model.ports.is_empty());
-    for entry in &model.ports {
-        copy_port =
-            copy_port.item(&MenuItemBuilder::with_id(tray_menu::copy_port_id(entry.port), &entry.label).build(app)?);
-    }
-    menu.append(&copy_port.build()?)?;
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItemBuilder::with_id(tray_menu::OPEN_ID, "Open Procly").build(app)?)?;
-    menu.append(&MenuItemBuilder::with_id(tray_menu::SETTINGS_ID, "Settings…").build(app)?)?;
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItemBuilder::with_id(tray_menu::QUIT_ID, "Quit Procly").build(app)?)?;
     Ok((menu, header))
 }
 

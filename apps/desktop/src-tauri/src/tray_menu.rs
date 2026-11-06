@@ -238,6 +238,77 @@ pub(crate) fn copy_port_id(port: u16) -> String {
     format!("tray-copy-port-{port}")
 }
 
+/// The id of the header, which is text and does nothing when chosen.
+pub(crate) const HEADER_ID: &str = "tray-header";
+
+/// One item of the native menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Item {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) enabled: bool,
+}
+
+impl Item {
+    fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            enabled: true,
+        }
+    }
+}
+
+/// One entry of the native menu below its header, in the order they show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Entry {
+    Item(Item),
+    Separator,
+    /// A submenu, which has nothing to open while it has no item.
+    Submenu {
+        label: &'static str,
+        enabled: bool,
+        items: Vec<Item>,
+    },
+}
+
+/// The native menu as it is built: the header, then the entries. `tray.rs` draws it item by item, so what the menu
+/// holds is tested here without a menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Layout {
+    pub(crate) header: Item,
+    pub(crate) entries: Vec<Entry>,
+}
+
+/// The items of the menu for `model`: the header, the lines of "Needs you" when there are any, Copy Port, then Open
+/// Procly, Settings and Quit, which are always there.
+pub(crate) fn layout(model: &Model) -> Layout {
+    let mut header = Item::new(HEADER_ID, &model.header);
+    header.enabled = false;
+    let mut entries = vec![Entry::Separator];
+    for (index, line) in model.needs_you.iter().enumerate() {
+        entries.push(Entry::Item(Item::new(needs_you_id(index), line)));
+    }
+    if !model.needs_you.is_empty() {
+        entries.push(Entry::Separator);
+    }
+    entries.push(Entry::Submenu {
+        label: "Copy Port",
+        enabled: !model.ports.is_empty(),
+        items: model
+            .ports
+            .iter()
+            .map(|entry| Item::new(copy_port_id(entry.port), &entry.label))
+            .collect(),
+    });
+    entries.push(Entry::Separator);
+    entries.push(Entry::Item(Item::new(OPEN_ID, "Open Procly")));
+    entries.push(Entry::Item(Item::new(SETTINGS_ID, "Settings…")));
+    entries.push(Entry::Separator);
+    entries.push(Entry::Item(Item::new(QUIT_ID, "Quit Procly")));
+    Layout { header, entries }
+}
+
 /// What the item with `id` does, nothing for an id that is not an item of this menu.
 pub(crate) fn action(id: &str) -> Option<Action> {
     match id {
@@ -541,5 +612,81 @@ mod tests {
         assert_eq!(action("settings"), None);
         assert_eq!(action("tray-copy-port-lots"), None);
         assert_eq!(action("tray-copy-port-99999"), None);
+    }
+
+    fn item(id: &str, label: &str) -> Entry {
+        Entry::Item(Item::new(id, label))
+    }
+
+    #[test]
+    fn the_menu_holds_the_header_what_needs_you_copy_port_open_settings_and_quit_in_that_order() {
+        let model = model(Glyph::NeedsYou, Some(&known(&[failed_service()])), clock);
+
+        let built = layout(&model);
+
+        assert_eq!(
+            built.header,
+            Item {
+                id: HEADER_ID.to_owned(),
+                label: "Needs you: 1 (19:35:12)".to_owned(),
+                enabled: false,
+            }
+        );
+        assert_eq!(
+            built.entries,
+            [
+                Entry::Separator,
+                item("tray-needs-you-0", "web-fix: api exited 1"),
+                Entry::Separator,
+                Entry::Submenu {
+                    label: "Copy Port",
+                    enabled: true,
+                    items: vec![Item::new("tray-copy-port-24001", &model.ports[0].label)],
+                },
+                Entry::Separator,
+                item(OPEN_ID, "Open Procly"),
+                item(SETTINGS_ID, "Settings…"),
+                Entry::Separator,
+                item(QUIT_ID, "Quit Procly"),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_nothing_to_show_the_menu_keeps_open_settings_and_quit_and_disables_copy_port() {
+        let built = layout(&model(Glyph::Outline, None, clock));
+
+        assert_eq!(built.header.label, "No Daemon");
+        assert_eq!(
+            built.entries,
+            [
+                Entry::Separator,
+                Entry::Submenu {
+                    label: "Copy Port",
+                    enabled: false,
+                    items: Vec::new(),
+                },
+                Entry::Separator,
+                item(OPEN_ID, "Open Procly"),
+                item(SETTINGS_ID, "Settings…"),
+                Entry::Separator,
+                item(QUIT_ID, "Quit Procly"),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_item_the_menu_builds_does_something_except_the_header() {
+        let built = layout(&model(Glyph::NeedsYou, Some(&known(&[failed_service()])), clock));
+        let clickable = built.entries.iter().flat_map(|entry| match entry {
+            Entry::Item(item) => vec![item],
+            Entry::Submenu { items, .. } => items.iter().collect(),
+            Entry::Separator => Vec::new(),
+        });
+
+        for item in clickable {
+            assert!(action(&item.id).is_some(), "{} does nothing", item.id);
+        }
+        assert_eq!(action(&built.header.id), None);
     }
 }

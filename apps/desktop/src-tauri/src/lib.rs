@@ -7,6 +7,7 @@ mod apps;
 mod atomic;
 mod clipboard;
 mod daemon;
+mod dock;
 mod glyph;
 mod lifecycle;
 mod login_item;
@@ -19,7 +20,10 @@ mod tray;
 mod tray_menu;
 mod window;
 
+use std::sync::Mutex;
+
 use daemon::DaemonClient;
+use dock::DockIcon;
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
@@ -128,6 +132,8 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let client = DaemonClient::resolve()?;
+            // Before the first change of the Dock icon, which tao may ignore when it follows a show too closely.
+            app.manage(Mutex::new(DockIcon::default()));
             let shown = MainWindow(app.handle());
             // `LSUIElement` starts a bundled app with no Dock icon, and this does the same when it runs unbundled.
             shown.set_dock_visibility(false);
