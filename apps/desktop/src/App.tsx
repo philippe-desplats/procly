@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
@@ -67,6 +67,17 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
       void doctor.run(null);
     }
   }, [doctor, notRunning]);
+
+  // The release banner reads the machine checks, so they run once when the Daemon first answers, on no timer, rather
+  // than waiting for a visit to Doctor or a Refresh.
+  const answering = snapshot.kind === "status";
+  const launched = useRef(false);
+  useEffect(() => {
+    if (answering && !launched.current) {
+      launched.current = true;
+      void doctor.run(null);
+    }
+  }, [doctor, answering]);
 
   // The menu refreshes without the window, so Rust says so.
   useTauriEvent(REFRESH_REQUESTED, () => {

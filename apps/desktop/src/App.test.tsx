@@ -83,13 +83,13 @@ describe("the window", () => {
     expect(commands).toContain("last_update");
   });
 
-  it("never asks the Daemon for anything itself, the poller does", async () => {
+  it("never asks the Daemon for anything itself, the poller does, and runs doctor once at launch", async () => {
     const commands = poller(answered(status));
 
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("button", { name: "web-fix" });
 
-    expect(commands).toEqual(["last_update"]);
+    expect(commands).toEqual(["last_update", "doctor"]);
   });
 
   it("follows the poller: a new answer replaces the one on screen without a request", async () => {
@@ -145,7 +145,7 @@ describe("the window", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(commands).toEqual(["last_update", "refresh", "doctor"]);
+    expect(commands).toEqual(["last_update", "doctor", "refresh", "doctor"]);
   });
 });
 
