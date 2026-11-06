@@ -1,17 +1,26 @@
-import { daemonVersion, problemCount, type DoctorState } from "./doctor";
+import { daemonVersion, problemCount, type DoctorDocument, type DoctorState } from "./doctor";
 import { GlyphMark } from "./Glyph";
 import { orphanCount, type OrphanScan } from "./orphan-scan";
 import { formatMinute, formatMoment } from "./time";
 
+/** What the sidebar reads of the last doctor run: its problems, the release it found the Daemon on, and when it ran. */
+interface LastRun {
+  problems: number;
+  version: string | null;
+  at: number;
+}
+
+function summarize(document: DoctorDocument, at: number): LastRun {
+  return { problems: problemCount(document), version: daemonVersion(document), at };
+}
+
 /** The last doctor run the sidebar counts from: the one on show while a new one is on its way. */
-function lastRun(state: DoctorState): { problems: number; version: string | null; at: number } | null {
+function lastRun(state: DoctorState): LastRun | null {
   switch (state.kind) {
     case "report":
-      return { problems: problemCount(state.document), version: daemonVersion(state.document), at: state.at };
+      return summarize(state.document, state.at);
     case "running":
-      return state.document === null || state.at === null
-        ? null
-        : { problems: problemCount(state.document), version: daemonVersion(state.document), at: state.at };
+      return state.document === null || state.at === null ? null : summarize(state.document, state.at);
     case "idle":
     case "failure":
       return null;
@@ -51,6 +60,7 @@ export function SidebarFooter({
 }) {
   const run = lastRun(doctor);
   const orphaned = orphanCount(orphans);
+  const version = run?.version ?? null;
   return (
     <div className="sidebar-foot">
       <button type="button" className="row" aria-current={checking ? "true" : undefined} onClick={onDoctor}>
@@ -75,7 +85,7 @@ export function SidebarFooter({
       {updatedAt === null ? null : (
         <p className="daemon-line">
           <GlyphMark glyph="healthy" />
-          <span>{`Daemon${run?.version == null ? "" : ` ${run.version}`}, updated at ${formatMoment(updatedAt, updatedAt)}`}</span>
+          <span>{`Daemon${version === null ? "" : ` ${version}`}, updated at ${formatMoment(updatedAt, updatedAt)}`}</span>
         </p>
       )}
     </div>
