@@ -355,7 +355,7 @@ describe("the sidebar", () => {
       .map((button) => button.textContent)
       .filter(
         (text) =>
-          text !== "Overview⌘0" &&
+          text !== "Overview" &&
           text !== "Outside Repositories" &&
           text !== "Orphans" &&
           text !== "Doctor" &&
@@ -557,6 +557,74 @@ describe("Needs you", () => {
     );
 
     expect(await screen.findByRole("region", { name: "Needs you" })).toBeInTheDocument();
+  });
+
+  describe("counter on the Overview entry", () => {
+    const SECOND_FOREIGN: NeedsYou = {
+      kind: "foreign",
+      worktree: "/p/work/acme/web",
+      process: { kind: "process", pid: 4343, command: "node worker.js", ports: [3001] },
+    };
+
+    /** The Overview entry of the sidebar. */
+    async function overviewEntry(): Promise<HTMLElement> {
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      return within(sidebar).findByRole("button", { name: /^Overview/ });
+    }
+
+    it("says how many items need the developer, as many as the Needs you section lists", async () => {
+      poller(answered(many, { needsYou: [API_FAILURE, FOREIGN, SECOND_FOREIGN] }));
+
+      render(<App store={createDaemonStore()} />);
+
+      const entry = await overviewEntry();
+      expect(within(entry).getByText("3 need you")).toBeInTheDocument();
+      const needs = await screen.findByRole("region", { name: "Needs you" });
+      expect(within(needs).getAllByRole("listitem")).toHaveLength(3);
+    });
+
+    it("is drawn as the count of a sidebar entry, not as a caption", async () => {
+      poller(answered(many, { needsYou: [API_FAILURE, FOREIGN, SECOND_FOREIGN] }));
+
+      render(<App store={createDaemonStore()} />);
+
+      const count = within(await overviewEntry()).getByText("3 need you");
+      expect(count).toHaveClass("row-count");
+      expect(count).not.toHaveClass("caption");
+    });
+
+    it("says 'needs' for a single item", async () => {
+      poller(answered(many, { needsYou: [FOREIGN] }));
+
+      render(<App store={createDaemonStore()} />);
+
+      expect(within(await overviewEntry()).getByText("1 needs you")).toBeInTheDocument();
+    });
+
+    it("shows no count, and no shortcut either, when nothing needs the developer", async () => {
+      poller(answered(many));
+
+      render(<App store={createDaemonStore()} />);
+
+      const entry = await overviewEntry();
+      expect(entry).toHaveTextContent(/^Overview$/);
+    });
+
+    it("drops by 1 when a failure is marked as Seen", async () => {
+      poller(answered(many, { needsYou: [API_FAILURE, FOREIGN, SECOND_FOREIGN] }), () =>
+        answered(many, { needsYou: [FOREIGN, SECOND_FOREIGN], seen: [API_KEY] }),
+      );
+      render(<App store={createDaemonStore()} />);
+      expect(within(await overviewEntry()).getByText("3 need you")).toBeInTheDocument();
+
+      fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+
+      await waitFor(() => {
+        expect(
+          within(screen.getByRole("navigation", { name: "Worktrees" })).getByText("2 need you"),
+        ).toBeInTheDocument();
+      });
+    });
   });
 
   it("marks a Job as Seen by its id and dims its row in its Worktree", async () => {
