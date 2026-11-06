@@ -6,6 +6,7 @@
 mod apps;
 mod atomic;
 mod daemon;
+mod follow;
 mod lifecycle;
 mod menu;
 mod needs_you;
@@ -15,6 +16,7 @@ mod poller;
 mod settings;
 
 use daemon::DaemonClient;
+use follow::{Follower, WINDOW_VISIBLE};
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
@@ -98,6 +100,13 @@ fn follow_window(window: &Window, event: &WindowEvent) {
     if let Some(poller) = window.try_state::<Poller>() {
         poller.window(state);
     }
+    // A hidden window cancels the follow, and the window starts it again from a fresh backlog once it comes back.
+    if let Some(follower) = window.try_state::<Follower>()
+        && let Some(visible) = follower.window(state)
+    {
+        // A window that is gone has nothing to be told.
+        let _ = window.emit(WINDOW_VISIBLE, visible);
+    }
 }
 
 #[cfg(all(feature = "e2e", not(debug_assertions)))]
@@ -151,6 +160,7 @@ pub fn run() {
             app.manage(client);
             app.manage(poller);
             app.manage(attention);
+            app.manage(Follower::new());
             app.manage(SettingsStore::open(app.path().app_config_dir()?.join(SETTINGS_FILE)));
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())
@@ -173,6 +183,9 @@ pub fn run() {
             last_update,
             mark_seen,
             refresh,
+            follow::follow_logs,
+            follow::stop_follow,
+            follow::service_logs,
             lifecycle::start_daemon,
             lifecycle::restart_daemon,
             apps::detected_apps,

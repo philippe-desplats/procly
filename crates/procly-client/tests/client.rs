@@ -264,3 +264,34 @@ fn an_error_serializes_as_its_kind_and_its_message() {
     let json = serde_json::to_value(ClientError::NoResponse).expect("an error serializes");
     assert_eq!(json["kind"], "no_response");
 }
+
+#[test]
+fn closing_a_connection_ends_a_stream_whose_daemon_stays_silent() {
+    let (_dir, state) = state();
+    let listener = UnixListener::bind(state.socket()).expect("the stand-in Daemon binds the socket");
+    let silent = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("the client connects");
+        let mut request = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut request)
+            .expect("the client sends its request");
+        (&stream)
+            .write_all(line(logs("backlog\n")).as_bytes())
+            .expect("the client reads the backlog");
+        // The stand-in answers nothing more and waits for the client to let go: it reads end of file.
+        let mut rest = Vec::new();
+        std::io::Read::read_to_end(&mut &stream, &mut rest).expect("the client closes the connection");
+    });
+
+    let mut responses = connect(&state).unwrap().send(&wait()).unwrap();
+    let closer = responses.closer().expect("the connection can be closed from elsewhere");
+    assert!(matches!(responses.next(), Some(Ok(Response::Logs { .. }))));
+    // A reader blocked on the silent Daemon in another thread, as a followed Service that prints nothing.
+    let reader = thread::spawn(move || responses.next().is_none());
+    thread::sleep(Duration::from_millis(100));
+
+    closer.close();
+
+    assert!(reader.join().unwrap(), "the blocked reader sees the end of the stream");
+    silent.join().unwrap();
+}
