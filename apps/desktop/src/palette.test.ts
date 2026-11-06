@@ -80,18 +80,30 @@ describe("the palette", () => {
   );
 
   it.each(["light", "dark"] as const)(
-    "keeps the mark cut out of a failure disc and a warning triangle readable in the %s theme",
+    "keeps the mark cut out of a warning triangle readable in the %s theme",
     (theme) => {
       const colours = palette()[theme];
       const cut = colours.get("--panel") ?? "";
-      for (const name of ["--fail", "--warn"]) {
-        // 3:1 is the floor of WCAG 1.4.11 for a graphical object, the cross and the bar are drawn in the pane colour.
-        expect(contrast(cut, colours.get(name) ?? ""), `--panel on ${name}, ${theme}`).toBeGreaterThanOrEqual(
-          3,
-        );
-      }
+      // 3:1 is the floor of WCAG 1.4.11 for a graphical object, the bar and the dot are drawn in the pane colour.
+      expect(
+        contrast(cut, colours.get("--warn") ?? ""),
+        `--panel on --warn, ${theme}`,
+      ).toBeGreaterThanOrEqual(3);
     },
   );
+
+  it("draws the cross of a failure white in light, as the mockup does, and at 3:1 on the red disc in both themes", () => {
+    const { light, dark } = palette();
+    expect(light.get("--fail-cut")).toBe("#ffffff");
+    for (const [theme, colours] of [
+      ["light", light],
+      ["dark", dark],
+    ] as const) {
+      // White on the dark red would fall to 2.78:1, so the dark theme draws the cross in the colour of the pane.
+      const ratio = contrast(colours.get("--fail-cut") ?? "", colours.get("--fail") ?? "");
+      expect(ratio, `--fail-cut on --fail, ${theme}`).toBeGreaterThanOrEqual(3);
+    }
+  });
 
   it("tints the picked row with the accent, lighter in light than in dark", () => {
     expect(css).toMatch(/\.item\[data-selected="true"\]\s*\{\s*background: var\(--selected\);/);
