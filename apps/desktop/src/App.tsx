@@ -254,6 +254,7 @@ export function App({
               updatedAt={snapshot.kind === "status" ? snapshot.at : null}
               doctor={doctorRun}
               orphanScan={orphanDryRun}
+              needsYou={snapshot.kind === "status" ? snapshot.needsYou.length : 0}
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
               }}
@@ -375,6 +376,11 @@ function Toolbar({
   );
 }
 
+/** "3 need you", "1 needs you": the size of Needs you, said on the Overview entry. */
+function needsYouCount(count: number): string {
+  return `${count} ${count === 1 ? "needs" : "need"} you`;
+}
+
 function Sidebar({
   snapshot,
   repositories,
@@ -387,6 +393,7 @@ function Sidebar({
   updatedAt,
   doctor,
   orphanScan,
+  needsYou,
   onSelect,
   onOverview,
   onOrphans,
@@ -409,6 +416,8 @@ function Sidebar({
   doctor: DoctorState;
   /** The last dry run of `Gc`, which the footer counts the Orphans of. */
   orphanScan: OrphanScan;
+  /** How many items are in Needs you, the same list the Overview pins on top. */
+  needsYou: number;
   onSelect: (path: string) => void;
   onOverview: () => void;
   onOrphans: () => void;
@@ -425,7 +434,7 @@ function Sidebar({
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
-        <span className="caption">⌘0</span>
+        {needsYou === 0 ? null : <span className="row-count">{needsYouCount(needsYou)}</span>}
       </button>
       <SidebarWorktrees
         snapshot={snapshot}

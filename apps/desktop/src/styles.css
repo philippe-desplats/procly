@@ -173,6 +173,16 @@ body {
   color: inherit;
 }
 
+.row-count {
+  color: var(--muted);
+  font-size: var(--size-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.row[aria-current="true"] .row-count {
+  color: inherit;
+}
+
 .row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -351,18 +361,11 @@ body {
   flex: none;
 }
 
-.row-count {
+.sidebar-foot .row-count {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted);
-  font-size: var(--size-small);
-  font-variant-numeric: tabular-nums;
-}
-
-.row[aria-current="true"] .row-count {
-  color: inherit;
 }
 
 /* The Daemon answers: a quiet dot and when the last Status was read. */
