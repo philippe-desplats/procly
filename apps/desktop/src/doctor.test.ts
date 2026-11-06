@@ -37,4 +37,10 @@ describe("the commands of a fix", () => {
       "(cd /p/work/acme/web && procly env web)",
     ]);
   });
+
+  it("keep the quotes of a fix that moves to a path with a space, as doctor wrote them", () => {
+    expect(fixCommands("cd '/p/work/acme/my web' && procly env web", null)).toEqual([
+      "(cd '/p/work/acme/my web' && procly env web)",
+    ]);
+  });
 });

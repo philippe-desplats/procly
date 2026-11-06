@@ -1826,7 +1826,7 @@ pub(crate) fn major(version: &str) -> Option<u32> {
 
 /// The output of a command as trimmed text, an invalid UTF-8 sequence read as a replacement character.
 /// `text` as one word of a shell command, single quoted unless it holds only characters a shell reads as they are.
-fn shell_word(text: &str) -> String {
+pub(super) fn shell_word(text: &str) -> String {
     if !text.is_empty()
         && text
             .chars()
