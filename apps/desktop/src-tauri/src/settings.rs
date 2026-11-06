@@ -27,6 +27,9 @@ pub(crate) struct Settings {
     pub(crate) terminal: String,
     /// Whether the app shows a Dock icon while its window is open. On unless the developer turns it off.
     pub(crate) show_in_dock: bool,
+    /// Whether a failure that enters "Needs you" makes a banner. Off until the developer turns it on, which is the one
+    /// moment the app asks for the permission, so it changes through [`SettingsStore::set_notify_on_failure`] only.
+    pub(crate) notify_on_failure: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +38,7 @@ impl Default for Settings {
             editor: None,
             terminal: DEFAULT_TERMINAL.to_owned(),
             show_in_dock: true,
+            notify_on_failure: false,
         }
     }
 }
@@ -78,12 +82,15 @@ impl SettingsStore {
     }
 
     /// Applies `settings` at once and writes them to the file. A blank editor means none, a blank terminal means the
-    /// default one.
+    /// default one. The notification switch is left as it stands, since only [`Self::set_notify_on_failure`] changes
+    /// it, after the permission was asked.
     ///
     /// # Errors
     ///
     /// When the file cannot be written. The change holds until the app quits.
     pub(crate) fn set(&self, settings: Settings) -> Result<(), SettingsError> {
+        // Held while the file is written, so that two changes reach the file in the order they were applied.
+        let mut held = self.held();
         let settings = Settings {
             editor: settings
                 .editor
@@ -94,15 +101,29 @@ impl SettingsStore {
                 terminal => terminal.to_owned(),
             },
             show_in_dock: settings.show_in_dock,
+            notify_on_failure: held.notify_on_failure,
         };
-        // Held while the file is written, so that two changes reach the file in the order they were applied.
-        let mut held = self.held();
         held.clone_from(&settings);
+        self.write(&settings)
+    }
+
+    /// Turns "Notify on failure" on or off at once and writes it to the file, whatever else the window holds.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be written. The change holds until the app quits.
+    pub(crate) fn set_notify_on_failure(&self, enabled: bool) -> Result<(), SettingsError> {
+        let mut held = self.held();
+        held.notify_on_failure = enabled;
+        self.write(&held)
+    }
+
+    fn write(&self, settings: &Settings) -> Result<(), SettingsError> {
         let write = |source| SettingsError::Write {
             path: self.inner.path.clone(),
             source,
         };
-        let bytes = serde_json::to_vec_pretty(&settings).map_err(|error| write(io::Error::other(error)))?;
+        let bytes = serde_json::to_vec_pretty(settings).map_err(|error| write(io::Error::other(error)))?;
         atomic::write(&self.inner.path, &bytes).map_err(write)
     }
 }
@@ -246,7 +267,7 @@ mod tests {
         Settings {
             editor: editor.map(str::to_owned),
             terminal: terminal.to_owned(),
-            show_in_dock: true,
+            ..Settings::default()
         }
     }
 
@@ -359,6 +380,64 @@ mod tests {
 
         assert!(settings.show_in_dock);
         assert_eq!(settings.editor.as_deref(), Some("Zed"));
+    }
+
+    #[test]
+    fn notifications_are_off_until_the_developer_turns_them_on() {
+        let (_dir, path) = settings_file();
+
+        assert!(!SettingsStore::open(path).get().notify_on_failure);
+    }
+
+    #[test]
+    fn the_notification_switch_persists_in_the_file_and_is_read_back_after_a_restart() {
+        let (_dir, path) = settings_file();
+        let store = SettingsStore::open(path.clone());
+
+        store.set_notify_on_failure(true).expect("the write");
+
+        assert!(store.get().notify_on_failure);
+        assert!(SettingsStore::open(path.clone()).get().notify_on_failure);
+        let written = fs::read_to_string(path).expect("the file");
+        assert!(written.contains("\"notify_on_failure\": true"), "{written}");
+    }
+
+    #[test]
+    fn saving_the_other_settings_never_turns_notifications_on_or_off() {
+        let (_dir, path) = settings_file();
+        let store = SettingsStore::open(path);
+        store.set(chosen(Some("Zed"), "Terminal")).expect("the write");
+        store.set_notify_on_failure(true).expect("the write");
+
+        // A window that saved the switch as off, or on before the permission was asked, changes nothing.
+        store
+            .set(Settings {
+                notify_on_failure: false,
+                ..chosen(Some("Cursor"), "Ghostty")
+            })
+            .expect("the write");
+        assert!(store.get().notify_on_failure);
+        assert_eq!(store.get().editor.as_deref(), Some("Cursor"));
+
+        store.set_notify_on_failure(false).expect("the write");
+        store
+            .set(Settings {
+                notify_on_failure: true,
+                ..chosen(Some("Cursor"), "Ghostty")
+            })
+            .expect("the write");
+        assert!(!store.get().notify_on_failure);
+    }
+
+    #[test]
+    fn a_file_written_before_the_notification_switch_existed_keeps_notifications_off() {
+        let (_dir, path) = settings_file();
+        fs::write(&path, r#"{"editor": "Zed", "show_in_dock": false}"#).expect("the file is written");
+
+        let settings = SettingsStore::open(path).get();
+
+        assert!(!settings.notify_on_failure);
+        assert!(!settings.show_in_dock);
     }
 
     #[test]

@@ -51,14 +51,14 @@ impl Model {
 }
 
 /// The last name of a path, which names a Worktree in a line.
-fn name_of(path: &std::path::Path) -> String {
+pub(crate) fn name_of(path: &std::path::Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
 }
 
-fn service_end(end: ServiceEnd) -> String {
+pub(crate) fn service_end(end: ServiceEnd) -> String {
     match end {
         ServiceEnd::Exited { code } => format!("exited {code}"),
         ServiceEnd::Signaled { signal } => format!("signaled {signal}"),
@@ -73,7 +73,7 @@ fn service_end(end: ServiceEnd) -> String {
     }
 }
 
-fn job_end(end: JobEnd) -> String {
+pub(crate) fn job_end(end: JobEnd) -> String {
     match end {
         JobEnd::Exited { code } => format!("exited {code}"),
         JobEnd::Signaled { signal } => format!("signaled {signal}"),
@@ -82,7 +82,7 @@ fn job_end(end: JobEnd) -> String {
 }
 
 /// A command cut to [`COMMAND_WIDTH`] characters, so that a line stays one line.
-fn short(command: &str) -> String {
+pub(crate) fn short(command: &str) -> String {
     let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
     if command.chars().count() <= COMMAND_WIDTH {
         return command;

@@ -250,6 +250,17 @@ impl Presented {
     pub(crate) fn needs_you(&self) -> &[NeedsYou] {
         &self.needs_you
     }
+
+    /// The failures of the answer that are in "Needs you", each with its key. A Foreign process is not one, and a
+    /// failure marked as Seen is not in "Needs you" any more.
+    pub(crate) fn unseen_failures(&self) -> Vec<(FailureKey, NeedsYou)> {
+        report_of(&self.update).map_or_else(Vec::new, |report| {
+            failures(report)
+                .into_iter()
+                .filter(|(key, _)| !self.seen.contains(key))
+                .collect()
+        })
+    }
 }
 
 /// The Seen set as the rest of the app holds it, with the file it survives in.
@@ -264,7 +275,8 @@ struct Inner {
     seen: Mutex<Seen>,
 }
 
-fn report_of(update: &Update) -> Option<&StatusReport> {
+/// The report an answer holds, nothing for an answer that is not a status.
+pub(crate) fn report_of(update: &Update) -> Option<&StatusReport> {
     match &update.answer {
         Answer::Response(Response::Status(report)) => Some(report),
         Answer::Response(_) | Answer::Failure(_) => None,

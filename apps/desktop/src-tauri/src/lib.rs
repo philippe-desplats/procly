@@ -15,6 +15,7 @@ mod lifecycle;
 mod login_item;
 mod menu;
 mod needs_you;
+mod notifications;
 mod opening;
 mod orphans;
 mod poller;
@@ -29,6 +30,7 @@ use daemon::DaemonClient;
 use dock::DockIcon;
 use follow::{Follower, WINDOW_VISIBLE};
 use needs_you::{Attention, FailureKey, Presented, SeenError};
+use notifications::Notifier;
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
 use tauri::{AppHandle, Emitter as _, Manager as _, Runtime, State, Window, WindowEvent};
@@ -86,6 +88,17 @@ fn publish(app: &AppHandle, presented: &Presented) {
     let _ = app.emit(DAEMON_UPDATE, presented);
     if let Some(tray) = app.try_state::<Tray>() {
         tray.show(app, presented);
+    }
+}
+
+/// Shows the banners an answer calls for. Every answer is followed, but a banner shows only while "Notify on failure"
+/// is on.
+fn notify(app: &AppHandle, notifier: &mut Notifier, presented: &Presented) {
+    let enabled = app
+        .try_state::<SettingsStore>()
+        .is_some_and(|settings| settings.get().notify_on_failure);
+    for banner in notifier.banners(presented, enabled) {
+        notifications::show(app, &banner);
     }
 }
 
@@ -188,7 +201,10 @@ pub fn run() {
             let mut updates = poller.subscribe();
             let handle = app.handle().clone();
             let seen = attention.clone();
+            // A click on a banner is reported only for banners shown after this, and none shows before the first answer.
+            notifications::open_on_click(app.handle());
             tauri::async_runtime::spawn(async move {
+                let mut notifier = Notifier::default();
                 while updates.changed().await.is_ok() {
                     let update = updates.borrow_and_update().clone();
                     if let Some(update) = update {
@@ -203,6 +219,7 @@ pub fn run() {
                             eprintln!("procly: {error}");
                         }
                         publish(&handle, &presented);
+                        notify(&handle, &mut notifier, &presented);
                     }
                 }
             });
@@ -221,6 +238,8 @@ pub fn run() {
                 .build(),
         )
         .plugin(login_item::plugin())
+        // Banners are sent from Rust and the window is granted no permission of the plugin.
+        .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
             if menu::is_refresh(&event) {
                 if let Some(poller) = app.try_state::<Poller>() {
@@ -254,6 +273,8 @@ pub fn run() {
             settings::save_settings,
             login_item::get_open_at_login,
             login_item::set_open_at_login,
+            notifications::set_notify_on_failure,
+            notifications::open_notification_settings,
         ])
         .build(tauri::generate_context!())
         .expect("the Tauri application builds")
@@ -308,6 +329,30 @@ mod tests {
             .collect();
 
         assert!(autostart.is_empty(), "{autostart:?}");
+    }
+
+    #[test]
+    fn the_window_is_granted_no_notification_permission() {
+        // Rust sends the banners and asks for the permission, so the window cannot notify of its own making.
+        let notification: Vec<_> = granted()
+            .into_iter()
+            .filter(|name| name.starts_with("notification:"))
+            .collect();
+
+        assert!(notification.is_empty(), "{notification:?}");
+    }
+
+    #[test]
+    fn launching_the_app_never_asks_for_the_permission_to_notify() {
+        // The permission is asked when "Notify on failure" is turned on, which `notifications::switch` does.
+        let source = include_str!("lib.rs");
+        let launch = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the source before the tests");
+
+        assert!(!launch.contains("request_permission"));
+        assert!(!launch.contains("Permission"));
     }
 
     #[test]
