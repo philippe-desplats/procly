@@ -173,6 +173,41 @@ describe("the Overview", () => {
     expect(rows[1]?.textContent).not.toMatch(/:\d{4,5}/);
   });
 
+  it("lists the Isolated Compose services of each Worktree with their port, a Worktree with nothing else included", async () => {
+    const withContainers = structuredClone(many);
+    if (withContainers.response !== "status") {
+      throw new Error("the recorded answer is a status");
+    }
+    const worktrees = withContainers.repositories.flatMap((repository) => repository.worktrees);
+    const db = { service: "db", project: "acme-web", compose: "postgres", port: 24050 };
+    const cache = { service: "cache", project: "acme-infra", compose: "redis", port: null };
+    const web = worktrees.find((worktree) => worktree.path === "/p/work/acme/web");
+    const infra = worktrees.find((worktree) => worktree.path === "/p/work/acme/infra");
+    if (web === undefined || infra === undefined) {
+      throw new Error("the recorded answer has the web and infra Worktrees");
+    }
+    web.containers = [db];
+    // The infra Worktree runs no Process service, only this container.
+    infra.containers = [cache];
+    poller(answered(withContainers));
+
+    render(<App store={createDaemonStore()} />);
+
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    const rows = within(overviewPane)
+      .getAllByRole("listitem")
+      .map((row) => row.textContent);
+    expect(rows).toEqual([
+      "apihealthy:1873119:31:22",
+      "workerrestarting19:31:22",
+      "dbrunning:24050",
+      "apiexited 1:187422026-11-04 19:31:22",
+      "sitestarting:1875519:31:40",
+      "sitestopped:1876019:30:00",
+      "cacherunning",
+    ]);
+  });
+
   it("groups the Services under the label of their Worktree", async () => {
     poller(answered(many));
 

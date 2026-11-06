@@ -18,7 +18,7 @@ import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree } 
 import { State } from "./StateMark";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { RemovedMark, ServiceRow } from "./Rows";
+import { ContainerRow, RemovedMark, ServiceRow } from "./Rows";
 import { jobEndWord, serviceEndWord } from "./state";
 import { formatMoment } from "./time";
 import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
@@ -450,8 +450,9 @@ function Center({
 }
 
 /**
- * "Needs you" pinned on top, then every Service of every Worktree, grouped under the Worktree, with its port. `at` is
- * when the answer was read, the day the times are compared with.
+ * "Needs you" pinned on top, then every Service of every Worktree, grouped under the Worktree, with its port: its
+ * Process services and Groups, then its Isolated Compose services. `at` is when the answer was read, the day the times
+ * are compared with.
  */
 function Overview({
   repositories,
@@ -469,7 +470,9 @@ function Overview({
   const groups = repositories
     .map((repository) => ({
       repository,
-      worktrees: repository.worktrees.filter((worktree) => worktree.services.length > 0),
+      worktrees: repository.worktrees.filter(
+        (worktree) => worktree.services.length > 0 || (worktree.containers ?? []).length > 0,
+      ),
     }))
     .filter((group) => group.worktrees.length > 0);
   return (
@@ -499,6 +502,9 @@ function Overview({
                     at={at}
                     seen={seen}
                   />
+                ))}
+                {(worktree.containers ?? []).map((container) => (
+                  <ContainerRow key={container.service} container={container} worktreePath={worktree.path} />
                 ))}
               </ul>
             </div>
