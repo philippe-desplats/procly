@@ -374,6 +374,58 @@ body {
   overflow-wrap: anywhere;
 }
 
+.copybox-block {
+  align-items: flex-start;
+}
+
+.copybox-block code {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.item.check {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.check-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.check-message {
+  margin: 0;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.fix {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prompt {
+  margin-top: 16px;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: var(--raise);
+  color: var(--text);
+}
+
 .overlay {
   position: fixed;
   inset: 0;
