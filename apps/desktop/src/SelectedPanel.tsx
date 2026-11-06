@@ -41,7 +41,7 @@ function targetOf(selected: Selected): OutputTarget {
 }
 
 /** The key of the failure the selection may be, nothing for a Compose service, which is listed because it runs. */
-function failureKeyOf(selected: Selected): FailureKey | null {
+export function failureKeyOf(selected: Selected): FailureKey | null {
   switch (selected.kind) {
     case "service":
       return {

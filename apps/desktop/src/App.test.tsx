@@ -246,13 +246,15 @@ describe("the Overview", () => {
     expect(await screen.findByText("No Service is known.")).toBeInTheDocument();
   });
 
-  it("comes back with ⌘0 from a Worktree", async () => {
+  it("comes back with ⌘0 from a Worktree, which the Overview item of the View menu carries", async () => {
     poller(answered(many));
     render(<App store={createDaemonStore()} />);
     fireEvent.click(await screen.findByRole("button", { name: "docs-preview" }));
     expect(screen.queryByRole("region", { name: "Overview" })).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "0", metaKey: true });
+    await act(async () => {
+      await emit("menu-choice", "overview");
+    });
 
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
   });
@@ -314,6 +316,31 @@ describe("the sidebar", () => {
   afterEach(() => {
     cleanup();
     clearMocks();
+  });
+
+  it("draws no title above the entries, the traffic lights sit on its background", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: "docs-preview" });
+    expect(within(sidebar).queryByRole("heading", { level: 1 })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Procly" })).toBeNull();
+  });
+
+  it("opens with a drag region that holds no entry, so that the entries stay clickable", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: "docs-preview" });
+    const region = sidebar.querySelector("[data-tauri-drag-region]");
+    expect(region).not.toBeNull();
+    expect(sidebar.firstElementChild).toBe(region);
+    expect(region?.children).toHaveLength(0);
+    expect(region?.textContent).toBe("");
   });
 
   it("lists the Worktrees by branch, by folder name when there is no branch, and marks the removed ones", async () => {
