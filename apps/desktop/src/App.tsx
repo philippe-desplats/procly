@@ -6,13 +6,14 @@ import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon
 import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
+import { MENU_CHOICE, menuContext, useMenuContext, type MenuChoice } from "./menu";
 import { failureKey, FailuresContext, failuresOf } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
-import { SelectedPanel, WorktreeNames } from "./SelectedPanel";
+import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
@@ -89,18 +90,6 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     void doctor.refresh();
   });
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if ((event.metaKey || event.ctrlKey) && event.key === "0") {
-        setView({ kind: "overview" });
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [setView]);
-
   // The native menu sends Settings, which `⌘,` triggers.
   useEffect(() => {
     let stopped = false;
@@ -154,6 +143,60 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
 
   // The Daemon may stop reporting what was picked, an ended Job it evicted for one.
   const selected = snapshot.kind === "status" ? resolve(selection, snapshot.report) : null;
+  // The Worktree the inspector offers to open, which the Worktree menu acts on.
+  const inspected = selected === null ? current : selected.worktree;
+  const failure = selected === null ? null : failureKeyOf(selected);
+  useMenuContext(
+    menuContext(
+      selected,
+      current,
+      failure,
+      snapshot.kind === "status" ? snapshot.needsYou.flatMap((line) => failureKey(line) ?? []) : [],
+    ),
+  );
+  const release = (worktree: WorktreeStatus): void => {
+    setReleasing({
+      path: worktree.path,
+      label: worktreeLabel(worktree),
+      listed: worktree.listed,
+      ended: endedIn(worktree),
+    });
+  };
+
+  // Restart, Stop and the opening of the Worktree are carried out by the inspector, which shows how they went.
+  useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
+    switch (choice) {
+      case "overview":
+        setView({ kind: "overview" });
+        break;
+      case "doctor":
+        setView({ kind: "doctor" });
+        break;
+      case "orphans":
+        setView({ kind: "orphans" });
+        break;
+      case "mark-seen":
+        if (failure !== null) {
+          // Rust answers with a new update, so a mark that could not be saved still shows.
+          store.markSeen(failure).catch(() => undefined);
+        }
+        break;
+      case "release":
+        if (inspected !== null) {
+          release(inspected);
+        }
+        break;
+      case "restart":
+      case "stop":
+      case "open-in-editor":
+      case "open-in-terminal":
+        break;
+      default: {
+        const unhandled: never = choice;
+        throw new Error(`unhandled choice: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  });
 
   const settings = view.kind === "settings";
   const checking = view.kind === "doctor";
@@ -230,14 +273,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
                     current={current}
                     store={store}
                     doctor={doctor}
-                    onRelease={(worktree) => {
-                      setReleasing({
-                        path: worktree.path,
-                        label: worktreeLabel(worktree),
-                        listed: worktree.listed,
-                        ended: endedIn(worktree),
-                      });
-                    }}
+                    onRelease={release}
                   />
                 )}
               </>
@@ -699,7 +735,10 @@ function Inspector({
   );
 }
 
-/** Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. */
+/**
+ * Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. Open in Editor and
+ * Open in Terminal of the menu bar open it here, so that a failure shows under the buttons.
+ */
 function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: () => void }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -714,6 +753,14 @@ function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: (
       }
     });
   }
+
+  useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
+    if (choice === "open-in-editor") {
+      run(openWorktree(path, "editor"));
+    } else if (choice === "open-in-terminal") {
+      run(openWorktree(path, "terminal"));
+    }
+  });
 
   return (
     <div className="worktree-actions">
