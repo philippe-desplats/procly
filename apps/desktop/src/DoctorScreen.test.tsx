@@ -95,6 +95,17 @@ function clipboard(): string[] {
   return written;
 }
 
+/** The glyphs the list draws, grouped by the status of the check they sit on. */
+function glyphsByStatus(list: HTMLElement): Record<string, string[]> {
+  const found: Record<string, Set<string>> = {};
+  for (const item of within(list).getAllByRole("listitem")) {
+    const status = item.dataset.status;
+    if (status === undefined) continue;
+    (found[status] ??= new Set()).add(item.querySelector("svg")?.getAttribute("data-glyph") ?? "none");
+  }
+  return Object.fromEntries(Object.entries(found).map(([status, glyphs]) => [status, [...glyphs]]));
+}
+
 /** The names of the checks the list shows, in the order it shows them. */
 function listed(list: HTMLElement): string[] {
   return within(list)
@@ -138,6 +149,16 @@ describe("the Doctor screen", () => {
     ]);
     // Once at launch for the banner, then once for the screen.
     expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
+  });
+
+  it("draws each check with the glyph of its status: a cross, a triangle, a tick or a dash", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+
+    const doctor = await openDoctor();
+
+    await within(doctor).findByText("leased_ports");
+    expect(glyphsByStatus(doctor)).toEqual({ failed: ["failure"], warning: ["warning"], passed: ["passed"] });
   });
 
   it("leaves out the checks that belong to a Worktree, which a run from no directory only skips", async () => {
@@ -366,6 +387,14 @@ describe("the Worktree screen", () => {
     const checks = await screen.findByRole("region", { name: "Doctor checks" });
     expect(await within(checks).findByText("configuration")).toBeInTheDocument();
     expect(listed(checks)).toEqual(["configuration", "worktrunk_hooks", "guard", "portless"]);
+    // Whatever their status, the checks of a Worktree wear the same shapes as the checks of the machine.
+    const shapes = glyphsByStatus(checks);
+    expect(Object.keys(shapes).length).toBeGreaterThan(1);
+    for (const [status, glyphs] of Object.entries(shapes)) {
+      expect(glyphs, status).toEqual([
+        { failed: "failure", warning: "warning", passed: "passed", skipped: "skipped" }[status],
+      ]);
+    }
     expect(within(checks).getByText(/unknown key `servcies`/)).toBeInTheDocument();
     expect(within(checks).queryByText("docker_compose")).not.toBeInTheDocument();
   });

@@ -6,7 +6,7 @@ const MAIN = "main";
 describe("the close button of the window", () => {
   it("hides the window and leaves the app running in the menu bar", async () => {
     await browser.waitUntil(
-      async () => browser.execute(() => document.querySelector("h1")?.textContent === "Procly"),
+      async () => browser.execute(() => document.querySelector('nav[aria-label="Worktrees"]') !== null),
       { timeout: 60_000, timeoutMsg: "the window did not draw" },
     );
     expect(await browser.execute(() => document.visibilityState)).toBe("visible");

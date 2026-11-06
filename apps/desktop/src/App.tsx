@@ -19,7 +19,7 @@ import { State } from "./StateMark";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ContainerRow, RemovedMark, ServiceRow } from "./Rows";
-import { jobEndWord, serviceEndWord } from "./state";
+import { foreignWord, jobEndWord, serviceEndWord } from "./state";
 import { formatMoment } from "./time";
 import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
 
@@ -171,7 +171,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
       <FailuresContext.Provider value={failures}>
         <div className={wide ? "window window-settings" : "window"}>
           <nav className="pane sidebar" aria-label="Worktrees">
-            <h1 className="pane-title">Procly</h1>
+            <div className="drag-strip" data-tauri-drag-region />
             <Sidebar
               snapshot={snapshot}
               repositories={repositories}
@@ -650,7 +650,7 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
     case "foreign":
       return (
         <>
-          <span className="mark">Foreign</span>
+          <State {...foreignWord()} />
           <span className="item-name mono">
             {line.process.kind === "process" ? line.process.command : line.process.name}
           </span>

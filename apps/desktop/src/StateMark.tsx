@@ -1,11 +1,12 @@
+import { GlyphMark } from "./Glyph";
 import type { StateWord } from "./state";
 
-/** A state as a coloured dot and a word: the colour only repeats what the word says. */
-export function State({ word, tone }: StateWord) {
+/** A state as a glyph and a word: the shape of the glyph and the word say the state, the colour only repeats it. */
+export function State({ word, tone, glyph }: StateWord) {
   return (
     <span className={`state tone-${tone}`}>
-      <span className="dot" aria-hidden="true" />
-      {word}
+      <GlyphMark glyph={glyph} />
+      <span className="word">{word}</span>
     </span>
   );
 }

@@ -316,6 +316,31 @@ describe("the sidebar", () => {
     clearMocks();
   });
 
+  it("draws no title above the entries, the traffic lights sit on its background", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: "docs-preview" });
+    expect(within(sidebar).queryByRole("heading", { level: 1 })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Procly" })).toBeNull();
+  });
+
+  it("opens with a drag region that holds no entry, so that the entries stay clickable", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: "docs-preview" });
+    const region = sidebar.querySelector("[data-tauri-drag-region]");
+    expect(region).not.toBeNull();
+    expect(sidebar.firstElementChild).toBe(region);
+    expect(region?.children).toHaveLength(0);
+    expect(region?.textContent).toBe("");
+  });
+
   it("lists the Worktrees by branch, by folder name when there is no branch, and marks the removed ones", async () => {
     poller(answered(many));
 
@@ -426,8 +451,14 @@ describe("Needs you", () => {
       .map((line) => line.textContent);
     expect(lines).toEqual([
       "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-endMark as Seen",
-      "Foreignnode server.js:3000main",
+      "started outside Proclynode server.js:3000main",
     ]);
+    // The same glyph as everywhere else: a cross for the failure, a diamond for the Foreign process.
+    expect(
+      within(needs)
+        .getAllByRole("listitem")
+        .map((line) => line.querySelector("svg")?.getAttribute("data-glyph")),
+    ).toEqual(["failure", "foreign"]);
     const firstService = within(overviewPane).getAllByText("healthy")[0];
     expect(
       needs.compareDocumentPosition(firstService as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
