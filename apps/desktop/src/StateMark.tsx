@@ -6,7 +6,7 @@ export function State({ word, tone, glyph }: StateWord) {
   return (
     <span className={`state tone-${tone}`}>
       <GlyphMark glyph={glyph} />
-      {word}
+      <span className="word">{word}</span>
     </span>
   );
 }

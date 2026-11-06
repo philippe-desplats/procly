@@ -59,6 +59,13 @@ describe("the state glyph", () => {
     expect(container.querySelector(".state")).toHaveTextContent("exited 1");
   });
 
+  it("wraps the word apart from the glyph, so that a Seen row can dim the word and keep the glyph", () => {
+    const { container } = render(<State {...SIX.failure!} />);
+
+    expect(container.querySelector(".state .word")).toHaveTextContent("exited 1");
+    expect(container.querySelector(".state .word svg")).toBeNull();
+  });
+
   it("keeps the tone class on the state, which the stylesheet colours the glyph and the word with", () => {
     const { container } = render(<State {...SIX.failure!} />);
 

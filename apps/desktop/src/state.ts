@@ -95,7 +95,7 @@ export function jobEndWord(end: JobEnd, failed: boolean): StateWord {
 export function serviceWord(service: ServiceStatus, failed: boolean): StateWord {
   switch (service.state) {
     case "starting":
-      return { word: "starting", tone: "muted", glyph: "busy" };
+      return { word: "starting", tone: "warn", glyph: "busy" };
     case "healthy":
       return { word: "healthy", tone: "ok", glyph: "healthy" };
     case "restarting":

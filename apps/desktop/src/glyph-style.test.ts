@@ -5,11 +5,14 @@ import { describe, expect, it } from "vitest";
 
 const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
-/** The declarations of the first rule whose selector is exactly `selector`, outside any at-rule. */
+/** The declarations of the first rule whose selector list holds `selector`, outside any at-rule. */
 function rule(selector: string, source: string = css): string | null {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`, "m").exec(source);
-  return match?.[1] ?? null;
+  const bare = source.replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const match of bare.matchAll(/([^{}@]+)\{([^{}]*)\}/g)) {
+    const selectors = (match[1] ?? "").split(",").map((candidate) => candidate.trim());
+    if (selectors.includes(selector)) return match[2] ?? null;
+  }
+  return null;
 }
 
 /** The body of the `@media (prefers-reduced-motion: reduce)` block. */
@@ -52,6 +55,15 @@ describe("the glyph stylesheet", () => {
     expect(rule(".state.tone-fail")).toContain("color: var(--fail)");
     expect(rule(".state.tone-warn")).toContain("color: var(--warn)");
     expect(rule(".state.tone-ok")).toBeNull();
+  });
+
+  it("dims the text of a Seen row and never its glyph, which keeps its contrast", () => {
+    // Opacity on the row would dim the glyph too (0.55 takes the failure red under 3:1), so the dimming sits on the
+    // parts of the row that are not the state, and on the word of the state alone.
+    expect(rule('.item[data-seen="true"]')).toBeNull();
+    expect(rule('.item[data-seen="true"] .item-select > :not(.state)')).toMatch(/opacity:\s*0\.55/);
+    expect(rule('.item[data-seen="true"] .word')).toMatch(/opacity:\s*0\.55/);
+    expect(css).not.toMatch(/data-seen[^{]*\.(glyph|state)\s*\{/);
   });
 
   it("no longer draws the 8 px dot", () => {

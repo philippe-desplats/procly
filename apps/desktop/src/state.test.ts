@@ -58,8 +58,12 @@ describe("the glyph of a state", () => {
     expect(glyphOfJob(ended, false)).toBe("ended");
   });
 
-  it("shows a Service that is starting as busy, as the mockup does", () => {
-    expect(glyphOfService({ ...SERVICE, state: "starting" })).toBe("busy");
+  it("shows a Service that is starting as the amber ring, like one that restarts, as the mockup does", () => {
+    expect(serviceWord({ ...SERVICE, state: "starting" }, false)).toEqual({
+      word: "starting",
+      tone: "warn",
+      glyph: "busy",
+    });
   });
 
   it("draws a Foreign process amber, a warning and not a failure", () => {

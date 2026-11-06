@@ -180,7 +180,9 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
-.item[data-seen="true"] {
+/* A Seen row fades, except the glyph of its state, which keeps the 3:1 contrast it needs to be read by its shape. */
+.item[data-seen="true"] .item-select > :not(.state),
+.item[data-seen="true"] .word {
   opacity: 0.55;
 }
 
