@@ -1,8 +1,9 @@
-import { memo, useLayoutEffect, useRef } from "react";
+import { Fragment, memo, useLayoutEffect, useRef } from "react";
 
 import { CopyBox } from "./CopyBox";
 import { composeStatement, jobStatement, serviceStatement, type Statement } from "./inspect";
-import { worktreeLabel } from "./labels";
+import { worktreeLabel, worktreeNames } from "./labels";
+import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
 import type { Selected } from "./selection";
 import { ServiceActions } from "./ServiceActions";
@@ -133,6 +134,20 @@ function Heading({ selected }: { selected: Selected }) {
   }
 }
 
+/** The branch, the folder and the slug of a Worktree, as terms of a list of facts. */
+export function WorktreeNames({ worktree }: { worktree: WorktreeStatus }) {
+  return (
+    <>
+      {worktreeNames(worktree).map(([name, value]) => (
+        <Fragment key={name}>
+          <dt className="caption">{name}</dt>
+          <dd className={name === "Branch" ? undefined : "mono"}>{value}</dd>
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
 function Facts({ selected, at }: { selected: Selected; at: number }) {
   return (
     <dl className="facts">
@@ -140,6 +155,7 @@ function Facts({ selected, at }: { selected: Selected; at: number }) {
         <>
           <dt className="caption">Worktree</dt>
           <dd>{worktreeLabel(selected.worktree)}</dd>
+          <WorktreeNames worktree={selected.worktree} />
         </>
       )}
       {selected.kind === "service" ? (

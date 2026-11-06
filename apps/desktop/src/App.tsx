@@ -12,7 +12,7 @@ import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
-import { SelectedPanel } from "./SelectedPanel";
+import { SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
@@ -748,10 +748,9 @@ function WorktreeActions({ path, onNeedEditor }: { path: string; onNeedEditor: (
 function WorktreeFacts({ current }: { current: WorktreeStatus }) {
   return (
     <dl className="facts">
+      <WorktreeNames worktree={current} />
       <dt className="caption">Path</dt>
       <dd className="mono">{current.path}</dd>
-      <dt className="caption">Slug</dt>
-      <dd className="mono">{current.slug}</dd>
       <dt className="caption">Kind</dt>
       <dd>{current.main ? "Main worktree" : "Worktree"}</dd>
       <dt className="caption">Services</dt>

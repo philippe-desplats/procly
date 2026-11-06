@@ -258,6 +258,58 @@ describe("the Overview", () => {
   });
 });
 
+describe("the inspector of a Worktree", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  const BRANCH = "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end";
+
+  /** The facts the inspector lists, as `name: value` pairs in the order it lists them. */
+  function facts(): string[] {
+    const inspector = screen.getByRole("complementary", { name: "Inspector" });
+    return within(inspector)
+      .getAllByRole("term")
+      .map((term) => `${term.textContent}: ${term.nextElementSibling?.textContent ?? ""}`);
+  }
+
+  it("names the branch, the folder and the slug of the Worktree on screen", async () => {
+    poller(answered(many));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
+    await screen.findByRole("heading", { name: BRANCH, level: 2 });
+
+    expect(facts()).toEqual(
+      expect.arrayContaining([`Branch: ${BRANCH}`, "Folder: web-login", "Slug: web_login"]),
+    );
+  });
+
+  it("names the branch, the folder and the slug of the Worktree of the item picked", async () => {
+    poller(answered(many));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
+    const center = screen.getByRole("main");
+
+    fireEvent.click(await within(center).findByRole("button", { name: /^api/ }));
+
+    expect(facts()).toEqual(
+      expect.arrayContaining([`Branch: ${BRANCH}`, "Folder: web-login", "Slug: web_login"]),
+    );
+  });
+
+  it("says a Worktree with no branch has none", async () => {
+    poller(answered(many));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "docs-preview" }));
+    await screen.findByRole("heading", { name: "docs-preview", level: 2 });
+
+    expect(facts()).toEqual(expect.arrayContaining(["Branch: none", "Folder: docs-preview"]));
+  });
+});
+
 describe("the sidebar", () => {
   afterEach(() => {
     cleanup();
