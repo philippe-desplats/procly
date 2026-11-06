@@ -74,7 +74,8 @@ describe("a Daemon that does not run", () => {
     expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start the Daemon" })).toBeEnabled();
     expect(screen.getByText("procly unit install")).toBeInTheDocument();
-    expect(commands).toEqual(["last_update"]);
+    // Doctor ran on entering the state, which starts nothing.
+    expect(commands).toEqual(["last_update", "doctor"]);
   });
 
   it("copies exactly the command it shows", async () => {
@@ -104,7 +105,7 @@ describe("a Daemon that does not run", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(commands).toEqual(["last_update", "start_daemon"]);
+    expect(commands).toEqual(["last_update", "doctor", "start_daemon"]);
 
     await tick(answered());
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();

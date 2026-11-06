@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "result": "problems",
+  "checks": [
+    { "name": "docker_compose", "status": "passed", "message": "docker compose 2.29.1", "fix": null },
+    {
+      "name": "daemon",
+      "status": "passed",
+      "message": "the Daemon answers and runs procly 0.5.0",
+      "fix": null
+    },
+    {
+      "name": "session_unit",
+      "status": "warning",
+      "message": "the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session",
+      "fix": "procly unit install"
+    },
+    {
+      "name": "state_documents",
+      "status": "passed",
+      "message": "every state document can be read",
+      "fix": null
+    },
+    {
+      "name": "configuration",
+      "status": "skipped",
+      "message": "/ is in no git Repository",
+      "fix": null
+    },
+    { "name": "guard", "status": "skipped", "message": "/ is in no git Repository", "fix": null },
+    { "name": "portless", "status": "skipped", "message": "/ is in no git Repository", "fix": null },
+    {
+      "name": "worktrunk_hooks",
+      "status": "skipped",
+      "message": "/ is in no git Repository",
+      "fix": null
+    },
+    {
+      "name": "leased_ports",
+      "status": "failed",
+      "message": "lease web.http port 24081 of /p/work/acme/web-fix is held by process 4812 node, which Procly did not start\nservice web of /p/work/acme/web-fix listens on port 10189 instead of its Lease, port 24000 (Port mismatch)",
+      "fix": "kill 4812\ncd /p/work/acme/web-fix && procly env web"
+    },
+    {
+      "name": "orphans",
+      "status": "failed",
+      "message": "3 Orphans left by removed Worktrees",
+      "fix": "procly gc"
+    },
+    {
+      "name": "portless_aliases",
+      "status": "failed",
+      "message": "the Portless alias web.acme outlived its Lease\nthe Portless alias api.acme outlived its Lease",
+      "fix": "portless alias --remove web.acme\nportless alias --remove api.acme"
+    }
+  ],
+  "prompt": "`procly doctor` checked this machine and found 3 problems listed below. Fix them in the order listed.\n\n1. leased_ports: lease web.http port 24081 is held by process 4812 node\n   Commands:\n   - kill 4812\n\n2. orphans: 3 Orphans left by removed Worktrees\n   Commands:\n   - procly gc\n",
+  "agent": null
+}

@@ -1,6 +1,6 @@
 import type { StateWord } from "./state";
 
-/** A state in words, with the dot of its tone: colour only carries the state, the word says it. */
+/** A state as a coloured dot and a word: the colour only repeats what the word says. */
 export function State({ word, tone }: StateWord) {
   return (
     <span className={`state tone-${tone}`}>

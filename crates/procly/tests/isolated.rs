@@ -428,7 +428,17 @@ fn docker_logs_reads_the_container_of_the_worktree() {
     assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
 
-    let output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    // `up` answers once the container listens, which may be before Docker has delivered its first output.
+    let mut output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    common::eventually_within(
+        common::DOCKER_DEADLINE,
+        "the container to print its marker",
+        || {
+            output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+            stdout(&output).contains("procly-other-marker")
+        },
+        String::new,
+    );
 
     assert_success(&output);
     let logs = stdout(&output);
@@ -1143,7 +1153,17 @@ fn docker_logs_of_a_compose_service_reads_its_container_in_the_environment_of_it
     assert_success(&up);
 
     // This shell has no `PCL_MARKER`, the environment of the `up` interpolates the compose file.
-    let output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    // `up` answers once the container listens, which may be before Docker has delivered its first output.
+    let mut output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    common::eventually_within(
+        common::DOCKER_DEADLINE,
+        "the container to print its marker",
+        || {
+            output = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+            stdout(&output).contains("procly-held-marker")
+        },
+        String::new,
+    );
 
     assert_success(&output);
     assert!(stdout(&output).contains("procly-held-marker"), "{}", stdout(&output));

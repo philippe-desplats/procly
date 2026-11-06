@@ -51,6 +51,9 @@ function app(
           return options.apps ?? APPS;
         case "save_settings":
           return options.saving?.();
+        case "doctor":
+          // The Worktree screen asks for its checks when it opens, which these tests do not look at.
+          return { schema_version: 1, result: "healthy", checks: [], prompt: null, agent: null };
         case "open_worktree":
         case "reveal_worktree":
           return options.opening?.(command, args);

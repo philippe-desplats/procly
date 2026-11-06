@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "result": "problems",
+  "checks": [
+    { "name": "docker_compose", "status": "passed", "message": "docker compose 2.29.1", "fix": null },
+    {
+      "name": "daemon",
+      "status": "failed",
+      "message": "no Daemon runs, nothing answers on /p/state/procly.sock, any procly command starts one",
+      "fix": "procly status"
+    },
+    {
+      "name": "session_unit",
+      "status": "warning",
+      "message": "the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session",
+      "fix": "procly unit install"
+    },
+    {
+      "name": "state_documents",
+      "status": "passed",
+      "message": "every state document can be read",
+      "fix": null
+    },
+    {
+      "name": "configuration",
+      "status": "skipped",
+      "message": "/ is in no git Repository",
+      "fix": null
+    },
+    { "name": "guard", "status": "skipped", "message": "/ is in no git Repository", "fix": null },
+    { "name": "portless", "status": "skipped", "message": "/ is in no git Repository", "fix": null },
+    {
+      "name": "worktrunk_hooks",
+      "status": "skipped",
+      "message": "/ is in no git Repository",
+      "fix": null
+    },
+    { "name": "leased_ports", "status": "skipped", "message": "no Daemon runs", "fix": null },
+    { "name": "orphans", "status": "skipped", "message": "no Daemon runs", "fix": null },
+    { "name": "portless_aliases", "status": "skipped", "message": "no Daemon runs", "fix": null }
+  ],
+  "prompt": "`procly doctor` checked this machine and found 1 problem listed below.\n\n1. daemon: no Daemon runs\n   Commands:\n   - procly status\n",
+  "agent": null
+}

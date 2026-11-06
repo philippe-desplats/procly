@@ -445,8 +445,7 @@ mod tests {
         let window = window.as_ref().window();
         let (told, heard) = mpsc::channel();
         app.listen(WINDOW_VISIBLE, move |event| {
-            told.send(event.payload().to_owned())
-                .expect("the test still listens");
+            told.send(event.payload().to_owned()).expect("the test still listens");
         });
 
         // A window that is gone is no longer looked at, which is how the app learns that it is hidden.
