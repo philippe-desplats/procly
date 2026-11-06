@@ -809,6 +809,11 @@ body {
   margin: 0;
 }
 
+/* The line of a Daemon that no longer answers well, centered as the text around it. */
+.state-column > .daemon-line {
+  justify-content: center;
+}
+
 .state-column > .brand-mark {
   width: 22px;
   height: 22px;

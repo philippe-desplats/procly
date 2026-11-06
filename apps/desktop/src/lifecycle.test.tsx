@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type Failure, type Update } from "./daemon";
+import machine from "./fixtures/doctor.json";
+import gc from "./fixtures/gc.json";
 import recorded from "./fixtures/status.json";
 import type { Response } from "./protocol/Response";
 
@@ -90,6 +92,49 @@ async function tick(update: Update): Promise<void> {
     await emit("daemon-update", update);
   });
 }
+
+describe("a Daemon that does not answer well", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  const UNREADABLE: Failure = { kind: "decode", message: "unreadable answer from the daemon" };
+
+  it("takes the whole window, with the brand mark, the title and why, and no sidebar, toolbar or inspector", async () => {
+    rust(failed(UNREADABLE));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon did not answer" });
+    expectCenteredScreen("The Daemon did not answer");
+    expectNoShell();
+    expect(screen.getByText("unreadable answer from the daemon")).toBeInTheDocument();
+  });
+
+  it("keeps the Daemon line with the time of the last Status that answered, and no quiet glyph", async () => {
+    rust(answered(), { doctor: () => machine, list_orphans: () => gc });
+    render(<App store={createDaemonStore()} />);
+    const sidebar = await screen.findByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByText("Daemon 0.5.0, updated at 19:35:00");
+
+    await tick({ ...failed(UNREADABLE), at_ms: AT + 60_000 });
+
+    const line = await screen.findByText("Daemon 0.5.0, updated at 19:35:00");
+    expect(within(screen.getByRole("main")).getByText("Daemon 0.5.0, updated at 19:35:00")).toBe(line);
+    // The quiet glyph says the Daemon answers, which it no longer does.
+    expect(line.parentElement?.querySelector("[data-glyph]")).toBeNull();
+  });
+
+  it("names no time at all when no Status ever answered", async () => {
+    rust(failed(UNREADABLE));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon did not answer" });
+    expect(screen.queryByText(/updated at/)).not.toBeInTheDocument();
+  });
+});
 
 describe("a Daemon that does not run", () => {
   afterEach(() => {

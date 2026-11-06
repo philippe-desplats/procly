@@ -3,8 +3,9 @@ import { useState, type ReactNode } from "react";
 import { BrandMark } from "./BrandMark";
 import { CopyBox } from "./CopyBox";
 import { failureMessage, type DaemonSnapshot, type DaemonStore } from "./daemon";
-import type { DoctorStore } from "./doctor";
+import { useDoctor, type DoctorStore } from "./doctor";
 import { ChecksWithoutDaemon } from "./DoctorScreen";
+import { DaemonLine, daemonVersionOf } from "./SidebarFooter";
 
 /** The command that has a session manager keep the Daemon running, which the developer runs in a terminal. */
 const INSTALL_UNIT = "procly unit install";
@@ -34,28 +35,43 @@ function useAction(run: () => Promise<void>): { start: () => void; pending: bool
 }
 
 /** The snapshots with nothing to show in a sidebar or an inspector, which take the whole window instead. */
-export type BlockingSnapshot = Extract<DaemonSnapshot, { kind: "no-daemon" | "protocol-mismatch" }>;
+export type BlockingSnapshot = Extract<
+  DaemonSnapshot,
+  { kind: "no-daemon" | "protocol-mismatch" | "failure" }
+>;
 
-/** Whether the Daemon cannot be read, or speaks another protocol, so that the window shows a state screen. */
+/**
+ * Whether the Daemon cannot be read, gave an error or an unexpected answer, or speaks another protocol, so that the
+ * window shows a state screen.
+ */
 export function isBlocking(snapshot: DaemonSnapshot): snapshot is BlockingSnapshot {
-  return snapshot.kind === "no-daemon" || snapshot.kind === "protocol-mismatch";
+  return (
+    snapshot.kind === "no-daemon" || snapshot.kind === "protocol-mismatch" || snapshot.kind === "failure"
+  );
 }
 
-/** The screen of a Daemon that cannot be used, on the whole window and not in the 3-pane shell. */
+/**
+ * The screen of a Daemon that cannot be used, on the whole window and not in the 3-pane shell. `lastAnswer` is when a
+ * Status last answered, `null` while none did.
+ */
 export function DaemonStateScreen({
   snapshot,
   store,
   doctor,
+  lastAnswer,
 }: {
   snapshot: BlockingSnapshot;
   store: DaemonStore;
   doctor: DoctorStore;
+  lastAnswer: number | null;
 }) {
   switch (snapshot.kind) {
     case "no-daemon":
       return <DaemonNotRunning store={store} doctor={doctor} />;
     case "protocol-mismatch":
       return <DaemonOfAnotherVersion daemon={snapshot.daemon} app={snapshot.app} store={store} />;
+    case "failure":
+      return <DaemonDidNotAnswer message={snapshot.message} doctor={doctor} lastAnswer={lastAnswer} />;
     default: {
       const unhandled: never = snapshot;
       throw new Error(`unhandled snapshot: ${JSON.stringify(unhandled)}`);
@@ -89,6 +105,29 @@ function StateScreen({
         {below}
       </main>
     </>
+  );
+}
+
+/**
+ * The Daemon gave an error or an answer this app cannot read. The poller keeps asking, and the window recovers on the
+ * next Status. The line of the Daemon keeps the time of the last Status that answered, without the glyph that says it
+ * answers.
+ */
+function DaemonDidNotAnswer({
+  message,
+  doctor,
+  lastAnswer,
+}: {
+  message: string;
+  doctor: DoctorStore;
+  lastAnswer: number | null;
+}) {
+  const version = daemonVersionOf(useDoctor(doctor, null));
+  return (
+    <StateScreen title="The Daemon did not answer">
+      <p className="muted">{message}</p>
+      {lastAnswer === null ? null : <DaemonLine version={version} updatedAt={lastAnswer} answering={false} />}
+    </StateScreen>
   );
 }
 

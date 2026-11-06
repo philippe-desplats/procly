@@ -913,7 +913,7 @@ describe("the reason line of a Worktree in the sidebar", () => {
     expect(reason?.parentElement?.querySelectorAll(".row-line")).toHaveLength(1);
   });
 
-  it("draws no reason line while the Daemon answers badly", async () => {
+  it("draws no reason line while the Daemon answers badly, since the sidebar gives the window to the state screen", async () => {
     poller(answered(many, { needsYou: [API_FAILURE] }));
     render(<App store={createDaemonStore()} />);
     await entryOf("web-login");
@@ -925,7 +925,9 @@ describe("the reason line of a Worktree in the sidebar", () => {
       seen: [],
     });
 
-    expect(reasons()).toHaveLength(0);
+    expect(await screen.findByRole("heading", { name: "The Daemon did not answer" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Worktrees" })).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".row-reason")).toHaveLength(0);
   });
 
   it("names the reason in the accessible name of the entry, after the label", async () => {

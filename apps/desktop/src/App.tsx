@@ -89,6 +89,13 @@ export function App({
   // The poller of the app keeps the snapshot current, the window only follows it.
   useEffect(() => store.start(), [store]);
 
+  // When a Status last answered, which the screen of a Daemon that no longer answers well still names.
+  const [lastAnswer, setLastAnswer] = useState<number | null>(null);
+  // Kept while rendering, as React advises for state that follows a prop, so a failure never shows a stale time.
+  if (snapshot.kind === "status" && snapshot.at !== lastAnswer) {
+    setLastAnswer(snapshot.at);
+  }
+
   // Doctor runs when the app enters "Daemon not running", not on each tick that finds it still not running.
   const notRunning = snapshot.kind === "no-daemon";
   useEffect(() => {
@@ -250,7 +257,7 @@ export function App({
 
   // Without a Daemon to read there is nothing for a sidebar or an inspector to hold, so the window is one screen.
   if (isBlocking(snapshot)) {
-    return <DaemonStateScreen snapshot={snapshot} store={store} doctor={doctor} />;
+    return <DaemonStateScreen snapshot={snapshot} store={store} doctor={doctor} lastAnswer={lastAnswer} />;
   }
 
   return (
@@ -569,13 +576,6 @@ function Center({
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
-    case "failure":
-      return (
-        <section>
-          <h2 className="title">The Daemon did not answer</h2>
-          <p className="muted">{snapshot.message}</p>
-        </section>
-      );
     case "status":
       return current === null ? (
         <Overview
