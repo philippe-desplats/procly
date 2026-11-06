@@ -1,5 +1,3 @@
-import { useState } from "react";
-
 import type { FailureKey } from "./daemon";
 import type { DoctorStore } from "./doctor";
 import { WorktreeChecks } from "./DoctorScreen";
@@ -8,7 +6,6 @@ import { isSeen } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { ReleaseSheet } from "./ReleaseSheet";
 import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
 import { jobWord } from "./state";
 import { State } from "./StateMark";
@@ -40,16 +37,18 @@ export function WorktreeScreen({
   at,
   seen,
   doctor,
-  onChanged,
+  onRelease,
 }: {
   worktree: WorktreeStatus;
   at: number;
   seen: FailureKey[];
   doctor: DoctorStore;
-  /** Asks for a fresh status once a release changed what the Daemon holds. */
-  onChanged: () => void;
+  /**
+   * Opens the release sheet. The app holds the sheet, not this screen: a release can leave the Daemon with nothing to
+   * report for the Worktree, and the screen is gone by then while the sheet still shows the result.
+   */
+  onRelease: (worktree: WorktreeStatus) => void;
 }) {
-  const [releasing, setReleasing] = useState(false);
   const foreign = worktree.foreign ?? [];
   const containers = worktree.containers ?? [];
   const empty =
@@ -68,23 +67,12 @@ export function WorktreeScreen({
           type="button"
           className="button"
           onClick={() => {
-            setReleasing(true);
+            onRelease(worktree);
           }}
         >
           Release…
         </button>
       </div>
-      {releasing ? (
-        <ReleaseSheet
-          path={worktree.path}
-          label={worktreeLabel(worktree)}
-          listed={worktree.listed}
-          onClose={() => {
-            setReleasing(false);
-          }}
-          onChanged={onChanged}
-        />
-      ) : null}
       {empty ? <p className="muted">Nothing runs in this Worktree.</p> : null}
       {foreign.length > 0 ? (
         <>

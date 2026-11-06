@@ -8,6 +8,7 @@ import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
+import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { SelectedPanel } from "./SelectedPanel";
@@ -46,6 +47,9 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   }, []);
   const control = useMemo(() => ({ selection, select: setSelection }), [selection]);
   const [doctor] = useState(() => given ?? createDoctorStore());
+  // The Worktree whose release sheet is open. The app holds it, since the status may stop reporting the Worktree once
+  // it is released, and the screen that opened the sheet goes with it.
+  const [releasing, setReleasing] = useState<{ path: string; label: string; listed: boolean } | null>(null);
 
   // The poller of the app keeps the snapshot current, the window only follows it.
   useEffect(() => store.start(), [store]);
@@ -177,7 +181,19 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               {view.kind === "doctor" ? (
                 <DoctorScreen store={doctor} />
               ) : (
-                <Center snapshot={snapshot} current={current} store={store} doctor={doctor} />
+                <Center
+                  snapshot={snapshot}
+                  current={current}
+                  store={store}
+                  doctor={doctor}
+                  onRelease={(worktree) => {
+                    setReleasing({
+                      path: worktree.path,
+                      label: worktreeLabel(worktree),
+                      listed: worktree.listed,
+                    });
+                  }}
+                />
               )}
             </>
           )}
@@ -196,6 +212,17 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
           </aside>
         )}
       </div>
+      {releasing === null ? null : (
+        <ReleaseSheet
+          path={releasing.path}
+          label={releasing.label}
+          listed={releasing.listed}
+          onClose={() => {
+            setReleasing(null);
+          }}
+          onChanged={refresh}
+        />
+      )}
     </SelectionContext.Provider>
   );
 }
@@ -352,11 +379,13 @@ function Center({
   current,
   store,
   doctor,
+  onRelease,
 }: {
   snapshot: DaemonSnapshot;
   current: WorktreeStatus | null;
   store: DaemonStore;
   doctor: DoctorStore;
+  onRelease: (worktree: WorktreeStatus) => void;
 }) {
   const onMarkSeen = (key: FailureKey): void => {
     // Rust answers with a new update, so a mark that could not be saved still shows.
@@ -391,10 +420,7 @@ function Center({
           at={snapshot.at}
           seen={snapshot.seen}
           doctor={doctor}
-          onChanged={() => {
-            // The poller answers with the effect, and a refresh asks for that answer now.
-            store.refresh().catch(() => undefined);
-          }}
+          onRelease={onRelease}
         />
       );
     default: {

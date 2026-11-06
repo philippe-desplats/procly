@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -310,6 +311,26 @@ describe("the Worktree release sheet", () => {
     expect(await sheet.findByText("no Daemon answers")).toBeInTheDocument();
     expect(sheet.getByRole("button", { name: "Release" })).toBeEnabled();
     expect(sheet.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
+
+  it("keeps showing the result when the status stops reporting the released Worktree", async () => {
+    app({ releasing: () => ({ ...emptyReport, services: ["web"] }) });
+    const sheet = within(await openSheet());
+    fireEvent.click(await sheet.findByRole("button", { name: "Release" }));
+    await screen.findByRole("dialog", { name: "Released web-fix" });
+
+    // The Daemon forgets what it held, and has nothing left to report for the Worktree.
+    await act(async () => {
+      await emit("daemon-update", {
+        at_ms: AT + 2000,
+        response: { response: "status", repositories: [], jobs_outside_repositories: [] },
+        needs_you: [],
+        seen: [],
+      } satisfies Update);
+    });
+
+    expect(screen.getByRole("dialog", { name: "Released web-fix" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
   });
 
   it("closes the result with Done", async () => {
