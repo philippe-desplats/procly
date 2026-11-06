@@ -20,7 +20,7 @@ use follow::{Follower, WINDOW_VISIBLE};
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
-use tauri::{AppHandle, Emitter as _, Manager as _, State, Window, WindowEvent};
+use tauri::{AppHandle, Emitter as _, Manager as _, Runtime, State, Window, WindowEvent};
 
 /// The event that carries each answer of the poller to the window.
 const DAEMON_UPDATE: &str = "daemon-update";
@@ -80,7 +80,7 @@ fn refresh(poller: State<'_, Poller>) {
 }
 
 /// Where the window stands, from what Tauri reports about it.
-fn window_state(window: &Window) -> WindowState {
+fn window_state<R: Runtime>(window: &Window<R>) -> WindowState {
     // A window that is being destroyed answers nothing: nobody looks at it.
     let flag = |read: tauri::Result<bool>| read.unwrap_or(false);
     WindowState::from_flags(
@@ -91,7 +91,7 @@ fn window_state(window: &Window) -> WindowState {
 }
 
 /// Tells the poller about a window event that changes where the window stands.
-fn follow_window(window: &Window, event: &WindowEvent) {
+fn follow_window<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     let state = match event {
         WindowEvent::Focused(_) | WindowEvent::Resized(_) => window_state(window),
         WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => WindowState::Closed,

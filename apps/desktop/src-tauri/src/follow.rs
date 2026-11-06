@@ -244,6 +244,8 @@ mod tests {
     use std::time::Duration;
 
     use procly_client::protocol;
+    use tauri::test::{mock_builder, mock_context, noop_assets};
+    use tauri::{Listener as _, Manager as _, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
     use super::*;
 
@@ -425,6 +427,79 @@ mod tests {
         assert_eq!(follower.window(WindowState::Closed), None, "no change, no event");
         assert_eq!(follower.window(WindowState::Visible), Some(true));
         assert_eq!(follower.window(WindowState::Front), None);
+    }
+
+    #[test]
+    fn the_window_event_handler_closes_the_follow_and_tells_the_window_when_it_hides_and_returns() {
+        let (_dir, state) = state();
+        let follower = Follower::new();
+        let (daemon, thread) = waiting_follow(state, &follower, 1);
+        // The handler of the app, run on the events of a window of the mock runtime.
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        app.manage(follower);
+        let window = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .expect("the mock window opens");
+        let window = window.as_ref().window();
+        let (told, heard) = mpsc::channel();
+        app.listen(WINDOW_VISIBLE, move |event| {
+            told.send(event.payload().to_owned())
+                .expect("the test still listens");
+        });
+
+        // A window that is gone is no longer looked at, which is how the app learns that it is hidden.
+        crate::follow_window(&window, &WindowEvent::Destroyed);
+
+        // Checked first, so that a handler that tells the follower the wrong state fails here instead of waiting on
+        // a connection that stays open.
+        assert_eq!(heard.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("false"));
+        thread.join().expect("the follow ends").expect("quietly");
+        daemon.join().expect("the Daemon sees the connection close");
+        // The mock window is shown and not in front: giving it focus again is the window coming back.
+        crate::follow_window(&window, &WindowEvent::Focused(true));
+        assert_eq!(heard.recv_timeout(Duration::from_secs(5)).as_deref(), Ok("true"));
+    }
+
+    #[test]
+    fn a_snapshot_asks_for_the_logs_once_with_the_environment_of_the_app() {
+        let (_dir, state) = state();
+        let listener = UnixListener::bind(state.socket()).expect("the stand-in Daemon binds the socket");
+        let daemon = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("the app connects");
+            let mut request = String::new();
+            BufReader::new(&stream)
+                .read_line(&mut request)
+                .expect("the request line is read");
+            let answer = line(Response::Logs {
+                output: "db ready\n".to_owned(),
+            });
+            (&stream).write_all(answer.as_bytes()).expect("written");
+            request
+        });
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        app.manage(DaemonClient::new(state, PathBuf::from("/p/bin/procly")));
+
+        let response = tauri::async_runtime::block_on(service_logs(
+            "db".to_owned(),
+            PathBuf::from("/p/work/acme/web"),
+            app.state::<DaemonClient>(),
+        ))
+        .expect("a running Daemon answers");
+
+        assert!(matches!(response, Response::Logs { output } if output == "db ready\n"));
+        let request = daemon.join().expect("the stand-in Daemon ends");
+        let Ok(Request::Logs { name, cwd, env, follow }) = protocol::decode::<Request>(request.trim_end()) else {
+            panic!("the app asked for the logs: {request}");
+        };
+        assert_eq!(name, "db");
+        assert_eq!(cwd, PathBuf::from("/p/work/acme/web"));
+        assert!(!follow, "a Compose service is read once, it is never followed");
+        assert!(!env.is_empty(), "the test process has an environment");
+        assert_eq!(env, std::env::vars().collect::<Vec<_>>());
     }
 
     #[test]
