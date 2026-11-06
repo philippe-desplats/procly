@@ -10,6 +10,9 @@ import { exportGlyphs, GLYPHS, ICONS } from "./export-glyphs";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+// Rasterizing the glyphs takes over 5 s on the macOS CI runner.
+const EXPORT_TIMEOUT_MS = 30_000;
+
 /** The size a PNG declares in its header, and whether it is a PNG at all. */
 async function header(path: string): Promise<{ png: boolean; width: number; height: number }> {
   const bytes = await readFile(path);
@@ -21,34 +24,42 @@ async function header(path: string): Promise<{ png: boolean; width: number; heig
 }
 
 describe("the glyph export script", () => {
-  it("draws the 3 template PNGs of the tray from the SVG sources, each 36 px tall", async () => {
-    const out = await mkdtemp(join(tmpdir(), "procly-glyphs-"));
+  it(
+    "draws the 3 template PNGs of the tray from the SVG sources, each 36 px tall",
+    async () => {
+      const out = await mkdtemp(join(tmpdir(), "procly-glyphs-"));
 
-    const written = await exportGlyphs(GLYPHS, out);
+      const written = await exportGlyphs(GLYPHS, out);
 
-    expect(written.map((path) => basename(path))).toEqual([
-      "tray-mark.png",
-      "tray-mark-needs-you.png",
-      "tray-outline.png",
-    ]);
-    const sizes = await Promise.all(written.map(header));
-    expect(sizes.map((size) => size.png)).toEqual([true, true, true]);
-    expect(sizes.map((size) => size.height)).toEqual([36, 36, 36]);
-    // The mark and its outline are 12 units wide on a 3 px grid, the bite widens the mark to 13.85 units.
-    expect(sizes[0]?.width).toBe(36);
-    expect(sizes[1]?.width).toBeGreaterThanOrEqual(41);
-    expect(sizes[1]?.width).toBeLessThanOrEqual(42);
-    expect(sizes[2]?.width).toBe(36);
-  });
+      expect(written.map((path) => basename(path))).toEqual([
+        "tray-mark.png",
+        "tray-mark-needs-you.png",
+        "tray-outline.png",
+      ]);
+      const sizes = await Promise.all(written.map(header));
+      expect(sizes.map((size) => size.png)).toEqual([true, true, true]);
+      expect(sizes.map((size) => size.height)).toEqual([36, 36, 36]);
+      // The mark and its outline are 12 units wide on a 3 px grid, the bite widens the mark to 13.85 units.
+      expect(sizes[0]?.width).toBe(36);
+      expect(sizes[1]?.width).toBeGreaterThanOrEqual(41);
+      expect(sizes[1]?.width).toBeLessThanOrEqual(42);
+      expect(sizes[2]?.width).toBe(36);
+    },
+    EXPORT_TIMEOUT_MS,
+  );
 
-  it("agrees in size with the PNGs the app ships, so that a glyph edited without exporting is caught", async () => {
-    const out = await mkdtemp(join(tmpdir(), "procly-glyphs-"));
+  it(
+    "agrees in size with the PNGs the app ships, so that a glyph edited without exporting is caught",
+    async () => {
+      const out = await mkdtemp(join(tmpdir(), "procly-glyphs-"));
 
-    const written = await exportGlyphs(GLYPHS, out);
+      const written = await exportGlyphs(GLYPHS, out);
 
-    for (const path of written) {
-      const shipped = join(fileURLToPath(ICONS), basename(path));
-      expect(await header(shipped)).toEqual(await header(path));
-    }
-  });
+      for (const path of written) {
+        const shipped = join(fileURLToPath(ICONS), basename(path));
+        expect(await header(shipped)).toEqual(await header(path));
+      }
+    },
+    EXPORT_TIMEOUT_MS,
+  );
 });
