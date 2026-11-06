@@ -58,6 +58,14 @@ procly --version
 
 The formula lives in the tap [`philippe-desplats/homebrew-procly`](https://github.com/philippe-desplats/homebrew-procly) and installs the binary of the matching GitHub release.
 
+On macOS 13 or newer, the desktop app has a cask of its own. It installs `Procly.app` and the `procly` command line it carries, so it replaces the formula:
+
+```sh
+brew install --cask philippe-desplats/procly/procly-app
+```
+
+The bundle is signed and notarized, one per architecture, and `brew upgrade --cask procly-app` moves to a newer release. See [Installing Procly](docs/install.md).
+
 ### GitHub Releases
 
 Each [release](https://github.com/philippe-desplats/procly/releases) carries one archive per platform and a `SHA256SUMS` file:

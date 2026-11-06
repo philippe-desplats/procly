@@ -55,6 +55,9 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: apps/desktop/package.json
+      # WebdriverIO (ADR 0016) pulls `extract-zip` through `@puppeteer/browsers`, and no release of it fixes these 2
+      # advisories. It only unpacks browser downloads, which the end-to-end tests never ask for since they drive the
+      # app itself. Drop the flags once a fixed release exists.
       - name: Audit apps/desktop/bun.lock
-        run: bun audit --audit-level=high
+        run: bun audit --audit-level=high --ignore GHSA-7pqw-9j4j-h8q3 --ignore GHSA-jmr9-qjv8-65gv
         working-directory: apps/desktop

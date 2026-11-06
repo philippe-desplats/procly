@@ -43,3 +43,40 @@ jobs:
       - run: make fmt-check
       - run: make lint
       - run: make test
+      # The scripts of the release workflow, which only a tag would otherwise run.
+      - run: make test-release-scripts
+
+  # The end-to-end tests (ADR 0016) drive the built app against a real Daemon, outside `make check`. They run on every
+  # pull request. Linux has no display on a runner, so `xvfb-run` gives the window one. Narrow the trigger with a `paths`
+  # filter on `pull_request` if a run exceeds 10 minutes.
+  e2e:
+    name: e2e ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: apps/desktop/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: apps/desktop/.node-version
+      - name: Install the system packages Tauri needs, and a virtual display
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev xvfb
+      - run: bun install --frozen-lockfile
+        working-directory: apps/desktop
+      - name: Run the end-to-end tests
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum make e2e
+      - name: Run the end-to-end tests
+        if: runner.os != 'Linux'
+        run: make e2e

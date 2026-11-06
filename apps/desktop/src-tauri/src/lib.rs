@@ -14,6 +14,7 @@ mod login_item;
 mod menu;
 mod needs_you;
 mod opening;
+mod orphans;
 mod poller;
 mod settings;
 mod tray;
@@ -122,6 +123,18 @@ fn follow_window(window: &Window, event: &WindowEvent) {
     }
 }
 
+#[cfg(all(feature = "e2e", not(debug_assertions)))]
+compile_error!("the `e2e` feature opens a WebDriver server and must never be part of a release build (ADR 0016)");
+
+/// The builder every run starts from. A build made for the end-to-end tests (ADR 0016) also carries the plugin that
+/// serves `WebDriver` on the loopback port the test runner chose, which no other build has.
+fn builder() -> tauri::Builder<tauri::Wry> {
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "e2e")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
+}
+
 /// Runs the app until the developer quits it. Closing the window leaves it in the menu bar, and neither closing the
 /// window nor quitting the app stops anything in the Daemon.
 ///
@@ -129,7 +142,7 @@ fn follow_window(window: &Window, event: &WindowEvent) {
 ///
 /// When Tauri cannot start, which leaves nothing to show.
 pub fn run() {
-    tauri::Builder::default()
+    builder()
         .setup(|app| {
             let client = DaemonClient::resolve()?;
             // Before the first change of the Dock icon, which tao may ignore when it follows a show too closely.
@@ -209,6 +222,8 @@ pub fn run() {
             apps::detected_apps,
             opening::open_worktree,
             opening::reveal_worktree,
+            orphans::list_orphans,
+            orphans::delete_orphans,
             settings::get_settings,
             settings::save_settings,
             login_item::get_open_at_login,
