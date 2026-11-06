@@ -46,9 +46,11 @@ pub(crate) struct Banner {
 
 /// Which failures an answer brings that the previous answer did not hold.
 ///
-/// The first answer after launch is a baseline, and so is the first one after the Daemon did not answer, since a
-/// Daemon that restarted starts every Service again and all its failures would look new. The set is replaced by each
-/// answer, so a failure that leaves "Needs you", marked as Seen or gone, comes back as new if it enters again.
+/// The first answer after launch is a baseline, and so is the first one after a connection the Daemon refused, since a
+/// Daemon that restarted starts every Service again and all its failures would look new. A Daemon that accepted the
+/// connection and answered badly, or too late, still runs, so the baseline stays and a failure that enters meanwhile
+/// is announced with the next answer. The set is replaced by each answer, so a failure that leaves "Needs you", marked
+/// as Seen or gone, comes back as new if it enters again.
 #[derive(Debug, Default)]
 struct Tracker {
     known: Option<BTreeSet<FailureKey>>,
@@ -58,8 +60,8 @@ impl Tracker {
     /// The keys of `current` that entered "Needs you" with this answer, in the order of `current`.
     fn entering(&mut self, answer: &Answer, current: &[FailureKey]) -> Vec<FailureKey> {
         match answer {
-            // The Daemon did not answer, so what it answers next is read as a first answer again.
-            Answer::Failure(_) => {
+            // No Daemon accepted the connection, so what one answers next is read as a first answer again.
+            Answer::Failure(error) if error.is_unreachable() => {
                 self.known = None;
                 Vec::new()
             }
@@ -70,8 +72,9 @@ impl Tracker {
                 self.known = Some(current.iter().cloned().collect());
                 entered
             }
-            // Only a `Status` says what fails, any other answer leaves the set as it is.
-            Answer::Response(_) => Vec::new(),
+            // Only a `Status` says what fails, and a Daemon that answered badly or too late still runs: any other
+            // answer leaves the set as it is.
+            Answer::Failure(_) | Answer::Response(_) => Vec::new(),
         }
     }
 }
@@ -484,6 +487,24 @@ mod tests {
         // The answer after the baseline notifies as usual.
         let banners = rig.answer(with_services(vec![crashed("api", 2_000), crashed("web", 2_500)]), true);
         assert_eq!(titles(&banners), ["web: exited 1"]);
+    }
+
+    #[test]
+    fn a_status_that_times_out_keeps_the_baseline_so_a_failure_that_enters_meanwhile_is_announced() {
+        let mut rig = Rig::new();
+        rig.answer(with_services(vec![]), true);
+        // The Daemon accepted the connection and did not answer in time: it still runs, nothing restarted.
+        let timeout = rig.presented(Answer::Failure(crate::daemon::CommandError::Client(
+            procly_client::ClientError::Connection {
+                path: PathBuf::from("/p/state/procly.sock"),
+                source: io::Error::from(io::ErrorKind::TimedOut),
+            },
+        )));
+        assert_eq!(rig.notifier.banners(&timeout, true), []);
+
+        let banners = rig.answer(with_services(vec![crashed("api", 1_000)]), true);
+
+        assert_eq!(titles(&banners), ["api: exited 1"]);
     }
 
     #[test]
