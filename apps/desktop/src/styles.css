@@ -313,6 +313,18 @@ body {
   margin: 0;
 }
 
+/* A setting that is on or off: the box, then its words on one line. */
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.switch input {
+  accent-color: var(--accent);
+}
+
 .control {
   padding: 3px 6px;
   border: 1px solid var(--line);
@@ -374,6 +386,58 @@ body {
   overflow-wrap: anywhere;
 }
 
+.copybox-block {
+  align-items: flex-start;
+}
+
+.copybox-block code {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.item.check {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.check-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.check-message {
+  margin: 0;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.fix {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prompt {
+  margin-top: 16px;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: var(--raise);
+  color: var(--text);
+}
+
 .overlay {
   position: fixed;
   inset: 0;
@@ -413,15 +477,7 @@ body {
   gap: 2px;
 }
 
-/* The line of a row that has controls under it: the same line a plain row draws. */
-.item-line {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  align-self: stretch;
-}
-
-/* Stop and Restart of one Service, and the command to copy when the app cannot restart it. Nothing here is red. */
+/* Stop and Restart of one Service in the inspector, and the command to copy when the app cannot restart it. Nothing here is red. */
 .controls {
   display: flex;
   flex-direction: column;
@@ -442,4 +498,81 @@ body {
 
 .controls .error {
   margin: 0;
+}
+
+/* A row of the center is a button that picks the item for the inspector. */
+.item-select {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.item-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.item[data-selected="true"] {
+  background: var(--raise);
+}
+
+/* The output of a Service or a Job, drawn as text on the panel so that every colour holds its contrast. */
+.output {
+  max-height: 40vh;
+  margin: 8px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.output .bold {
+  font-weight: 700;
+}
+
+.output .note {
+  color: var(--faint);
+  font-style: italic;
+}
+
+/* Colour only carries state: the colours of a terminal that mean one are drawn in its token, the others in the text. */
+.output .fg-black {
+  color: var(--muted);
+}
+
+.output .fg-grey {
+  color: var(--faint);
+}
+
+.output .fg-red {
+  color: var(--fail);
+}
+
+.output .fg-green {
+  color: var(--ok);
+}
+
+.output .fg-yellow {
+  color: var(--warn);
+}
+
+.output .fg-blue,
+.output .fg-magenta,
+.output .fg-cyan,
+.output .fg-white {
+  color: var(--text);
 }

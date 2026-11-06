@@ -116,14 +116,15 @@ describe("the window", () => {
     expect(screen.getByText("/p/work/acme/web-fix")).toBeInTheDocument();
   });
 
-  it("says that no Daemon runs, and sends nothing but the request for the last answer", async () => {
+  it("says that no Daemon runs, and sends nothing but the request for the last answer and doctor", async () => {
     const commands = poller(failed("unreachable", "the daemon did not answer on /p/state/procly.sock"));
 
     render(<App store={createDaemonStore()} />);
 
     expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
     expect(screen.getByText(/does not start one/)).toBeInTheDocument();
-    expect(commands).toEqual(["last_update"]);
+    // Doctor runs when the app enters that state, and it never starts a Daemon.
+    expect(commands).toEqual(["last_update", "doctor"]);
   });
 
   it("shows why a Daemon that does not answer well failed", async () => {
@@ -135,7 +136,7 @@ describe("the window", () => {
     expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
   });
 
-  it("asks the poller for a tick when Refresh is pressed, and does not ask the Daemon", async () => {
+  it("asks the poller for a tick when Refresh is pressed, runs doctor, and does not ask the Daemon", async () => {
     const commands = poller(answered(status));
     render(<App store={createDaemonStore()} />);
 
@@ -144,7 +145,7 @@ describe("the window", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(commands).toEqual(["last_update", "refresh"]);
+    expect(commands).toEqual(["last_update", "refresh", "doctor"]);
   });
 });
 
@@ -243,6 +244,7 @@ describe("the sidebar", () => {
           text !== "Overview⌘0" &&
           text !== "Outside Repositories" &&
           text !== "Orphans" &&
+          text !== "Doctor" &&
           text !== "Settings⌘,",
       );
     expect(labels).toEqual([

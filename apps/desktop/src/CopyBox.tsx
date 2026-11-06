@@ -1,7 +1,10 @@
-/** A command to copy: the box shows exactly what the Copy button puts on the clipboard. */
-export function CopyBox({ text }: { text: string }) {
+/**
+ * A command to copy: the box shows exactly what the Copy button puts on the clipboard. `block` keeps the line breaks
+ * of a text that spans lines, such as a prompt.
+ */
+export function CopyBox({ text, block = false }: { text: string; block?: boolean }) {
   return (
-    <div className="copybox">
+    <div className={block ? "copybox copybox-block" : "copybox"}>
       <code className="mono">{text}</code>
       <button
         type="button"

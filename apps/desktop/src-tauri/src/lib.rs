@@ -5,8 +5,14 @@
 
 mod apps;
 mod atomic;
+mod clipboard;
 mod daemon;
+mod dock;
+mod doctor;
+mod follow;
+mod glyph;
 mod lifecycle;
+mod login_item;
 mod menu;
 mod needs_you;
 mod opening;
@@ -14,15 +20,28 @@ mod orphans;
 mod poller;
 mod services;
 mod settings;
+mod tray;
+mod tray_menu;
+mod window;
+
+use std::sync::Mutex;
 
 use daemon::DaemonClient;
+use dock::DockIcon;
+use follow::{Follower, WINDOW_VISIBLE};
 use needs_you::{Attention, FailureKey, Presented, SeenError};
 use poller::{Poller, WindowState};
 use settings::{OPEN_SETTINGS, SETTINGS_FILE, SettingsStore};
-use tauri::{AppHandle, Emitter as _, Manager as _, State, Window, WindowEvent};
+use tauri::{AppHandle, Emitter as _, Manager as _, Runtime, State, Window, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
+use tray::Tray;
+use window::{Host as _, MainWindow};
 
 /// The event that carries each answer of the poller to the window.
 const DAEMON_UPDATE: &str = "daemon-update";
+
+/// The event that tells the window the menu refreshed, so that it runs doctor again as it does on its own Refresh.
+const REFRESH_REQUESTED: &str = "refresh-requested";
 
 /// The file the Seen failures survive a restart in, inside the data directory of the app.
 const SEEN_FILE: &str = "seen.json";
@@ -62,10 +81,13 @@ async fn mark_seen(
     saved
 }
 
-/// Tells the window about an answer.
+/// Tells the window and the menu bar icon about an answer.
 fn publish(app: &AppHandle, presented: &Presented) {
     // A window that is gone has nothing to be told, the next one asks `last_update`.
     let _ = app.emit(DAEMON_UPDATE, presented);
+    if let Some(tray) = app.try_state::<Tray>() {
+        tray.show(app, presented);
+    }
 }
 
 /// Asks the poller for a tick now. It never starts, stops or restarts anything.
@@ -79,7 +101,7 @@ fn refresh(poller: State<'_, Poller>) {
 }
 
 /// Where the window stands, from what Tauri reports about it.
-fn window_state(window: &Window) -> WindowState {
+fn window_state<R: Runtime>(window: &Window<R>) -> WindowState {
     // A window that is being destroyed answers nothing: nobody looks at it.
     let flag = |read: tauri::Result<bool>| read.unwrap_or(false);
     WindowState::from_flags(
@@ -89,8 +111,21 @@ fn window_state(window: &Window) -> WindowState {
     )
 }
 
-/// Tells the poller about a window event that changes where the window stands.
-fn follow_window(window: &Window, event: &WindowEvent) {
+/// Handles a window event of the app. Closing the window hides it instead of ending the app, which stays in the menu
+/// bar until the developer quits it. Then every event that changes where the window stands is followed.
+fn on_window_event(window: &Window, event: &WindowEvent) {
+    if let WindowEvent::CloseRequested { api, .. } = event
+        && window.label() == window::MAIN
+    {
+        api.prevent_close();
+        window::close(&MainWindow(window.app_handle()));
+    }
+    follow_window(window, event);
+}
+
+/// Tells the poller and the follow about a window event that changes where the window stands. A window that is hidden,
+/// minimized or closed cancels the follow, and the window starts it again from a fresh backlog once it comes back.
+fn follow_window<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     let state = match event {
         WindowEvent::Focused(_) | WindowEvent::Resized(_) => window_state(window),
         WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => WindowState::Closed,
@@ -98,6 +133,13 @@ fn follow_window(window: &Window, event: &WindowEvent) {
     };
     if let Some(poller) = window.try_state::<Poller>() {
         poller.window(state);
+    }
+    // A hidden window cancels the follow, and the window starts it again from a fresh backlog once it comes back.
+    if let Some(follower) = window.try_state::<Follower>()
+        && let Some(visible) = follower.window(state)
+    {
+        // A window that is gone has nothing to be told.
+        let _ = window.emit(WINDOW_VISIBLE, visible);
     }
 }
 
@@ -113,7 +155,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
     builder
 }
 
-/// Runs the app until its last window closes. Closing the window or quitting the app stops nothing in the Daemon.
+/// Runs the app until the developer quits it. Closing the window leaves it in the menu bar, and neither closing the
+/// window nor quitting the app stops anything in the Daemon.
 ///
 /// # Panics
 ///
@@ -122,12 +165,27 @@ pub fn run() {
     builder()
         .setup(|app| {
             let client = DaemonClient::resolve()?;
+            // Before the first change of the Dock icon, which tao may ignore when it follows a show too closely.
+            app.manage(Mutex::new(DockIcon::default()));
+            let shown = MainWindow(app.handle());
+            // `LSUIElement` starts a bundled app with no Dock icon, and this does the same when it runs unbundled.
+            shown.set_dock_visibility(false);
+            app.manage(SettingsStore::open(app.path().app_config_dir()?.join(SETTINGS_FILE)));
+            // Open at login starts the app hidden: no window, only the glyph, and no Daemon, which the app never starts
+            // by itself. Any other launch opens the window.
+            let hidden = window::launched_hidden(std::env::args().skip(1));
+            if !hidden {
+                shown.open();
+            }
             // Told as soon as the window moves, but the first tick should already match how it opened.
-            let opened = app
-                .get_webview_window("main")
-                .map_or(WindowState::Front, |window| window_state(&window.as_ref().window()));
+            let opened = if hidden {
+                WindowState::Closed
+            } else {
+                WindowState::Front
+            };
             let attention = Attention::open(app.path().app_data_dir()?.join(SEEN_FILE));
             let poller = Poller::start(client.clone(), opened);
+            app.manage(Tray::create(app.handle())?);
             let mut updates = poller.subscribe();
             let handle = app.handle().clone();
             let seen = attention.clone();
@@ -152,30 +210,42 @@ pub fn run() {
             app.manage(client);
             app.manage(poller);
             app.manage(attention);
-            app.manage(SettingsStore::open(app.path().app_config_dir()?.join(SETTINGS_FILE)));
+            app.manage(Follower::new());
             app.set_menu(menu::build(app.handle())?)?;
             Ok(())
         })
-        // The window reopens where it was left, with no visible setting.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // The window reopens where it was left, with no visible setting. Whether it shows is not part of what is
+        // restored: Open at login starts the app hidden, and the app decides at launch.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .build(),
+        )
+        .plugin(login_item::plugin())
         .on_menu_event(|app, event| {
-            if menu::is_refresh(&event)
-                && let Some(poller) = app.try_state::<Poller>()
-            {
-                poller.refresh();
+            if menu::is_refresh(&event) {
+                if let Some(poller) = app.try_state::<Poller>() {
+                    poller.refresh();
+                }
+                // The window runs doctor again on a Refresh, and this one did not go through it.
+                let _ = app.emit(REFRESH_REQUESTED, ());
             }
             if menu::is_settings(&event) {
                 // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
                 let _ = app.emit(OPEN_SETTINGS, ());
             }
         })
-        .on_window_event(follow_window)
+        .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             last_update,
             mark_seen,
             refresh,
+            follow::follow_logs,
+            follow::stop_follow,
+            follow::service_logs,
             lifecycle::start_daemon,
             lifecycle::restart_daemon,
+            doctor::doctor,
             apps::detected_apps,
             opening::open_worktree,
             opening::reveal_worktree,
@@ -185,9 +255,20 @@ pub fn run() {
             services::restart_service,
             settings::get_settings,
             settings::save_settings,
+            login_item::get_open_at_login,
+            login_item::set_open_at_login,
         ])
-        .run(tauri::generate_context!())
-        .expect("the Tauri application runs");
+        .build(tauri::generate_context!())
+        .expect("the Tauri application builds")
+        .run(|app, event| {
+            // Clicking the Dock icon or opening the app again brings the window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                MainWindow(app).open();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]
@@ -219,6 +300,26 @@ mod tests {
             .collect();
 
         assert!(opener.is_empty(), "{opener:?}");
+    }
+
+    #[test]
+    fn the_window_is_granted_no_autostart_permission() {
+        // Rust switches Open at login through 2 commands, so the window cannot write a LaunchAgent of its own making.
+        let autostart: Vec<_> = granted()
+            .into_iter()
+            .filter(|name| name.starts_with("autostart:"))
+            .collect();
+
+        assert!(autostart.is_empty(), "{autostart:?}");
+    }
+
+    #[test]
+    fn the_window_starts_hidden_so_that_the_app_decides_at_launch_whether_it_opens() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("the Tauri configuration");
+
+        assert_eq!(config["app"]["windows"][0]["visible"], false);
+        assert_eq!(config["app"]["windows"][0]["label"], "main");
     }
 
     #[test]

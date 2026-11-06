@@ -100,8 +100,15 @@ function app(answers: Record<string, () => unknown> = {}, response: Response = s
       if (command === "last_update") {
         return update;
       }
-      if (command === "refresh") {
+      if (command === "refresh" || command === "stop_follow") {
         return undefined;
+      }
+      // The inspector follows what is picked: it waits for output that never comes, and reads a Compose service once.
+      if (command === "follow_logs") {
+        return new Promise<void>(() => undefined);
+      }
+      if (command === "service_logs") {
+        return { response: "logs", output: "" };
       }
       const answer = answers[command];
       return answer === undefined ? Promise.reject(new Error(`unexpected command ${command}`)) : answer();
@@ -117,6 +124,16 @@ async function openWorktree(): Promise<HTMLElement> {
   const center = screen.getByRole("main");
   await within(center).findByRole("heading", { name: "Services" });
   return center;
+}
+
+function inspector(): HTMLElement {
+  return screen.getByRole("complementary", { name: "Inspector" });
+}
+
+/** Picks the row of `center` that starts with `name`, which puts it in the inspector with its actions. */
+function pick(center: HTMLElement, name: string): HTMLElement {
+  fireEvent.click(within(center).getByRole("button", { name: new RegExp(`^${name}`) }));
+  return inspector();
 }
 
 function written(): string[] {
@@ -223,7 +240,7 @@ describe("the Worktree screen", () => {
     const calls = app({ stop_service: down });
 
     const center = await openWorktree();
-    fireEvent.click(within(center).getByRole("button", { name: "Stop web" }));
+    fireEvent.click(within(pick(center, "web")).getByRole("button", { name: "Stop web" }));
 
     await waitFor(() => {
       expect(calls.filter((call) => call.command === "stop_service")).toEqual([
@@ -242,7 +259,7 @@ describe("the Worktree screen", () => {
     const calls = app({ stop_service: down });
 
     const center = await openWorktree();
-    fireEvent.click(within(center).getByRole("button", { name: "Stop cache" }));
+    fireEvent.click(within(pick(center, "cache")).getByRole("button", { name: "Stop cache" }));
 
     await waitFor(() => {
       expect(calls).toContainEqual({ command: "stop_service", args: { service: "cache", cwd: PATH } });
@@ -254,21 +271,29 @@ describe("the Worktree screen", () => {
 
     const center = await openWorktree();
 
-    const stop = within(center).getByRole("button", { name: "Stop web" });
+    // The center only picks, the inspector holds the actions of what is picked.
+    expect(within(center).queryByRole("button", { name: /^Stop / })).not.toBeInTheDocument();
+    const stop = within(pick(center, "web")).getByRole("button", { name: "Stop web" });
     expect(stop.className).not.toMatch(/danger|destructive|fail|red/);
-    expect(within(center).queryByRole("button", { name: /stop all/i })).not.toBeInTheDocument();
-    const stops = within(center)
-      .getAllByRole("button", { name: /^Stop / })
-      .map((button) => button.getAttribute("aria-label"));
-    // `old` ended, so it has nothing to stop, and the Jobs have no Stop at all.
-    expect(stops).toEqual(["Stop web", "Stop api", "Stop dev", "Stop cache"]);
+    expect(screen.queryByRole("button", { name: /stop all/i })).not.toBeInTheDocument();
+    const stopsOf = (row: string): (string | null)[] =>
+      within(pick(center, row))
+        .queryAllByRole("button", { name: /^Stop / })
+        .map((button) => button.getAttribute("aria-label"));
+    expect(stopsOf("api")).toEqual(["Stop api"]);
+    expect(stopsOf("dev")).toEqual(["Stop dev"]);
+    expect(stopsOf("cache")).toEqual(["Stop cache"]);
+    // `old` ended, so it has nothing to stop, and a Job has no Stop at all.
+    expect(stopsOf("old")).toEqual([]);
+    fireEvent.click(within(center).getByRole("button", { name: /sleep 61/ }));
+    expect(within(inspector()).queryByRole("button", { name: /^Stop / })).not.toBeInTheDocument();
   });
 
   it("restarts a Service whose environment the Daemon holds", async () => {
     const calls = app({ restart_service: up });
 
     const center = await openWorktree();
-    fireEvent.click(within(center).getByRole("button", { name: "Restart web" }));
+    fireEvent.click(within(pick(center, "web")).getByRole("button", { name: "Restart web" }));
 
     await waitFor(() => {
       expect(calls).toContainEqual({ command: "restart_service", args: { service: "web", cwd: PATH } });
@@ -282,18 +307,20 @@ describe("the Worktree screen", () => {
     app();
 
     const center = await openWorktree();
+    const panel = within(pick(center, "old"));
 
-    expect(within(center).getByRole("button", { name: "Restart old" })).toBeEnabled();
-    expect(within(center).queryByRole("button", { name: "Stop old" })).not.toBeInTheDocument();
+    expect(panel.getByRole("button", { name: "Restart old" })).toBeEnabled();
+    expect(panel.queryByRole("button", { name: "Stop old" })).not.toBeInTheDocument();
   });
 
   it("offers the command to copy, and no Restart, for a Service the Daemon holds no environment for", async () => {
     const calls = app();
 
     const center = await openWorktree();
+    const panel = within(pick(center, "api"));
 
-    expect(within(center).queryByRole("button", { name: "Restart api" })).not.toBeInTheDocument();
-    expect(within(center).getByText(`(cd ${PATH} && procly restart api)`)).toBeInTheDocument();
+    expect(panel.queryByRole("button", { name: "Restart api" })).not.toBeInTheDocument();
+    expect(panel.getByText(`(cd ${PATH} && procly restart api)`)).toBeInTheDocument();
     expect(calls.map((call) => call.command)).not.toContain("restart_service");
   });
 
@@ -301,20 +328,22 @@ describe("the Worktree screen", () => {
     app();
 
     const center = await openWorktree();
+    const panel = within(pick(center, "cache"));
 
-    expect(within(center).queryByRole("button", { name: "Restart cache" })).not.toBeInTheDocument();
-    expect(within(center).getByText(`(cd ${PATH} && procly restart cache)`)).toBeInTheDocument();
+    expect(panel.queryByRole("button", { name: "Restart cache" })).not.toBeInTheDocument();
+    expect(panel.getByText(`(cd ${PATH} && procly restart cache)`)).toBeInTheDocument();
   });
 
   it("puts Stop and Restart on the row of a Group, the only row a Group's Services have", async () => {
     app();
 
     const center = await openWorktree();
+    const panel = within(pick(center, "dev"));
 
     // The Group runs one process for the Services it covers, and `down` refuses a covered Service with 125, so the
     // status holds a row for the Group and none for what it covers.
-    expect(within(center).getByRole("button", { name: "Stop dev" })).toBeEnabled();
-    expect(within(center).getByRole("button", { name: "Restart dev" })).toBeEnabled();
+    expect(panel.getByRole("button", { name: "Stop dev" })).toBeEnabled();
+    expect(panel.getByRole("button", { name: "Restart dev" })).toBeEnabled();
     expect(within(center).queryByText("frontend")).not.toBeInTheDocument();
   });
 
@@ -323,7 +352,9 @@ describe("the Worktree screen", () => {
     const texts = written();
 
     const center = await openWorktree();
-    const box = within(center).getByText(`(cd ${PATH} && procly restart api)`).closest(".copybox");
+    const box = within(pick(center, "api"))
+      .getByText(`(cd ${PATH} && procly restart api)`)
+      .closest(".copybox");
     expect(box).not.toBeNull();
     fireEvent.click(within(box as HTMLElement).getByRole("button", { name: /^Copy/ }));
 
@@ -340,8 +371,9 @@ describe("the Worktree screen", () => {
     render(<App store={createDaemonStore()} />);
     fireEvent.click(await screen.findByRole("button", { name: /^web-fix/ }));
     const center = screen.getByRole("main");
+    await within(center).findByRole("heading", { name: "Services" });
     const shown = `(cd '/p/work/acme/web fix' && procly restart api)`;
-    const box = (await within(center).findByText(shown)).closest(".copybox");
+    const box = (await within(pick(center, "api")).findByText(shown)).closest(".copybox");
     fireEvent.click(within(box as HTMLElement).getByRole("button", { name: /^Copy/ }));
 
     expect(texts).toEqual([shown]);
@@ -353,11 +385,10 @@ describe("the Worktree screen", () => {
     });
 
     const center = await openWorktree();
-    fireEvent.click(within(center).getByRole("button", { name: "Restart web" }));
+    const panel = within(pick(center, "web"));
+    fireEvent.click(panel.getByRole("button", { name: "Restart web" }));
 
-    expect(await within(center).findByRole("alert")).toHaveTextContent(
-      "web has no environment to restart with",
-    );
+    expect(await panel.findByRole("alert")).toHaveTextContent("web has no environment to restart with");
     expect(calls.map((call) => call.command)).not.toContain("up");
   });
 
@@ -374,20 +405,20 @@ describe("the Worktree screen", () => {
     });
 
     const center = await openWorktree();
-    fireEvent.click(within(center).getByRole("button", { name: "Restart web" }));
+    const panel = within(pick(center, "web"));
+    fireEvent.click(panel.getByRole("button", { name: "Restart web" }));
 
-    expect(await within(center).findByRole("alert")).toHaveTextContent(
-      "web did not become healthy: exited 1",
-    );
+    expect(await panel.findByRole("alert")).toHaveTextContent("web did not become healthy: exited 1");
   });
 
   it("shows a command that could not reach the Daemon", async () => {
     app({ stop_service: () => Promise.reject({ kind: "unreachable", message: "no Daemon answered" }) });
 
     const center = await openWorktree();
-    fireEvent.click(within(center).getByRole("button", { name: "Stop web" }));
+    const panel = within(pick(center, "web"));
+    fireEvent.click(panel.getByRole("button", { name: "Stop web" }));
 
-    expect(await within(center).findByRole("alert")).toHaveTextContent("no Daemon answered");
+    expect(await panel.findByRole("alert")).toHaveTextContent("no Daemon answered");
   });
 });
 

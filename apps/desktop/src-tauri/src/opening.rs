@@ -214,6 +214,7 @@ mod tests {
         Settings {
             editor: editor.map(str::to_owned),
             terminal: terminal.to_owned(),
+            ..Settings::default()
         }
     }
 

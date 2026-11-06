@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "result": "problems",
+  "checks": [
+    { "name": "docker_compose", "status": "passed", "message": "docker compose 2.29.1", "fix": null },
+    {
+      "name": "daemon",
+      "status": "passed",
+      "message": "the Daemon answers and runs procly 0.5.0",
+      "fix": null
+    },
+    {
+      "name": "session_unit",
+      "status": "passed",
+      "message": "the Session unit is installed and loaded",
+      "fix": null
+    },
+    {
+      "name": "state_documents",
+      "status": "passed",
+      "message": "every state document can be read",
+      "fix": null
+    },
+    {
+      "name": "configuration",
+      "status": "passed",
+      "message": "/p/work/acme/web-fix/procly.toml is valid and its Drivers load",
+      "fix": null
+    },
+    {
+      "name": "guard",
+      "status": "failed",
+      "message": "the Guard in /p/work/acme/web-fix/.claude/settings.json left the settings",
+      "fix": "procly agent install"
+    },
+    {
+      "name": "portless",
+      "status": "skipped",
+      "message": "settings.portless is not on, nothing calls portless",
+      "fix": null
+    },
+    {
+      "name": "worktrunk_hooks",
+      "status": "failed",
+      "message": "the Worktrunk hooks block in /p/work/acme/web-fix/.config/wt.toml left the file",
+      "fix": "procly worktree hooks"
+    },
+    {
+      "name": "leased_ports",
+      "status": "passed",
+      "message": "every port a Lease holds is free or its own",
+      "fix": null
+    },
+    { "name": "orphans", "status": "passed", "message": "no Orphan", "fix": null },
+    {
+      "name": "portless_aliases",
+      "status": "passed",
+      "message": "every Portless alias Procly made is held by a Lease",
+      "fix": null
+    }
+  ],
+  "prompt": "`procly doctor` checked this machine and found 2 problems listed below.\n\n1. guard: the Guard left the settings\n   Commands:\n   - procly agent install\n\n2. worktrunk_hooks: the hooks block left the file\n   Commands:\n   - procly worktree hooks\n",
+  "agent": null
+}

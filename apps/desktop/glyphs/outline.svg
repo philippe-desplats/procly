@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="36" height="36">
+<!-- The outer outline of the mark, an inner stroke of 2/3 unit (2 px at 36 px tall) clipped to the shape. -->
+<defs><clipPath id="outer"><path d="M4,0 L12,0 L12,8 L8,12 L0,12 L0,4 Z" clip-rule="evenodd"/></clipPath></defs>
+<path d="M4,0 L12,0 L12,8 L8,12 L0,12 L0,4 Z" fill="none" stroke="#000" stroke-width="1.333" clip-path="url(#outer)"/>
+</svg>
