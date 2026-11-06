@@ -66,6 +66,46 @@ export function removedWorktreeLabel(path: string): string {
   return basename(path);
 }
 
+/** What deleting `count` Orphans of a kind does, in one line that holds the count. The order is the one of the sheet. */
+const EFFECTS: Record<Orphan["kind"], (count: number) => string> = {
+  lease: (count) =>
+    count === 1
+      ? "1 Lease: its port goes back to the Range, with its Portless alias."
+      : `${count} Leases: their ports go back to the Range, with their Portless aliases.`,
+  logical_resource: (count) =>
+    count === 1
+      ? "1 Logical resource: dropped in its container, with the data in it."
+      : `${count} Logical resources: dropped in their containers, with the data in them.`,
+  output_directory: (count) =>
+    count === 1
+      ? "1 output directory: deleted, with the output files of its Services."
+      : `${count} output directories: deleted, with the output files of their Services.`,
+  setup_directory: (count) =>
+    count === 1
+      ? "1 setup directory: deleted, with the log of a setup command that failed."
+      : `${count} setup directories: deleted, with the logs of setup commands that failed.`,
+  isolated_container: (count) =>
+    count === 1
+      ? "1 Isolated container: removed, with its anonymous volumes."
+      : `${count} Isolated containers: removed, with their anonymous volumes.`,
+  isolated_volume: (count) =>
+    count === 1
+      ? "1 volume: removed, with the data in it."
+      : `${count} volumes: removed, with the data in them.`,
+};
+
+/** What a collection of `orphans` deletes: one line per kind it holds, with how many and the data they drop. */
+export function collectionEffects(orphans: Orphan[]): string[] {
+  const counts = new Map<Orphan["kind"], number>();
+  for (const orphan of orphans) {
+    counts.set(orphan.kind, (counts.get(orphan.kind) ?? 0) + 1);
+  }
+  return (Object.keys(EFFECTS) as Orphan["kind"][]).flatMap((kind) => {
+    const count = counts.get(kind) ?? 0;
+    return count === 0 ? [] : [EFFECTS[kind](count)];
+  });
+}
+
 export function describeOrphan(orphan: Orphan): OrphanLine {
   switch (orphan.kind) {
     case "lease":

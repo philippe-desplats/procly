@@ -148,6 +148,26 @@ describe("the Orphans screen", () => {
     expect(sheet.getByText("procly gc --apply")).toBeInTheDocument();
   });
 
+  it("names in the sheet itself how many Orphans of each kind it deletes and the data they drop", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    await openOrphans();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Delete 6 Orphans/ }));
+
+    const sheet = within(await screen.findByRole("dialog"));
+    const effects = sheet.getByRole("list", { name: "What it deletes" }).querySelectorAll("li");
+    expect([...effects].map((effect) => effect.textContent)).toEqual([
+      "2 Leases: their ports go back to the Range, with their Portless aliases.",
+      "1 Logical resource: dropped in its container, with the data in it.",
+      "1 output directory: deleted, with the output files of its Services.",
+      "1 Isolated container: removed, with its anonymous volumes.",
+      "1 volume: removed, with the data in it.",
+    ]);
+    // The sheet says it all, it never sends the developer to the screen behind it.
+    expect(sheet.queryByText(/on the screen/)).not.toBeInTheDocument();
+  });
+
   it("deletes with `only` equal to the Orphans it showed, and sends nothing when cancelled", async () => {
     const calls = app({ deleting: () => ({ ...recordedGc, applied: true }) });
     render(<App store={createDaemonStore()} />);
