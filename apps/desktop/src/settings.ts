@@ -6,7 +6,12 @@ export interface Settings {
   terminal: string;
   /** Whether the app shows a Dock icon while its window is open. */
   show_in_dock: boolean;
+  /** Whether a failure that enters "Needs you" makes a banner. Rust changes it through `setNotifyOnFailure` only. */
+  notify_on_failure: boolean;
 }
+
+/** What `saveSettings` sends: the notification switch has its own command, which asks for the permission first. */
+export type SavedSettings = Omit<Settings, "notify_on_failure">;
 
 /** The editors and terminals installed on this Mac, among the ones the app knows. */
 export interface DetectedApps {
@@ -19,17 +24,36 @@ export type OpenWith = "editor" | "terminal";
 
 /** Why a Worktree did not open. `no_editor` sends the developer to Settings, every other kind is shown as it is. */
 export interface OpenFailure {
-  kind: "no_editor" | "missing" | "launch" | "reveal" | "task" | "settings" | "login_item";
+  kind: "no_editor" | "missing" | "launch" | "reveal" | "task" | "settings" | "login_item" | "notifications";
   message: string;
 }
 
 /** The event the native menu sends when Settings is chosen, `⌘,` included. */
 export const OPEN_SETTINGS = "open-settings";
 
+/**
+ * The event Rust sends when a banner was clicked. Its payload is the path of the Worktree the banner was about, or null
+ * for a banner about several failures or about a Job started outside any Repository.
+ */
+export const OPEN_FAILURE = "open-failure";
+
 export const loadSettings = (): Promise<Settings> => invoke("get_settings");
 
 /** Applies the settings at once. Rust writes them to `settings.json`. */
-export const saveSettings = (settings: Settings): Promise<void> => invoke("save_settings", { settings });
+export const saveSettings = ({ editor, terminal, show_in_dock }: Settings): Promise<void> => {
+  const settings: SavedSettings = { editor, terminal, show_in_dock };
+  return invoke("save_settings", { settings });
+};
+
+/**
+ * Asks Rust to turn "Notify on failure" on or off, and answers whether it is on. Turning it on asks for the permission,
+ * and a refusal answers false.
+ */
+export const setNotifyOnFailure = (enabled: boolean): Promise<boolean> =>
+  invoke("set_notify_on_failure", { enabled });
+
+/** Asks Rust to open the notification settings of macOS, where the banners of the app are allowed. */
+export const openNotificationSettings = (): Promise<void> => invoke("open_notification_settings");
 
 /** Whether the system starts the app at login. It is read from the system every time, the app never stores it. */
 export const loadOpenAtLogin = (): Promise<boolean> => invoke("get_open_at_login");

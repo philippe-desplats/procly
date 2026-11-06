@@ -30,6 +30,8 @@ serde_json.workspace = true
 tauri.workspace = true
 # Open at login is a LaunchAgent the plugin writes, switched from Rust and never stored by the app.
 tauri-plugin-autostart.workspace = true
+# A failure that enters "Needs you" makes a banner when the developer asked for it, sent from Rust only.
+tauri-plugin-notification.workspace = true
 # Rust opens a Worktree with the app the developer chose, the window itself holds no `opener` permission.
 tauri-plugin-opener.workspace = true
 tauri-plugin-wdio-webdriver = { workspace = true, optional = true }

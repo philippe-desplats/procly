@@ -121,7 +121,7 @@ Nothing automated drives the native surfaces of the app: the menu bar, the notif
 11. The launch from Homebrew: on a machine without the app, `brew install --cask philippe-desplats/procly/procly-app` installs `Procly.app` and links the command line, `procly --version` prints `procly <version>`, the app opens from Launchpad, and `brew uninstall --cask procly-app` removes both. Installing the cask while the formula `procly` is installed is refused, which proves `conflicts_with`.
 12. The upgrade from the previous release through `brew upgrade --cask procly-app`, with a Daemon started from the previous bundle and one running Service: the app shows the Daemon of another version, `procly logs` of a Service started after the upgrade still shows its output, and the restart brings the window back, see the next section.
 
-Items 2, 3, 5 and 6 are played step by step below for the menu bar, the glyphs, the Dock, Reopen and Open at login. Run them from a bundled app and not from `tauri dev`, since `LSUIElement` only applies to a bundle. Use a temporary `HOME` or switch Open at login back off, so that no LaunchAgent is left behind.
+Items 2, 3, 4, 5 and 6 are played step by step below for the menu bar, the glyphs, the notifications, the Dock, Reopen and Open at login. Run them from a bundled app and not from `tauri dev`, since `LSUIElement` only applies to a bundle. Use a temporary `HOME` or switch Open at login back off, so that no LaunchAgent is left behind.
 
 ### Menu bar and Dock
 
@@ -135,6 +135,21 @@ Items 2, 3, 5 and 6 are played step by step below for the menu bar, the glyphs, 
 8. Close the window again and open the app from the Finder or the Launchpad. This is a reopen: the window shows. Do the same by clicking the Dock icon while another app has the focus.
 9. Turn off "Show in Dock while the window is open" in Settings. The Dock icon goes at once, the window stays open and keeps the focus, and it takes focus every time it opens with no Dock icon. Do it a first time within a second of the window opening, on a fresh launch: the icon goes a moment later, since the system ignores a hide that comes too soon after a show. Turn it on again and close the window, then open it: the icon follows the window.
 10. Quit from the menu, then with `⌘Q` on another launch. Both end the app, and the Daemon and its Services keep running.
+
+### Notifications
+
+Allow banners for Procly in System Settings > Notifications first, since macOS decides whether a banner shows and the app cannot read that choice. The permission calls of the app always answer granted on desktop.
+
+1. Launch the app with the Daemon running, a Service failed in a Worktree and "Notify on failure" off. No prompt appears at launch and no banner shows, whatever the state.
+2. Put another app in front, then make a second Service fail. No banner shows, since the setting is off.
+3. In Settings, the "Notifications" section holds the "Notify on failure" switch, off, a line saying that macOS decides whether the banner shows, and an "Open notification settings" button. The button opens the Notifications pane of System Settings.
+4. Turn the switch on. It stays on. If macOS asks to allow notifications for Procly at the first banner, allow them.
+5. With another app in front, make a Service fail. A banner names the Service, how it ended and the branch of its Worktree, and the 2 failures that were already there make none. Click the banner: the window opens on that Worktree.
+6. Make 4 Services fail within one poll, for example from one Worktree. One banner says that 4 failures need you, and a click on it opens the window on the Overview. Fewer than 4 failures make a banner each.
+7. Leave a Foreign process running on a Worktree. It makes no banner.
+8. Stop the Daemon from outside the app, then start it again with a failed Service. The first answer of the restarted Daemon makes no banner, and a failure after it does. Quit and launch the app again with the setting on: the failures already there make no banner.
+9. Mark a failure as Seen in the window, then make another Service fail. Only the new failure makes a banner.
+10. Turn the switch off, and make a Service fail. No banner shows.
 
 ### Open at login
 

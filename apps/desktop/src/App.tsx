@@ -9,7 +9,7 @@ import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey, isSeen } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
 import { SettingsScreen } from "./SettingsScreen";
-import { failureOf, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
+import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
 import { State } from "./StateMark";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
@@ -82,6 +82,11 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
       unlisten?.();
     };
   }, []);
+
+  // A clicked banner brings the window back on the Worktree of its failure, or on the Overview when it names none.
+  useTauriEvent<string | null>(OPEN_FAILURE, (worktree) => {
+    setView(worktree === null ? { kind: "overview" } : { kind: "worktree", path: worktree });
+  });
 
   const repositories = snapshot.kind === "status" ? snapshot.report.repositories : [];
   const worktrees = repositories.flatMap((repository) => repository.worktrees);

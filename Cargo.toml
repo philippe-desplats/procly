@@ -24,6 +24,7 @@ serde_yaml_ng = "0.10"
 tauri = { version = "2.12", features = ["image-png", "tray-icon"] }
 tauri-build = "2.7"
 tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-wdio-webdriver = "=1.5.1"
 tauri-plugin-window-state = "2"
