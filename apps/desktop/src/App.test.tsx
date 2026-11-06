@@ -246,13 +246,15 @@ describe("the Overview", () => {
     expect(await screen.findByText("No Service is known.")).toBeInTheDocument();
   });
 
-  it("comes back with ⌘0 from a Worktree", async () => {
+  it("comes back with ⌘0 from a Worktree, which the Overview item of the View menu carries", async () => {
     poller(answered(many));
     render(<App store={createDaemonStore()} />);
     fireEvent.click(await screen.findByRole("button", { name: "docs-preview" }));
     expect(screen.queryByRole("region", { name: "Overview" })).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "0", metaKey: true });
+    await act(async () => {
+      await emit("menu-choice", "overview");
+    });
 
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
   });
