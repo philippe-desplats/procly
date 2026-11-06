@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { commandIn } from "./services";
 import type { ReleaseReport } from "./protocol/ReleaseReport";
 import type { Response } from "./protocol/Response";
+import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 
 /** The command the sheet stands for, run from the Worktree it releases. */
 export function releaseCommand(path: string): string {
@@ -42,6 +43,32 @@ export function holdsNothing(report: ReleaseReport): boolean {
     report.compose_services.length === 0 &&
     report.leases.length === 0
   );
+}
+
+/** The ended Jobs and Services of a Worktree, which a release forgets. */
+export interface Ended {
+  jobs: number;
+  services: number;
+}
+
+/**
+ * How many ended Jobs and ended Services the status holds for a Worktree. The dry run lists only what runs, so the
+ * sheet counts the rest from the status the window already has, with no request of its own.
+ */
+export function endedIn(worktree: Pick<WorktreeStatus, "jobs" | "services">): Ended {
+  return {
+    jobs: worktree.jobs.filter((job) => job.state === "ended").length,
+    services: worktree.services.filter((service) => service.state === "ended").length,
+  };
+}
+
+/** "2 ended Jobs and 1 ended Service", leaving out the kind that has none. Empty when nothing ended is left. */
+export function endedWords({ jobs, services }: Ended): string {
+  const parts = [
+    ...(jobs === 0 ? [] : [`${jobs} ended ${jobs === 1 ? "Job" : "Jobs"}`]),
+    ...(services === 0 ? [] : [`${services} ended ${services === 1 ? "Service" : "Services"}`]),
+  ];
+  return parts.join(" and ");
 }
 
 /** What happens to the container of a Compose service the Worktree lets go of: it keeps running for others, or stops. */

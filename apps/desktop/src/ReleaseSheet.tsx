@@ -2,7 +2,15 @@ import { useEffect, useState } from "react";
 
 import { CopyBox } from "./CopyBox";
 import { failureMessage } from "./daemon";
-import { composeLine, holdsNothing, previewRelease, releaseCommand, releaseWorktree } from "./release";
+import {
+  composeLine,
+  endedWords,
+  holdsNothing,
+  previewRelease,
+  releaseCommand,
+  releaseWorktree,
+  type Ended,
+} from "./release";
 import type { KeptLease } from "./protocol/KeptLease";
 import type { ReleaseReport } from "./protocol/ReleaseReport";
 
@@ -107,6 +115,7 @@ export function ReleaseSheet({
   path,
   label,
   listed,
+  ended,
   onClose,
   onChanged,
 }: {
@@ -114,6 +123,8 @@ export function ReleaseSheet({
   label: string;
   /** Whether git still lists the Worktree, in which case an agent may still be working in it. */
   listed: boolean;
+  /** The ended Jobs and Services the status held for the Worktree when the sheet opened, which a release forgets. */
+  ended: Ended;
   onClose: () => void;
   /** Called once the real release is over, so the window shows its effect without waiting for the poller. */
   onChanged: () => void;
@@ -154,11 +165,16 @@ export function ReleaseSheet({
   }
 
   if (phase.kind === "result") {
-    return <ResultSheet label={label} report={phase.report} onDone={onClose} />;
+    return (
+      <ResultSheet label={label} report={phase.report} forgot={endedWords(ended) !== ""} onDone={onClose} />
+    );
   }
   const pending = phase.kind === "releasing";
   const report = phase.kind === "confirm" || phase.kind === "releasing" ? phase.report : null;
-  const nothing = report !== null && holdsNothing(report);
+  // Nothing runs, and nothing ended is left for the release to forget: the one case with no point in confirming.
+  const forgotten = endedWords(ended);
+  const running = report !== null && !holdsNothing(report);
+  const nothing = report !== null && !running && forgotten === "";
   return (
     <div className="overlay">
       <div
@@ -191,17 +207,21 @@ export function ReleaseSheet({
           <>
             {nothing ? (
               <p>Procly holds nothing in this Worktree, so there is nothing to release.</p>
-            ) : (
+            ) : running ? (
               <p>
                 Each Service and Job is stopped with its whole process tree, and what it held in memory is
                 lost.
               </p>
+            ) : (
+              <p>Nothing runs in this Worktree.</p>
             )}
             <Effects report={report} tense="preview" />
-            <p>
-              The ended Jobs and Services of this Worktree are cleared, so procly wait, procly logs and procly
-              status no longer know them. No data is deleted.
-            </p>
+            {forgotten === "" ? null : (
+              <p>
+                {`The release forgets ${forgotten} of this Worktree, so procly wait, procly logs and procly status no longer know them.`}
+              </p>
+            )}
+            {nothing ? null : <p>No data is deleted.</p>}
             <p className="caption">From a terminal, in the Worktree:</p>
             <CopyBox text={releaseCommand(path)} />
           </>
@@ -238,10 +258,13 @@ export function ReleaseSheet({
 function ResultSheet({
   label,
   report,
+  forgot,
   onDone,
 }: {
   label: string;
   report: ReleaseReport;
+  /** Whether the sheet had ended Jobs or Services to forget, which the report does not list. */
+  forgot: boolean;
   onDone: () => void;
 }) {
   return (
@@ -250,7 +273,14 @@ function ResultSheet({
         <h2 id="released-title" className="title">
           {`Released ${label}`}
         </h2>
-        {holdsNothing(report) ? <p>Procly held nothing in this Worktree, nothing was released.</p> : null}
+        {holdsNothing(report) ? (
+          <p>
+            {forgot
+              ? "Nothing ran in this Worktree."
+              : "Procly held nothing in this Worktree, nothing was released."}
+          </p>
+        ) : null}
+        {forgot ? <p>Its ended Jobs and Services were forgotten.</p> : null}
         <Effects report={report} tense="result" />
         <div className="actions">
           <button type="button" className="button default" autoFocus onClick={onDone}>

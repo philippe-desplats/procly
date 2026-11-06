@@ -59,6 +59,8 @@ mod tests {
 
     use procly_client::protocol::{self, ReleaseReport};
     use procly_client::state_dir::StateDir;
+    use tauri::Manager as _;
+    use tauri::test::{mock_builder, mock_context, noop_assets};
 
     use super::*;
 
@@ -113,5 +115,50 @@ mod tests {
         assert!(request.contains(r#""request":"worktree_release""#), "{request}");
         assert!(request.contains(r#""path":"/p/work/acme/web-fix""#), "{request}");
         assert!(request.contains(r#""dry_run":false"#), "{request}");
+    }
+
+    /// A mock app that manages `client`, so that a command runs the way the window runs it: against the managed state.
+    fn app_managing(client: DaemonClient) -> tauri::App<tauri::test::MockRuntime> {
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        app.manage(client);
+        app
+    }
+
+    #[test]
+    fn the_release_command_sends_the_real_release_and_not_the_dry_run() {
+        let (_dir, client) = client();
+        let daemon = daemon(client.state());
+
+        let app = app_managing(client);
+        let path = PathBuf::from("/p/work/acme/web-fix");
+
+        let response = tauri::async_runtime::block_on(release_worktree(path, app.state::<DaemonClient>()))
+            .expect("a running Daemon answers");
+
+        assert!(matches!(response, Response::WorktreeRelease(_)));
+
+        let request = daemon.join().expect("the stand-in Daemon ends");
+        assert!(request.contains(r#""path":"/p/work/acme/web-fix""#), "{request}");
+        assert!(request.contains(r#""dry_run":false"#), "{request}");
+    }
+
+    #[test]
+    fn the_preview_command_sends_the_dry_run_and_not_the_real_release() {
+        let (_dir, client) = client();
+        let daemon = daemon(client.state());
+
+        let app = app_managing(client);
+        let path = PathBuf::from("/p/work/acme/web-fix");
+
+        let response = tauri::async_runtime::block_on(preview_release(path, app.state::<DaemonClient>()))
+            .expect("a running Daemon answers");
+
+        assert!(matches!(response, Response::WorktreeRelease(_)));
+
+        let request = daemon.join().expect("the stand-in Daemon ends");
+        assert!(request.contains(r#""path":"/p/work/acme/web-fix""#), "{request}");
+        assert!(request.contains(r#""dry_run":true"#), "{request}");
     }
 }

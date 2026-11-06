@@ -8,6 +8,7 @@ import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { failureKey } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
+import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
@@ -49,7 +50,12 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   const [doctor] = useState(() => given ?? createDoctorStore());
   // The Worktree whose release sheet is open. The app holds it, since the status may stop reporting the Worktree once
   // it is released, and the screen that opened the sheet goes with it.
-  const [releasing, setReleasing] = useState<{ path: string; label: string; listed: boolean } | null>(null);
+  const [releasing, setReleasing] = useState<{
+    path: string;
+    label: string;
+    listed: boolean;
+    ended: Ended;
+  } | null>(null);
 
   // The poller of the app keeps the snapshot current, the window only follows it.
   useEffect(() => store.start(), [store]);
@@ -191,6 +197,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
                       path: worktree.path,
                       label: worktreeLabel(worktree),
                       listed: worktree.listed,
+                      ended: endedIn(worktree),
                     });
                   }}
                 />
@@ -217,6 +224,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
           path={releasing.path}
           label={releasing.label}
           listed={releasing.listed}
+          ended={releasing.ended}
           onClose={() => {
             setReleasing(null);
           }}

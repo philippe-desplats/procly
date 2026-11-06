@@ -15,7 +15,34 @@ const MAIN = "/p/work/acme/web";
 /** A dry run in the shape the Daemon gives it, its paths replaced by neutral ones. */
 const dryRun: Response = recordedRelease as Response;
 
-function scene(options: { listed: boolean }): Response {
+/** What the status holds for `web-fix` besides the Service `web` that runs: ended Jobs and an ended Service. */
+const ended = {
+  jobs: [
+    {
+      id: "a4e2ea77",
+      command: "sh -c 'exit 3'",
+      cwd: PATH,
+      state: "ended",
+      end: { kind: "exited", code: 3 },
+    },
+    { id: "b17c0de2", command: "make test", cwd: PATH, state: "ended", end: { kind: "exited", code: 0 } },
+  ],
+  service: {
+    service: "old",
+    port: null,
+    reattached: false,
+    started_at: AT - 120_000,
+    restartable: true,
+    state: "ended",
+    end: { kind: "exited", code: 3 },
+  },
+} as const;
+
+function scene(options: {
+  listed: boolean;
+  ended?: boolean | undefined;
+  running?: boolean | undefined;
+}): Response {
   return {
     response: "status",
     repositories: [
@@ -38,16 +65,21 @@ function scene(options: { listed: boolean }): Response {
             branch: "web-fix",
             listed: options.listed,
             services: [
-              {
-                service: "web",
-                port: 24001,
-                reattached: false,
-                started_at: AT - 60_000,
-                restartable: true,
-                state: "healthy",
-              },
+              ...(options.running === false
+                ? []
+                : [
+                    {
+                      service: "web",
+                      port: 24001,
+                      reattached: false,
+                      started_at: AT - 60_000,
+                      restartable: true,
+                      state: "healthy" as const,
+                    },
+                  ]),
+              ...(options.ended === true ? [ended.service] : []),
             ],
-            jobs: [],
+            jobs: options.ended === true ? [...ended.jobs] : [],
           },
         ],
       },
@@ -65,6 +97,10 @@ interface Call {
 function app(
   options: {
     listed?: boolean;
+    /** Whether the status holds ended Jobs and an ended Service for the Worktree. */
+    ended?: boolean;
+    /** Whether the Service `web` still runs in the status, `true` unless said otherwise. */
+    running?: boolean;
     previewing?: () => unknown;
     releasing?: () => unknown;
   } = {},
@@ -72,7 +108,7 @@ function app(
   const calls: Call[] = [];
   const update: Update = {
     at_ms: AT,
-    response: scene({ listed: options.listed ?? true }),
+    response: scene({ listed: options.listed ?? true, ended: options.ended, running: options.running }),
     needs_you: [],
     seen: [],
   };
@@ -181,15 +217,53 @@ describe("the Worktree release sheet", () => {
     expect(sheet.getByText("Logical resource web__web_fix of db (postgres)")).toBeInTheDocument();
   });
 
-  it("says that ended Jobs and Services are cleared and that no data is deleted", async () => {
-    app();
+  it("says how many ended Jobs and Services the release forgets, counted from the status, and that no data is deleted", async () => {
+    const calls = app({ ended: true });
 
     const sheet = within(await openSheet());
 
     expect(
-      await sheet.findByText(/ended Jobs and Services of this Worktree are cleared/),
+      await sheet.findByText(/The release forgets 2 ended Jobs and 1 ended Service of this Worktree/),
     ).toBeInTheDocument();
     expect(sheet.getByText(/No data is deleted/)).toBeInTheDocument();
+    // The count comes from the status the window holds, so the only request the sheet sends is the dry run.
+    expect(calls.filter((call) => call.command === "preview_release")).toHaveLength(1);
+    expect(calls.map((call) => call.command)).not.toContain("release_worktree");
+  });
+
+  it("draws no paragraph about ended items when the status holds none", async () => {
+    app();
+
+    const sheet = within(await openSheet());
+
+    await sheet.findByRole("heading", { name: "Will stop" });
+    expect(sheet.queryByText(/The release forgets/)).not.toBeInTheDocument();
+    expect(sheet.getByRole("button", { name: "Release" })).toBeEnabled();
+  });
+
+  it("keeps Release enabled when nothing runs but ended Jobs and Services are left to forget", async () => {
+    const calls = app({
+      ended: true,
+      running: false,
+      previewing: () => emptyReport,
+      releasing: () => emptyReport,
+    });
+
+    const sheet = within(await openSheet());
+
+    expect(
+      await sheet.findByText(/The release forgets 2 ended Jobs and 1 ended Service/),
+    ).toBeInTheDocument();
+    expect(sheet.queryByText(/Procly holds nothing/)).not.toBeInTheDocument();
+    expect(sheet.getByText("Nothing runs in this Worktree.")).toBeInTheDocument();
+    const release = sheet.getByRole("button", { name: "Release" });
+    expect(release).toBeEnabled();
+
+    fireEvent.click(release);
+    expect(await screen.findByRole("dialog", { name: "Released web-fix" })).toHaveTextContent(
+      "Its ended Jobs and Services were forgotten.",
+    );
+    expect(calls.filter((call) => call.command === "release_worktree")).toHaveLength(1);
   });
 
   it("warns first when git still lists the Worktree", async () => {
@@ -241,6 +315,8 @@ describe("the Worktree release sheet", () => {
     expect(await sheet.findByText(/Procly holds nothing in this Worktree/)).toBeInTheDocument();
     expect(sheet.getByRole("button", { name: "Release" })).toBeDisabled();
     expect(sheet.getByRole("heading", { name: "Kept" })).toBeInTheDocument();
+    // Nothing ended is left either, so there is nothing to clear and the sheet does not talk about it.
+    expect(sheet.queryByText(/The release forgets/)).not.toBeInTheDocument();
   });
 
   it("disables Release while the dry run is read and when it failed", async () => {
