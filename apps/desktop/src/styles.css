@@ -631,3 +631,64 @@ body {
 .output .fg-white {
   color: var(--text);
 }
+
+/* A Daemon that cannot be read takes the whole window: one centered column under the overlay title bar. */
+.state-drag {
+  position: fixed;
+  inset: 0 0 auto;
+  height: 52px;
+}
+
+.state-screen {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 52px 30px 30px;
+  overflow: auto;
+  background: var(--panel);
+  text-align: center;
+}
+
+/* The column holds its content in the middle of the window, and scrolls from the top once it is taller. */
+.state-screen > :not(.overlay) {
+  width: 100%;
+  max-width: 480px;
+  margin: 0;
+}
+
+.state-screen::before,
+.state-screen::after {
+  content: "";
+  flex: 1 0 0;
+}
+
+.state-screen > .brand-mark {
+  width: 72px;
+  height: 72px;
+  flex: none;
+}
+
+/* The checks that run without the Daemon are a list to read, so they get a wider column and left aligned text. */
+.state-screen > section,
+.state-screen .copybox {
+  text-align: left;
+}
+
+.state-screen > section {
+  max-width: 620px;
+}
+
+.brand-ink {
+  fill: var(--brand-ink);
+}
+
+.brand-lime-deep {
+  fill: var(--brand-lime-deep);
+}
+
+.brand-lime {
+  fill: var(--brand-lime);
+}

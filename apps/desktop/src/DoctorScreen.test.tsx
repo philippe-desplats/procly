@@ -293,7 +293,7 @@ describe("when doctor runs", () => {
     await act(async () => {
       await emit("daemon-update", failed(NOT_RUNNING));
     });
-    expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
     expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
 
     // The poller keeps finding no Daemon, which is not entering the state again.
@@ -457,7 +457,7 @@ describe("Daemon not running", () => {
     for (const name of ["leased_ports", "orphans", "portless_aliases"]) {
       expect(within(checks).queryByText(name)).not.toBeInTheDocument();
     }
-    expect(screen.getByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
   });
 
   it("runs doctor on entering the state, and copies the fix of a check", async () => {
@@ -578,8 +578,10 @@ describe("a Daemon of another release", () => {
     );
     render(<App store={createDaemonStore()} />);
 
-    expect(await screen.findByRole("heading", { name: "Daemon of another version" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByRole("heading", { name: "The Daemon runs an older version" }),
+    ).toBeInTheDocument();
+    // This screen has no Refresh, and the banner could only come from a doctor run that a Daemon answering starts.
     await settle();
 
     expect(screen.queryByRole("status")).not.toBeInTheDocument();

@@ -121,7 +121,7 @@ describe("the window", () => {
 
     render(<App store={createDaemonStore()} />);
 
-    expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
     expect(screen.getByText(/does not start one/)).toBeInTheDocument();
     // Doctor runs when the app enters that state, and it never starts a Daemon.
     expect(commands).toEqual(["last_update", "doctor"]);
@@ -133,7 +133,7 @@ describe("the window", () => {
     render(<App store={createDaemonStore()} />);
 
     expect(await screen.findByText("unreadable answer from the daemon")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "The Daemon is not running" })).not.toBeInTheDocument();
   });
 
   it("asks the poller for a tick when Refresh is pressed, runs doctor, and does not ask the Daemon", async () => {

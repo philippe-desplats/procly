@@ -26,6 +26,22 @@ function mismatch(daemon: number, app = 22): Failure {
   };
 }
 
+/** The 3 parts of the 3-pane shell, which a Daemon that cannot be read leaves nothing to put in. */
+function expectNoShell(): void {
+  expect(screen.queryByRole("navigation", { name: "Worktrees" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/^Updated /)).not.toBeInTheDocument();
+}
+
+/** The brand mark and the title of a full-window state screen, in the one centered column. */
+function expectCenteredScreen(title: string): void {
+  const column = screen.getByRole("main");
+  expect(column).toHaveClass("state-screen");
+  expect(within(column).getByRole("img", { name: "Procly" })).toBeInTheDocument();
+  expect(within(column).getByRole("heading", { name: title })).toBeInTheDocument();
+}
+
 function answered(at = AT): Update {
   return { at_ms: at, response: status, needs_you: [], seen: [] };
 }
@@ -71,11 +87,23 @@ describe("a Daemon that does not run", () => {
 
     render(<App store={createDaemonStore()} />);
 
-    expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start the Daemon" })).toBeEnabled();
     expect(screen.getByText("procly unit install")).toBeInTheDocument();
     // Doctor ran on entering the state, which starts nothing.
     expect(commands).toEqual(["last_update", "doctor"]);
+  });
+
+  it("takes the whole window, with the brand mark and the title, and no sidebar, toolbar or inspector", async () => {
+    rust(failed(NOT_RUNNING));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon is not running" });
+    expectCenteredScreen("The Daemon is not running");
+    expectNoShell();
+    expect(screen.getByRole("button", { name: "Start the Daemon" })).toHaveClass("brand");
+    expect(screen.getByRole("region", { name: "Checks without the Daemon" })).toBeInTheDocument();
   });
 
   it("copies exactly the command it shows", async () => {
@@ -109,7 +137,7 @@ describe("a Daemon that does not run", () => {
 
     await tick(answered());
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "The Daemon is not running" })).not.toBeInTheDocument();
   });
 
   it("shows why the Daemon could not be started, and lets the developer try again", async () => {
@@ -134,11 +162,11 @@ describe("a Daemon that does not run", () => {
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
 
     await tick(failed(NOT_RUNNING));
-    expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
 
     await tick(answered(AT + 5000));
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "The Daemon is not running" })).not.toBeInTheDocument();
   });
 });
 
@@ -153,9 +181,46 @@ describe("a Daemon of another protocol version", () => {
 
     render(<App store={createDaemonStore()} />);
 
-    expect(await screen.findByRole("heading", { name: "Daemon of another version" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "The Daemon runs an older version" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("The Daemon speaks protocol 21, this app speaks 22.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Restart the Daemon" })).toBeEnabled();
+  });
+
+  it("takes the whole window on an older Daemon, with the brand mark and the title", async () => {
+    rust(failed(mismatch(21)));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon runs an older version" });
+    expectCenteredScreen("The Daemon runs an older version");
+    expectNoShell();
+  });
+
+  it("takes the whole window on a newer Daemon, with the brand mark and the title", async () => {
+    rust(failed(mismatch(23)));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon runs a newer version" });
+    expectCenteredScreen("The Daemon runs a newer version");
+    expectNoShell();
+  });
+
+  it("brings the shell back once the Daemon answers in the protocol of the app", async () => {
+    rust(failed(mismatch(21)));
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("heading", { name: "The Daemon runs an older version" });
+
+    await tick(answered());
+
+    expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Worktrees" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "The Daemon runs an older version" }),
+    ).not.toBeInTheDocument();
   });
 
   it("asks for an update of the app on a newer Daemon, and offers no restart", async () => {
@@ -163,7 +228,9 @@ describe("a Daemon of another protocol version", () => {
 
     render(<App store={createDaemonStore()} />);
 
-    expect(await screen.findByRole("heading", { name: "Daemon of another version" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "The Daemon runs a newer version" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("The Daemon speaks protocol 23, this app speaks 22.")).toBeInTheDocument();
     expect(screen.getByText(/update Procly/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();

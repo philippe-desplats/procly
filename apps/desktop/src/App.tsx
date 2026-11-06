@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
-import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
+import { DaemonStateScreen, isBlocking, type BlockingSnapshot } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
@@ -165,6 +165,11 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
   };
+
+  // Without a Daemon to read there is nothing for a sidebar or an inspector to hold, so the window is one screen.
+  if (isBlocking(snapshot)) {
+    return <DaemonStateScreen snapshot={snapshot} store={store} doctor={doctor} />;
+  }
 
   return (
     <SelectionContext.Provider value={control}>
@@ -429,7 +434,7 @@ function Center({
   doctor,
   onRelease,
 }: {
-  snapshot: DaemonSnapshot;
+  snapshot: Exclude<DaemonSnapshot, BlockingSnapshot>;
   current: WorktreeStatus | null;
   store: DaemonStore;
   doctor: DoctorStore;
@@ -442,10 +447,6 @@ function Center({
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
-    case "no-daemon":
-      return <DaemonNotRunning store={store} doctor={doctor} />;
-    case "protocol-mismatch":
-      return <DaemonOfAnotherVersion daemon={snapshot.daemon} app={snapshot.app} store={store} />;
     case "failure":
       return (
         <section>
