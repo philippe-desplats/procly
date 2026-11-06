@@ -78,14 +78,17 @@ describe("the Orphans screen", () => {
     expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
   });
 
-  it("runs a dry run when it opens, never an apply", async () => {
+  it("runs a dry run at launch and again when it opens, never an apply", async () => {
     const calls = app();
     render(<App store={createDaemonStore()} />);
+    await waitFor(() => {
+      expect(calls.filter((call) => call.command === "list_orphans")).toHaveLength(1);
+    });
 
     await openOrphans();
 
     await screen.findByRole("heading", { name: "web-login" });
-    expect(calls.filter((call) => call.command === "list_orphans")).toHaveLength(1);
+    expect(calls.filter((call) => call.command === "list_orphans")).toHaveLength(2);
     expect(calls.some((call) => call.command === "delete_orphans")).toBe(false);
   });
 
@@ -221,6 +224,9 @@ describe("the Orphans screen", () => {
   it("looks again after the result is closed", async () => {
     const calls = app({ deleting: () => ({ ...recordedGc, applied: true }) });
     render(<App store={createDaemonStore()} />);
+    await waitFor(() => {
+      expect(calls.filter((call) => call.command === "list_orphans")).toHaveLength(1);
+    });
     await openOrphans();
     fireEvent.click(await screen.findByRole("button", { name: /^Delete 6 Orphans/ }));
     fireEvent.click(
@@ -234,7 +240,7 @@ describe("the Orphans screen", () => {
     );
 
     await waitFor(() => {
-      expect(calls.filter((call) => call.command === "list_orphans")).toHaveLength(2);
+      expect(calls.filter((call) => call.command === "list_orphans")).toHaveLength(3);
     });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });

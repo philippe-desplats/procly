@@ -26,8 +26,11 @@ export type Scope = string | null;
 /** What the window knows of the checks of one scope. */
 export type DoctorState =
   | { kind: "idle" }
-  /** A run is on its way, `document` is the last one while there is one, so that a refresh does not blank the list. */
-  | { kind: "running"; document: DoctorDocument | null }
+  /**
+   * A run is on its way. `document` is the last one while there is one, so that a refresh does not blank the list, and
+   * `at` is when it ran, so that the sidebar keeps its time.
+   */
+  | { kind: "running"; document: DoctorDocument | null; at: number | null }
   | { kind: "report"; document: DoctorDocument; at: number }
   | { kind: "failure"; message: string };
 
@@ -45,6 +48,29 @@ const WORKTREE_CHECKS: readonly string[] = ["configuration", "guard", "portless"
 
 /** The fix the `daemon` check names for a Daemon of another release, which is how the window tells that drift. */
 const RESTART_FIX = "procly daemon stop";
+
+/**
+ * How many checks of a run failed, which the sidebar counts as problems. A warning is no problem: it changes neither the
+ * result of doctor nor its exit code (`docs/json.md`), and `procly doctor --agent` counts the failed checks only.
+ */
+export function problemCount(document: DoctorDocument): number {
+  return document.checks.filter((check) => check.status === "failed").length;
+}
+
+/** What the `daemon` check says of the release the Daemon runs, with or without the drift from this app. */
+const DAEMON_RELEASE = /^the Daemon (?:answers and )?runs procly ([^\s,]+)/;
+
+/**
+ * The version of the procly executable the Daemon runs, as the `daemon` check of doctor reports it, or `null` when that
+ * check did not hear from a Daemon. Doctor prints the `procly_version` the Daemon answered in the message of the check,
+ * so this reads it there and the protocol stays as it is. The wording is pinned by the Rust test
+ * `the_daemon_check_words_the_version_the_desktop_app_parses_in_both_of_its_messages` in `crates/procly/src/doctor.rs`,
+ * so rewording the message fails the build there, and this expression has to follow.
+ */
+export function daemonVersion(document: DoctorDocument): string | null {
+  const check = document.checks.find((candidate) => candidate.name === "daemon");
+  return check?.message.match(DAEMON_RELEASE)?.[1] ?? null;
+}
 
 /** The checks of the machine and the Daemon, which the Doctor screen shows: all but those of a Worktree. */
 export function machineChecks(checks: Check[]): Check[] {
@@ -144,6 +170,22 @@ function documentOf(state: DoctorState): DoctorDocument | null {
   }
 }
 
+function atOf(state: DoctorState): number | null {
+  switch (state.kind) {
+    case "running":
+      return state.at;
+    case "report":
+      return state.at;
+    case "idle":
+    case "failure":
+      return null;
+    default: {
+      const unhandled: never = state;
+      throw new Error(`unhandled state: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 export function createDoctorStore(): DoctorStore {
   const states = new Map<Scope, DoctorState>();
   const running = new Map<Scope, Promise<void>>();
@@ -170,7 +212,8 @@ export function createDoctorStore(): DoctorStore {
       if (flying !== undefined) {
         return flying;
       }
-      set(scope, { kind: "running", document: documentOf(store.get(scope)) });
+      const previous = store.get(scope);
+      set(scope, { kind: "running", document: documentOf(previous), at: atOf(previous) });
       const run = invoke<DoctorDocument>("doctor", { cwd: scope })
         .then(
           (document) => {

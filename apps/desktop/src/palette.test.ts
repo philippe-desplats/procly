@@ -93,6 +93,13 @@ describe("the palette", () => {
     },
   );
 
+  it("tints the picked row with the accent, lighter in light than in dark", () => {
+    expect(css).toMatch(/\.item\[data-selected="true"\]\s*\{\s*background: var\(--selected\);/);
+    expect(css).toMatch(/:root\s*\{[^}]*--selected: color-mix\(in srgb, var\(--accent\) 14%, transparent\)/);
+    const dark = /@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?\n\}/.exec(css)?.[0] ?? "";
+    expect(dark).toMatch(/--selected: color-mix\(in srgb, var\(--accent\) 22%, transparent\)/);
+  });
+
   it("falls back to the system accent where WebKit provides it", () => {
     expect(css).toMatch(
       /@supports \(color: -apple-system-control-accent\)\s*\{\s*:root\s*\{\s*--accent: -apple-system-control-accent;/,

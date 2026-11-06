@@ -3,18 +3,27 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import { DaemonStateScreen, isBlocking, type BlockingSnapshot } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
-import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
+import {
+  createDoctorStore,
+  REFRESH_REQUESTED,
+  useDoctor,
+  useTauriEvent,
+  type DoctorState,
+  type DoctorStore,
+} from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
 import { MENU_CHOICE, menuContext, useMenuContext, type MenuChoice } from "./menu";
 import { failureKey, FailuresContext, failuresOf } from "./needs-you";
+import { createOrphanScanStore, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
-import { SelectionContext } from "./selectable";
+import { SelectableRow, SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
+import { SidebarFooter } from "./SidebarFooter";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
@@ -37,8 +46,19 @@ type View =
   | { kind: "doctor" }
   | { kind: "settings"; focusEditor: boolean };
 
-/** `doctor` is the store of the checks, a window makes its own unless a test hands it one. */
-export function App({ store, doctor: given }: { store: DaemonStore; doctor?: DoctorStore }) {
+/**
+ * `doctor` is the store of the checks and `orphans` the one of the last dry run of `Gc`, a window makes its own unless a
+ * test hands it one.
+ */
+export function App({
+  store,
+  doctor: given,
+  orphans: givenOrphans,
+}: {
+  store: DaemonStore;
+  doctor?: DoctorStore;
+  orphans?: OrphanScanStore;
+}) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const [view, setCurrentView] = useState<View>({ kind: "overview" });
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -54,6 +74,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     [snapshot],
   );
   const [doctor] = useState(() => given ?? createDoctorStore());
+  const [orphanScan] = useState(() => givenOrphans ?? createOrphanScanStore());
   // The Worktree whose release sheet is open. The app holds it, since the status may stop reporting the Worktree once
   // it is released, and the screen that opened the sheet goes with it.
   const [releasing, setReleasing] = useState<{
@@ -74,20 +95,24 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     }
   }, [doctor, notRunning]);
 
-  // The release banner reads the machine checks, so they run once when the Daemon first answers, on no timer, rather
-  // than waiting for a visit to Doctor or a Refresh.
+  // The release banner reads the machine checks, and the sidebar counts the Orphans, so both run once when the Daemon
+  // first answers, on no timer, rather than waiting for a visit to Doctor or the Orphans or a Refresh.
   const answering = snapshot.kind === "status";
   const launched = useRef(false);
   useEffect(() => {
     if (answering && !launched.current) {
       launched.current = true;
       void doctor.run(null);
+      void orphanScan.run();
     }
-  }, [doctor, answering]);
+  }, [doctor, orphanScan, answering]);
 
-  // The menu refreshes without the window, so Rust says so.
+  // The menu refreshes without the window, so Rust says so. A scan of the Orphans asks the Daemon, so it waits for one.
   useTauriEvent(REFRESH_REQUESTED, () => {
     void doctor.refresh();
+    if (answering) {
+      void orphanScan.run();
+    }
   });
 
   // The native menu sends Settings, which `⌘,` triggers.
@@ -163,6 +188,11 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     });
   };
 
+  const onMarkSeen = (key: FailureKey): void => {
+    // Rust answers with a new update, so a mark that could not be saved still shows.
+    store.markSeen(key).catch(() => undefined);
+  };
+
   // Restart, Stop and the opening of the Worktree are carried out by the inspector, which shows how they went.
   useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
     switch (choice) {
@@ -177,8 +207,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
         break;
       case "mark-seen":
         if (failure !== null) {
-          // Rust answers with a new update, so a mark that could not be saved still shows.
-          store.markSeen(failure).catch(() => undefined);
+          onMarkSeen(failure);
         }
         break;
       case "release":
@@ -204,6 +233,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   const outside = view.kind === "outside";
   // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
   const wide = settings || orphans;
+  const doctorRun = useDoctor(doctor, null);
+  const orphanDryRun = useOrphanScan(orphanScan);
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
@@ -229,6 +260,9 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               orphans={orphans}
               outside={outside}
               outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
+              updatedAt={snapshot.kind === "status" ? snapshot.at : null}
+              doctor={doctorRun}
+              orphanScan={orphanDryRun}
               needsYou={snapshot.kind === "status" ? snapshot.needsYou.length : 0}
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
@@ -254,7 +288,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
             {view.kind === "settings" ? (
               <SettingsScreen focusEditor={view.focusEditor} />
             ) : view.kind === "orphans" && snapshot.kind === "status" ? (
-              <OrphansScreen />
+              <OrphansScreen store={orphanScan} />
             ) : view.kind === "outside" && snapshot.kind === "status" ? (
               <OutsideRepositoriesScreen
                 jobs={snapshot.report.jobs_outside_repositories}
@@ -262,7 +296,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               />
             ) : (
               <>
-                <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
+                <Toolbar snapshot={snapshot} store={store} doctor={doctor} orphans={orphanScan} />
                 {snapshot.kind === "status" ? (
                   <ReleaseBanner
                     store={doctor}
@@ -292,6 +326,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
                 selected={selected}
                 hint={outside ? "Select a Job." : "Select a Worktree."}
                 at={snapshot.kind === "loading" ? 0 : snapshot.at}
+                seen={snapshot.kind === "status" ? snapshot.seen : []}
+                onMarkSeen={onMarkSeen}
                 onChanged={refresh}
                 onNeedEditor={() => {
                   setView({ kind: "settings", focusEditor: true });
@@ -321,10 +357,12 @@ function Toolbar({
   snapshot,
   store,
   doctor,
+  orphans,
 }: {
   snapshot: DaemonSnapshot;
   store: DaemonStore;
   doctor: DoctorStore;
+  orphans: OrphanScanStore;
 }) {
   return (
     <header className="toolbar">
@@ -337,6 +375,10 @@ function Toolbar({
         onClick={() => {
           void store.refresh();
           void doctor.refresh();
+          // The scan asks the Daemon, which a Daemon that does not answer cannot give.
+          if (snapshot.kind === "status") {
+            void orphans.run();
+          }
         }}
       >
         Refresh
@@ -359,6 +401,9 @@ function Sidebar({
   orphans,
   outside,
   outsideJobs,
+  updatedAt,
+  doctor,
+  orphanScan,
   needsYou,
   onSelect,
   onOverview,
@@ -376,6 +421,12 @@ function Sidebar({
   outside: boolean;
   /** How many Jobs started outside any Repository, so the entry says whether it holds something. */
   outsideJobs: number;
+  /** When the poller last read a Status, `null` while none was read. */
+  updatedAt: number | null;
+  /** The last run of doctor for the machine, which the footer counts the problems of. */
+  doctor: DoctorState;
+  /** The last dry run of `Gc`, which the footer counts the Orphans of. */
+  orphanScan: OrphanScan;
   /** How many items are in Needs you, the same list the Overview pins on top. */
   needsYou: number;
   onSelect: (path: string) => void;
@@ -406,21 +457,17 @@ function Sidebar({
         <span className="row-name">Outside Repositories</span>
         {outsideJobs === 0 ? null : <span className="caption">{outsideJobs}</span>}
       </button>
-      <button
-        type="button"
-        className="row sidebar-foot"
-        aria-current={checking ? "true" : undefined}
-        onClick={onDoctor}
-      >
-        <span className="row-name">Doctor</span>
-      </button>
-      <button type="button" className="row" aria-current={orphans ? "true" : undefined} onClick={onOrphans}>
-        <span className="row-name">Orphans</span>
-      </button>
-      <button type="button" className="row" aria-current={settings ? "true" : undefined} onClick={onSettings}>
-        <span className="row-name">Settings</span>
-        <span className="caption">⌘,</span>
-      </button>
+      <SidebarFooter
+        updatedAt={updatedAt}
+        doctor={doctor}
+        orphans={orphanScan}
+        checking={checking}
+        orphansOpen={orphans}
+        settings={settings}
+        onDoctor={onDoctor}
+        onOrphans={onOrphans}
+        onSettings={onSettings}
+      />
     </>
   );
 }
@@ -485,10 +532,6 @@ function Center({
   doctor: DoctorStore;
   onRelease: (worktree: WorktreeStatus) => void;
 }) {
-  const onMarkSeen = (key: FailureKey): void => {
-    // Rust answers with a new update, so a mark that could not be saved still shows.
-    store.markSeen(key).catch(() => undefined);
-  };
   switch (snapshot.kind) {
     case "loading":
       return <p className="caption">Reading the Daemon…</p>;
@@ -506,7 +549,6 @@ function Center({
           at={snapshot.at}
           needsYou={snapshot.needsYou}
           seen={snapshot.seen}
-          onMarkSeen={onMarkSeen}
         />
       ) : (
         <WorktreeScreen
@@ -534,13 +576,11 @@ function Overview({
   at,
   needsYou,
   seen,
-  onMarkSeen,
 }: {
   repositories: RepositoryStatus[];
   at: number;
   needsYou: NeedsYou[];
   seen: FailureKey[];
-  onMarkSeen: (key: FailureKey) => void;
 }) {
   const groups = repositories
     .map((repository) => ({
@@ -556,7 +596,6 @@ function Overview({
       <NeedsYouSection
         lines={needsYou}
         worktrees={repositories.flatMap((repository) => repository.worktrees)}
-        onMarkSeen={onMarkSeen}
       />
       {groups.length === 0 ? <p className="muted">No Service is known.</p> : null}
       {groups.map(({ repository, worktrees }) => (
@@ -591,15 +630,7 @@ function Overview({
 }
 
 /** What the developer has to look at, pinned on top of the Overview: nothing is drawn when nothing needs them. */
-function NeedsYouSection({
-  lines,
-  worktrees,
-  onMarkSeen,
-}: {
-  lines: NeedsYou[];
-  worktrees: WorktreeStatus[];
-  onMarkSeen: (key: FailureKey) => void;
-}) {
+function NeedsYouSection({ lines, worktrees }: { lines: NeedsYou[]; worktrees: WorktreeStatus[] }) {
   if (lines.length === 0) {
     return null;
   }
@@ -614,7 +645,7 @@ function NeedsYouSection({
       </h3>
       <ul className="list">
         {lines.map((line) => (
-          <NeedsYouLine key={lineKey(line)} line={line} labelOf={labelOf} onMarkSeen={onMarkSeen} />
+          <NeedsYouLine key={lineKey(line)} line={line} labelOf={labelOf} />
         ))}
       </ul>
     </section>
@@ -636,31 +667,36 @@ function lineKey(line: NeedsYou): string {
   }
 }
 
-function NeedsYouLine({
-  line,
-  labelOf,
-  onMarkSeen,
-}: {
-  line: NeedsYou;
-  labelOf: (path: string) => string;
-  onMarkSeen: (key: FailureKey) => void;
-}) {
-  const key = failureKey(line);
-  return (
+/** The item a line of Needs you picks for the inspector, nothing for a Foreign process, which has no inspector yet. */
+function targetOfLine(line: NeedsYou): Selection | null {
+  switch (line.kind) {
+    case "service":
+      return { kind: "service", worktree: line.worktree, service: line.service };
+    case "job":
+      return { kind: "job", id: line.id };
+    case "foreign":
+      return null;
+    default: {
+      const unhandled: never = line;
+      throw new Error(`unhandled line: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * A failure is picked like any row, and its inspector holds Mark as Seen. A line that is Seen leaves Needs you, so a
+ * line here is never dimmed.
+ */
+function NeedsYouLine({ line, labelOf }: { line: NeedsYou; labelOf: (path: string) => string }) {
+  const target = targetOfLine(line);
+  return target === null ? (
     <li className="item">
       <NeedsYouWhat line={line} labelOf={labelOf} />
-      {key === null ? null : (
-        <button
-          type="button"
-          className="button"
-          onClick={() => {
-            onMarkSeen(key);
-          }}
-        >
-          Mark as Seen
-        </button>
-      )}
     </li>
+  ) : (
+    <SelectableRow target={target} seen={false}>
+      <NeedsYouWhat line={line} labelOf={labelOf} />
+    </SelectableRow>
   );
 }
 
@@ -709,6 +745,8 @@ function Inspector({
   selected,
   hint,
   at,
+  seen,
+  onMarkSeen,
   onChanged,
   onNeedEditor,
 }: {
@@ -717,13 +755,22 @@ function Inspector({
   /** What the inspector says while nothing is picked and no Worktree is open. */
   hint: string;
   at: number;
+  seen: FailureKey[];
+  onMarkSeen: (key: FailureKey) => void;
   onChanged: () => void;
   onNeedEditor: () => void;
 }) {
   if (selected !== null) {
     return (
       <>
-        <SelectedPanel key={selectedKey(selected)} selected={selected} at={at} onChanged={onChanged} />
+        <SelectedPanel
+          key={selectedKey(selected)}
+          selected={selected}
+          at={at}
+          seen={seen}
+          onMarkSeen={onMarkSeen}
+          onChanged={onChanged}
+        />
         {selected.worktree === null ? null : (
           <WorktreeActions
             key={selected.worktree.path}
