@@ -876,14 +876,14 @@ describe("the reason line of a Worktree in the sidebar", () => {
     expect(reason?.parentElement?.querySelectorAll(".row-line")).toHaveLength(1);
   });
 
-  it("draws no reason line while the Daemon does not answer", async () => {
+  it("draws no reason line while the Daemon answers badly", async () => {
     poller(answered(many, { needsYou: [API_FAILURE] }));
     render(<App store={createDaemonStore()} />);
     await entryOf("web-login");
 
     await tick({
       at_ms: AT,
-      failure: { kind: "unreachable", message: "no socket" },
+      failure: { kind: "decode", message: "unreadable answer" },
       needs_you: [],
       seen: [],
     });
