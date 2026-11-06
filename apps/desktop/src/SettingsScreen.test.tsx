@@ -559,13 +559,42 @@ describe("a clicked banner", () => {
     clearMocks();
   });
 
-  it("brings the window back on the Worktree of the failure", async () => {
+  it("brings the window back on the failed Job, selected in the inspector of its Worktree", async () => {
     app();
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("button", { name: "web-fix" });
 
     await act(async () => {
-      await emit("open-failure", "/p/work/acme/web-fix");
+      await emit("open-failure", { kind: "job", worktree: "/p/work/acme/web-fix", id: "a4e2ea77" });
+    });
+
+    const inspector = await screen.findByRole("complementary", { name: "Inspector" });
+    expect(await within(inspector).findByRole("heading", { name: "sh -c 'exit 3'" })).toBeInTheDocument();
+    expect(within(inspector).getByText("a4e2ea77")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "web-fix" })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("brings the window back on the failed Service, selected in the inspector of its Worktree", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("button", { name: /^main/ });
+
+    await act(async () => {
+      await emit("open-failure", { kind: "service", worktree: "/p/work/acme/web", service: "api" });
+    });
+
+    const inspector = await screen.findByRole("complementary", { name: "Inspector" });
+    expect(await within(inspector).findByRole("heading", { name: "api" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^main/ })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("brings the window back on the Worktree of a Foreign process, which the inspector does not explain", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("button", { name: "web-fix" });
+
+    await act(async () => {
+      await emit("open-failure", { kind: "worktree", worktree: "/p/work/acme/web-fix" });
     });
 
     expect(await screen.findByRole("complementary", { name: "Inspector" })).toHaveTextContent(

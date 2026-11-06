@@ -10,7 +10,7 @@ use procly_client::protocol::{
 };
 
 use crate::glyph::Glyph;
-use crate::needs_you::NeedsYou;
+use crate::needs_you::{NeedsYou, Place};
 use crate::poller::{Answer, Update};
 
 /// The longest a command is shown in a line of the menu.
@@ -24,6 +24,8 @@ pub(crate) struct Snapshot {
     at_ms: u64,
     /// One line per thing that needs the developer, in the order of "Needs you".
     needs_you: Vec<String>,
+    /// Where a click on each line of `needs_you` opens the window, in the same order.
+    places: Vec<Place>,
     /// The ports of what runs, which Copy Port copies.
     ports: Vec<CopyPort>,
 }
@@ -42,6 +44,8 @@ pub(crate) struct Model {
     pub(crate) header: String,
     /// The lines of "Needs you".
     pub(crate) needs_you: Vec<String>,
+    /// Where a click on each line of "Needs you" opens the window, in the same order.
+    pub(crate) places: Vec<Place>,
     /// The entries of Copy Port.
     pub(crate) ports: Vec<CopyPort>,
 }
@@ -190,6 +194,7 @@ pub(crate) fn snapshot(update: &Update, needs_you: &[NeedsYou]) -> Option<Snapsh
     Some(Snapshot {
         at_ms: update.at_ms,
         needs_you: needs_you.iter().map(|item| line(item, report)).collect(),
+        places: needs_you.iter().map(NeedsYou::place).collect(),
         ports: copy_ports(report),
     })
 }
@@ -231,6 +236,7 @@ pub(crate) fn model(glyph: Glyph, last: Option<&Snapshot>, when: impl Fn(u64) ->
     Model {
         header: header(glyph, last, when),
         needs_you: last.map_or_else(Vec::new, |last| last.needs_you.clone()),
+        places: last.map_or_else(Vec::new, |last| last.places.clone()),
         ports: last.map_or_else(Vec::new, |last| last.ports.clone()),
     }
 }
@@ -240,6 +246,8 @@ pub(crate) fn model(glyph: Glyph, last: Option<&Snapshot>, when: impl Fn(u64) ->
 pub(crate) enum Action {
     /// Open the window.
     Open,
+    /// Open the window on the line of "Needs you" at this index, see [`Model::places`].
+    OpenOn(usize),
     /// Open the window on Settings.
     Settings,
     /// Quit the app, which stops nothing in the Daemon.
@@ -253,7 +261,7 @@ pub(crate) const OPEN_ID: &str = "tray-open";
 pub(crate) const SETTINGS_ID: &str = "tray-settings";
 pub(crate) const QUIT_ID: &str = "tray-quit";
 
-/// The id of the line of "Needs you" at `index`, which opens the window.
+/// The id of the line of "Needs you" at `index`, which opens the window on what it names.
 pub(crate) fn needs_you_id(index: usize) -> String {
     format!("tray-needs-you-{index}")
 }
@@ -340,11 +348,14 @@ pub(crate) fn action(id: &str) -> Option<Action> {
         OPEN_ID => Some(Action::Open),
         SETTINGS_ID => Some(Action::Settings),
         QUIT_ID => Some(Action::Quit),
-        _ if id.starts_with("tray-needs-you-") => Some(Action::Open),
-        _ => id
-            .strip_prefix("tray-copy-port-")
-            .and_then(|port| port.parse().ok())
-            .map(Action::CopyPort),
+        _ => {
+            if let Some(index) = id.strip_prefix("tray-needs-you-") {
+                return index.parse().ok().map(Action::OpenOn);
+            }
+            id.strip_prefix("tray-copy-port-")
+                .and_then(|port| port.parse().ok())
+                .map(Action::CopyPort)
+        }
     }
 }
 
@@ -664,8 +675,27 @@ mod tests {
         assert_eq!(action(OPEN_ID), Some(Action::Open));
         assert_eq!(action(SETTINGS_ID), Some(Action::Settings));
         assert_eq!(action(QUIT_ID), Some(Action::Quit));
-        assert_eq!(action(&needs_you_id(3)), Some(Action::Open));
+        assert_eq!(action(&needs_you_id(3)), Some(Action::OpenOn(3)));
         assert_eq!(action(&copy_port_id(24001)), Some(Action::CopyPort(24001)));
+    }
+
+    #[test]
+    fn a_line_of_needs_you_opens_the_window_on_the_item_it_names() {
+        let model = model(Glyph::NeedsYou, Some(&known(&[failed_service()])), clock);
+
+        let index = match action(&needs_you_id(0)) {
+            Some(Action::OpenOn(index)) => index,
+            other => panic!("a line of Needs you opens on its item: {other:?}"),
+        };
+
+        assert_eq!(
+            model.places.get(index),
+            Some(&Place::Service {
+                worktree: PathBuf::from("/p/work/acme/web-fix"),
+                service: "api".to_owned(),
+            })
+        );
+        assert_eq!(model.places.len(), model.needs_you.len());
     }
 
     #[test]
@@ -674,6 +704,7 @@ mod tests {
         assert_eq!(action("settings"), None);
         assert_eq!(action("tray-copy-port-lots"), None);
         assert_eq!(action("tray-copy-port-99999"), None);
+        assert_eq!(action("tray-needs-you-first"), None);
     }
 
     fn item(id: &str, label: &str) -> Entry {

@@ -14,7 +14,7 @@ import { SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { SelectedPanel } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
-import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
+import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import { State } from "./StateMark";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
@@ -115,9 +115,30 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
     };
   }, [setView]);
 
-  // A clicked banner brings the window back on the Worktree of its failure, or on the Overview when it names none.
-  useTauriEvent<string | null>(OPEN_FAILURE, (worktree) => {
-    setView(worktree === null ? { kind: "overview" } : { kind: "worktree", path: worktree });
+  // A clicked banner or line of the menu brings the window back on its item, selected in the inspector, or on the
+  // Overview when it names none.
+  useTauriEvent<Place | null>(OPEN_FAILURE, (place) => {
+    if (place === null) {
+      setView({ kind: "overview" });
+      return;
+    }
+    switch (place.kind) {
+      case "worktree":
+        setView({ kind: "worktree", path: place.worktree });
+        break;
+      case "service":
+        setView({ kind: "worktree", path: place.worktree });
+        setSelection({ kind: "service", worktree: place.worktree, service: place.service });
+        break;
+      case "job":
+        setView(place.worktree === null ? { kind: "outside" } : { kind: "worktree", path: place.worktree });
+        setSelection({ kind: "job", id: place.id });
+        break;
+      default: {
+        const unhandled: never = place;
+        throw new Error(`unhandled place: ${JSON.stringify(unhandled)}`);
+      }
+    }
   });
 
   const repositories = snapshot.kind === "status" ? snapshot.report.repositories : [];

@@ -32,10 +32,19 @@ export interface OpenFailure {
 export const OPEN_SETTINGS = "open-settings";
 
 /**
- * The event Rust sends when a banner was clicked. Its payload is the path of the Worktree the banner was about, or null
- * for a banner about several failures or about a Job started outside any Repository.
+ * The event Rust sends when a banner or a line of "Needs you" in the menu was clicked. Its payload is the `Place` of
+ * the item it was about, or null for a banner about several failures.
  */
 export const OPEN_FAILURE = "open-failure";
+
+/**
+ * What a click opens the window on: a failed Service or Job, selected in the inspector, or the Worktree of a Foreign
+ * process. A Job has no Worktree when it started outside any Repository.
+ */
+export type Place =
+  | { kind: "service"; worktree: string; service: string }
+  | { kind: "job"; worktree: string | null; id: string }
+  | { kind: "worktree"; worktree: string };
 
 export const loadSettings = (): Promise<Settings> => invoke("get_settings");
 

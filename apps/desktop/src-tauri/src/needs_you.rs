@@ -56,6 +56,44 @@ pub(crate) enum NeedsYou {
     Foreign { worktree: PathBuf, process: ForeignProcess },
 }
 
+/// What a click on a line of "Needs you", in the menu or on its banner, opens the window on: the item itself, which the
+/// window selects in the inspector, or the Worktree of a Foreign process, which the inspector does not explain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum Place {
+    Service {
+        worktree: PathBuf,
+        service: String,
+    },
+    /// `worktree` is empty for a Job started outside any Repository.
+    Job {
+        worktree: Option<PathBuf>,
+        id: String,
+    },
+    Worktree {
+        worktree: PathBuf,
+    },
+}
+
+impl NeedsYou {
+    /// Where a click on this line opens the window.
+    pub(crate) fn place(&self) -> Place {
+        match self {
+            Self::Service { worktree, service, .. } => Place::Service {
+                worktree: worktree.clone(),
+                service: service.clone(),
+            },
+            Self::Job { worktree, id, .. } => Place::Job {
+                worktree: worktree.clone(),
+                id: id.clone(),
+            },
+            Self::Foreign { worktree, .. } => Place::Worktree {
+                worktree: worktree.clone(),
+            },
+        }
+    }
+}
+
 /// Whether a Service ended in a way that needs the developer.
 ///
 /// Only `stopped`, `idle` and `exited` with code 0 are routine. Every other end counts as a failure, so a kind this
@@ -574,6 +612,43 @@ mod tests {
                     process: foreign[1].clone(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_failure_opens_on_the_item_and_one_on_a_foreign_process_on_its_worktree() {
+        let service = NeedsYou::Service {
+            worktree: PathBuf::from("/p/work/acme/web"),
+            service: "api".to_owned(),
+            started_at: 1,
+            end: ServiceEnd::Exited { code: 1 },
+        };
+        let stray = NeedsYou::Job {
+            worktree: None,
+            id: "j-red".to_owned(),
+            command: "make".to_owned(),
+            end: JobEnd::Exited { code: 2 },
+        };
+        let foreign = NeedsYou::Foreign {
+            worktree: PathBuf::from("/p/work/acme/web"),
+            process: ForeignProcess::Process {
+                pid: 7,
+                command: "node".to_owned(),
+                ports: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(service.place()).expect("serializes"),
+            serde_json::json!({ "kind": "service", "worktree": "/p/work/acme/web", "service": "api" })
+        );
+        assert_eq!(
+            serde_json::to_value(stray.place()).expect("serializes"),
+            serde_json::json!({ "kind": "job", "worktree": null, "id": "j-red" })
+        );
+        assert_eq!(
+            serde_json::to_value(foreign.place()).expect("serializes"),
+            serde_json::json!({ "kind": "worktree", "worktree": "/p/work/acme/web" })
         );
     }
 

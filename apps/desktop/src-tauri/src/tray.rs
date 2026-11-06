@@ -10,11 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
-use tauri::{AppHandle, Emitter as _, Wry};
+use tauri::{AppHandle, Emitter as _, Manager as _, Wry};
 
 use crate::clipboard;
 use crate::glyph::{Glyph, GlyphTracker};
-use crate::needs_you::Presented;
+use crate::needs_you::{Place, Presented};
+use crate::notifications::OPEN_FAILURE;
 use crate::settings::OPEN_SETTINGS;
 use crate::tray_menu::{self, Action, Entry, Item, Model, Snapshot};
 use crate::window::MainWindow;
@@ -40,6 +41,9 @@ struct State {
 pub(crate) struct Tray {
     icon: TrayIcon,
     state: Mutex<State>,
+    /// Where each line of "Needs you" on screen opens the window. Apart from `state`, so that a click read while the
+    /// menu is being drawn waits for no drawing.
+    places: Mutex<Vec<Place>>,
 }
 
 impl std::fmt::Debug for Tray {
@@ -96,6 +100,12 @@ fn run(app: &AppHandle, id: &str) {
     };
     match action {
         Action::Open => MainWindow(app).open(),
+        Action::OpenOn(index) => {
+            let place = app.try_state::<Tray>().and_then(|tray| tray.place(index));
+            MainWindow(app).open();
+            // The window listens while it is hidden too, and shows the item once it is back.
+            let _ = app.emit(OPEN_FAILURE, place);
+        }
         Action::Settings => {
             MainWindow(app).open();
             // The window listens while it is hidden too, and asks for the screen when it shows.
@@ -140,12 +150,23 @@ impl Tray {
                     header,
                 },
             }),
+            places: Mutex::new(Vec::new()),
         })
     }
 
     fn held(&self) -> MutexGuard<'_, State> {
         // A panic while drawing leaves a state that the next answer draws over.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn places(&self) -> MutexGuard<'_, Vec<Place>> {
+        // Nothing panics while holding it, and the list is replaced whole.
+        self.places.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Where the line of "Needs you" at `index` on screen opens the window.
+    fn place(&self, index: usize) -> Option<Place> {
+        self.places().get(index).cloned()
     }
 
     /// Takes an answer of the poller into account: the glyph, the lines of the menu and the time of the last state.
@@ -157,9 +178,11 @@ impl Tray {
             state.last = Some(snapshot);
         }
         let model = tray_menu::model(glyph, state.last.as_ref(), local);
+        let places = model.places.clone();
         if let Err(error) = self.draw(&mut state.drawn, app, glyph, model) {
             eprintln!("procly: cannot update the menu bar icon: {error}");
         }
+        *self.places() = places;
     }
 
     /// Changes only what changed: the image, the items when the shape of the menu changed, otherwise the header text
