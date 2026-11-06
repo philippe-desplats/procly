@@ -100,6 +100,40 @@ describe("the palette", () => {
     expect(dark).toMatch(/--selected: color-mix\(in srgb, var\(--accent\) 22%, transparent\)/);
   });
 
+  it.each([
+    ["light", 0.14],
+    ["dark", 0.22],
+  ] as const)(
+    "keeps the text and the state glyphs readable on the tint of the open sidebar entry in the %s theme",
+    (theme, share) => {
+      const colours = palette()[theme];
+      const channel = (hex: string, at: number): number => Number.parseInt(hex.slice(at, at + 2), 16);
+      const side = colours.get("--side") ?? "";
+      const accent = colours.get("--accent") ?? "";
+      // The tint is the accent over the sidebar, as `color-mix` blends them.
+      const tint = `#${[1, 3, 5]
+        .map((at) =>
+          Math.round(channel(accent, at) * share + channel(side, at) * (1 - share))
+            .toString(16)
+            .padStart(2, "0"),
+        )
+        .join("")}`;
+      for (const name of ["--text", "--muted"]) {
+        expect(
+          contrast(colours.get(name) ?? "", tint),
+          `${name} on the open entry, ${theme}`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+      for (const name of ["--ok", "--warn", "--fail", "--ended"]) {
+        // 3:1 is the floor of WCAG 1.4.11 for a graphical object.
+        expect(
+          contrast(colours.get(name) ?? "", tint),
+          `${name} on the open entry, ${theme}`,
+        ).toBeGreaterThanOrEqual(3);
+      }
+    },
+  );
+
   it("falls back to the system accent where WebKit provides it", () => {
     expect(css).toMatch(
       /@supports \(color: -apple-system-control-accent\)\s*\{\s*:root\s*\{\s*--accent: -apple-system-control-accent;/,

@@ -166,13 +166,14 @@ body {
   white-space: nowrap;
 }
 
+/* The open entry takes the tint of the picked rows and keeps every colour it has, so a glyph is read by its shape and its tone. */
 .row[aria-current="true"] {
-  background: var(--accent);
-  color: #ffffff;
+  background: var(--selected);
 }
 
+/* A caption is the faintest text of the sidebar, and on the tint it would fall under 4.5:1, so it takes the muted colour. */
 .row[aria-current="true"] .caption {
-  color: inherit;
+  color: var(--muted);
 }
 
 .row-count {
@@ -181,13 +182,47 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.row[aria-current="true"] .row-count {
-  color: inherit;
-}
-
 .row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* A Worktree of the sidebar: its label on the first line, and why it needs the developer under it, when it does. */
+.row-worktree {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 1px;
+}
+
+.row-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row-reason {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--size-small);
+}
+
+.row-reason .glyph {
+  width: 10px;
+  height: 10px;
+}
+
+/* One line, cut at its end with an ellipsis: a long reason is never wrapped. */
+.row-reason-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .item {

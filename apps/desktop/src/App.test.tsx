@@ -762,3 +762,197 @@ describe("Needs you", () => {
     expect(row).toHaveAttribute("data-seen", "true");
   });
 });
+
+describe("the reason line of a Worktree in the sidebar", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  const LONG_BRANCH = "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end";
+
+  /** The sidebar entry of the Worktree whose folder is `folder`, found by the tooltip that names it. */
+  async function entryOf(folder: string): Promise<HTMLElement> {
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: /^Overview/ });
+    const entry = within(sidebar)
+      .getAllByRole("button")
+      .find((button) => button.getAttribute("title")?.includes(`Folder: ${folder}\n`));
+    if (entry === undefined) {
+      throw new Error(`no sidebar entry for ${folder}`);
+    }
+    return entry;
+  }
+
+  /** The reason lines of the whole sidebar. */
+  function reasons(): Element[] {
+    return [...screen.getByRole("navigation", { name: "Worktrees" }).querySelectorAll(".row-reason")];
+  }
+
+  it("says under the label why a Worktree needs the developer, with the glyph of the failed Service", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const entry = await entryOf("web-login");
+    const reason = entry.querySelector(".row-reason");
+    expect(reason).toHaveTextContent("api exited 1");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
+    // The label stays on its own line, above the reason.
+    expect(entry.querySelector(".row-line")).toHaveTextContent(LONG_BRANCH);
+    expect(entry.querySelector(".row-line")).not.toContainElement(reason as HTMLElement);
+    // The glyph carries the state, the colour class repeats it.
+    expect(reason).toHaveClass("tone-fail");
+  });
+
+  it("names a Foreign process as a process outside Procly, with the glyph of a Foreign process", async () => {
+    poller(answered(many, { needsYou: [FOREIGN] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web")).querySelector(".row-reason");
+    expect(reason).toHaveTextContent("a process outside Procly");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "foreign");
+    expect(reason).toHaveClass("tone-warn");
+  });
+
+  it("names a failed Job by its command", async () => {
+    const job: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web",
+      id: "j-7",
+      command: "make test",
+      end: { kind: "exited", code: 2 },
+    };
+    poller(answered(many, { needsYou: [job] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web")).querySelector(".row-reason");
+    expect(reason).toHaveTextContent("make test exited 2");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
+  });
+
+  it("gives a Worktree with nothing in Needs you a single line, and its neighbours too", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    await entryOf("web-login");
+    expect(reasons()).toHaveLength(1);
+    const quiet = await entryOf("docs");
+    expect(quiet.querySelector(".row-reason")).toBeNull();
+    expect(quiet).toHaveTextContent(/^mainmain$/);
+  });
+
+  it("draws no reason line at all while nothing needs the developer", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    await entryOf("web-login");
+    expect(reasons()).toHaveLength(0);
+  });
+
+  it("shows the first item of Needs you for the Worktree, and none of another Worktree's", async () => {
+    const second: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web-login",
+      id: "j-8",
+      command: "make lint",
+      end: { kind: "exited", code: 1 },
+    };
+    const outside: NeedsYou = { ...second, worktree: null, id: "j-9", command: "make outside" };
+    poller(answered(many, { needsYou: [outside, API_FAILURE, second, FOREIGN] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const entry = await entryOf("web-login");
+    expect(entry.querySelectorAll(".row-reason")).toHaveLength(1);
+    expect(entry.querySelector(".row-reason")).toHaveTextContent("api exited 1");
+    // A Job outside every Repository belongs to no Worktree of the sidebar.
+    expect(reasons().map((reason) => reason.textContent)).toEqual([
+      "a process outside Procly",
+      "api exited 1",
+    ]);
+  });
+
+  it("keeps a long reason whole in one cut-off text, for the stylesheet to end it with an ellipsis", async () => {
+    const long: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web-login",
+      id: "j-10",
+      command: "cargo test --workspace --locked -- --test-threads 1 --nocapture some_very_long_test_name",
+      end: { kind: "exited", code: 101 },
+    };
+    poller(answered(many, { needsYou: [long] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web-login")).querySelector(".row-reason");
+    expect(reason?.querySelectorAll(".row-reason-text")).toHaveLength(1);
+    expect(reason?.querySelector(".row-reason-text")).toHaveTextContent(`${long.command} exited 101`);
+    // One line of its own: the reason is not part of the label's line, which the entry cuts separately.
+    expect(reason?.parentElement?.querySelectorAll(".row-line")).toHaveLength(1);
+  });
+
+  it("draws no reason line while the Daemon answers badly", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+    render(<App store={createDaemonStore()} />);
+    await entryOf("web-login");
+
+    await tick({
+      at_ms: AT,
+      failure: { kind: "decode", message: "unreadable answer" },
+      needs_you: [],
+      seen: [],
+    });
+
+    expect(reasons()).toHaveLength(0);
+  });
+
+  it("names the reason in the accessible name of the entry, after the label", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    const entry = await within(sidebar).findByRole("button", { name: new RegExp(`^${LONG_BRANCH}`) });
+    expect(entry).toHaveAccessibleName(/api exited 1$/);
+  });
+
+  it("follows the poller: the line is gone once the failure is marked as Seen", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }), () =>
+      answered(many, { needsYou: [], seen: [API_KEY] }),
+    );
+    render(<App store={createDaemonStore()} />);
+    expect((await entryOf("web-login")).querySelector(".row-reason")).not.toBeNull();
+
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+    fireEvent.click(within(needs).getByRole("button", { name: /^api/ }));
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Mark as Seen" }));
+
+    await waitFor(() => {
+      expect(reasons()).toHaveLength(0);
+    });
+    expect((await entryOf("web-login")).querySelector(".row-line")).toHaveTextContent(LONG_BRANCH);
+  });
+
+  it("moves to the next item of the Worktree when the first one is marked as Seen", async () => {
+    const lint: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web-login",
+      id: "j-8",
+      command: "make lint",
+      end: { kind: "exited", code: 1 },
+    };
+    poller(answered(many, { needsYou: [API_FAILURE, lint] }));
+    render(<App store={createDaemonStore()} />);
+    expect((await entryOf("web-login")).querySelector(".row-reason")).toHaveTextContent("api exited 1");
+
+    await tick(answered(many, { needsYou: [lint], seen: [API_KEY] }));
+
+    expect((await entryOf("web-login")).querySelector(".row-reason")).toHaveTextContent("make lint exited 1");
+  });
+});
