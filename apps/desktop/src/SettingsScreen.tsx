@@ -6,9 +6,11 @@ import {
   failureOf,
   loadOpenAtLogin,
   loadSettings,
+  openNotificationSettings,
   saveOpenAtLogin,
   saveSettings,
   type Settings,
+  setNotifyOnFailure,
 } from "./settings";
 
 /** The value of the pop-up entry that asks for a name to be typed. */
@@ -18,14 +20,16 @@ const OTHER = "__other__";
 const NONE = "";
 
 /**
- * The Settings screen. Every change applies at once, there is no Save button. The "General" and "Open with" sections
- * live here, the others come with the behaviour they set.
+ * The Settings screen. Every change applies at once, there is no Save button. The "General", "Notifications" and
+ * "Open with" sections live here, the others come with the behaviour they set.
  */
 export function SettingsScreen({ focusEditor }: { focusEditor: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [apps, setApps] = useState<DetectedApps | null>(null);
   const [openAtLogin, setOpenAtLogin] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Whether the last attempt to turn "Notify on failure" on was refused, which the line below the switch says. */
+  const [refused, setRefused] = useState(false);
 
   useEffect(() => {
     let stopped = false;
@@ -71,6 +75,30 @@ export function SettingsScreen({ focusEditor }: { focusEditor: boolean }) {
       });
   }
 
+  /**
+   * Asks Rust to turn "Notify on failure" on or off. Rust asks for the permission when it is turned on, and the switch
+   * shows what it ends up as, which is off when the permission was refused.
+   */
+  function switchNotifications(enabled: boolean): void {
+    setError(null);
+    setRefused(false);
+    setNotifyOnFailure(enabled)
+      .then((on) => {
+        setSettings((current) => (current === null ? current : { ...current, notify_on_failure: on }));
+        setRefused(enabled && !on);
+      })
+      .catch((reason: unknown) => {
+        setError(failureOf(reason).message);
+      });
+  }
+
+  function showNotificationSettings(): void {
+    setError(null);
+    openNotificationSettings().catch((reason: unknown) => {
+      setError(failureOf(reason).message);
+    });
+  }
+
   return (
     <section aria-label="Settings">
       <h2 className="title">Settings</h2>
@@ -92,6 +120,31 @@ export function SettingsScreen({ focusEditor }: { focusEditor: boolean }) {
             }}
           />
           <Switch label="Open at login" checked={openAtLogin} onChange={switchOpenAtLogin} />
+        </section>
+      )}
+      {settings === null ? null : (
+        <section aria-labelledby="notifications">
+          <h3 id="notifications" className="subtitle">
+            Notifications
+          </h3>
+          <Switch
+            label="Notify on failure"
+            checked={settings.notify_on_failure}
+            onChange={switchNotifications}
+          />
+          <p className="caption">
+            A banner tells you when a failure enters Needs you while Procly is in the background. macOS
+            decides whether the banner shows: allow Procly in System Settings &gt; Notifications.
+          </p>
+          {refused ? (
+            <p role="alert" className="error">
+              Notifications are not allowed for Procly, so Notify on failure stays off. Allow them in System
+              Settings &gt; Notifications, then turn it on again.
+            </p>
+          ) : null}
+          <button type="button" className="button" onClick={showNotificationSettings}>
+            Open notification settings
+          </button>
         </section>
       )}
       {settings === null || apps === null ? null : (

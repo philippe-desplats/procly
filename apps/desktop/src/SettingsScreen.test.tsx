@@ -32,16 +32,20 @@ interface Call {
  */
 function app(
   options: {
-    settings?: Settings;
+    /** What `settings.json` holds. Notifications are off unless it says otherwise. */
+    settings?: Omit<Settings, "notify_on_failure"> & { notify_on_failure?: boolean };
     apps?: DetectedApps;
     opening?: (command: string, args: unknown) => unknown;
     saving?: () => unknown;
     /** What the system says about Open at login, and what it answers when the switch is asked to change. */
     login?: { enabled: boolean; switching?: (enabled: boolean) => unknown };
+    /** What the system answers when the notification permission is asked, and what opening its settings does. */
+    notifications?: { permission?: "granted" | "refused"; failure?: unknown; pane?: () => unknown };
   } = {},
 ): Call[] {
   const calls: Call[] = [];
   let loginItem = options.login?.enabled ?? false;
+  let notifying = options.settings?.notify_on_failure ?? false;
   mockIPC(
     (command, args) => {
       calls.push({ command, args });
@@ -49,7 +53,20 @@ function app(
         case "last_update":
           return FIXED;
         case "get_settings":
-          return options.settings ?? { editor: null, terminal: "Terminal", show_in_dock: true };
+          return {
+            ...(options.settings ?? { editor: null, terminal: "Terminal", show_in_dock: true }),
+            notify_on_failure: notifying,
+          };
+        case "set_notify_on_failure": {
+          if (options.notifications?.failure !== undefined) {
+            return Promise.reject(options.notifications.failure);
+          }
+          const { enabled } = args as { enabled: boolean };
+          notifying = enabled && options.notifications?.permission !== "refused";
+          return notifying;
+        }
+        case "open_notification_settings":
+          return options.notifications?.pane?.();
         case "detected_apps":
           return options.apps ?? APPS;
         case "get_open_at_login":
@@ -379,6 +396,195 @@ describe("the General section of Settings", () => {
     await waitFor(() => {
       expect(login).not.toBeChecked();
     });
+  });
+});
+
+function notificationCalls(calls: Call[]): Call[] {
+  return calls.filter((call) => call.command === "set_notify_on_failure");
+}
+
+describe("the Notifications section of Settings", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  it("holds a Notify on failure switch, off by default", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    await openSettings();
+
+    expect(await screen.findByRole("heading", { name: "Notifications" })).toBeInTheDocument();
+    expect(await screen.findByRole("switch", { name: "Notify on failure" })).not.toBeChecked();
+  });
+
+  it("asks for no permission by opening Settings, only when the switch is turned on", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    const notify = await screen.findByRole("switch", { name: "Notify on failure" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(notificationCalls(calls)).toEqual([]);
+
+    fireEvent.click(notify);
+
+    await waitFor(() => {
+      expect(notify).toBeChecked();
+    });
+    expect(notificationCalls(calls)).toEqual([{ command: "set_notify_on_failure", args: { enabled: true } }]);
+  });
+
+  it("states that macOS decides the banner and points to System Settings > Notifications", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    await openSettings();
+
+    const section = await screen.findByRole("region", { name: "Notifications" });
+    expect(section).toHaveTextContent(/macOS decides whether the banner shows/);
+    expect(section).toHaveTextContent("System Settings > Notifications");
+  });
+
+  it("links to the notification settings of the system", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open notification settings" }));
+
+    await waitFor(() => {
+      expect(calls.filter((call) => call.command === "open_notification_settings")).toHaveLength(1);
+    });
+  });
+
+  it("turns the switch back off when the permission is refused, with a line pointing to System Settings", async () => {
+    const calls = app({ notifications: { permission: "refused" } });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    const notify = await screen.findByRole("switch", { name: "Notify on failure" });
+
+    fireEvent.click(notify);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Notifications are not allowed for Procly, so Notify on failure stays off. Allow them in System Settings > Notifications",
+    );
+    expect(notify).not.toBeChecked();
+    expect(notificationCalls(calls)).toHaveLength(1);
+  });
+
+  it("turns the switch off without asking again", async () => {
+    const calls = app({
+      settings: { editor: null, terminal: "Terminal", show_in_dock: true, notify_on_failure: true },
+    });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    const notify = await screen.findByRole("switch", { name: "Notify on failure" });
+    await waitFor(() => {
+      expect(notify).toBeChecked();
+    });
+
+    fireEvent.click(notify);
+
+    await waitFor(() => {
+      expect(notify).not.toBeChecked();
+    });
+    expect(notificationCalls(calls)).toEqual([
+      { command: "set_notify_on_failure", args: { enabled: false } },
+    ]);
+  });
+
+  it("never sends the notification switch with the other settings, which would skip the permission", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    fireEvent.click(await screen.findByRole("switch", { name: "Notify on failure" }));
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "Notify on failure" })).toBeChecked();
+    });
+
+    fireEvent.click(screen.getByRole("switch", { name: "Show in Dock while the window is open" }));
+
+    await waitFor(() => {
+      expect(saved(calls)).toHaveLength(1);
+    });
+    expect(JSON.stringify(saved(calls))).not.toContain("notify");
+  });
+
+  it("says why when the permission cannot be asked, and keeps the switch off", async () => {
+    app({
+      notifications: {
+        failure: { kind: "notifications", message: "cannot ask for the permission to notify: no answer" },
+      },
+    });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+    const notify = await screen.findByRole("switch", { name: "Notify on failure" });
+
+    fireEvent.click(notify);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "cannot ask for the permission to notify: no answer",
+    );
+    expect(notify).not.toBeChecked();
+  });
+
+  it("says why when the notification settings do not open", async () => {
+    app({
+      notifications: {
+        pane: () =>
+          Promise.reject({
+            kind: "notifications",
+            message: "cannot open the notification settings of macOS: denied",
+          }),
+      },
+    });
+    render(<App store={createDaemonStore()} />);
+    await openSettings();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open notification settings" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "cannot open the notification settings of macOS: denied",
+    );
+  });
+});
+
+describe("a clicked banner", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  it("brings the window back on the Worktree of the failure", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("button", { name: "web-fix" });
+
+    await act(async () => {
+      await emit("open-failure", "/p/work/acme/web-fix");
+    });
+
+    expect(await screen.findByRole("complementary", { name: "Inspector" })).toHaveTextContent(
+      "/p/work/acme/web-fix",
+    );
+    expect(screen.getByRole("button", { name: "web-fix" })).toHaveAttribute("aria-current", "true");
+  });
+
+  it("shows the Overview when the banner names no Worktree, as a grouped banner does", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "web-fix" }));
+    await screen.findByRole("complementary", { name: "Inspector" });
+
+    await act(async () => {
+      await emit("open-failure", null);
+    });
+
+    expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
   });
 });
 

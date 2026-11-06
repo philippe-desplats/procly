@@ -216,16 +216,16 @@ export function useDoctorOpen(store: DoctorStore, scope: Scope): void {
   useEffect(() => store.open(scope), [store, scope]);
 }
 
-/** Calls `handler` whenever the Rust side emits `event`. */
-export function useTauriEvent(event: string, handler: () => void): void {
+/** Calls `handler` with the payload whenever the Rust side emits `event`. */
+export function useTauriEvent<Payload = void>(event: string, handler: (payload: Payload) => void): void {
   const latest = useRef(handler);
   useEffect(() => {
     latest.current = handler;
   });
   useEffect(() => {
     const stop = new AbortController();
-    void listen(event, () => {
-      latest.current();
+    void listen<Payload>(event, (emitted) => {
+      latest.current(emitted.payload);
     }).then((off) => {
       // A listener registered after the screen left is released at once.
       if (stop.signal.aborted) {
