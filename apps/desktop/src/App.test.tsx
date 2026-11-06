@@ -83,13 +83,13 @@ describe("the window", () => {
     expect(commands).toContain("last_update");
   });
 
-  it("never asks the Daemon for anything itself, the poller does, and runs doctor once at launch", async () => {
+  it("never asks the Daemon for a Status itself, the poller does, and runs doctor and the Orphan scan once at launch", async () => {
     const commands = poller(answered(status));
 
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("button", { name: "web-fix" });
 
-    expect(commands).toEqual(["last_update", "doctor"]);
+    expect(commands).toEqual(["last_update", "doctor", "list_orphans"]);
   });
 
   it("follows the poller: a new answer replaces the one on screen without a request", async () => {
@@ -136,7 +136,7 @@ describe("the window", () => {
     expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
   });
 
-  it("asks the poller for a tick when Refresh is pressed, runs doctor, and does not ask the Daemon", async () => {
+  it("asks the poller for a tick when Refresh is pressed, runs doctor and the Orphan scan, and does not ask the Daemon for a Status", async () => {
     const commands = poller(answered(status));
     render(<App store={createDaemonStore()} />);
 
@@ -145,7 +145,7 @@ describe("the window", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(commands).toEqual(["last_update", "doctor", "refresh", "doctor"]);
+    expect(commands).toEqual(["last_update", "doctor", "list_orphans", "refresh", "doctor", "list_orphans"]);
   });
 });
 

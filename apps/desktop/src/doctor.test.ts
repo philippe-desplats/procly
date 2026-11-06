@@ -1,6 +1,42 @@
 import { describe, expect, it } from "vitest";
 
-import { fixCommands } from "./doctor";
+import { daemonVersion, fixCommands, problemCount, type DoctorDocument } from "./doctor";
+import machine from "./fixtures/doctor.json";
+import noDaemon from "./fixtures/doctor-no-daemon.json";
+import drift from "./fixtures/doctor-release-drift.json";
+
+describe("the problems of a doctor run", () => {
+  it("count the failed checks and the warnings, and nothing else", () => {
+    expect(problemCount(machine as DoctorDocument)).toBe(4);
+    expect(problemCount(noDaemon as DoctorDocument)).toBe(2);
+    expect(problemCount(drift as DoctorDocument)).toBe(1);
+  });
+
+  it("are none when every check passed or was skipped", () => {
+    const healthy: DoctorDocument = {
+      ...(machine as DoctorDocument),
+      checks: (machine as DoctorDocument).checks.filter(
+        (check) => check.status === "passed" || check.status === "skipped",
+      ),
+    };
+
+    expect(problemCount(healthy)).toBe(0);
+  });
+});
+
+describe("the release the Daemon runs", () => {
+  it("is read from the check of the Daemon when it answers", () => {
+    expect(daemonVersion(machine as DoctorDocument)).toBe("0.5.0");
+  });
+
+  it("is the one of the Daemon, not of this app, when they differ", () => {
+    expect(daemonVersion(drift as DoctorDocument)).toBe("0.4.0");
+  });
+
+  it("is unknown when the Daemon did not answer", () => {
+    expect(daemonVersion(noDaemon as DoctorDocument)).toBeNull();
+  });
+});
 
 describe("the commands of a fix", () => {
   it("are one per line, and none is blank", () => {
