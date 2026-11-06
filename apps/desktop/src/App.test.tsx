@@ -240,7 +240,12 @@ describe("the sidebar", () => {
       .getAllByRole("button")
       .map((button) => button.textContent)
       .filter(
-        (text) => text !== "Overview⌘0" && text !== "Orphans" && text !== "Doctor" && text !== "Settings⌘,",
+        (text) =>
+          text !== "Overview⌘0" &&
+          text !== "Outside Repositories" &&
+          text !== "Orphans" &&
+          text !== "Doctor" &&
+          text !== "Settings⌘,",
       );
     expect(labels).toEqual([
       "mainmain",

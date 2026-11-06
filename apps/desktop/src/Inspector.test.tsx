@@ -417,7 +417,10 @@ describe("the inspector on a Compose service", () => {
     const panel = within(inspector());
     await panel.findByRole("alert");
 
-    fireEvent.click(panel.getByRole("button", { name: "Copy" }));
+    // The panel holds another copy box, the command to restart the Compose service, so the one of the output is named.
+    fireEvent.click(
+      within(panel.getByRole("region", { name: "Output" })).getByRole("button", { name: "Copy" }),
+    );
 
     expect(written).toEqual(["(cd /p/work/acme/web && procly logs db)"]);
   });

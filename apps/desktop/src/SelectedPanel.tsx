@@ -5,6 +5,7 @@ import { composeStatement, jobStatement, serviceStatement, type Statement } from
 import { worktreeLabel } from "./labels";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
 import type { Selected } from "./selection";
+import { ServiceActions } from "./ServiceActions";
 import { inWorktree } from "./shell";
 import { State } from "./StateMark";
 import { formatMoment } from "./time";
@@ -51,8 +52,55 @@ function statementOf(selected: Selected): Statement {
   }
 }
 
-/** The inspector on the selection: what it is in words, what to do next, its facts, and its output. `at` is when the answer was read. */
-export function SelectedPanel({ selected, at }: { selected: Selected; at: number }) {
+/**
+ * Stop and Restart of the selection. A Job has none, and a Service a Group covers has no row of its own, so the
+ * Group's row, selected, holds the actions that reach what runs.
+ */
+function Actions({ selected, onChanged }: { selected: Selected; onChanged: () => void }) {
+  switch (selected.kind) {
+    case "service":
+      return (
+        <ServiceActions
+          name={selected.service.service}
+          cwd={selected.worktree.path}
+          running={selected.service.state !== "ended"}
+          restartable={selected.service.restartable}
+          onChanged={onChanged}
+        />
+      );
+    case "compose":
+      // The status lists the containers that run, and does not tell whether the Daemon holds their environment.
+      return (
+        <ServiceActions
+          name={selected.container.service}
+          cwd={selected.worktree.path}
+          running
+          restartable={false}
+          onChanged={onChanged}
+        />
+      );
+    case "job":
+      return null;
+    default: {
+      const unhandled: never = selected;
+      throw new Error(`unhandled selection: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+/**
+ * The inspector on the selection: what it is in words, what to do next, its actions, its facts, and its output. `at`
+ * is when the answer was read, `onChanged` asks for a fresh answer after an action.
+ */
+export function SelectedPanel({
+  selected,
+  at,
+  onChanged,
+}: {
+  selected: Selected;
+  at: number;
+  onChanged: () => void;
+}) {
   const statement = statementOf(selected);
   const output = useOutput(targetOf(selected));
   return (
@@ -63,6 +111,7 @@ export function SelectedPanel({ selected, at }: { selected: Selected; at: number
       <p>
         <span className="caption">Next</span> {statement.next}
       </p>
+      <Actions selected={selected} onChanged={onChanged} />
       <Facts selected={selected} at={at} />
       <OutputPane selected={selected} output={output} />
     </section>

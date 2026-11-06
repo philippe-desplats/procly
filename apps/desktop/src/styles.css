@@ -477,6 +477,29 @@ body {
   gap: 2px;
 }
 
+/* Stop and Restart of one Service in the inspector, and the command to copy when the app cannot restart it. Nothing here is red. */
+.controls {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  align-self: stretch;
+  margin: 4px 0;
+}
+
+.controls-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.controls .copybox {
+  align-self: stretch;
+}
+
+.controls .error {
+  margin: 0;
+}
+
 /* A row of the center is a button that picks the item for the inspector. */
 .item-select {
   display: flex;

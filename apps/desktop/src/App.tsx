@@ -4,32 +4,32 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { DaemonNotRunning, DaemonOfAnotherVersion } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import { createDoctorStore, REFRESH_REQUESTED, useTauriEvent, type DoctorStore } from "./doctor";
-import { DoctorScreen, ReleaseBanner, WorktreeChecks } from "./DoctorScreen";
+import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { failureKey, isSeen } from "./needs-you";
+import { failureKey } from "./needs-you";
 import { OrphansScreen } from "./OrphansScreen";
-import { SelectableRow, SelectionContext } from "./selectable";
+import { SelectionContext } from "./selectable";
 import { resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { SelectedPanel } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree } from "./settings";
 import { State } from "./StateMark";
-import type { ContainerStatus } from "./protocol/ContainerStatus";
-import type { JobStatus } from "./protocol/JobStatus";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
-import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { jobEndWord, jobWord, serviceEndWord, serviceWord } from "./state";
+import { RemovedMark, ServiceRow } from "./Rows";
+import { jobEndWord, serviceEndWord } from "./state";
 import { formatMoment } from "./time";
+import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
 
 /**
- * What the center shows: the Overview of every Service, one Worktree, the Orphans, Doctor, or Settings. Orphans and
- * Settings hide the inspector. `focusEditor` sends the developer to the editor field, because "Open in editor" found
- * none set.
+ * What the center shows: the Overview of every Service, one Worktree, the Jobs outside any Repository, the Orphans,
+ * Doctor, or Settings. The Jobs outside any Repository, the Orphans and Settings hide the inspector. `focusEditor`
+ * sends the developer to the editor field, because "Open in editor" found none set.
  */
 type View =
   | { kind: "overview" }
   | { kind: "worktree"; path: string }
+  | { kind: "outside" }
   | { kind: "orphans" }
   | { kind: "doctor" }
   | { kind: "settings"; focusEditor: boolean };
@@ -111,8 +111,13 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
   const settings = view.kind === "settings";
   const checking = view.kind === "doctor";
   const orphans = view.kind === "orphans";
+  const outside = view.kind === "outside";
   // A screen that is not about one Worktree has no inspector.
-  const wide = settings || orphans;
+  const wide = settings || orphans || outside;
+  const refresh = (): void => {
+    // The poller answers with the effect, and a refresh asks for that answer now.
+    store.refresh().catch(() => undefined);
+  };
 
   return (
     <SelectionContext.Provider value={control}>
@@ -126,6 +131,8 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
             settings={settings}
             checking={checking}
             orphans={orphans}
+            outside={outside}
+            outsideJobs={snapshot.kind === "status" ? snapshot.report.jobs_outside_repositories.length : 0}
             onSelect={(path) => {
               setView({ kind: "worktree", path });
             }}
@@ -134,6 +141,9 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
             }}
             onOrphans={() => {
               setView({ kind: "orphans" });
+            }}
+            onOutside={() => {
+              setView({ kind: "outside" });
             }}
             onDoctor={() => {
               setView({ kind: "doctor" });
@@ -148,6 +158,11 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
             <SettingsScreen focusEditor={view.focusEditor} />
           ) : view.kind === "orphans" && snapshot.kind === "status" ? (
             <OrphansScreen />
+          ) : view.kind === "outside" && snapshot.kind === "status" ? (
+            <OutsideRepositoriesScreen
+              jobs={snapshot.report.jobs_outside_repositories}
+              seen={snapshot.seen}
+            />
           ) : (
             <>
               <Toolbar snapshot={snapshot} store={store} doctor={doctor} />
@@ -173,6 +188,7 @@ export function App({ store, doctor: given }: { store: DaemonStore; doctor?: Doc
               current={current}
               selected={selected}
               at={snapshot.kind === "loading" ? 0 : snapshot.at}
+              onChanged={refresh}
               onNeedEditor={() => {
                 setView({ kind: "settings", focusEditor: true });
               }}
@@ -219,9 +235,12 @@ function Sidebar({
   settings,
   checking,
   orphans,
+  outside,
+  outsideJobs,
   onSelect,
   onOverview,
   onOrphans,
+  onOutside,
   onDoctor,
   onSettings,
 }: {
@@ -231,9 +250,13 @@ function Sidebar({
   settings: boolean;
   checking: boolean;
   orphans: boolean;
+  outside: boolean;
+  /** How many Jobs started outside any Repository, so the entry says whether it holds something. */
+  outsideJobs: number;
   onSelect: (path: string) => void;
   onOverview: () => void;
   onOrphans: () => void;
+  onOutside: () => void;
   onDoctor: () => void;
   onSettings: () => void;
 }) {
@@ -242,7 +265,7 @@ function Sidebar({
       <button
         type="button"
         className="row"
-        aria-current={current === null && !settings && !orphans && !checking ? "true" : undefined}
+        aria-current={current === null && !settings && !orphans && !outside && !checking ? "true" : undefined}
         onClick={onOverview}
       >
         <span className="row-name">Overview</span>
@@ -254,6 +277,10 @@ function Sidebar({
         current={current}
         onSelect={onSelect}
       />
+      <button type="button" className="row" aria-current={outside ? "true" : undefined} onClick={onOutside}>
+        <span className="row-name">Outside Repositories</span>
+        {outsideJobs === 0 ? null : <span className="caption">{outsideJobs}</span>}
+      </button>
       <button
         type="button"
         className="row sidebar-foot"
@@ -320,11 +347,6 @@ function SidebarWorktrees({
   );
 }
 
-/** Git no longer lists the Worktree, though the Daemon still runs something in it. */
-function RemovedMark({ worktree }: { worktree: WorktreeStatus }) {
-  return worktree.listed ? null : <span className="mark">Removed</span>;
-}
-
 function Center({
   snapshot,
   current,
@@ -364,7 +386,7 @@ function Center({
           onMarkSeen={onMarkSeen}
         />
       ) : (
-        <WorktreeView worktree={current} at={snapshot.at} seen={snapshot.seen} doctor={doctor} />
+        <WorktreeScreen worktree={current} at={snapshot.at} seen={snapshot.seen} doctor={doctor} />
       );
     default: {
       const unhandled: never = snapshot;
@@ -546,142 +568,23 @@ function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: strin
   }
 }
 
-/** The mark of a failure the developer saw: its row stays, dimmed, and says so in words as well. */
-function SeenMark({ seen }: { seen: boolean }) {
-  return seen ? <span className="mark">Seen</span> : null;
-}
-
-function ServiceRow({
-  service,
-  worktreePath,
-  at,
-  seen,
-}: {
-  service: ServiceStatus;
-  worktreePath: string;
-  at: number;
-  seen: FailureKey[];
-}) {
-  const marked = isSeen(seen, {
-    kind: "service",
-    worktree: worktreePath,
-    service: service.service,
-    started_at: service.started_at,
-  });
-  return (
-    <SelectableRow
-      target={{ kind: "service", worktree: worktreePath, service: service.service }}
-      seen={marked}
-    >
-      <span className="item-name">{service.service}</span>
-      <State {...serviceWord(service)} />
-      {service.port === null ? null : <span className="caption">{`:${service.port}`}</span>}
-      <span className="caption">{formatMoment(service.started_at, at)}</span>
-      <SeenMark seen={marked} />
-    </SelectableRow>
-  );
-}
-
-function JobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
-  const marked = isSeen(seen, { kind: "job", id: job.id });
-  return (
-    <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
-      <State {...jobWord(job)} />
-      <span className="item-name mono">{job.command}</span>
-      <span className="caption mono">{job.id}</span>
-      <SeenMark seen={marked} />
-    </SelectableRow>
-  );
-}
-
-function ContainerRow({ container, worktreePath }: { container: ContainerStatus; worktreePath: string }) {
-  return (
-    <SelectableRow
-      target={{ kind: "compose", worktree: worktreePath, service: container.service }}
-      seen={false}
-    >
-      <span className="item-name">{container.service}</span>
-      <State word="running" tone="ok" />
-      {container.port === null ? null : <span className="caption">{`:${container.port}`}</span>}
-    </SelectableRow>
-  );
-}
-
-function WorktreeView({
-  worktree,
-  at,
-  seen,
-  doctor,
-}: {
-  worktree: WorktreeStatus;
-  at: number;
-  seen: FailureKey[];
-  doctor: DoctorStore;
-}) {
-  const empty = worktree.services.length === 0 && worktree.jobs.length === 0;
-  return (
-    <section>
-      <h2 className="title">
-        <span title={worktreeTooltip(worktree)}>{worktreeLabel(worktree)}</span>{" "}
-        <RemovedMark worktree={worktree} />
-      </h2>
-      {empty ? <p className="muted">Nothing runs in this Worktree.</p> : null}
-      {worktree.services.length > 0 ? (
-        <>
-          <h3 className="caption">Services</h3>
-          <ul className="list">
-            {worktree.services.map((service) => (
-              <ServiceRow
-                key={service.service}
-                service={service}
-                worktreePath={worktree.path}
-                at={at}
-                seen={seen}
-              />
-            ))}
-          </ul>
-        </>
-      ) : null}
-      {(worktree.containers ?? []).length > 0 ? (
-        <>
-          <h3 className="caption">Compose services</h3>
-          <ul className="list">
-            {(worktree.containers ?? []).map((container) => (
-              <ContainerRow key={container.service} container={container} worktreePath={worktree.path} />
-            ))}
-          </ul>
-        </>
-      ) : null}
-      {worktree.jobs.length > 0 ? (
-        <>
-          <h3 className="caption">Jobs</h3>
-          <ul className="list">
-            {worktree.jobs.map((job) => (
-              <JobRow key={job.id} job={job} seen={seen} />
-            ))}
-          </ul>
-        </>
-      ) : null}
-      <WorktreeChecks store={doctor} path={worktree.path} />
-    </section>
-  );
-}
-
 function Inspector({
   current,
   selected,
   at,
+  onChanged,
   onNeedEditor,
 }: {
   current: WorktreeStatus | null;
   selected: Selected | null;
   at: number;
+  onChanged: () => void;
   onNeedEditor: () => void;
 }) {
   if (selected !== null) {
     return (
       <>
-        <SelectedPanel key={selectedKey(selected)} selected={selected} at={at} />
+        <SelectedPanel key={selectedKey(selected)} selected={selected} at={at} onChanged={onChanged} />
         {selected.worktree === null ? null : (
           <WorktreeActions
             key={selected.worktree.path}

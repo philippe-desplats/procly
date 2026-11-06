@@ -122,8 +122,9 @@ export async function writeScene(name: string, service: string): Promise<Scene> 
   const path = join(required(ROOT), "work", name);
   const port = await freePort();
   mkdirSync(path);
-  // The identity is passed on the command line, so no configuration of the developer is read or written.
-  await run("git", ["init", "--quiet"], { cwd: path });
+  // The identity and the branch are passed on the command line, so no configuration of the developer is read or
+  // written, and the sidebar names the Worktree by the same branch on every machine.
+  await run("git", ["init", "--quiet", "--initial-branch=main"], { cwd: path });
   await run(
     "git",
     [
@@ -142,6 +143,31 @@ export async function writeScene(name: string, service: string): Promise<Scene> 
   const config = `[services.${service}]\nrun = '${required(TEST_SERVER)} --port {ports.http}'\nports = { http = ${port} }\n`;
   writeFileSync(join(path, "procly.toml"), config);
   return { path, service, port };
+}
+
+/** One Service as `procly status --json` reports it. */
+interface ReportedService {
+  service: string;
+  state: string;
+  port: number | null;
+  started_at: number;
+}
+
+/** The Service `name` of the Worktree of `scene` as the CLI reports it, or `null` when the status does not list it. */
+export async function reportedService(scene: Scene, name: string): Promise<ReportedService | null> {
+  const { stdout } = await procly(["status", "--json"], scene.path);
+  const report = JSON.parse(stdout) as {
+    repositories: { worktrees: { path: string; services: ReportedService[] }[] }[];
+  };
+  for (const repository of report.repositories) {
+    for (const worktree of repository.worktrees) {
+      const found = worktree.services.find((service) => service.service === name);
+      if (found !== undefined) {
+        return found;
+      }
+    }
+  }
+  return null;
 }
 
 /** Removes everything the run created. Called once, by the runner, after the Daemon is stopped. */

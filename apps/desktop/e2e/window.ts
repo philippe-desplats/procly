@@ -68,6 +68,44 @@ export async function showingText(selector: string, parts: string[], within = 60
   );
 }
 
+/** Whether the page has an enabled button whose accessible name is exactly `label`, such as `Restart web`. */
+export async function hasButton(label: string): Promise<boolean> {
+  return browser.execute(
+    (wanted: string) =>
+      Array.from(document.querySelectorAll("button")).some(
+        (candidate) => candidate.getAttribute("aria-label") === wanted && !candidate.disabled,
+      ),
+    label,
+  );
+}
+
+/** Presses the enabled button whose accessible name is exactly `label`, and tells whether there was one. */
+export async function pressNamed(label: string): Promise<boolean> {
+  return browser.execute((wanted: string) => {
+    const button = Array.from(document.querySelectorAll("button")).find(
+      (candidate) => candidate.getAttribute("aria-label") === wanted && !candidate.disabled,
+    );
+    button?.click();
+    return button !== undefined;
+  }, label);
+}
+
+/** Opens the Worktree the sidebar names `name`, and tells whether the sidebar had it. */
+export async function openWorktree(name: string): Promise<boolean> {
+  return browser.execute((wanted: string) => {
+    const row = Array.from(document.querySelectorAll('nav[aria-label="Worktrees"] .row')).find(
+      (candidate) => candidate.querySelector(".row-name")?.textContent === wanted,
+    );
+    (row as HTMLElement | undefined)?.click();
+    return row !== undefined;
+  }, name);
+}
+
+/** Waits until the window has an enabled button named `label`. */
+export async function showingButton(label: string, within = 60_000): Promise<void> {
+  await until(`the button "${label}"`, () => hasButton(label), within);
+}
+
 /** The first worktree of the sidebar, once a Daemon reports one. A scene has one, so it is the scene's. */
 export const FIRST_WORKTREE = 'nav[aria-label="Worktrees"] section.group ul.list li button';
 
