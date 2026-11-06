@@ -33,7 +33,7 @@ function lastRun(state: DoctorState): LastRun | null {
 
 /**
  * The foot of the sidebar: Doctor with the problems of its last run and when it ran, Orphans with the count of the last
- * dry run, Settings, and the line of the Daemon. Every time is absolute, since an age would drift between two ticks.
+ * dry run, the line of the Daemon under them, and Settings pinned last. Every time is absolute, since an age would drift between two ticks.
  * A count is drawn only once a run happened and found something, so nothing is invented before the first run.
  * `updatedAt` is when the poller last read a Status, `null` while none was read.
  */
@@ -78,16 +78,16 @@ export function SidebarFooter({
         <span className="row-name">Orphans</span>
         {orphaned === null || orphaned === 0 ? null : <span className="row-count">{orphaned}</span>}
       </button>
-      <button type="button" className="row" aria-current={settings ? "true" : undefined} onClick={onSettings}>
-        <span className="row-name">Settings</span>
-        <span className="caption">⌘,</span>
-      </button>
       {updatedAt === null ? null : (
         <p className="daemon-line">
           <GlyphMark glyph="healthy" />
           <span>{`Daemon${version === null ? "" : ` ${version}`}, updated at ${formatMoment(updatedAt, updatedAt)}`}</span>
         </p>
       )}
+      <button type="button" className="row" aria-current={settings ? "true" : undefined} onClick={onSettings}>
+        <span className="row-name">Settings</span>
+        <span className="caption">⌘,</span>
+      </button>
     </div>
   );
 }

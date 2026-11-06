@@ -4,12 +4,26 @@ import { daemonVersion, fixCommands, problemCount, type DoctorDocument } from ".
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import drift from "./fixtures/doctor-release-drift.json";
+import repairs from "./fixtures/doctor-worktree-repairs.json";
 
 describe("the problems of a doctor run", () => {
-  it("count the failed checks and the warnings, and nothing else", () => {
-    expect(problemCount(machine as DoctorDocument)).toBe(4);
-    expect(problemCount(noDaemon as DoctorDocument)).toBe(2);
+  it("count the failed checks, as the prompt of the CLI does, and leave the warnings out", () => {
+    // 3 failed and 1 warning.
+    expect(problemCount(machine as DoctorDocument)).toBe(3);
+    // 1 failed and 1 warning.
+    expect(problemCount(noDaemon as DoctorDocument)).toBe(1);
     expect(problemCount(drift as DoctorDocument)).toBe(1);
+    expect(problemCount(repairs as DoctorDocument)).toBe(2);
+  });
+
+  it("are none when only warnings are left, since a warning changes neither the result nor the exit code", () => {
+    const warned: DoctorDocument = {
+      ...(machine as DoctorDocument),
+      checks: (machine as DoctorDocument).checks.filter((check) => check.status === "warning"),
+    };
+
+    expect(warned.checks).toHaveLength(1);
+    expect(problemCount(warned)).toBe(0);
   });
 
   it("are none when every check passed or was skipped", () => {

@@ -8,6 +8,7 @@ import type { DoctorDocument, DoctorState } from "./doctor";
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import drift from "./fixtures/doctor-release-drift.json";
+import repairs from "./fixtures/doctor-worktree-repairs.json";
 import recordedGc from "./fixtures/gc.json";
 import recordedStatus from "./fixtures/status.json";
 import type { OrphanScan } from "./orphan-scan";
@@ -59,9 +60,17 @@ describe("the Doctor entry of the sidebar footer", () => {
   afterEach(cleanup);
 
   it("counts the problems of the last run with the absolute time it ran", () => {
-    footer({ doctor: reported(noDaemon) });
+    // A recorded run with exactly 2 failed checks.
+    footer({ doctor: reported(repairs) });
 
     expect(entry("Doctor")).toHaveTextContent("2 problems at 13:40");
+  });
+
+  it("leaves the warnings out of the count", () => {
+    // 1 failed check and 1 warning.
+    footer({ doctor: reported(noDaemon) });
+
+    expect(entry("Doctor")).toHaveTextContent("1 problem at 13:40");
   });
 
   it("says 1 problem in the singular", () => {
@@ -71,7 +80,7 @@ describe("the Doctor entry of the sidebar footer", () => {
   });
 
   it("carries the date of a run that is not of the day of the last update", () => {
-    footer({ doctor: reported(noDaemon, Date.UTC(2026, 10, 4, 13, 40, 7)) });
+    footer({ doctor: reported(repairs, Date.UTC(2026, 10, 4, 13, 40, 7)) });
 
     expect(entry("Doctor")).toHaveTextContent("2 problems at 2026-11-04 13:40");
   });
@@ -109,7 +118,7 @@ describe("the Doctor entry of the sidebar footer", () => {
   it("keeps the count of the last run while a new one is on its way", () => {
     footer({ doctor: { kind: "running", document: machine as DoctorDocument, at: CHECKED } });
 
-    expect(entry("Doctor")).toHaveTextContent("4 problems at 13:40");
+    expect(entry("Doctor")).toHaveTextContent("3 problems at 13:40");
   });
 });
 
@@ -194,11 +203,16 @@ describe("the Daemon line of the sidebar footer", () => {
 describe("the sidebar footer", () => {
   afterEach(cleanup);
 
-  it("keeps Doctor, Orphans and Settings in that order, Settings last", () => {
-    footer();
+  it("puts the Daemon line under the Doctor and Orphans counters, and Settings pinned last", () => {
+    const { container } = footer();
 
-    const names = screen.getAllByRole("button").map((button) => button.textContent);
-    expect(names).toEqual(["Doctor4 problems at 13:40", "Orphans6", "Settings⌘,"]);
+    const foot = container.firstElementChild as HTMLElement;
+    expect([...foot.children].map((child) => child.textContent)).toEqual([
+      "Doctor3 problems at 13:40",
+      "Orphans6",
+      "Daemon 0.5.0, updated at 14:01:12",
+      "Settings⌘,",
+    ]);
   });
 
   it("shows no relative age anywhere", () => {
@@ -251,7 +265,7 @@ describe("the sidebar footer of the window", () => {
     const sidebar = await screen.findByRole("navigation", { name: "Worktrees" });
     expect(
       await within(sidebar).findByRole("button", {
-        name: /^Doctor4 problems at (\d{4}-\d\d-\d\d )?\d\d:\d\d$/,
+        name: /^Doctor3 problems at (\d{4}-\d\d-\d\d )?\d\d:\d\d$/,
       }),
     ).toBeVisible();
     expect(within(sidebar).getByRole("button", { name: /^Orphans6$/ })).toBeVisible();
