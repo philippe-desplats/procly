@@ -651,44 +651,59 @@ body {
 
 .state-screen {
   box-sizing: border-box;
+  height: 100%;
+  padding: 56px 20px 20px;
+  overflow: auto;
+  background: var(--panel);
+}
+
+/* The explanation sits in a narrow column at the top, under the traffic lights, as it does in the mockup. */
+.state-column {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  height: 100%;
-  padding: 52px 30px 30px;
-  overflow: auto;
-  background: var(--panel);
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 30px;
   text-align: center;
 }
 
-/* The column holds its content in the middle of the window, and scrolls from the top once it is taller. */
-.state-screen > :not(.overlay) {
+.state-column > :not(.overlay) {
   width: 100%;
-  max-width: 480px;
   margin: 0;
 }
 
-.state-screen::before,
-.state-screen::after {
-  content: "";
-  flex: 1 0 0;
-}
-
-.state-screen > .brand-mark {
-  width: 72px;
-  height: 72px;
+.state-column > .brand-mark {
+  width: 22px;
+  height: 22px;
   flex: none;
 }
 
-/* The checks that run without the Daemon are a list to read, so they get a wider column and left aligned text. */
-.state-screen > section,
-.state-screen .copybox {
+.state-column .copybox,
+.state-warning {
   text-align: left;
 }
 
+/* What a restart costs, kept in view before the sheet asks. */
+.state-warning {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.state-warning p {
+  margin: 0;
+}
+
+.state-warning p + p {
+  margin-top: 4px;
+}
+
+/* The checks that run without the Daemon are a list to read, so they get a block wider than the column. */
 .state-screen > section {
   max-width: 620px;
+  margin: 6px auto 0;
 }
 
 .brand-ink {

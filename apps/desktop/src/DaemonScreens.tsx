@@ -12,6 +12,9 @@ const INSTALL_UNIT = "procly unit install";
 /** The command the restart sheet stands for, run by hand. */
 const STOP_DAEMON = "procly daemon stop";
 
+/** The command that updates the app to a release matching a newer Daemon, which the developer runs in a terminal. */
+const UPDATE_APP = "brew upgrade --cask procly";
+
 /** What a click starts: the call, whether it is running, and why the last one failed. */
 function useAction(run: () => Promise<void>): { start: () => void; pending: boolean; error: string | null } {
   const [pending, setPending] = useState(false);
@@ -61,17 +64,29 @@ export function DaemonStateScreen({
 }
 
 /**
- * One centered column: the brand mark, the title, then what the developer can do. The overlay title bar leaves the
- * top of the window to the traffic lights, so a strip there moves the window, as the one of the sidebar does.
+ * A narrow column at the top: the brand mark, the title, then what the developer can do. `below` is a block wider
+ * than the column. The overlay title bar leaves the top of the window to the traffic lights, so a strip there moves
+ * the window, as the one of the sidebar does.
  */
-function StateScreen({ title, children }: { title: string; children: ReactNode }) {
+function StateScreen({
+  title,
+  children,
+  below = null,
+}: {
+  title: string;
+  children: ReactNode;
+  below?: ReactNode;
+}) {
   return (
     <>
       <div className="state-drag" data-tauri-drag-region />
       <main className="state-screen">
-        <BrandMark />
-        <h2 className="title">{title}</h2>
-        {children}
+        <div className="state-column">
+          <BrandMark />
+          <h2 className="title">{title}</h2>
+          {children}
+        </div>
+        {below}
       </main>
     </>
   );
@@ -85,7 +100,7 @@ function StateScreen({ title, children }: { title: string; children: ReactNode }
 function DaemonNotRunning({ store, doctor }: { store: DaemonStore; doctor: DoctorStore }) {
   const start = useAction(() => store.startDaemon());
   return (
-    <StateScreen title="The Daemon is not running">
+    <StateScreen title="The Daemon is not running" below={<ChecksWithoutDaemon store={doctor} />}>
       <p className="muted">No Daemon answers on its socket, and this app does not start one on its own.</p>
       <p>
         <button type="button" className="button brand" disabled={start.pending} onClick={start.start}>
@@ -99,7 +114,6 @@ function DaemonNotRunning({ store, doctor }: { store: DaemonStore; doctor: Docto
       )}
       <p className="caption">To have the Daemon start with every session, run in a terminal:</p>
       <CopyBox text={INSTALL_UNIT} />
-      <ChecksWithoutDaemon store={doctor} />
     </StateScreen>
   );
 }
@@ -120,6 +134,12 @@ function DaemonOfAnotherVersion({ daemon, app, store }: { daemon: number; app: n
           <p className="muted">
             A Daemon left by an earlier release still runs. Restart it to run the one this app embeds.
           </p>
+          <div className="state-warning">
+            <p>
+              <b>Restarting it stops every Service and Job of every Repository.</b>
+            </p>
+            <p className="muted">They come back once your agents or you run procly up again.</p>
+          </div>
           <p>
             <button
               type="button"
@@ -131,6 +151,8 @@ function DaemonOfAnotherVersion({ daemon, app, store }: { daemon: number; app: n
               Restart the Daemon
             </button>
           </p>
+          <p className="caption">Or stop it yourself from a terminal:</p>
+          <CopyBox text={STOP_DAEMON} />
           {confirming ? (
             <RestartSheet
               store={store}
@@ -141,7 +163,11 @@ function DaemonOfAnotherVersion({ daemon, app, store }: { daemon: number; app: n
           ) : null}
         </>
       ) : (
-        <p className="muted">{`Update Procly to a release that speaks protocol ${daemon}. This app does not replace a newer Daemon.`}</p>
+        <>
+          <p className="muted">{`Update Procly to a release that speaks protocol ${daemon}. This app does not replace a newer Daemon.`}</p>
+          <p className="caption">Update the app to match:</p>
+          <CopyBox text={UPDATE_APP} />
+        </>
       )}
     </StateScreen>
   );

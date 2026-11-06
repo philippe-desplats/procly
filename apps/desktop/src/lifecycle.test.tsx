@@ -26,6 +26,21 @@ function mismatch(daemon: number, app = 22): Failure {
   };
 }
 
+/** A clipboard that keeps what is written to it. */
+function clipboard(): string[] {
+  const written: string[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: (text: string) => {
+        written.push(text);
+        return Promise.resolve();
+      },
+    },
+  });
+  return written;
+}
+
 /** The 3 parts of the 3-pane shell, which a Daemon that cannot be read leaves nothing to put in. */
 function expectNoShell(): void {
   expect(screen.queryByRole("navigation", { name: "Worktrees" })).not.toBeInTheDocument();
@@ -108,16 +123,7 @@ describe("a Daemon that does not run", () => {
 
   it("copies exactly the command it shows", async () => {
     rust(failed(NOT_RUNNING));
-    const written: string[] = [];
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: {
-        writeText: (text: string) => {
-          written.push(text);
-          return Promise.resolve();
-        },
-      },
-    });
+    const written = clipboard();
     render(<App store={createDaemonStore()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Copy" }));
@@ -206,6 +212,51 @@ describe("a Daemon of another protocol version", () => {
     await screen.findByRole("heading", { name: "The Daemon runs a newer version" });
     expectCenteredScreen("The Daemon runs a newer version");
     expectNoShell();
+  });
+
+  it("warns on the screen of an older Daemon what a restart stops, before any sheet opens", async () => {
+    rust(failed(mismatch(21)));
+
+    render(<App store={createDaemonStore()} />);
+
+    const warning = await screen.findByText("Restarting it stops every Service and Job of every Repository.");
+    expect(warning).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows the command that stops an older Daemon on the screen, and copies exactly that", async () => {
+    rust(failed(mismatch(21)));
+    const written = clipboard();
+    render(<App store={createDaemonStore()} />);
+
+    expect(await screen.findByText("procly daemon stop")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(written).toEqual(["procly daemon stop"]);
+  });
+
+  it("shows the command that updates the app on a newer Daemon, and copies exactly that", async () => {
+    rust(failed(mismatch(23)));
+    const written = clipboard();
+    render(<App store={createDaemonStore()} />);
+
+    expect(await screen.findByText("brew upgrade --cask procly")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(written).toEqual(["brew upgrade --cask procly"]);
+  });
+
+  it("holds the checks that run without the Daemon outside the narrow column of the explanation", async () => {
+    rust(failed(NOT_RUNNING));
+
+    render(<App store={createDaemonStore()} />);
+
+    const column = (await screen.findByRole("heading", { name: "The Daemon is not running" })).parentElement;
+    const checks = screen.getByRole("region", { name: "Checks without the Daemon" });
+    expect(column).toHaveClass("state-column");
+    expect(column).not.toContainElement(checks);
+    expect(screen.getByRole("main")).toContainElement(checks);
   });
 
   it("brings the shell back once the Daemon answers in the protocol of the app", async () => {
