@@ -1,0 +1,67 @@
+import { invoke } from "@tauri-apps/api/core";
+
+import { commandIn } from "./services";
+import type { ReleaseReport } from "./protocol/ReleaseReport";
+import type { Response } from "./protocol/Response";
+
+/** The command the sheet stands for, run from the Worktree it releases. */
+export function releaseCommand(path: string): string {
+  return commandIn(path, "worktree release");
+}
+
+function reportOf(response: Response): ReleaseReport {
+  switch (response.response) {
+    case "worktree_release":
+      return response;
+    case "error":
+      throw new Error(response.message);
+    default:
+      throw new Error(`unexpected answer from the Daemon: ${response.response}`);
+  }
+}
+
+/** Asks what releasing the Worktree at `path` would do, with `WorktreeRelease { dry_run: true }`. Nothing changes. */
+export async function previewRelease(path: string): Promise<ReleaseReport> {
+  return reportOf(await invoke<Response>("preview_release", { path }));
+}
+
+/** Releases the Worktree at `path`, with `WorktreeRelease { dry_run: false }`. */
+export async function releaseWorktree(path: string): Promise<ReleaseReport> {
+  return reportOf(await invoke<Response>("release_worktree", { path }));
+}
+
+/**
+ * Whether Procly holds nothing in the Worktree: no Service or Job to stop, no Compose service to let go of, no Lease to
+ * release. A Lease or a Logical resource the release keeps is not held, so it does not count. This is the test
+ * `ReleaseReport::released_nothing` makes in Rust, written over the same fields because the window only has the JSON.
+ */
+export function holdsNothing(report: ReleaseReport): boolean {
+  return (
+    report.services.length === 0 &&
+    report.jobs.length === 0 &&
+    report.compose_services.length === 0 &&
+    report.leases.length === 0
+  );
+}
+
+/** What happens to the container of a Compose service the Worktree lets go of: it keeps running for others, or stops. */
+export function composeLine(released: ReleaseReport["compose_services"][number]): string {
+  const { service, others, grace_ms } = released;
+  if (others === 0) {
+    return `${service}: its container stops after ${graceOf(grace_ms)} unless a Worktree needs it again`;
+  }
+  return `${service}: its container keeps running for ${
+    others === 1 ? "1 other Worktree" : `${others} other Worktrees`
+  }`;
+}
+
+function graceOf(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds >= 3600 && seconds % 3600 === 0) {
+    return `${seconds / 3600} h`;
+  }
+  if (seconds >= 60 && seconds % 60 === 0) {
+    return `${seconds / 60} min`;
+  }
+  return `${seconds} s`;
+}

@@ -192,7 +192,8 @@ describe("the Worktree screen", () => {
 
     const center = await openWorktree();
 
-    expect(within(center).queryByText(/lease/i)).not.toBeInTheDocument();
+    // The word, not the Release button of the screen.
+    expect(within(center).queryByText(/\blease\b/i)).not.toBeInTheDocument();
     expect(within(center).queryByText(/logical/i)).not.toBeInTheDocument();
   });
 

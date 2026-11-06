@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { FailureKey } from "./daemon";
 import type { DoctorStore } from "./doctor";
 import { WorktreeChecks } from "./DoctorScreen";
@@ -6,6 +8,7 @@ import { isSeen } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
+import { ReleaseSheet } from "./ReleaseSheet";
 import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
 import { jobWord } from "./state";
 import { State } from "./StateMark";
@@ -37,12 +40,16 @@ export function WorktreeScreen({
   at,
   seen,
   doctor,
+  onChanged,
 }: {
   worktree: WorktreeStatus;
   at: number;
   seen: FailureKey[];
   doctor: DoctorStore;
+  /** Asks for a fresh status once a release changed what the Daemon holds. */
+  onChanged: () => void;
 }) {
+  const [releasing, setReleasing] = useState(false);
   const foreign = worktree.foreign ?? [];
   const containers = worktree.containers ?? [];
   const empty =
@@ -56,6 +63,28 @@ export function WorktreeScreen({
         <span title={worktreeTooltip(worktree)}>{worktreeLabel(worktree)}</span>{" "}
         <RemovedMark worktree={worktree} />
       </h2>
+      <div className="actions-row">
+        <button
+          type="button"
+          className="button"
+          onClick={() => {
+            setReleasing(true);
+          }}
+        >
+          Release…
+        </button>
+      </div>
+      {releasing ? (
+        <ReleaseSheet
+          path={worktree.path}
+          label={worktreeLabel(worktree)}
+          listed={worktree.listed}
+          onClose={() => {
+            setReleasing(false);
+          }}
+          onChanged={onChanged}
+        />
+      ) : null}
       {empty ? <p className="muted">Nothing runs in this Worktree.</p> : null}
       {foreign.length > 0 ? (
         <>

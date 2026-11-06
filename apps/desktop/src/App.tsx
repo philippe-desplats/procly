@@ -386,7 +386,16 @@ function Center({
           onMarkSeen={onMarkSeen}
         />
       ) : (
-        <WorktreeScreen worktree={current} at={snapshot.at} seen={snapshot.seen} doctor={doctor} />
+        <WorktreeScreen
+          worktree={current}
+          at={snapshot.at}
+          seen={snapshot.seen}
+          doctor={doctor}
+          onChanged={() => {
+            // The poller answers with the effect, and a refresh asks for that answer now.
+            store.refresh().catch(() => undefined);
+          }}
+        />
       );
     default: {
       const unhandled: never = snapshot;
