@@ -75,7 +75,7 @@ export function WorktreeScreen({
         onNeedEditor={onNeedEditor}
       />
       {banner}
-      <div className="actions-row">
+      <div className="actions-row release-row">
         <button
           type="button"
           className="button"

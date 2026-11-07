@@ -33,25 +33,27 @@ export function WorktreeHeader({
           </div>
           <p className="worktree-path">{worktree.path}</p>
         </div>
-        <button
-          type="button"
-          className="button"
-          onClick={() => {
-            run(openWorktree(worktree.path, "editor"));
-          }}
-        >
-          Open in Editor
-        </button>
-        <button
-          type="button"
-          className="button"
-          onClick={() => {
-            run(openWorktree(worktree.path, "terminal"));
-          }}
-        >
-          Open in Terminal
-        </button>
-        {controls}
+        <div className="worktree-open">
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(openWorktree(worktree.path, "editor"));
+            }}
+          >
+            Open in Editor
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              run(openWorktree(worktree.path, "terminal"));
+            }}
+          >
+            Open in Terminal
+          </button>
+        </div>
+        <div className="worktree-controls">{controls}</div>
       </header>
       {error === null ? null : (
         <p role="alert" className="error">
