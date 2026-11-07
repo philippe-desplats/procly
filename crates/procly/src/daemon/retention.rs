@@ -15,6 +15,7 @@
 //! often while it keeps failing.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ use super::clock::Clock;
 use super::gc::{self, Found, Removed};
 use super::isolated_record::{IsolatedRecord, Key};
 use crate::config::Retention;
-use crate::protocol::OrphanKind;
+use crate::protocol::{AppliedRetention, OrphanKind};
 
 /// The longest a wait for a delayed deletion sleeps before it reads the clock again, so that the time a machine
 /// spent asleep, which a monotonic timer may not count, still brings the deletion closer.
@@ -80,28 +81,29 @@ impl Retentions {
 }
 
 /// Applies the Retention policy of every recorded Isolated container whose Worktree is removed: deletes those that
-/// are due, and waits for the others. Logs what it cannot do, nobody else is told, and runs again later.
-pub(super) async fn sweep(registry: &Arc<Registry>) {
+/// are due, and waits for the others. Returns the policies it applied, whether their deletion is done or not. Logs
+/// what it cannot do, nobody else is told, and runs again later.
+pub(super) async fn sweep(registry: &Arc<Registry>) -> Vec<AppliedRetention> {
     let _sweeping = registry.retentions.sweeping.lock().await;
     let swept = {
         let registry = Arc::clone(registry);
         // Listing the Worktrees runs git, finding and removing the containers runs docker, and the record is written.
         tokio::task::spawn_blocking(move || sweep_blocking(&registry)).await
     };
-    let done = match swept {
-        Ok(Ok(Swept { later, done })) => {
+    let (done, applied) = match swept {
+        Ok(Ok(Swept { later, done, applied })) => {
             for (key, due) in later {
                 wait(registry, key, due);
             }
-            done
+            (done, applied)
         }
         Ok(Err(error)) => {
             eprintln!("cannot apply the retention policies of the Isolated containers: {error:#}");
-            false
+            (false, Vec::new())
         }
         Err(error) => {
             eprintln!("cannot apply the retention policies of the Isolated containers: {error}");
-            false
+            (false, Vec::new())
         }
     };
     if done {
@@ -109,6 +111,48 @@ pub(super) async fn sweep(registry: &Arc<Registry>) {
     } else {
         retry(registry);
     }
+    applied
+}
+
+/// The Retention policies a sweep would apply if what runs were `running`, the Service names by Worktree, without
+/// deleting, waiting for or recording anything. Blocking, it reads the record and runs git.
+pub(super) fn would_apply(
+    registry: &Registry,
+    running: BTreeSet<(PathBuf, String)>,
+) -> anyhow::Result<Vec<AppliedRetention>> {
+    let records = registry.isolated.all().context("cannot read the Isolated containers")?;
+    let declared = declared(&records);
+    if declared.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (worktrees, _) = Removed::list_while(registry, repositories(&declared), running);
+    Ok(applied(&declared, &worktrees))
+}
+
+/// The records whose Retention policy is not keep, the only ones a sweep applies a policy to.
+fn declared(records: &[IsolatedRecord]) -> Vec<&IsolatedRecord> {
+    records
+        .iter()
+        .filter(|record| record.retention != Retention::Keep)
+        .collect()
+}
+
+/// The Repositories of `declared`, whose Worktrees a sweep lists.
+fn repositories(declared: &[&IsolatedRecord]) -> BTreeSet<PathBuf> {
+    declared.iter().map(|record| record.repository.clone()).collect()
+}
+
+/// The Retention policies a sweep applies: those of `declared` whose Worktree `worktrees` lists as removed.
+fn applied(declared: &[&IsolatedRecord], worktrees: &Removed) -> Vec<AppliedRetention> {
+    declared
+        .iter()
+        .filter(|record| removed(record, worktrees) == Some(true))
+        .map(|record| AppliedRetention {
+            worktree: record.worktree.clone(),
+            service: record.service.clone(),
+            policy: record.retention.to_string(),
+        })
+        .collect()
 }
 
 /// Sweeps again a moment after a sweep that could not do a deletion, on real time since what failed is Docker or the
@@ -178,24 +222,24 @@ struct Swept {
     later: Vec<(Key, Duration)>,
     /// Whether every deletion that was due was done.
     done: bool,
+    /// The policies it applied.
+    applied: Vec<AppliedRetention>,
 }
 
 /// Marks the containers whose Worktree the Daemon finds removed, deletes those that are due, and returns when each of
 /// the others is. Blocking.
 fn sweep_blocking(registry: &Registry) -> anyhow::Result<Swept> {
     let records = registry.isolated.all().context("cannot read the Isolated containers")?;
-    let declared: Vec<&IsolatedRecord> = records
-        .iter()
-        .filter(|record| record.retention != Retention::Keep)
-        .collect();
+    let declared = declared(&records);
     if declared.is_empty() {
         return Ok(Swept {
             later: Vec::new(),
             done: true,
+            applied: Vec::new(),
         });
     }
-    let repositories: BTreeSet<_> = declared.iter().map(|record| record.repository.clone()).collect();
-    let (worktrees, skipped) = Removed::list(registry, repositories);
+    let (worktrees, skipped) = Removed::list(registry, repositories(&declared));
+    let applied = applied(&declared, &worktrees);
     for skipped in &skipped {
         eprintln!(
             "cannot list the Worktrees of {}, the retention policies of its Isolated containers wait: {}",
@@ -236,7 +280,7 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Swept> {
         );
         done = delete(registry, &found);
     }
-    Ok(Swept { later, done })
+    Ok(Swept { later, done, applied })
 }
 
 /// Whether the Worktree of `record` is removed, as `worktrees` lists them. `None` when git could not list the Worktrees

@@ -1600,6 +1600,16 @@ fn release_summary(report: &ReleaseReport, dry_run: bool) -> String {
             resource.name, resource.service, resource.driver
         );
     }
+    let applied = if dry_run { "would apply" } else { "applied" };
+    for retention in &report.retention {
+        let _ = writeln!(
+            text,
+            "Retention policy {} of {} {applied} to the Isolated container of the removed Worktree {}",
+            retention.policy,
+            retention.service,
+            retention.worktree.display()
+        );
+    }
     text
 }
 

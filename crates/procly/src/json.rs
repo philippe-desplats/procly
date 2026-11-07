@@ -9,7 +9,7 @@ use serde::{Serialize, Serializer};
 
 use crate::doctor::Report;
 use crate::protocol::{
-    Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
+    AppliedRetention, Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
     ServiceEnd, StartOutcome, Stopped, UpService,
 };
 
@@ -163,6 +163,8 @@ pub(crate) struct WorktreeRelease<'a> {
     kept: ReleaseKept<'a>,
     /// What went wrong without failing the release, such as a Portless alias that could not be removed.
     warnings: &'a [String],
+    /// The Retention policies it applied to the Isolated containers of the Worktrees already removed.
+    retention: &'a [AppliedRetention],
 }
 
 /// The Services and Jobs a Worktree release stopped.
@@ -203,6 +205,7 @@ impl<'a> WorktreeRelease<'a> {
                 logical_resources: &report.logical_resources,
             },
             warnings: &report.warnings,
+            retention: &report.retention,
         }
     }
 }
