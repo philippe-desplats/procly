@@ -63,13 +63,16 @@ describe("the inspector of a Foreign process", () => {
 });
 
 describe("the room of the output in the inspector", () => {
-  it("fills what is left under the facts, never less than 140 px, and the inspector scrolls when it does not fit", () => {
+  // The heights are proved on the computed style of the real inspector in `inspector-bounds.test.tsx`, this reads
+  // the declarations that test relies on.
+  it("fills what is left under the facts, never less than 120 px, and the inspector scrolls when it does not fit", () => {
     expect(declarations(".inspector-panel")).toMatch(/display:\s*flex\s*;/);
     expect(declarations(".inspector-panel")).toMatch(/flex-direction:\s*column\s*;/);
     expect(declarations(".inspector-panel")).toMatch(/flex:\s*1 0 auto\s*;/);
-    expect(declarations(".output-pane")).toMatch(/flex:\s*1\s*;/);
-    expect(declarations(".output-pane")).toMatch(/min-height:\s*140px\s*;/);
-    expect(declarations(".output")).toMatch(/flex:\s*1\s*;/);
+    expect(declarations(".output-pane")).toMatch(/flex:\s*1 1 auto\s*;/);
+    expect(declarations(".output-box")).toMatch(/flex:\s*1 1 0px\s*;/);
+    expect(declarations(".output-box")).toMatch(/min-height:\s*120px\s*;/);
+    expect(declarations(".output")).toMatch(/position:\s*absolute\s*;/);
     expect(declarations(".output")).not.toMatch(/max-height/);
     expect(declarations(".inspector")).toMatch(/display:\s*flex\s*;/);
     expect(declarations(".inspector")).toMatch(/flex-direction:\s*column\s*;/);

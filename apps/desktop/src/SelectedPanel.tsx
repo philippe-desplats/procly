@@ -483,19 +483,21 @@ function Lines({ lines, wrap }: { lines: Line[]; wrap: boolean }) {
     }
   }, [lines]);
   return (
-    <pre
-      ref={pane}
-      role="log"
-      aria-label="Output"
-      className={wrap ? "output mono wrap" : "output mono"}
-      onScroll={(event) => {
-        following.current = atEnd(event.currentTarget);
-      }}
-    >
-      {lines.map((line, index) => (
-        <OutputLine key={line.id} line={line} last={index === lines.length - 1} />
-      ))}
-    </pre>
+    <div className="output-box">
+      <pre
+        ref={pane}
+        role="log"
+        aria-label="Output"
+        className={wrap ? "output mono wrap" : "output mono"}
+        onScroll={(event) => {
+          following.current = atEnd(event.currentTarget);
+        }}
+      >
+        {lines.map((line, index) => (
+          <OutputLine key={line.id} line={line} last={index === lines.length - 1} />
+        ))}
+      </pre>
+    </div>
   );
 }
 

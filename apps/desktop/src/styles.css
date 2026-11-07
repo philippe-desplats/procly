@@ -936,9 +936,10 @@ body {
 
 /* The output of a Service or a Job, drawn as text on the panel so that every colour holds its contrast. */
 .output {
-  flex: 1;
-  min-height: 80px;
-  margin: 8px 0 0;
+  /* Out of flow, so that the length of the output never makes the pane taller. It scrolls inside its box. */
+  position: absolute;
+  inset: 0;
+  margin: 0;
   padding: 8px;
   overflow: auto;
   border: 1px solid var(--line);
@@ -965,8 +966,15 @@ body {
 .output-pane {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 140px;
+  flex: 1 1 auto;
+}
+
+/* The room the output scrolls in: what the pane has left under its toolbar, never less than 120 px. */
+.output-box {
+  position: relative;
+  flex: 1 1 0px;
+  min-height: 120px;
+  margin: 8px 0 0;
 }
 
 /* What the output is doing on the left, Find and Wrap on the right, as the mockup draws the line. */
