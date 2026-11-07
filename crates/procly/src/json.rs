@@ -217,6 +217,8 @@ pub(crate) struct Doctor<'a> {
     prompt: Option<&'a str>,
     /// The coding agent CLI the prompt was handed to.
     agent: Option<&'a str>,
+    /// The version of procly the running Daemon runs, `None` when no Daemon answered.
+    daemon_version: Option<&'a str>,
 }
 
 impl<'a> Doctor<'a> {
@@ -226,6 +228,7 @@ impl<'a> Doctor<'a> {
             checks: &report.checks,
             prompt,
             agent,
+            daemon_version: report.daemon_version.as_deref(),
         }
     }
 }
