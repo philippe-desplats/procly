@@ -6,6 +6,7 @@
 mod apps;
 mod atomic;
 mod clipboard;
+mod context_menu;
 mod daemon;
 mod dock;
 mod doctor;
@@ -29,6 +30,7 @@ mod window;
 
 use std::sync::{Arc, Mutex};
 
+use context_menu::{ContextMenus, Picked};
 use daemon::DaemonClient;
 use dock::DockIcon;
 use follow::{Follower, WINDOW_VISIBLE};
@@ -180,9 +182,28 @@ fn window_state<R: Runtime>(window: &Window<R>) -> WindowState {
     )
 }
 
+/// Puts `text` on the clipboard, which a copy item of a menu asked for.
+fn copy_text(text: &str) {
+    if let Err(error) = clipboard::copy(text) {
+        eprintln!("procly: cannot copy {text}: {error}");
+    }
+}
+
 /// Handles a choice in the native menu bar. Refresh asks the poller for an answer at once, the copy items copy what the
 /// window last said the selection holds, and every other item is carried out by the window.
 fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
+    if let Some(menus) = app.try_state::<ContextMenus>() {
+        let shown = menus.shown();
+        match context_menu::picked(&shown, event.id().as_ref()) {
+            Some(Picked::Copy(text)) => return copy_text(text),
+            Some(Picked::Act(index)) => {
+                // A window that is gone has nothing to carry out.
+                let _ = app.emit(context_menu::CONTEXT_CHOICE, index);
+                return;
+            }
+            None => {}
+        }
+    }
     let Some(choice) = Choice::of(event) else {
         return;
     };
@@ -198,15 +219,19 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
             // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
             let _ = app.emit(OPEN_SETTINGS, ());
         }
-        Choice::CopyLogsCommand | Choice::CopyPath => {
-            let copied = app
-                .try_state::<MenuBar>()
-                .and_then(|bar| bar.context().copied(choice).map(ToOwned::to_owned));
-            if let Some(text) = copied
-                && let Err(error) = clipboard::copy(&text)
-            {
-                eprintln!("procly: cannot copy {text}: {error}");
+        Choice::CopyLogsCommand | Choice::CopyPath | Choice::CopySlug | Choice::CopyMainValue => {
+            let copied = app.try_state::<MenuBar>().and_then(|bar| bar.context().copied(choice));
+            if let Some(text) = copied {
+                copy_text(&text);
             }
+        }
+        Choice::Help => {
+            // Opening the browser waits for `open`, which the thread of the menu should not.
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(error) = opening::Launcher::open_url(&opening::Opener, menu::HELP_URL) {
+                    eprintln!("procly: cannot open {}: {error}", menu::HELP_URL);
+                }
+            });
         }
         Choice::Overview
         | Choice::Doctor
@@ -216,6 +241,8 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
         | Choice::MarkSeen
         | Choice::OpenInEditor
         | Choice::OpenInTerminal
+        | Choice::RevealInFinder
+        | Choice::FindInOutput
         | Choice::Release => {
             // A window that is gone has nothing selected to act on.
             let _ = app.emit(MENU_CHOICE, choice);
@@ -275,6 +302,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         mark_unseen,
         refresh,
         menu::set_menu_context,
+        context_menu::show_context_menu,
         follow::follow_logs,
         follow::stop_follow,
         follow::service_logs,
@@ -364,6 +392,7 @@ pub fn run() {
             app.manage(attention);
             app.manage(publishing);
             app.manage(Follower::new());
+            app.manage(ContextMenus::default());
             app.manage(menu::install(app.handle())?);
             Ok(())
         })

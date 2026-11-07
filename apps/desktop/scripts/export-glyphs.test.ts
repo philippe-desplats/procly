@@ -55,7 +55,10 @@ describe("the glyph export script", () => {
 
       const written = await exportGlyphs(GLYPHS, out);
 
-      expect(written.map((path) => basename(path)).slice(3)).toEqual(["menu-failure.png", "menu-foreign.png"]);
+      expect(written.map((path) => basename(path)).slice(3)).toEqual([
+        "menu-failure.png",
+        "menu-foreign.png",
+      ]);
       const sizes = await Promise.all(written.slice(3).map(header));
       expect(sizes).toEqual([
         { png: true, width: 32, height: 32 },

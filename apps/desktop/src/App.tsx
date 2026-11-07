@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { BrandMark } from "./BrandMark";
+import { rowMenu, useContextMenu, worktreeMenu } from "./context-menu";
 import { CopyBox } from "./CopyBox";
 import { DaemonStateScreen, isBlocking, type BlockingSnapshot } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
@@ -25,8 +26,16 @@ import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { GlyphMark } from "./Glyph";
 import { ItemRow } from "./ItemRow";
 import { basename, repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { MENU_CHOICE, menuContext, useMenuContext } from "./menu";
-import { failureKey, FailuresContext, failuresOf, reasonOf, type Reason } from "./needs-you";
+import { MENU_CHOICE, menuContext, useMenuContext, useTextSelected } from "./menu";
+import {
+  failureKey,
+  FailuresContext,
+  failuresOf,
+  isSeen,
+  reasonOf,
+  sameFailure,
+  type Reason,
+} from "./needs-you";
 import { createOrphanScanStore, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
@@ -83,7 +92,18 @@ export function App({
     setCurrentView(next);
     setSelection(null);
   }, []);
-  const control = useMemo(() => ({ selection, select: setSelection }), [selection]);
+  // The context menu of a row reads the newest answer, which a callback made once would not see.
+  const rowMenuOf = useRef<(target: Selection) => void>(() => undefined);
+  const control = useMemo(
+    () => ({
+      selection,
+      select: setSelection,
+      showMenu: (target: Selection) => {
+        rowMenuOf.current(target);
+      },
+    }),
+    [selection],
+  );
   // Which ends are failures is Rust's to say, the rows and the inspector draw them from this.
   const failures = useMemo(
     () => (snapshot.kind === "status" ? failuresOf(snapshot.needsYou, snapshot.seen) : []),
@@ -195,12 +215,14 @@ export function App({
   // The Worktree the inspector offers to open, which the Worktree menu acts on.
   const inspected = selected === null ? current : selected.worktree;
   const failure = selected === null ? null : failureKeyOf(selected);
+  const textSelected = useTextSelected();
   useMenuContext(
     menuContext(
       selected,
       current,
       failure,
       snapshot.kind === "status" ? snapshot.needsYou.flatMap((line) => failureKey(line) ?? []) : [],
+      textSelected,
     ),
   );
   const release = (worktree: WorktreeStatus): void => {
@@ -216,6 +238,61 @@ export function App({
   const onMarkSeen = (key: FailureKey): void => {
     // Rust answers with a new update, so a mark that could not be saved still shows.
     store.markSeen(key).catch(() => undefined);
+  };
+  const onMarkUnseen = (key: FailureKey): void => {
+    store.markUnseen(key).catch(() => undefined);
+  };
+
+  const showMenu = useContextMenu();
+  // A failure to open from the context menu of a Worktree, which the inspector shows.
+  const { error: openingError, run: runOpening } = useOpening(() => {
+    setView({ kind: "settings", focusEditor: true });
+  });
+  const showRowMenu = (target: Selection): void => {
+    const picked = snapshot.kind === "status" ? resolve(target, snapshot.report) : null;
+    if (picked === null || snapshot.kind !== "status") {
+      return;
+    }
+    const key = failureKeyOf(picked);
+    // A Seen failure is still a failure, the marks are offered on failures only.
+    const failed = key !== null && failures.some((known) => sameFailure(known, key));
+    showMenu(
+      rowMenu(
+        picked,
+        key === null || !failed
+          ? null
+          : {
+              seen: isSeen(snapshot.seen, key),
+              markSeen: () => {
+                onMarkSeen(key);
+              },
+              markUnseen: () => {
+                onMarkUnseen(key);
+              },
+            },
+      ),
+    );
+  };
+  useEffect(() => {
+    rowMenuOf.current = showRowMenu;
+  });
+  const showWorktreeMenu = (worktree: WorktreeStatus): void => {
+    showMenu(
+      worktreeMenu(worktree, {
+        openInEditor: () => {
+          runOpening(openWorktree(worktree.path, "editor"));
+        },
+        openInTerminal: () => {
+          runOpening(openWorktree(worktree.path, "terminal"));
+        },
+        reveal: () => {
+          runOpening(revealWorktree(worktree.path));
+        },
+        release: () => {
+          release(worktree);
+        },
+      }),
+    );
   };
 
   // Restart, Stop and the opening of the Worktree are carried out by the inspector, which shows how they went.
@@ -244,12 +321,17 @@ export function App({
       case "stop":
       case "open-in-editor":
       case "open-in-terminal":
+      case "reveal-in-finder":
+      case "find-in-output":
         break;
       // Rust carries these out without the window, so it never sends them.
       case "settings":
       case "refresh":
       case "copy-logs-command":
       case "copy-path":
+      case "copy-slug":
+      case "copy-main-value":
+      case "help":
         break;
       default: {
         const unhandled: never = choice;
@@ -332,6 +414,7 @@ export function App({
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
               }}
+              onWorktreeMenu={showWorktreeMenu}
               onOverview={() => {
                 setView({ kind: "overview" });
               }}
@@ -399,6 +482,11 @@ export function App({
           </main>
           {wide ? null : (
             <aside className="pane inspector" aria-label="Inspector">
+              {openingError === null ? null : (
+                <p role="alert" className="error">
+                  {openingError}
+                </p>
+              )}
               <Inspector
                 current={current}
                 selected={selected}
@@ -495,6 +583,7 @@ function Sidebar({
   orphanScan,
   needsYou,
   onSelect,
+  onWorktreeMenu,
   onOverview,
   onOrphans,
   onOutside,
@@ -519,6 +608,8 @@ function Sidebar({
   /** The items of Needs you, the same list the Overview pins on top. */
   needsYou: NeedsYou[];
   onSelect: (path: string) => void;
+  /** Shows the context menu of a Worktree, which a right-click on its entry asks for. */
+  onWorktreeMenu: (worktree: WorktreeStatus) => void;
   onOverview: () => void;
   onOrphans: () => void;
   onOutside: () => void;
@@ -542,6 +633,7 @@ function Sidebar({
         current={current}
         needsYou={needsYou}
         onSelect={onSelect}
+        onMenu={onWorktreeMenu}
       />
       <button
         type="button"
@@ -575,12 +667,14 @@ function SidebarWorktrees({
   current,
   needsYou,
   onSelect,
+  onMenu,
 }: {
   snapshot: DaemonSnapshot;
   repositories: RepositoryStatus[];
   current: WorktreeStatus | null;
   needsYou: NeedsYou[];
   onSelect: (path: string) => void;
+  onMenu: (worktree: WorktreeStatus) => void;
 }) {
   if (snapshot.kind === "loading") {
     return <p className="caption">Reading the Daemon…</p>;
@@ -601,6 +695,7 @@ function SidebarWorktrees({
                   current={worktree.path === current?.path}
                   reason={reasonOf(needsYou, worktree.path)}
                   onSelect={onSelect}
+                  onMenu={onMenu}
                 />
               </li>
             ))}
@@ -617,12 +712,14 @@ function WorktreeEntry({
   current,
   reason,
   onSelect,
+  onMenu,
 }: {
   worktree: WorktreeStatus;
   /** Whether this Worktree is the one open in the center. */
   current: boolean;
   reason: Reason | null;
   onSelect: (path: string) => void;
+  onMenu: (worktree: WorktreeStatus) => void;
 }) {
   return (
     <button
@@ -632,6 +729,11 @@ function WorktreeEntry({
       aria-current={current ? "true" : undefined}
       onClick={() => {
         onSelect(worktree.path);
+      }}
+      onContextMenu={(event) => {
+        // The native menu of the Worktree replaces the one of the webview. The center stays where it is.
+        event.preventDefault();
+        onMenu(worktree);
       }}
     >
       <span className="row-line">
@@ -960,8 +1062,8 @@ function Inspector({
 }
 
 /**
- * Reveals the Worktree in the Finder, and opens it in the editor or the terminal the settings name when Open in Editor
- * or Open in Terminal of the menu bar ask for it, so that a failure shows here. The buttons that open it live in the
+ * Reveals the Worktree in the Finder, and opens it in the editor or the terminal the settings name when Open in Editor,
+ * Open in Terminal or Reveal in Finder of the menu bar ask for it, so that a failure shows here. The buttons that open it live in the
  * title line of the Worktree.
  */
 function WorktreeActions({
@@ -981,6 +1083,8 @@ function WorktreeActions({
       run(openWorktree(path, "editor"));
     } else if (choice === "open-in-terminal") {
       run(openWorktree(path, "terminal"));
+    } else if (choice === "reveal-in-finder") {
+      run(revealWorktree(path));
     }
   });
 

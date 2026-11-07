@@ -24,4 +24,24 @@ mark_seen: boolean,
 /**
  * The path of the Worktree the inspector acts on, which the Worktree menu acts on too.
  */
-worktree: string | null, };
+worktree: string | null, 
+/**
+ * The slug of that Worktree, which Copy Slug copies.
+ */
+slug: string | null, 
+/**
+ * The port the selection listens on, the main value of a Service.
+ */
+port: number | null, 
+/**
+ * The command that stops a Foreign process, its main value, which Procly never runs.
+ */
+stop_command: string | null, 
+/**
+ * Whether text is selected in the window, in its output or in a field, which the standard Copy copies.
+ */
+text_selected: boolean, 
+/**
+ * Whether the selection has an output to find in, which a Foreign process does not.
+ */
+find: boolean, };

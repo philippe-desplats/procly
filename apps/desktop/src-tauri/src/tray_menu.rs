@@ -827,11 +827,7 @@ mod tests {
                 ports: vec![3000],
             },
         };
-        let model = model(
-            Glyph::NeedsYou,
-            Some(&known(&[failed_service(), job, foreign])),
-            clock,
-        );
+        let model = model(Glyph::NeedsYou, Some(&known(&[failed_service(), job, foreign])), clock);
 
         let lines: Vec<_> = layout(&model)
             .entries
@@ -847,7 +843,10 @@ mod tests {
             [
                 ("web-fix: api exited 1".to_owned(), Some(LineGlyph::Failure)),
                 ("make exited 2".to_owned(), Some(LineGlyph::Failure)),
-                ("web-fix: foreign node server.js :3000".to_owned(), Some(LineGlyph::Foreign)),
+                (
+                    "web-fix: foreign node server.js :3000".to_owned(),
+                    Some(LineGlyph::Foreign)
+                ),
             ]
         );
     }
