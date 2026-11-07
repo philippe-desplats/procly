@@ -6,30 +6,23 @@ import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
+import { ItemRow } from "./ItemRow";
 import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
-import { SelectableRow } from "./selectable";
 import { foreignId } from "./selection";
 import { foreignWord, jobWord } from "./state";
-import { State } from "./StateMark";
 
 /** A Foreign process of the Worktree. A row picks it for the inspector, which gives the command to stop it by hand. */
 function ForeignRow({ process, worktreePath }: { process: ForeignProcess; worktreePath: string }) {
   return (
-    <SelectableRow
+    <ItemRow
       target={{ kind: "foreign", worktree: worktreePath, process: foreignId(process) }}
       seen={false}
-    >
-      <State {...foreignWord()} />
-      <span className="item-name mono">{process.kind === "process" ? process.command : process.name}</span>
-      {process.kind === "process" ? (
-        <span className="caption">{`pid ${process.pid}`}</span>
-      ) : (
-        <span className="caption">{`${process.project} / ${process.service}`}</span>
-      )}
-      {process.ports.length === 0 ? null : (
-        <span className="caption">{process.ports.map((port) => `:${port}`).join(" ")}</span>
-      )}
-    </SelectableRow>
+      state={foreignWord()}
+      name={process.kind === "process" ? process.command : process.name}
+      mono
+      detail={process.kind === "process" ? `pid ${process.pid}` : `${process.project} / ${process.service}`}
+      ports={process.ports}
+    />
   );
 }
 
@@ -140,13 +133,17 @@ function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
   const marked = isSeen(seen, key);
   const failed = useFailed(key);
   return (
-    <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
-      <State {...jobWord(job, failed)} />
-      <span className="item-name mono">{job.command}</span>
+    <ItemRow
+      target={{ kind: "job", id: job.id }}
+      seen={marked}
+      state={jobWord(job, failed)}
+      name={job.command}
+      mono
+      where={<span className="mono">{job.cwd}</span>}
+    >
       <span className="caption mono">{job.id}</span>
-      <span className="caption mono item-where">{job.cwd}</span>
       <SeenMark seen={marked} />
-    </SelectableRow>
+    </ItemRow>
   );
 }
 

@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type Update } from "./daemon";
+import { PortPill } from "./PortPill";
 import type { Response } from "./protocol/Response";
+import { partsOf } from "./test-rows";
 
 const AT = Date.UTC(2026, 10, 5, 19, 35, 0);
 const PATH = "/p/work/acme/web-fix";
@@ -199,6 +201,54 @@ describe("the Worktree screen", () => {
     expect(glyphOn("legacy-db")).toBe("foreign");
     expect(glyphOn("cache")).toBe("healthy");
     expect(glyphOn("sleep 61")).toBe("job");
+  });
+
+  it("opens every row with the glyph of its state, the word of the state following the name", async () => {
+    app();
+
+    const center = await openWorktree();
+
+    const rows = within(center).getAllByRole("listitem");
+    expect(rows.map(partsOf)).toEqual([
+      {
+        glyph: "foreign",
+        name: "node server.js",
+        word: "started outside Procly",
+        where: undefined,
+        ports: ["3000"],
+      },
+      {
+        glyph: "foreign",
+        name: "legacy-db",
+        word: "started outside Procly",
+        where: undefined,
+        ports: ["5432"],
+      },
+      { glyph: "healthy", name: "web", word: "healthy", where: undefined, ports: ["18731"] },
+      { glyph: "healthy", name: "api", word: "healthy", where: undefined, ports: ["18732"] },
+      { glyph: "ended", name: "old", word: "exited 3", where: undefined, ports: [] },
+      { glyph: "healthy", name: "dev", word: "healthy", where: undefined, ports: ["18733"] },
+      { glyph: "healthy", name: "cache", word: "running", where: undefined, ports: ["18740"] },
+      { glyph: "job", name: "sleep 61", word: "running", where: undefined, ports: [] },
+      { glyph: "ended", name: "sh -c 'exit 3'", word: "exited 3", where: undefined, ports: [] },
+    ]);
+    for (const row of rows) {
+      expect(row.querySelector(".item-select")?.firstElementChild?.textContent).toBe("");
+    }
+  });
+
+  it("draws a port as the same pill on a Worktree row as on an Overview row, and never as the text :port", async () => {
+    app();
+    const center = await openWorktree();
+
+    const pill = within(center)
+      .getAllByRole("listitem")
+      .flatMap((row) => Array.from(row.querySelectorAll(".port")))
+      .find((port) => port.textContent === "18731");
+    // The one shared component draws it, so the row holds exactly the markup the component draws.
+    const { container } = render(<PortPill port={18731} />);
+    expect(pill?.outerHTML).toBe(container.innerHTML);
+    expect(within(center).queryByText(/^:\d+$/)).not.toBeInTheDocument();
   });
 
   it("picks a Foreign process for the inspector, which gives the kill command to copy and no Stop", async () => {
@@ -540,7 +590,7 @@ describe("the Outside Repositories screen", () => {
     const command = await within(center).findByText("make watch");
     expect(command).toHaveClass("item-name");
     // The stylesheet cuts the directory with an ellipsis before the command loses any width.
-    expect(within(center).getByText("/p/tmp/scratch")).toHaveClass("item-where");
+    expect(within(center).getByText("/p/tmp/scratch").closest(".item-where")).not.toBeNull();
   });
 
   it("picks a Job for the inspector, which follows its output from the directory it started in", async () => {
@@ -551,7 +601,7 @@ describe("the Outside Repositories screen", () => {
     await within(center).findByText("make watch");
     expect(within(inspector()).getByText("Select a Job.")).toBeInTheDocument();
 
-    const panel = within(pick(center, "running\\s*make watch"));
+    const panel = within(pick(center, "make watch"));
 
     expect(panel.getByRole("heading", { name: "make watch" })).toBeInTheDocument();
     expect(panel.getByText("c0ffee01")).toBeInTheDocument();

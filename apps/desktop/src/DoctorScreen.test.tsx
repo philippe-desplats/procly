@@ -539,6 +539,18 @@ describe("a Daemon of another release", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("draws the banner under the title line of the Overview, not above it", async () => {
+    rust(answered(), () => DRIFT);
+    render(<App store={createDaemonStore()} />);
+
+    const banner = await screen.findByRole("status");
+
+    const title = screen.getByRole("heading", { name: "Overview", level: 2 });
+    const position = title.parentElement?.compareDocumentPosition(banner) ?? 0;
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Overview" })).toContainElement(banner);
+  });
+
   it("sends the developer to the Doctor screen from the banner", async () => {
     rust(answered(), () => DRIFT);
     render(<App store={createDaemonStore()} />);

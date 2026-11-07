@@ -1,12 +1,12 @@
 import type { FailureKey } from "./daemon";
+import { ItemRow } from "./ItemRow";
+import { basename, worktreeTooltip } from "./labels";
 import { isSeen, useFailed } from "./needs-you";
 import type { ContainerStatus } from "./protocol/ContainerStatus";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { SelectableRow } from "./selectable";
 import { jobWord, serviceWord } from "./state";
-import { State } from "./StateMark";
 import { formatMoment } from "./time";
 
 /** Git no longer lists the Worktree, though the Daemon still runs something in it. */
@@ -19,15 +19,36 @@ export function SeenMark({ seen }: { seen: boolean }) {
   return seen ? <span className="mark">Seen</span> : null;
 }
 
-/** A Service with its state, port and start time. The inspector explains it and holds its Stop and Restart. */
+/**
+ * The Worktree a row runs in, as the props of `ItemRow` that name it: its folder, since the folders of the Worktrees
+ * of every Repository tell them apart, and its 3 names in the tooltip.
+ */
+export function worktreeWhere(worktree: WorktreeStatus) {
+  return {
+    where: (
+      <>
+        {basename(worktree.path)}
+        <RemovedMark worktree={worktree} />
+      </>
+    ),
+    whereTitle: worktreeTooltip(worktree),
+  };
+}
+
+/**
+ * A Service with its state, port and start time. The inspector explains it and holds its Stop and Restart. `worktree`
+ * is given where the row names the Worktree it runs in, the Overview.
+ */
 export function ServiceRow({
   service,
   worktreePath,
+  worktree,
   at,
   seen,
 }: {
   service: ServiceStatus;
   worktreePath: string;
+  worktree?: WorktreeStatus;
   at: number;
   seen: FailureKey[];
 }) {
@@ -40,16 +61,17 @@ export function ServiceRow({
   const marked = isSeen(seen, key);
   const failed = useFailed(key);
   return (
-    <SelectableRow
+    <ItemRow
       target={{ kind: "service", worktree: worktreePath, service: service.service }}
       seen={marked}
+      state={serviceWord(service, failed)}
+      name={service.service}
+      {...(worktree === undefined ? {} : worktreeWhere(worktree))}
+      moment={formatMoment(service.started_at, at)}
+      ports={service.port === null ? [] : [service.port]}
     >
-      <span className="item-name">{service.service}</span>
-      <State {...serviceWord(service, failed)} />
-      {service.port === null ? null : <span className="caption">{`:${service.port}`}</span>}
-      <span className="caption">{formatMoment(service.started_at, at)}</span>
       <SeenMark seen={marked} />
-    </SelectableRow>
+    </ItemRow>
   );
 }
 
@@ -58,12 +80,16 @@ export function JobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
   const marked = isSeen(seen, key);
   const failed = useFailed(key);
   return (
-    <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
-      <State {...jobWord(job, failed)} />
-      <span className="item-name mono">{job.command}</span>
+    <ItemRow
+      target={{ kind: "job", id: job.id }}
+      seen={marked}
+      state={jobWord(job, failed)}
+      name={job.command}
+      mono
+    >
       <span className="caption mono">{job.id}</span>
       <SeenMark seen={marked} />
-    </SelectableRow>
+    </ItemRow>
   );
 }
 
@@ -71,18 +97,20 @@ export function JobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
 export function ContainerRow({
   container,
   worktreePath,
+  worktree,
 }: {
   container: ContainerStatus;
   worktreePath: string;
+  worktree?: WorktreeStatus;
 }) {
   return (
-    <SelectableRow
+    <ItemRow
       target={{ kind: "compose", worktree: worktreePath, service: container.service }}
       seen={false}
-    >
-      <span className="item-name">{container.service}</span>
-      <State word="running" tone="ok" glyph="healthy" />
-      {container.port === null ? null : <span className="caption">{`:${container.port}`}</span>}
-    </SelectableRow>
+      state={{ word: "running", tone: "ok", glyph: "healthy" }}
+      name={container.service}
+      {...(worktree === undefined ? {} : worktreeWhere(worktree))}
+      ports={container.port === null ? [] : [container.port]}
+    />
   );
 }
