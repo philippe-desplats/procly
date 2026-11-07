@@ -14,6 +14,7 @@ import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
+import { PortPills } from "./PortPill";
 import type { Followed, Selected } from "./selection";
 import { ServiceActions } from "./ServiceActions";
 import { failureOf, openLocalhost } from "./settings";
@@ -258,11 +259,7 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
           <>
             <dt>Port</dt>
             <dd>
-              {process.ports.map((port) => (
-                <span key={port} className="port mono">
-                  {String(port)}
-                </span>
-              ))}
+              <PortPills ports={process.ports} />
             </dd>
           </>
         )}

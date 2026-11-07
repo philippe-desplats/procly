@@ -160,6 +160,7 @@ const emptyReport = {
   leases: [],
   kept_leases: [],
   logical_resources: [],
+  retention: [],
   warnings: [],
 };
 

@@ -57,13 +57,17 @@ describe("the glyph stylesheet", () => {
     expect(rule(".state.tone-ok")).toBeNull();
   });
 
-  it("dims the text of a Seen row and never its glyph, which keeps its contrast", () => {
-    // Opacity on the row would dim the glyph too (0.55 takes the failure red under 3:1), so the dimming sits on the
-    // parts of the row that are not the state, and on the word of the state alone.
+  it("dims what is not the state of a Seen row, and neither its glyph nor its word, which keep their contrast", () => {
+    // Opacity on the row would dim the glyph too (0.55 takes the failure red under 3:1), and on the word it would take
+    // the amber under 4.5:1. The dimming sits on the name, the place and the end of the row, and the word turns grey.
     expect(rule('.item[data-seen="true"]')).toBeNull();
-    expect(rule('.item[data-seen="true"] .item-select > :not(.state)')).toMatch(/opacity:\s*0\.55/);
-    expect(rule('.item[data-seen="true"] .word')).toMatch(/opacity:\s*0\.55/);
-    expect(css).not.toMatch(/data-seen[^{]*\.(glyph|state)\s*\{/);
+    for (const part of [".item-name", ".item-where", ".item-end > :not(.mark)"]) {
+      expect(rule(`.item[data-seen="true"] ${part}`), part).toMatch(/opacity:\s*0\.55/);
+    }
+    const word = rule('.item[data-seen="true"] .item-main .word');
+    expect(word).toContain("color: var(--muted)");
+    expect(word).not.toMatch(/opacity/);
+    expect(css).not.toMatch(/data-seen[^{]*\.(glyph|state-glyph|state)\s*\{/);
   });
 
   it("draws the cross of a failure in its own token, and the cut of a warning in the colour of the pane", () => {
