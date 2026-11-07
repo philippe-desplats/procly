@@ -703,7 +703,7 @@ describe("opening a Worktree", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open in Terminal" }));
     await screen.findByRole("alert");
 
-    fireEvent.click(screen.getByRole("button", { name: /^main\s*main$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^main\s*Main worktree$/ }));
 
     await waitFor(() => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();

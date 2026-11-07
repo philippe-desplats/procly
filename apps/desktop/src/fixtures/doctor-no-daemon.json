@@ -40,5 +40,6 @@
     { "name": "portless_aliases", "status": "skipped", "message": "no Daemon runs", "fix": null }
   ],
   "prompt": "`procly doctor` checked this machine and found 1 problem listed below.\n\n1. daemon: no Daemon runs\n   Commands:\n   - procly status\n",
-  "agent": null
+  "agent": null,
+  "daemon_version": null
 }

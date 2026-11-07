@@ -18,6 +18,8 @@ export interface DoctorDocument {
   /** What `procly doctor --agent` would hand to a coding agent for the failed checks, `null` when none failed. */
   prompt: string | null;
   agent: string | null;
+  /** The version of procly the running Daemon runs, `null` when no Daemon answered. */
+  daemon_version: string | null;
 }
 
 /** What a run of doctor is about: a Worktree, by its path, or `null` for the machine and the Daemon. */
@@ -57,19 +59,12 @@ export function problemCount(document: DoctorDocument): number {
   return document.checks.filter((check) => check.status === "failed").length;
 }
 
-/** What the `daemon` check says of the release the Daemon runs, with or without the drift from this app. */
-const DAEMON_RELEASE = /^the Daemon (?:answers and )?runs procly ([^\s,]+)/;
-
 /**
- * The version of the procly executable the Daemon runs, as the `daemon` check of doctor reports it, or `null` when that
- * check did not hear from a Daemon. Doctor prints the `procly_version` the Daemon answered in the message of the check,
- * so this reads it there and the protocol stays as it is. The wording is pinned by the Rust test
- * `the_daemon_check_words_the_version_the_desktop_app_parses_in_both_of_its_messages` in `crates/procly/src/doctor.rs`,
- * so rewording the message fails the build there, and this expression has to follow.
+ * The version of the procly executable the Daemon runs, as the `daemon_version` field of the document names it, or
+ * `null` when no Daemon answered. The message of the `daemon` check is text for a person and is never parsed.
  */
 export function daemonVersion(document: DoctorDocument): string | null {
-  const check = document.checks.find((candidate) => candidate.name === "daemon");
-  return check?.message.match(DAEMON_RELEASE)?.[1] ?? null;
+  return document.daemon_version;
 }
 
 /** The checks of the machine and the Daemon, which the Doctor screen shows: all but those of a Worktree. */
