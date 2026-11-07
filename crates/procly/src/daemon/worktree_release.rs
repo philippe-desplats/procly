@@ -1,6 +1,6 @@
 //! Worktree release: what a Worktree holds in Procly undone before it is removed, its data kept (ADR 0004).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -19,7 +19,7 @@ use crate::topology::{self, Topology};
 /// already removed.
 ///
 /// With `dry_run` it answers with the report the same release would give and changes nothing, so it forgets no Job or
-/// Service and applies no Retention policy.
+/// Service, and names the Retention policies it would apply without applying them.
 pub(super) async fn run(
     registry: Arc<Registry>,
     path: PathBuf,
@@ -42,7 +42,10 @@ pub(super) async fn run(
     let worktree = topology.worktree.path.clone();
     if dry_run {
         eprintln!("worktree release dry run of {} requested by {who}", worktree.display());
-        return dry_run_of(&registry, &topology, branch.as_deref());
+        // It reads the disk, and listing the Worktrees of the removed Isolated containers runs git.
+        return tokio::task::spawn_blocking(move || dry_run_of(&registry, &topology, branch.as_deref()))
+            .await
+            .context("the request could not be read")?;
     }
     eprintln!("worktree release of {} requested by {who}", worktree.display());
 
@@ -80,10 +83,11 @@ pub(super) async fn run(
         .map(|(_, name, _)| name)
         .collect();
     // Once the containers of removed Worktrees are stopped, which a policy never deletes while they run.
-    retention::sweep(&registry).await;
+    let retention = retention::sweep(&registry).await;
     let mut report = ReleaseReport {
         worktree: worktree.clone(),
         compose_services,
+        retention,
         ..ReleaseReport::default()
     };
     for (name, service) in services {
@@ -153,15 +157,28 @@ fn dry_run_of(registry: &Registry, topology: &Topology, branch: Option<&str>) ->
     let stopped_isolated = registry
         .composes
         .would_stop_isolated(registry.composes.isolated_released(repository, worktree, None));
+    let is_stopped = |path: &Path, service: &str| {
+        stopped_isolated
+            .iter()
+            .any(|(_, name, owner)| name == service && owner.as_deref() == Some(path))
+    };
+    // What runs when the release applies the Retention policies, once it has stopped the Isolated containers.
+    let running_at_sweep = registry
+        .running()
+        .into_iter()
+        .filter(|(path, service)| !is_stopped(path, service))
+        .collect();
     // What still runs once the release is done: the Services of the Worktree and the Isolated containers are gone, so
     // that only a container left to its Grace period keeps a Lease of the Worktree.
     let mut running = registry.running();
     running.retain(|(path, _)| path != worktree);
-    running.extend(registry.composes.running().into_iter().filter(|(path, service)| {
-        !stopped_isolated
-            .iter()
-            .any(|(_, name, owner)| name == service && owner.as_deref() == Some(path.as_path()))
-    }));
+    running.extend(
+        registry
+            .composes
+            .running()
+            .into_iter()
+            .filter(|(path, service)| !is_stopped(path, service)),
+    );
     report.services.extend(
         stopped_isolated
             .into_iter()
@@ -173,6 +190,11 @@ fn dry_run_of(registry: &Registry, topology: &Topology, branch: Option<&str>) ->
         .would_release_worktree(repository, worktree, branch, &running)?;
     report.leases = leases;
     report.kept_leases = kept_leases;
+    // A record that cannot be read leaves the policies out of the report and is only logged, as the release does.
+    match retention::would_apply(registry, running_at_sweep) {
+        Ok(applied) => report.retention = applied,
+        Err(error) => eprintln!("cannot tell the retention policies a release would apply: {error:#}"),
+    }
     // A configuration that cannot be read only hides the resources, the Leases are released whatever it says.
     match logical_resources(registry, topology) {
         Ok(resources) => report.logical_resources = resources,

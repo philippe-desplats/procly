@@ -13,5 +13,6 @@
     { "service": "db", "port_name": "tcp", "port": 24004, "reason": "container_running" }
   ],
   "logical_resources": [{ "service": "db", "driver": "postgres", "resource": "dev", "name": "web__web_fix" }],
+  "retention": [],
   "warnings": []
 }

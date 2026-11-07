@@ -32,6 +32,8 @@ const CONFIGURATION: &str = "configuration";
 #[derive(Debug)]
 pub(crate) struct Report {
     pub(crate) checks: Vec<Check>,
+    /// The version of procly the running Daemon runs, `None` when no Daemon answered the checks.
+    pub(crate) daemon_version: Option<String>,
 }
 
 impl Report {
@@ -54,6 +56,10 @@ pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
     let placement = place(cwd);
     let worktree = placement.worktree.as_deref();
     let answer = client::send_if_running(state, &Request::Doctor);
+    let daemon_version = match &answer {
+        Ok(Response::Doctor(DaemonChecks { procly_version, .. })) => Some(procly_version.clone()),
+        _ => None,
+    };
     let (daemon_check, daemon_checks) = daemon_checks(state, answer);
     let mut checks = vec![
         docker_compose(),
@@ -66,7 +72,7 @@ pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
         daemon::doctor::worktrunk_hooks(state, worktree, &placement.unplaced),
     ];
     checks.extend(daemon_checks);
-    Report { checks }
+    Report { checks, daemon_version }
 }
 
 fn place(cwd: &Path) -> Placement {
@@ -426,6 +432,7 @@ mod tests {
     fn a_report_with_a_failed_check_has_failed_and_one_with_only_skipped_or_warning_ones_has_not() {
         let report = |statuses: &[CheckStatus]| Report {
             checks: statuses.iter().map(|&status| check(status, "m", None)).collect(),
+            daemon_version: None,
         };
         assert!(!report(&[CheckStatus::Passed, CheckStatus::Skipped, CheckStatus::Warning]).failed());
         assert!(report(&[CheckStatus::Passed, CheckStatus::Failed]).failed());
@@ -439,6 +446,7 @@ mod tests {
                 check(CheckStatus::Failed, "one\ntwo", Some("kill 1\nkill 2")),
                 check(CheckStatus::Warning, "missing", Some("install it")),
             ],
+            daemon_version: None,
         };
         assert_eq!(
             text(&report),
@@ -457,6 +465,7 @@ mod tests {
                 check(CheckStatus::Failed, "one\ntwo", Some("kill 1\nkill 2")),
                 check(CheckStatus::Failed, "no way out", None),
             ],
+            daemon_version: None,
         };
         let prompt = prompt(&report).expect("two checks failed");
         assert!(prompt.contains("found 2 problems"), "{prompt}");
@@ -479,6 +488,7 @@ mod tests {
                 check(CheckStatus::Skipped, "n/a", None),
                 check(CheckStatus::Warning, "missing", Some("install it")),
             ],
+            daemon_version: None,
         };
         assert_eq!(prompt(&report), None);
     }
