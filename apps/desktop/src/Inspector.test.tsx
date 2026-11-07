@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import type { Channel } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type Update } from "./daemon";
@@ -685,6 +685,121 @@ describe("the inspector of a Service", () => {
 
     expect(log).not.toHaveClass("wrap");
     expect(within(inspector()).getByRole("button", { name: "Wrap" })).toBeInTheDocument();
+  });
+
+  describe("while it follows the end of the output", () => {
+    /** The observers the window made, standing in for the ResizeObserver jsdom does not have. */
+    const observers: { callback: ResizeObserverCallback; targets: Element[] }[] = [];
+
+    class FakeResizeObserver {
+      private readonly entry: { callback: ResizeObserverCallback; targets: Element[] };
+
+      constructor(callback: ResizeObserverCallback) {
+        this.entry = { callback, targets: [] };
+        observers.push(this.entry);
+      }
+
+      observe(target: Element): void {
+        this.entry.targets.push(target);
+      }
+
+      unobserve(target: Element): void {
+        this.entry.targets = this.entry.targets.filter((one) => one !== target);
+      }
+
+      disconnect(): void {
+        this.entry.targets = [];
+      }
+    }
+
+    afterEach(() => {
+      observers.length = 0;
+      vi.unstubAllGlobals();
+    });
+
+    /** Tells the observers of `element` that its box changed size, as the window does once it is laid out again. */
+    function resized(element: Element): void {
+      act(() => {
+        for (const observer of observers.filter((one) => one.targets.includes(element))) {
+          observer.callback([], observer as unknown as ResizeObserver);
+        }
+      });
+    }
+
+    /**
+     * Gives the output the sizes a laid-out window would, `content` tall in a box `box` tall, and keeps it scrolled
+     * within them as a browser does. Returns how far it is from the end.
+     */
+    function laidOut(log: HTMLElement, size: { content: number; box: number }): () => number {
+      let top = 0;
+      Object.defineProperty(log, "scrollHeight", { configurable: true, get: () => size.content });
+      Object.defineProperty(log, "clientHeight", { configurable: true, get: () => size.box });
+      Object.defineProperty(log, "scrollTop", {
+        configurable: true,
+        get: () => top,
+        set: (value: number) => {
+          top = Math.max(0, Math.min(value, size.content - size.box));
+        },
+      });
+      return () => size.content - top - size.box;
+    }
+
+    /** Opens the output of api, laid out 1000 px tall in a box 300 px tall, and scrolled to its end. */
+    async function following(): Promise<{
+      rust: Rust;
+      log: HTMLElement;
+      size: { content: number; box: number };
+      fromEnd: () => number;
+    }> {
+      vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+      const rust = new Rust(answered(status));
+      await open(rust);
+      fireEvent.click(screen.getByRole("button", { name: /^api/ }));
+      await waitFor(() => {
+        expect(rust.follows).toHaveLength(1);
+      });
+      const log = within(inspector()).getByRole("log", { name: "Output" });
+      const size = { content: 1000, box: 300 };
+      const fromEnd = laidOut(log, size);
+      await rust.write(logs("booting\nReady on 18731\n"));
+      await waitFor(() => {
+        expect(shown()).toContain("Ready on 18731");
+      });
+      expect(fromEnd()).toBe(0);
+      return { rust, log, size, fromEnd };
+    }
+
+    it("follows the end again when Find opens and shrinks the box, though no line came", async () => {
+      const { log, size, fromEnd } = await following();
+
+      fireEvent.click(within(inspector()).getByRole("button", { name: "Find" }));
+      size.box = 273;
+      resized(log);
+
+      expect(fromEnd()).toBe(0);
+    });
+
+    it("follows the end again when Wrap folds the lines and the output grows, though no line came", async () => {
+      const { size, fromEnd } = await following();
+
+      size.content = 19_000;
+      fireEvent.click(within(inspector()).getByRole("button", { name: "Wrap" }));
+
+      expect(fromEnd()).toBe(0);
+    });
+
+    it("leaves a reader who scrolled up where they are when the box changes size", async () => {
+      const { log, size, fromEnd } = await following();
+      log.scrollTop = 0;
+      fireEvent.scroll(log);
+
+      fireEvent.click(within(inspector()).getByRole("button", { name: "Find" }));
+      size.box = 273;
+      resized(log);
+
+      expect(log.scrollTop).toBe(0);
+      expect(fromEnd()).toBe(727);
+    });
   });
 
   it("shows a refusal of Rust to open localhost under the button", async () => {

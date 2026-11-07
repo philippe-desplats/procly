@@ -495,12 +495,30 @@ function atEnd(element: HTMLElement): boolean {
 function Lines({ lines, wrap }: { lines: Line[]; wrap: boolean }) {
   const pane = useRef<HTMLPreElement>(null);
   const following = useRef(true);
+  // While Following, the end is followed again whenever it moves: new lines, Wrap folding or unfolding them, and the
+  // box changing size, which Find does when it opens or closes.
   useLayoutEffect(() => {
     const element = pane.current;
     if (element !== null && following.current) {
       element.scrollTop = element.scrollHeight;
     }
-  }, [lines]);
+  }, [lines, wrap]);
+  useEffect(() => {
+    const element = pane.current;
+    // jsdom has no ResizeObserver, the window always has one.
+    if (element === null || typeof ResizeObserver === "undefined") {
+      return undefined;
+    }
+    const observer = new ResizeObserver(() => {
+      if (following.current) {
+        element.scrollTop = element.scrollHeight;
+      }
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
   return (
     <div className="output-box">
       <pre
