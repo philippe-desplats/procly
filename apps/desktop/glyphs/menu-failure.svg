@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="32" height="32">
+<!-- The failure glyph of the window (src/Glyph.tsx), in front of a line of Needs you in the menu bar menu. Coloured, never a template: the colour is the state. -->
+<circle cx="6" cy="6" r="5.4" fill="#b42318"/>
+<path d="M4 4l4 4M8 4l-4 4" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
