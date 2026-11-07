@@ -245,12 +245,23 @@ fn doctor_json_holds_the_version_of_the_running_daemon_and_keeps_its_schema() {
 
     let document = json_succeeded(&setup.doctor());
 
-    assert_eq!(document["daemon_version"], json!(env!("CARGO_PKG_VERSION")), "{document}");
+    assert_eq!(
+        document["daemon_version"],
+        json!(env!("CARGO_PKG_VERSION")),
+        "{document}"
+    );
     assert_eq!(document["schema_version"], json!(1));
     // An added key, every other one as it was.
     assert_eq!(
         keys(&document),
-        ["agent", "checks", "daemon_version", "prompt", "result", "schema_version"]
+        [
+            "agent",
+            "checks",
+            "daemon_version",
+            "prompt",
+            "result",
+            "schema_version"
+        ]
     );
 }
 
@@ -279,7 +290,14 @@ fn doctor_json_holds_no_daemon_version_when_no_daemon_answers() {
     assert_eq!(document["schema_version"], json!(1));
     assert_eq!(
         keys(&document),
-        ["agent", "checks", "daemon_version", "prompt", "result", "schema_version"]
+        [
+            "agent",
+            "checks",
+            "daemon_version",
+            "prompt",
+            "result",
+            "schema_version"
+        ]
     );
 }
 

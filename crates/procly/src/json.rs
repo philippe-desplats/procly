@@ -9,8 +9,8 @@ use serde::{Serialize, Serializer};
 
 use crate::doctor::Report;
 use crate::protocol::{
-    AppliedRetention, Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
-    ServiceEnd, StartOutcome, Stopped, UpService,
+    AppliedRetention, Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport,
+    Released, Removed, ServiceEnd, StartOutcome, Stopped, UpService,
 };
 
 /// The version of the `--json` schema of every command, bumped on any incompatible change, independently of the
