@@ -193,9 +193,10 @@ fn copy_text(text: &str) {
 /// window last said the selection holds, and every other item is carried out by the window.
 fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     if let Some(menus) = app.try_state::<ContextMenus>() {
-        let shown = menus.shown();
-        match context_menu::picked(&shown, event.id().as_ref()) {
-            Some(Picked::Copy(text)) => return copy_text(text),
+        // The entries are let go of before copying, which waits for the clipboard tool.
+        let picked = context_menu::picked(&menus.shown(), event.id().as_ref());
+        match picked {
+            Some(Picked::Copy(text)) => return copy_text(&text),
             Some(Picked::Act(index)) => {
                 // A window that is gone has nothing to carry out.
                 let _ = app.emit(context_menu::CONTEXT_CHOICE, index);

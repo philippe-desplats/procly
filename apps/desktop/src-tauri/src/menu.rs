@@ -453,7 +453,7 @@ impl MenuBar {
     }
 
     /// Enables the items `context` allows and disables the others, and gives `⌘C` to what it copies.
-    pub(crate) fn apply(&self, context: MenuContext) {
+    fn apply(&self, context: MenuContext) {
         for (choice, item) in &self.items {
             if let Err(error) = item.set_enabled(choice.enabled(&context)) {
                 eprintln!("procly: cannot update the menu item {}: {error}", choice.id());
@@ -511,7 +511,7 @@ pub(crate) fn install(app: &AppHandle) -> tauri::Result<MenuBar> {
                 edit: built,
                 position,
                 standard,
-                main_value: item(app, Choice::CopyMainValue, &context)?,
+                main_value: main_value_item(app)?,
             });
         }
     }
@@ -521,6 +521,17 @@ pub(crate) fn install(app: &AppHandle) -> tauri::Result<MenuBar> {
         copy,
         context: Mutex::new(context),
     })
+}
+
+/// The native item that copies the main value. It is enabled for good, since it is in the menu only while there is a
+/// main value to copy, and [`CopyLine::show`] names it each time it shows.
+fn main_value_item(app: &AppHandle) -> tauri::Result<MenuItem<Wry>> {
+    let choice = Choice::CopyMainValue;
+    let mut item = MenuItemBuilder::with_id(choice.id(), choice.title()).enabled(true);
+    if let Some(accelerator) = choice.accelerator() {
+        item = item.accelerator(accelerator);
+    }
+    item.build(app)
 }
 
 /// The native item of `choice`, as `context` enables it.

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { FailureKey } from "./daemon";
 import { sameFailure } from "./needs-you";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { MenuContext } from "./protocol/MenuContext";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import type { Selected } from "./selection";
@@ -46,11 +47,17 @@ export function portOf(selected: Selected): number | null {
   }
 }
 
-/** The command that stops a Foreign process, which the developer runs: Procly never stops what it did not start. */
+/**
+ * The command that stops a Foreign process, which the developer runs: Procly never stops what it did not start. A
+ * container has no pid, so it has none.
+ */
+export function stopCommand(process: ForeignProcess): string | null {
+  return process.kind === "process" ? `kill ${String(process.pid)}` : null;
+}
+
+/** The command that stops the selection, which only a Foreign process has. */
 export function stopCommandOf(selected: Selected): string | null {
-  return selected.kind === "foreign" && selected.process.kind === "process"
-    ? `kill ${String(selected.process.pid)}`
-    : null;
+  return selected.kind === "foreign" ? stopCommand(selected.process) : null;
 }
 
 /** The `procly logs` command of the selection, run where the selection runs. A Foreign process has no logs of Procly's. */

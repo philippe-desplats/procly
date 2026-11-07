@@ -78,8 +78,11 @@ interface Call {
   args: unknown;
 }
 
-/** Plays the Rust side from the answer `last`. A mark answers with the update the Seen set of Rust would publish. */
-function rust(last: Update): Call[] {
+/**
+ * Plays the Rust side from the answer `last`. A mark answers with the update the Seen set of Rust would publish, and
+ * `revealFails` makes the Finder refuse to reveal the Worktree.
+ */
+function rust(last: Update, revealFails = false): Call[] {
   const calls: Call[] = [];
   mockIPC(
     (command, args) => {
@@ -97,12 +100,15 @@ function rust(last: Update): Call[] {
           return undefined;
         case "preview_release":
           return new Promise<void>(() => undefined);
+        case "reveal_worktree":
+          return revealFails
+            ? Promise.reject({ kind: "reveal", message: `cannot reveal ${PATH} in the Finder: refused` })
+            : undefined;
         case "refresh":
         case "stop_follow":
         case "set_menu_context":
         case "show_context_menu":
         case "open_worktree":
-        case "reveal_worktree":
           return undefined;
         default:
           return Promise.reject(new Error(`unexpected command ${command}`));
@@ -255,5 +261,19 @@ describe("the context menu of a Worktree in the sidebar", () => {
     await waitFor(() => {
       expect(calls).toContainEqual({ command: "preview_release", args: { path: PATH } });
     });
+  });
+
+  it("says why the Finder did not reveal the Worktree, also on a screen that hides the inspector", async () => {
+    const calls = rust(unseen, true);
+    render(<App store={createDaemonStore()} />);
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    fireEvent.click(await within(sidebar).findByRole("button", { name: /^Orphans/ }));
+    await screen.findByRole("heading", { name: "Orphans" });
+    expect(screen.queryByRole("complementary", { name: "Inspector" })).toBeNull();
+
+    fireEvent.contextMenu(within(sidebar).getByRole("button", { name: /^web-fix/ }));
+    await choose(await shownMenu(calls), "Reveal in Finder");
+
+    expect(await screen.findByText(/in the Finder: refused/)).toHaveAttribute("role", "alert");
   });
 });

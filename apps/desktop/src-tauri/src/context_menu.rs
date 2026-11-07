@@ -35,10 +35,11 @@ pub(crate) enum ContextEntry {
 }
 
 /// What choosing an entry of the last context menu does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Picked<'a> {
+/// It holds its text, so that the entries can be let go of before copying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Picked {
     /// Rust copies this text.
-    Copy(&'a str),
+    Copy(String),
     /// The window carries out the entry at this index.
     Act(usize),
 }
@@ -49,10 +50,10 @@ fn id(index: usize) -> String {
 }
 
 /// What choosing the item with `id` does in a menu of `entries`, nothing for an id that is not one of its items.
-pub(crate) fn picked<'a>(entries: &'a [ContextEntry], id: &str) -> Option<Picked<'a>> {
+pub(crate) fn picked(entries: &[ContextEntry], id: &str) -> Option<Picked> {
     let index: usize = id.strip_prefix(PREFIX)?.parse().ok()?;
     match entries.get(index)? {
-        ContextEntry::Copy { text, .. } => Some(Picked::Copy(text)),
+        ContextEntry::Copy { text, .. } => Some(Picked::Copy(text.clone())),
         ContextEntry::Act { .. } => Some(Picked::Act(index)),
         ContextEntry::Separator => None,
     }
@@ -127,7 +128,7 @@ mod tests {
     fn a_copy_entry_copies_its_text_and_another_entry_goes_back_to_the_window_by_its_index() {
         let entries = entries();
 
-        assert_eq!(picked(&entries, &id(0)), Some(Picked::Copy("4101")));
+        assert_eq!(picked(&entries, &id(0)), Some(Picked::Copy("4101".to_owned())));
         assert_eq!(picked(&entries, &id(2)), Some(Picked::Act(2)));
     }
 

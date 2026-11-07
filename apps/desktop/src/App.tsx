@@ -347,6 +347,14 @@ export function App({
   // Settings, the Orphans and the checks show nothing the inspector explains. The Jobs outside any Repository are picked
   // for it.
   const wide = settings || orphans || checking;
+  // A failure to open from the context menu of a Worktree shows in the inspector, or above the center when a wide
+  // screen hides the inspector.
+  const openingAlert =
+    openingError === null ? null : (
+      <p role="alert" className="error">
+        {openingError}
+      </p>
+    );
   // The Overview and a Worktree draw their own title line, with the controls of the toolbar at its end, so the toolbar
   // is left out.
   const titled = snapshot.kind === "status" && !checking;
@@ -433,6 +441,7 @@ export function App({
             />
           </nav>
           <main className="pane center">
+            {wide ? openingAlert : null}
             {view.kind === "settings" ? (
               <SettingsScreen focusEditor={view.focusEditor} />
             ) : view.kind === "orphans" && snapshot.kind === "status" ? (
@@ -482,11 +491,7 @@ export function App({
           </main>
           {wide ? null : (
             <aside className="pane inspector" aria-label="Inspector">
-              {openingError === null ? null : (
-                <p role="alert" className="error">
-                  {openingError}
-                </p>
-              )}
+              {openingAlert}
               <Inspector
                 current={current}
                 selected={selected}

@@ -11,7 +11,7 @@ import {
   type Statement,
 } from "./inspect";
 import { worktreeLabel, worktreeNames } from "./labels";
-import { MENU_CHOICE } from "./menu";
+import { MENU_CHOICE, stopCommand } from "./menu";
 import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { MenuChoice } from "./protocol/MenuChoice";
@@ -257,6 +257,7 @@ export function WorktreeNames({ worktree }: { worktree: WorktreeStatus }) {
  */
 function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process: ForeignProcess }) {
   const statement = foreignStatement();
+  const stop = stopCommand(process);
   return (
     <section aria-label="Selection">
       <header className="inspector-head">
@@ -296,12 +297,12 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
         )}
       </dl>
       <p className="muted">{statement.summary}</p>
-      {process.kind === "process" ? (
+      {stop === null ? null : (
         <>
           <p className="caption">Stop it yourself</p>
-          <CopyBox text={`kill ${String(process.pid)}`} />
+          <CopyBox text={stop} />
         </>
-      ) : null}
+      )}
     </section>
   );
 }
