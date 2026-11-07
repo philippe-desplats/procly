@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "result": "healthy",
+  "checks": [
+    { "name": "docker_compose", "status": "passed", "message": "docker compose 2.29.1", "fix": null },
+    { "name": "daemon", "status": "passed", "message": "the Daemon answers", "fix": null }
+  ],
+  "prompt": null,
+  "agent": null,
+  "daemon_version": "0.5.0"
+}

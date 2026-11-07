@@ -84,7 +84,9 @@ describe("the window", () => {
     render(<App store={createDaemonStore()} />);
 
     const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
-    expect(await within(sidebar).findByRole("button", { name: /^main\s*main$/ })).toBeInTheDocument();
+    expect(
+      await within(sidebar).findByRole("button", { name: /^main\s*Main worktree$/ }),
+    ).toBeInTheDocument();
     expect(within(sidebar).getByRole("button", { name: "web-fix" })).toBeInTheDocument();
     expect(within(sidebar).getByRole("heading", { name: "web" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toBeInTheDocument();
@@ -429,18 +431,18 @@ describe("the sidebar", () => {
       .filter(
         (text) =>
           text !== "Overview" &&
-          text !== "Outside Repositories" &&
+          !text?.startsWith("Outside Repositories") &&
           text !== "Orphans" &&
           text !== "Doctor" &&
           text !== "Settings⌘,",
       );
     expect(labels).toEqual([
-      "mainmain",
+      "mainMain worktree",
       "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
-      "mainmain",
+      "mainMain worktree",
       "docs-preview",
       "docs-oldRemoved",
-      "mainmain",
+      "mainMain worktree",
     ]);
     expect(within(sidebar).queryByText(/detached/i)).not.toBeInTheDocument();
     expect(within(sidebar).getAllByText("Removed")).toHaveLength(1);
@@ -473,6 +475,64 @@ describe("the sidebar", () => {
     expect(within(long).getByText(/^feature\//)).toHaveClass("row-name");
     const detached = within(sidebar).getByRole("button", { name: "docs-preview" });
     expect(detached).toHaveAttribute("title", "Branch: none\nFolder: docs-preview\nSlug: docs_preview");
+  });
+
+  it("captions the Main worktree beside its label, and the label alone is the name of the row", async () => {
+    poller(answered(status));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    const main = await within(sidebar).findByRole("button", { name: /^main\s*Main worktree$/ });
+    expect(within(main).getByText("Main worktree")).toBeInTheDocument();
+    expect(main.querySelector(".row-name")).toHaveTextContent(/^main$/);
+    // The legend sits beside the label, outside the element that carries it, and "main" is not said twice.
+    expect(main.querySelector(".row-name")).not.toContainElement(within(main).getByText("Main worktree"));
+    expect(within(main).getAllByText(/main/i)).toHaveLength(2);
+    expect(within(main).queryByText("main", { selector: ".caption" })).toBeNull();
+  });
+
+  it("gives a Worktree that is not the Main worktree no legend", async () => {
+    poller(answered(status));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    const fix = await within(sidebar).findByRole("button", { name: "web-fix" });
+    expect(within(fix).queryByText("Main worktree")).toBeNull();
+  });
+
+  describe("the Outside Repositories entry", () => {
+    const OUTSIDE_JOB = { id: "c0ffee01", command: "make watch", cwd: "/p/tmp/scratch", state: "running" };
+
+    function outsideEntry(jobs: object[]) {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: jobs } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      return within(sidebar).findByRole("button", { name: /^Outside Repositories/ });
+    }
+
+    it("says how many Jobs started outside a Repository, in the singular for 1", async () => {
+      const entry = await outsideEntry([OUTSIDE_JOB]);
+
+      expect(entry).toHaveTextContent(/^Outside Repositories\s*1 Job$/);
+      expect(within(entry).getByText("1 Job")).toBeInTheDocument();
+    });
+
+    it("says it in the plural for 2", async () => {
+      const entry = await outsideEntry([OUTSIDE_JOB, { ...OUTSIDE_JOB, id: "c0ffee02" }]);
+
+      expect(entry).toHaveTextContent(/^Outside Repositories\s*2 Jobs$/);
+      expect(within(entry).getByText("2 Jobs")).toBeInTheDocument();
+    });
+
+    it("keeps the entry and draws no count when no Job started outside a Repository", async () => {
+      const entry = await outsideEntry([]);
+
+      expect(entry).toHaveAccessibleName("Outside Repositories");
+      expect(within(entry).queryByText(/Job/)).toBeNull();
+    });
   });
 });
 
@@ -897,7 +957,7 @@ describe("Needs you", () => {
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole("button", { name: /^main\s*main$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^main\s*Main worktree$/ }));
 
     expect(marked).toEqual([{ kind: "job", id: "j-7" }]);
     const row = (await screen.findByText("make test")).closest("li");
@@ -1001,7 +1061,7 @@ describe("the reason line of a Worktree in the sidebar", () => {
     expect(reasons()).toHaveLength(1);
     const quiet = await entryOf("docs");
     expect(quiet.querySelector(".row-reason")).toBeNull();
-    expect(quiet).toHaveTextContent(/^mainmain$/);
+    expect(quiet).toHaveTextContent(/^mainMain worktree$/);
   });
 
   it("draws no reason line at all while nothing needs the developer", async () => {
