@@ -1,4 +1,4 @@
-import { Fragment, memo, useLayoutEffect, useRef } from "react";
+import { Fragment, memo, useLayoutEffect, useRef, useState } from "react";
 
 import { CopyBox } from "./CopyBox";
 import type { FailureKey } from "./daemon";
@@ -16,6 +16,7 @@ import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
 import type { Followed, Selected } from "./selection";
 import { ServiceActions } from "./ServiceActions";
+import { failureOf, openLocalhost } from "./settings";
 import { inWorktree } from "./shell";
 import { State } from "./StateMark";
 import { formatMoment } from "./time";
@@ -190,6 +191,12 @@ function FollowedPanel({
         <span className="caption">Next</span> {statement.next}
       </p>
       <Actions selected={selected} onChanged={onChanged} />
+      {selected.kind === "job" ? (
+        <>
+          <p className="caption">Wait for it from a terminal</p>
+          <CopyBox text={`procly wait ${selected.job.id}`} />
+        </>
+      ) : null}
       <Facts selected={selected} at={at} />
       <OutputPane selected={selected} output={output} />
     </section>
@@ -199,7 +206,12 @@ function FollowedPanel({
 function Heading({ selected }: { selected: Followed }) {
   switch (selected.kind) {
     case "service":
-      return <h2 className="title">{selected.service.service}</h2>;
+      return (
+        <>
+          <h2 className="title">{selected.service.service}</h2>
+          <p className="caption foreign-where">{`Process service in ${selected.repository}`}</p>
+        </>
+      );
     case "job":
       return <h2 className="title mono">{selected.job.command}</h2>;
     case "compose":
@@ -234,8 +246,10 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
   const statement = foreignStatement();
   return (
     <section aria-label="Selection">
-      <h2 className="title">{process.kind === "process" ? process.command : process.name}</h2>
-      <p className="caption foreign-where">{`Foreign process in ${worktreeLabel(worktree)}`}</p>
+      <header className="inspector-head">
+        <h2 className="title">{process.kind === "process" ? process.command : process.name}</h2>
+        <p className="caption foreign-where">{`Foreign process in ${worktreeLabel(worktree)}`}</p>
+      </header>
       <div className="state-line">
         <State {...statement.state} />
       </div>
@@ -255,7 +269,7 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
         {process.kind === "process" ? (
           <>
             <dt>Process</dt>
-            <dd>
+            <dd className="facts-line" title={`${process.command}, pid ${String(process.pid)}`}>
               <code className="mono">{process.command}</code>
               {`, pid ${String(process.pid)}`}
             </dd>
@@ -283,6 +297,35 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
   );
 }
 
+/**
+ * Opens the port of a Service in the browser. `Status` carries the port only, so the address assumes `http`. A failure
+ * of Rust to open it stays under the button.
+ */
+function OpenLocalhost({ port }: { port: number }) {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        className="button"
+        onClick={() => {
+          setError(null);
+          openLocalhost(port).catch((reason: unknown) => {
+            setError(failureOf(reason).message);
+          });
+        }}
+      >
+        {`Open localhost:${String(port)}`}
+      </button>
+      {error === null ? null : (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
+
 function Facts({ selected, at }: { selected: Followed; at: number }) {
   return (
     <dl className="facts">
@@ -299,6 +342,14 @@ function Facts({ selected, at }: { selected: Followed; at: number }) {
             <>
               <dt className="caption">Port</dt>
               <dd className="mono">{`:${String(selected.service.port)}`}</dd>
+              {selected.service.state === "ended" ? null : (
+                <>
+                  <dt className="caption">Browser</dt>
+                  <dd>
+                    <OpenLocalhost port={selected.service.port} />
+                  </dd>
+                </>
+              )}
             </>
           )}
           <dt className="caption">Started</dt>
@@ -331,8 +382,18 @@ const WORDS: Record<Exclude<OutputView["status"], "snapshot">, string> = {
   failed: "",
 };
 
+/** The text of a line, which is what Find looks in. */
+function textOf(line: Line): string {
+  return line.spans.map((span) => span.text).join("");
+}
+
 function OutputPane({ selected, output }: { selected: Followed; output: OutputView }) {
   const snapshot = selected.kind === "compose";
+  const [query, setQuery] = useState("");
+  const [wrap, setWrap] = useState(false);
+  const needle = query.toLowerCase();
+  const lines =
+    needle === "" ? output.lines : output.lines.filter((line) => textOf(line).toLowerCase().includes(needle));
   return (
     <section aria-label="Output">
       <h3 className="caption">Output</h3>
@@ -352,12 +413,40 @@ function OutputPane({ selected, output }: { selected: Followed; output: OutputVi
             : WORDS[output.status === "snapshot" ? "connecting" : output.status]}
         </p>
       )}
-      {snapshot ? (
-        <button type="button" className="button" onClick={output.refresh}>
-          Refresh
+      <div className="output-tools">
+        <input
+          type="search"
+          className="output-find"
+          aria-label="Find in output"
+          placeholder="Find"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+          }}
+        />
+        <button
+          type="button"
+          className="button"
+          onClick={() => {
+            setWrap(!wrap);
+          }}
+        >
+          {wrap ? "No Wrap" : "Wrap"}
         </button>
-      ) : null}
-      <Lines lines={output.lines} />
+        {snapshot ? (
+          <button type="button" className="button" onClick={output.refresh}>
+            Refresh
+          </button>
+        ) : null}
+      </div>
+      {needle === "" ? null : (
+        <p className="caption">
+          {lines.length === 0
+            ? "No line holds this text."
+            : `${String(lines.length)} matching ${lines.length === 1 ? "line" : "lines"}`}
+        </p>
+      )}
+      <Lines lines={lines} wrap={wrap} />
     </section>
   );
 }
@@ -367,7 +456,7 @@ function atEnd(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < 8;
 }
 
-function Lines({ lines }: { lines: Line[] }) {
+function Lines({ lines, wrap }: { lines: Line[]; wrap: boolean }) {
   const pane = useRef<HTMLPreElement>(null);
   const following = useRef(true);
   useLayoutEffect(() => {
@@ -381,7 +470,7 @@ function Lines({ lines }: { lines: Line[] }) {
       ref={pane}
       role="log"
       aria-label="Output"
-      className="output mono"
+      className={wrap ? "output mono wrap" : "output mono"}
       onScroll={(event) => {
         following.current = atEnd(event.currentTarget);
       }}

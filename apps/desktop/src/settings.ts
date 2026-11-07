@@ -73,6 +73,9 @@ export const detectedApps = (): Promise<DetectedApps> => invoke("detected_apps")
 export const openWorktree = (path: string, withApp: OpenWith): Promise<void> =>
   invoke("open_worktree", { path, with: withApp });
 
+/** Asks Rust to open `http://localhost:<port>` in the default browser. Rust opens nothing else. */
+export const openLocalhost = (port: number): Promise<void> => invoke("open_localhost", { port });
+
 /** Asks Rust to show the Worktree at `path` in the Finder. */
 export const revealWorktree = (path: string): Promise<void> => invoke("reveal_worktree", { path });
 

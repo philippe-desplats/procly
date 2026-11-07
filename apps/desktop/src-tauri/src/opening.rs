@@ -1,7 +1,8 @@
-//! Opening a Worktree in the editor, the terminal or the Finder, from the app the settings name.
+//! Opening a Worktree in the editor, the terminal or the Finder, from the app the settings name, and the port of a
+//! Service in the browser.
 //!
-//! Rust opens, so that the window holds no `opener` permission and cannot open anything but a Worktree through the
-//! commands of the app (`docs/rules/tauri.md`).
+//! Rust opens, so that the window holds no `opener` permission and cannot open anything but a Worktree, or
+//! `http://localhost:<port>`, through the commands of the app (`docs/rules/tauri.md`).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,9 @@ pub(crate) trait Launcher {
 
     /// Shows `path` in the Finder.
     fn reveal(&self, path: &Path) -> io::Result<()>;
+
+    /// Opens `url` in the default browser.
+    fn open_url(&self, url: &str) -> io::Result<()>;
 }
 
 /// The `opener` plugin, which needs no plugin set up for what Rust calls of it.
@@ -40,6 +44,10 @@ impl Launcher for Opener {
 
     fn reveal(&self, path: &Path) -> io::Result<()> {
         tauri_plugin_opener::reveal_item_in_dir(path).map_err(io::Error::other)
+    }
+
+    fn open_url(&self, url: &str) -> io::Result<()> {
+        tauri_plugin_opener::open_url(url, None::<&str>).map_err(io::Error::other)
     }
 }
 
@@ -66,6 +74,14 @@ pub(crate) enum OpenError {
     },
     #[error("cannot open the Worktree: {0}")]
     Task(String),
+    #[error("port 0 is no address to open")]
+    NoPort,
+    #[error("cannot open {url} in the browser: {source}")]
+    Browser {
+        url: String,
+        #[source]
+        source: io::Error,
+    },
 }
 
 impl OpenError {
@@ -78,7 +94,7 @@ impl OpenError {
         match self {
             Self::NoEditor => AppFailureKind::NoEditor,
             Self::Missing { .. } => AppFailureKind::Missing,
-            Self::Launch { .. } => AppFailureKind::Launch,
+            Self::Launch { .. } | Self::Browser { .. } | Self::NoPort => AppFailureKind::Launch,
             Self::Reveal { .. } => AppFailureKind::Reveal,
             Self::Task(_) => AppFailureKind::Task,
         }
@@ -137,6 +153,22 @@ pub(crate) fn reveal(launcher: &impl Launcher, path: &Path) -> Result<(), OpenEr
     })
 }
 
+/// Opens `http://localhost:<port>` in the default browser. `Status` carries the port alone, so the scheme is `http`.
+/// The address is built here from the port, so the window cannot make the app open anything else.
+///
+/// # Errors
+///
+/// When the port is 0, or the browser does not open.
+pub(crate) fn open_port(launcher: &impl Launcher, port: u16) -> Result<(), OpenError> {
+    if port == 0 {
+        return Err(OpenError::NoPort);
+    }
+    let url = format!("http://localhost:{port}");
+    launcher
+        .open_url(&url)
+        .map_err(|source| OpenError::Browser { url, source })
+}
+
 /// Opens the Worktree at `path` in the editor or the terminal of the settings.
 ///
 /// # Errors
@@ -167,13 +199,25 @@ pub(crate) async fn reveal_worktree(path: PathBuf) -> Result<(), OpenError> {
         .map_err(|error| OpenError::task(&error))?
 }
 
+/// Opens `http://localhost:<port>` in the default browser.
+///
+/// # Errors
+///
+/// An [`OpenError`], which the window shows.
+#[tauri::command]
+pub(crate) async fn open_localhost(port: u16) -> Result<(), OpenError> {
+    tauri::async_runtime::spawn_blocking(move || open_port(&Opener, port))
+        .await
+        .map_err(|error| OpenError::task(&error))?
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::io;
     use std::path::{Path, PathBuf};
 
-    use super::{Launcher, OpenError, OpenWith, open, reveal};
+    use super::{Launcher, OpenError, OpenWith, open, open_port, reveal};
     use crate::settings::Settings;
 
     /// Stands for the system: what it was asked to launch is kept, and it can refuse.
@@ -181,6 +225,7 @@ mod tests {
     struct Fake {
         launched: RefCell<Vec<(PathBuf, String)>>,
         revealed: RefCell<Vec<PathBuf>>,
+        urls: RefCell<Vec<String>>,
         refuses: bool,
     }
 
@@ -198,6 +243,14 @@ mod tests {
                 return Err(io::Error::other("Finder is not there"));
             }
             self.revealed.borrow_mut().push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn open_url(&self, url: &str) -> io::Result<()> {
+            if self.refuses {
+                return Err(io::Error::other("No browser is set"));
+            }
+            self.urls.borrow_mut().push(url.to_owned());
             Ok(())
         }
     }
@@ -327,6 +380,41 @@ mod tests {
 
         assert!(missing.to_string().contains(&gone.display().to_string()), "{missing}");
         assert!(refused.to_string().contains("Finder is not there"), "{refused}");
+    }
+
+    #[test]
+    fn localhost_opens_http_on_the_port_and_nothing_else() {
+        let launcher = Fake::default();
+
+        open_port(&launcher, 18731).expect("it opens");
+
+        assert_eq!(*launcher.urls.borrow(), ["http://localhost:18731".to_owned()]);
+    }
+
+    #[test]
+    fn port_zero_is_no_address_and_opens_nothing() {
+        let launcher = Fake::default();
+
+        let error = open_port(&launcher, 0).expect_err("0 is not a port to open");
+
+        assert!(error.to_string().contains("port 0"), "{error}");
+        assert!(launcher.urls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_browser_that_does_not_open_is_named_in_the_error_with_the_address() {
+        let launcher = Fake {
+            refuses: true,
+            ..Fake::default()
+        };
+
+        let error = open_port(&launcher, 3000).expect_err("the browser does not open");
+
+        let message = error.to_string();
+        assert!(message.contains("http://localhost:3000"), "{message}");
+        assert!(message.contains("No browser"), "{message}");
+        let failure = serde_json::to_value(&error).expect("it serializes");
+        assert_eq!(failure["kind"], "launch");
     }
 
     #[test]

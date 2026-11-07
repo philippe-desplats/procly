@@ -4,6 +4,7 @@ import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { StatusReport } from "./protocol/StatusReport";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
+import { repositoryLabel } from "./labels";
 
 /**
  * What the developer picked in the center: the item the inspector explains and follows. It names the item and holds
@@ -18,7 +19,7 @@ export type Selection =
 
 /** A selection read in the last answer of the Daemon. */
 export type Selected =
-  | { kind: "service"; worktree: WorktreeStatus; service: ServiceStatus }
+  | { kind: "service"; worktree: WorktreeStatus; service: ServiceStatus; repository: string }
   | { kind: "job"; worktree: WorktreeStatus | null; job: JobStatus }
   | { kind: "compose"; worktree: WorktreeStatus; container: ContainerStatus }
   | { kind: "foreign"; worktree: WorktreeStatus; process: ForeignProcess };
@@ -73,9 +74,14 @@ export function resolve(selection: Selection | null, report: StatusReport): Sele
   const worktrees = report.repositories.flatMap((repository) => repository.worktrees);
   switch (selection.kind) {
     case "service": {
-      const worktree = worktrees.find((candidate) => candidate.path === selection.worktree);
+      const repository = report.repositories.find((candidate) =>
+        candidate.worktrees.some((worktree) => worktree.path === selection.worktree),
+      );
+      const worktree = repository?.worktrees.find((candidate) => candidate.path === selection.worktree);
       const service = worktree?.services.find((candidate) => candidate.service === selection.service);
-      return worktree === undefined || service === undefined ? null : { kind: "service", worktree, service };
+      return repository === undefined || worktree === undefined || service === undefined
+        ? null
+        : { kind: "service", worktree, service, repository: repositoryLabel(repository.git_common_dir) };
     }
     case "compose": {
       const worktree = worktrees.find((candidate) => candidate.path === selection.worktree);

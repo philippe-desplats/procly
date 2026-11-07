@@ -78,7 +78,7 @@ body {
 
 .window {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) 280px;
+  grid-template-columns: 220px minmax(0, 1fr) minmax(320px, 400px);
   height: 100%;
 }
 
@@ -360,6 +360,21 @@ body {
 
 .facts-grid dt {
   color: var(--muted);
+}
+
+/* A value that keeps to one line and gives way with an ellipsis, its whole text being the tooltip. */
+.facts .facts-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The title block of an inspector, set apart from the facts under it by a line. */
+.inspector-head {
+  margin: 0 -16px 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
 }
 
 /* A port as a chip. */
@@ -735,9 +750,28 @@ body {
   border-radius: 6px;
   background: var(--panel);
   color: var(--text);
+  white-space: pre;
+  user-select: text;
+}
+
+/* Wrap folds the lines at the edge of the pane, without it a long line scrolls sideways and keeps its columns. */
+.output.wrap {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  user-select: text;
+}
+
+/* Find and Wrap above the output, Find taking the room the buttons leave. */
+.output-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+}
+
+.output-find {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--size-small);
 }
 
 .output .bold {
