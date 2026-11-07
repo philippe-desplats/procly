@@ -21,7 +21,7 @@ import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectableRow, SelectionContext } from "./selectable";
-import { foreignId, resolve, selectedKey, type Selected, type Selection } from "./selection";
+import { foreignId, foreignToShow, resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
@@ -246,8 +246,17 @@ export function App({
   const checking = view.kind === "doctor";
   const orphans = view.kind === "orphans";
   const outside = view.kind === "outside";
-  // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
-  const wide = settings || orphans;
+  // Settings, the Orphans and the checks show nothing the inspector explains. The Jobs outside any Repository are picked
+  // for it.
+  const wide = settings || orphans || checking;
+  // Where the Doctor takes the developer from a failed check: the Orphans, and the Foreign process the Status reports.
+  const processToShow = snapshot.kind === "status" ? foreignToShow(snapshot.report) : null;
+  const showProcess = (): void => {
+    if (processToShow?.kind === "foreign") {
+      setView({ kind: "worktree", path: processToShow.worktree });
+      setSelection(processToShow);
+    }
+  };
   const doctorRun = useDoctor(doctor, null);
   const orphanDryRun = useOrphanScan(orphanScan);
   const refresh = (): void => {
@@ -321,7 +330,13 @@ export function App({
                   />
                 ) : null}
                 {view.kind === "doctor" ? (
-                  <DoctorScreen store={doctor} />
+                  <DoctorScreen
+                    store={doctor}
+                    onShowOrphans={() => {
+                      setView({ kind: "orphans" });
+                    }}
+                    onShowProcess={processToShow === null ? null : showProcess}
+                  />
                 ) : (
                   <Center snapshot={snapshot} current={current} doctor={doctor} onRelease={release} />
                 )}

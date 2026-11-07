@@ -34,6 +34,24 @@ export function foreignId(process: ForeignProcess): string {
   return process.kind === "process" ? `pid:${String(process.pid)}` : `container:${process.name}`;
 }
 
+/**
+ * The Foreign process the Doctor takes the developer to from a failed `leased_ports` check, read in the Status and never
+ * in the message of the check: the one that holds a port a Service of its own Worktree has, else the first of the
+ * Status. `null` when the Status reports none.
+ */
+export function foreignToShow(report: StatusReport): Selection | null {
+  const found = report.repositories
+    .flatMap((repository) => repository.worktrees)
+    .flatMap((worktree) => (worktree.foreign ?? []).map((process) => ({ worktree, process })));
+  const onAServicePort = found.find(({ worktree, process }) =>
+    process.ports.some((port) => worktree.services.some((service) => service.port === port)),
+  );
+  const chosen = onAServicePort ?? found[0];
+  return chosen === undefined
+    ? null
+    : { kind: "foreign", worktree: chosen.worktree.path, process: foreignId(chosen.process) };
+}
+
 /** Whether `selection` is the item `other` names. */
 export function sameSelection(selection: Selection | null, other: Selection): boolean {
   if (selection === null || selection.kind !== other.kind) {
