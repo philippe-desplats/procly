@@ -237,6 +237,19 @@ describe("the Worktree screen", () => {
     }
   });
 
+  it("draws a Job of the Worktree as its glyph, then its command, then its state", async () => {
+    app();
+    const center = await openWorktree();
+
+    for (const command of ["sleep 61", "sh -c 'exit 3'"]) {
+      expect(inOrder(within(center).getByText(command).closest("li") as HTMLElement)).toEqual([
+        "glyph",
+        "command",
+        "state",
+      ]);
+    }
+  });
+
   it("draws a port as the same pill on a Worktree row as on an Overview row, and never as the text :port", async () => {
     app();
     const center = await openWorktree();
@@ -656,18 +669,17 @@ function onBranch(branch: string, main = false): Response {
 
 /** What a row says, in the order the document draws it: its glyph, its name, then the word of its state. */
 function inOrder(row: HTMLElement): string[] {
-  const parts: [string, Element | null][] = [
-    ["glyph", row.querySelector("svg[data-glyph]")],
-    ["command", row.querySelector(".item-name")],
-    ["state", row.querySelector(".word")],
-  ];
+  const found = (name: string, selector: string): [string, Element] => {
+    const part = row.querySelector(selector);
+    if (part === null) {
+      throw new Error(`the row has no ${name}`);
+    }
+    return [name, part];
+  };
+  const parts = [found("glyph", "svg[data-glyph]"), found("command", ".item-name"), found("state", ".word")];
   return parts
     .toSorted(([, first], [, second]) =>
-      first === null || second === null
-        ? 0
-        : first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING
-          ? -1
-          : 1,
+      first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
     )
     .map(([name]) => name);
 }
@@ -700,7 +712,7 @@ describe("the header of the Worktree screen", () => {
 
     const title = within(center).getByRole("heading", { level: 2, name: "web-fix" });
     expect(within(center).queryByRole("heading", { name: "feature/login" })).not.toBeInTheDocument();
-    expect(title.closest("header")).toHaveTextContent(PATH);
+    expect(title.closest("header")?.querySelector(".worktree-path")).toHaveTextContent(PATH);
   });
 
   it("gives the slug and the other names of the Worktree in the tooltip of the title", async () => {

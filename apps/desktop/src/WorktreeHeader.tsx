@@ -27,10 +27,8 @@ export function WorktreeHeader({
       <header className="title-bar worktree-head">
         <div className="worktree-title" title={worktreeTooltip(worktree)}>
           <div className="worktree-name">
-            <h2 className="title">
-              {basename(worktree.path)}
-              <RemovedMark worktree={worktree} />
-            </h2>
+            <h2 className="title">{basename(worktree.path)}</h2>
+            <RemovedMark worktree={worktree} />
             {worktree.main ? <span className="worktree-legend">Main worktree</span> : null}
           </div>
           <p className="worktree-path">{worktree.path}</p>

@@ -513,10 +513,6 @@ body {
   white-space: nowrap;
 }
 
-.worktree-head .mark {
-  margin-left: 6px;
-}
-
 .worktree-head .button {
   flex: none;
 }

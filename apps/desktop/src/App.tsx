@@ -898,7 +898,7 @@ function Inspector({
           <WorktreeActions
             key={selected.worktree.path}
             path={selected.worktree.path}
-            // The inspector of a Foreign process draws none of them, the Worktree menu still opens its Worktree.
+            // The inspector of a Foreign process draws no Reveal in Finder, the Worktree menu still opens its Worktree.
             buttons={selected.kind !== "foreign"}
             onNeedEditor={onNeedEditor}
           />
