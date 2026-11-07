@@ -473,15 +473,37 @@ pub struct ReleaseReport {
     pub kept_leases: Vec<KeptLease>,
     /// The Logical resources of the Worktree, which a Worktree release never drops.
     pub logical_resources: Vec<KeptResource>,
+    /// The Retention policies it applied, or for a dry run would apply, to the Isolated containers of the Worktrees
+    /// already removed. Empty from a Daemon that does not report them.
+    #[serde(default)]
+    pub retention: Vec<AppliedRetention>,
     /// What went wrong without failing the release, such as a Portless alias that could not be removed.
     pub warnings: Vec<String>,
 }
 
+/// The Retention policy a Worktree release applied, or for a dry run would apply, to the Isolated container of a
+/// Worktree already removed, which deletes the container and its volumes at once or once its delay has passed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AppliedRetention {
+    /// The removed Worktree the container belongs to.
+    pub worktree: PathBuf,
+    /// The Compose service the container runs.
+    pub service: String,
+    /// The policy as `procly.toml` declares it: `delete`, or a delay such as `7d`.
+    pub policy: String,
+}
+
 impl ReleaseReport {
-    /// Whether nothing was stopped, let go of nor released, as for a second release or a Worktree Procly never saw.
+    /// Whether nothing was stopped, let go of nor released, and no Retention policy applied, as for a second release or
+    /// a Worktree Procly never saw. A policy may delete an Isolated container and its volumes, which is not nothing.
     #[must_use]
     pub fn released_nothing(&self) -> bool {
-        self.services.is_empty() && self.jobs.is_empty() && self.compose_services.is_empty() && self.leases.is_empty()
+        self.services.is_empty()
+            && self.jobs.is_empty()
+            && self.compose_services.is_empty()
+            && self.leases.is_empty()
+            && self.retention.is_empty()
     }
 }
 

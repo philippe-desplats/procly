@@ -236,12 +236,6 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
-/* A Seen row fades, except the glyph of its state, which keeps the 3:1 contrast it needs to be read by its shape. */
-.item[data-seen="true"] .item-select > :not(.state),
-.item[data-seen="true"] .word {
-  opacity: 0.55;
-}
-
 .item-name {
   flex: 1;
   min-width: 0;
@@ -254,6 +248,32 @@ body {
   margin: 0;
 }
 
+/* A row of the center, as the mockup draws it: the glyph, the name with the word of its state, where it runs, then its
+   time and its ports. The first column is the glyph, so every row starts with the shape of its state. */
+.item-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-glyph {
+  display: inline-flex;
+}
+
+/* The word of a state follows the name. It is grey like the text around it, except a failure and a restart. */
+.item-main .word {
+  color: var(--muted);
+}
+
+.item-main .word.tone-warn {
+  color: var(--warn);
+}
+
+.item-main .word.tone-fail {
+  color: var(--fail);
+}
+
 /* Where a row runs, a directory that can be long. It gives way first, cut at its end, so the name keeps its width. */
 .item-where {
   flex: 0 1 auto;
@@ -262,6 +282,45 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--faint);
+  font-size: var(--size-small);
+}
+
+/* In a column of its own the place takes the room the grid gives it. */
+.item-select .item-where {
+  max-width: none;
+}
+
+.item-where .mark {
+  margin-left: 6px;
+}
+
+.item-end {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+/* The ports hold a slot of their own, so the pills of the rows of a list end on the same edge. */
+.item-ports {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 56px;
+}
+
+/* A Seen row is set aside: what is not its state fades, and its word loses the colour of a failure or a restart for the
+   muted grey. The word is not faded, since 0.55 puts the amber word under 4.5:1. The glyph keeps its own colour and the
+   3:1 it needs to be read by its shape. */
+.item[data-seen="true"] .item-name,
+.item[data-seen="true"] .item-where,
+.item[data-seen="true"] .item-end > :not(.mark) {
+  opacity: 0.55;
+}
+
+.item[data-seen="true"] .item-main .word {
+  color: var(--muted);
 }
 
 .state {
@@ -390,6 +449,52 @@ body {
 
 .toolbar .caption {
   margin: 0;
+}
+
+/* The title of a screen and its controls on one line, a strip as tall as the one over the sidebar, under which a line
+   separates the title from the list. It bleeds to the edges of the pane, whose padding is 16px. */
+.title-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  margin: -16px -16px 8px;
+  padding: 0 16px 0 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.title-bar .title {
+  flex: 1;
+  margin: 0;
+}
+
+.title-bar .caption {
+  margin: 0;
+}
+
+/* The Services of the Overview, under the section Needs you pins on top. */
+.services {
+  margin-top: 4px;
+}
+
+/* The Overview of a Daemon that knows no Service sits a little below the title line, as the mockup draws it. */
+.state-column.overview-empty {
+  margin-top: 50px;
+}
+
+/* What the inspector says while nothing is picked, in the middle of the pane. */
+.hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  margin: 0;
+  color: var(--faint);
+  text-align: center;
 }
 
 .button {
@@ -771,10 +876,11 @@ body {
 
 /* A row of the center is a button that picks the item for the inspector. */
 .item-select {
-  display: flex;
+  display: grid;
   flex: 1;
-  align-items: baseline;
-  gap: 12px;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -783,6 +889,11 @@ body {
   font: inherit;
   text-align: left;
   cursor: default;
+}
+
+/* A row that says where it runs has a column for it. */
+.item-select-wide {
+  grid-template-columns: 14px minmax(0, 1.3fr) minmax(0, 1fr) auto;
 }
 
 .item-select:focus-visible {

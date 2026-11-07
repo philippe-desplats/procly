@@ -419,8 +419,10 @@ impl McpServer {
     #[tool(
         description = "Release a Worktree before it is removed: stop its Services and Jobs with their whole process \
                        trees, let go of its Compose services as `down` does and release its Leases, except those of \
-                       a Pinned branch. Nothing is deleted, the Logical resources are kept. Releasing again returns \
-                       `nothing to release`. Same as `procly worktree release --json`."
+                       a Pinned branch. No data of the Worktree is deleted, its Logical resources are kept. It also \
+                       applies the Retention policy of the Isolated containers of the Worktrees already removed, which \
+                       deletes a container and its volumes once its policy says so, and lists each policy applied. \
+                       Releasing again returns `nothing to release`. Same as `procly worktree release --json`."
     )]
     async fn worktree_release(
         &self,

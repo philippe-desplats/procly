@@ -17,10 +17,13 @@ export const SelectionContext = createContext<SelectionControl>({
 export function SelectableRow({
   target,
   seen,
+  wide = false,
   children,
 }: {
   target: Selection;
   seen: boolean;
+  /** Whether the row has a column for where the item runs, between what it is and its time and ports. */
+  wide?: boolean;
   children: ReactNode;
 }) {
   const { selection, select } = useContext(SelectionContext);
@@ -29,7 +32,7 @@ export function SelectableRow({
     <li className="item" data-seen={seen ? "true" : undefined} data-selected={picked ? "true" : undefined}>
       <button
         type="button"
-        className="item-select"
+        className={wide ? "item-select item-select-wide" : "item-select"}
         aria-pressed={picked}
         onClick={() => {
           select(target);
