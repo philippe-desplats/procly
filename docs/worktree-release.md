@@ -22,7 +22,13 @@ Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it on
 3. It forgets every Job and Service of the Worktree that has ended, the ones it has just stopped included, so that `procly wait`, `procly logs` and `procly status` no longer know them.
 4. It releases the Leases of the Worktree, so that the next Worktree can be granted their ports at once, without waiting for them to expire. With `portless = true`, it removes their [Portless alias](configuration.md#portless-aliases) too.
 
-It also applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers of the Worktrees already removed, of every Repository: those set to `"delete"` are removed, and those set to a duration are removed once it has passed. The Worktree being released still exists, so its own container is kept until a later release, or the next start of the Daemon, finds it removed.
+It also applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers of the Worktrees already removed, of every Repository: those set to `"delete"` are removed, and those set to a duration are removed once it has passed. The Worktree being released still exists, so its own container is kept until a later release, or the next start of the Daemon, finds it removed. Each policy it applies is printed with the container it applies to, whether the deletion happens at once or once its delay has passed:
+
+```console
+$ procly worktree release
+web stopped
+Retention policy delete of db applied to the Isolated container of the removed Worktree /home/me/app-login
+```
 
 It keeps the rest, and deletes no data (ADR 0004):
 
@@ -31,7 +37,7 @@ It keeps the rest, and deletes no data (ADR 0004):
 - Every Logical resource the configuration gives the Worktree, such as its Postgres databases, and for a Driver that numbers its resources, such as Redis, the indexes the Worktree holds. Each one is printed with the `procly gc` command, which lists it as an Orphan once git no longer lists the Worktree.
 - The Docker volumes, the files `worktree init` copied and the Env file.
 
-The Daemon logs who asked for the release, with what it stopped and released, as it does for `procly down`. Running it again, or in a Worktree Procly never saw, prints `nothing to release` and exits with 0, see [exit codes](exit-codes.md).
+The Daemon logs who asked for the release, with what it stopped and released, as it does for `procly down`. Running it again, or in a Worktree Procly never saw, prints `nothing to release` and exits with 0, see [exit codes](exit-codes.md). A release that has nothing of its Worktree to stop or release but applies a Retention policy, which may delete an Isolated container and its volumes, does not say `nothing to release`: it prints the Retention line alone, `would apply` in a dry run and `applied` in the release.
 
 A release that meets a `procly restart` in the same Worktree wins: the Restart starts nothing more, takes back no Lease and exits with 125. While that Restart is starting a Compose service, the release waits for the start to finish before it stops anything. The wait lasts as long as the start of the container: up to the health timeout of the service, plus the time its Driver takes to be ready and to apply any Seed of its Logical resources, each Driver command bounded by `driver_timeout`. A Restart of a Process service holds the release only for the milliseconds its spawn takes. A release of another Worktree, and a plain `procly up`, never wait for a Restart.
 
@@ -43,7 +49,7 @@ $ procly worktree release ../app-feature
 
 ## Looking before releasing
 
-`procly worktree release --dry-run` prints what the release would do and changes nothing: no Service or Job is stopped, no Compose service is let go of, no Lease is released, no state file is written, and the Retention policy is not applied. The lines say `would stop` and `would release`:
+`procly worktree release --dry-run` prints what the release would do and changes nothing: no Service or Job is stopped, no Compose service is let go of, no Lease is released, no state file is written, and no Retention policy is applied. The lines say `would stop`, `would release` and `would apply`, the last one for each Retention policy the release would apply to the Isolated container of a Worktree already removed, which may delete its data:
 
 ```console
 $ procly worktree release --dry-run
@@ -52,17 +58,18 @@ job 3f9a1c2e would stop
 db would release, 1 other Worktree still needs it
 lease web.http port 24001 would release
 Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it once the Worktree is removed
+Retention policy delete of db would apply to the Isolated container of the removed Worktree /home/me/app-login
 ```
 
 A dry run followed by a real release on the same state gives the same report. The `warnings` of a dry run carry only what keeps Procly from reading the Worktree, such as a configuration it cannot parse, which hides the Logical resources. With `--json` it prints the document below.
 
 ## JSON
 
-With `--json`, stdout holds 1 document with the `worktree`, then what was `stopped` (`services` by name, the Isolated Compose services included, and `jobs` by identifier), what was `released` (the `compose_services` let go of, each with `service`, `others` and `grace_ms` as for [`down`](json.md#down), and the `leases`, each with `service`, `port_name` and `port`) and what was `kept`. A kept Lease carries a `reason` of `pinned_branch`, with its `branch`, or `container_running`. A kept Logical resource carries its `service`, its `driver`, the key of the `resource` in the configuration and its `name`. `warnings` lists what went wrong without failing the release, such as a [Portless alias](configuration.md#portless-aliases) that could not be removed, and is empty when nothing did. Without `--json` each warning is on stderr as `procly: warning: ...`. The schema version is 1, see [JSON output](json.md).
+With `--json`, stdout holds 1 document with the `worktree`, then what was `stopped` (`services` by name, the Isolated Compose services included, and `jobs` by identifier), what was `released` (the `compose_services` let go of, each with `service`, `others` and `grace_ms` as for [`down`](json.md#down), and the `leases`, each with `service`, `port_name` and `port`) and what was `kept`. A kept Lease carries a `reason` of `pinned_branch`, with its `branch`, or `container_running`. A kept Logical resource carries its `service`, its `driver`, the key of the `resource` in the configuration and its `name`. `warnings` lists what went wrong without failing the release, such as a [Portless alias](configuration.md#portless-aliases) that could not be removed, and is empty when nothing did. Without `--json` each warning is on stderr as `procly: warning: ...`. `retention` lists the Retention policies the release applied, or with `--dry-run` would apply, to the Isolated containers of the Worktrees already removed, each with the removed `worktree`, the `service` and the `policy` as `procly.toml` declares it, `delete` or a delay such as `7d`, and is empty when there is none. The schema version is 1, see [JSON output](json.md).
 
 ```console
 $ procly worktree release --json
-{"schema_version":1,"worktree":"/home/me/app-feature","stopped":{"services":["web"],"jobs":["3f9a1c2e"]},"released":{"compose_services":[{"service":"db","others":1,"grace_ms":600000}],"leases":[{"service":"web","port_name":"http","port":24001}]},"kept":{"leases":[],"logical_resources":[{"service":"db","driver":"postgres","resource":"dev","name":"app__app_feature"}]},"warnings":[]}
+{"schema_version":1,"worktree":"/home/me/app-feature","stopped":{"services":["web"],"jobs":["3f9a1c2e"]},"released":{"compose_services":[{"service":"db","others":1,"grace_ms":600000}],"leases":[{"service":"web","port_name":"http","port":24001}]},"kept":{"leases":[],"logical_resources":[{"service":"db","driver":"postgres","resource":"dev","name":"app__app_feature"}]},"warnings":[],"retention":[{"worktree":"/home/me/app-login","service":"db","policy":"delete"}]}
 ```
 
 ## Calling it from a worktree manager
