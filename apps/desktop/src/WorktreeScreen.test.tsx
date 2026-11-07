@@ -319,6 +319,55 @@ describe("the Worktree screen", () => {
     }
   });
 
+  it("words a Foreign process as the mockup does: often an agent the Guard did not steer", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    expect(
+      within(inspector()).getByText(
+        "Started outside Procly in this Worktree, often an agent the Guard did not steer. Procly never stops a process it did not start.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("draws a separator under the title block of a Foreign process, which holds the title and where it is", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    const panel = within(inspector());
+    const block = panel.getByRole("heading", { name: "node server.js" }).closest("header");
+    expect(block).not.toBeNull();
+    expect(block).toHaveClass("inspector-head");
+    expect(within(block as HTMLElement).getByText("Foreign process in web-fix")).toBeInTheDocument();
+    // The facts come after the separator, not inside the block.
+    expect(within(block as HTMLElement).queryByText("Process")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Process value of a Foreign process in one element that never wraps, and gives it whole as a tooltip", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    const value = within(inspector()).getByText("Process").nextElementSibling;
+    expect(value).toHaveTextContent("node server.js, pid 4812");
+    expect(value).toHaveClass("facts-line");
+    expect(value).toHaveAttribute("title", "node server.js, pid 4812");
+  });
+
+  it("draws no Lease in the inspector of a Foreign process, the protocol returns none", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    expect(within(inspector()).queryByText(/\blease/i)).not.toBeInTheDocument();
+  });
+
   it("picks a Foreign container too, which has no pid and so no kill command", async () => {
     const calls = app();
 
@@ -625,6 +674,36 @@ describe("the Outside Repositories screen", () => {
       expect(calls.filter((call) => call.command === "follow_logs").map((call) => call.args)).toEqual([
         expect.objectContaining({ name: "c0ffee01", cwd: "/p/tmp/scratch" }),
       ]);
+    });
+  });
+
+  it("has the refresh bar of the other screens, the title, the time of the last answer and Refresh on one line", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+
+    const center = screen.getByRole("main");
+    const title = await within(center).findByRole("heading", { name: "Outside Repositories", level: 2 });
+    const line = title.parentElement;
+    expect(line).toContainElement(within(center).getByText("Updated at 19:35:00"));
+    expect(line).toContainElement(within(center).getByRole("button", { name: "Refresh" }));
+    // Nothing sits above the line.
+    expect(center.querySelector("header.toolbar")).toBeNull();
+  });
+
+  it("asks for the same refresh as the other screens when Refresh is pressed", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByText("make watch");
+    const before = calls.length;
+
+    fireEvent.click(within(center).getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(calls.slice(before).map((call) => call.command)).toEqual(["refresh", "doctor", "list_orphans"]);
     });
   });
 
