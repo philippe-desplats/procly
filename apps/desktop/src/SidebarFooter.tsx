@@ -95,6 +95,8 @@ export function daemonVersionOf(doctor: DoctorState): string | null {
 /**
  * The line of the Daemon: its release when doctor named one, and the absolute time of the last Status that answered.
  * The quiet glyph says it answers, so a Daemon that no longer does keeps the time and loses the glyph.
+ * It holds on one row. Where the sidebar is too narrow its words are cut with an ellipsis and its time never is, and the
+ * whole text is in the tooltip.
  */
 export function DaemonLine({
   version,
@@ -105,10 +107,14 @@ export function DaemonLine({
   updatedAt: number;
   answering: boolean;
 }) {
+  const words = `Daemon${version === null ? "" : ` ${version}`}, updated at`;
+  const time = formatMoment(updatedAt, updatedAt);
   return (
     <p className="daemon-line">
       {answering ? <GlyphMark glyph="healthy" /> : null}
-      <span>{`Daemon${version === null ? "" : ` ${version}`}, updated at ${formatMoment(updatedAt, updatedAt)}`}</span>
+      <span className="daemon-line-text" title={`${words} ${time}`}>
+        <span className="daemon-line-words">{words}</span> <span className="daemon-line-time">{time}</span>
+      </span>
     </p>
   );
 }

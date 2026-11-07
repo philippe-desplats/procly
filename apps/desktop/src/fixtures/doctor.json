@@ -55,5 +55,6 @@
     }
   ],
   "prompt": "`procly doctor` checked this machine and found 3 problems listed below. Fix them in the order listed.\n\n1. leased_ports: lease web.http port 24081 is held by process 4812 node\n   Commands:\n   - kill 4812\n\n2. orphans: 3 Orphans left by removed Worktrees\n   Commands:\n   - procly gc\n",
-  "agent": null
+  "agent": null,
+  "daemon_version": "0.5.0"
 }

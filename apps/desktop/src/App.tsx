@@ -472,6 +472,11 @@ function needsYouCount(count: number): string {
   return `${count} ${count === 1 ? "needs" : "need"} you`;
 }
 
+/** "1 Job", "2 Jobs": what the Outside Repositories entry holds. */
+function jobsOutside(count: number): string {
+  return `${count} ${count === 1 ? "Job" : "Jobs"}`;
+}
+
 function Sidebar({
   snapshot,
   repositories,
@@ -534,9 +539,16 @@ function Sidebar({
         needsYou={needsYou}
         onSelect={onSelect}
       />
-      <button type="button" className="row" aria-current={outside ? "true" : undefined} onClick={onOutside}>
-        <span className="row-name">Outside Repositories</span>
-        {outsideJobs === 0 ? null : <span className="caption">{outsideJobs}</span>}
+      <button
+        type="button"
+        className="row row-worktree"
+        aria-current={outside ? "true" : undefined}
+        onClick={onOutside}
+      >
+        <span className="row-line">
+          <span className="row-name">Outside Repositories</span>
+        </span>
+        {outsideJobs === 0 ? null : <span className="row-detail">{jobsOutside(outsideJobs)}</span>}
       </button>
       <SidebarFooter
         updatedAt={updatedAt}
@@ -621,7 +633,7 @@ function WorktreeEntry({
       <span className="row-line">
         <span className="row-name">{worktreeLabel(worktree)}</span>
         <RemovedMark worktree={worktree} />
-        {worktree.main ? <span className="caption">main</span> : null}
+        {worktree.main ? <span className="caption row-legend">Main worktree</span> : null}
       </span>
       {reason === null ? null : (
         <span className={`row-reason tone-${reason.tone}`}>

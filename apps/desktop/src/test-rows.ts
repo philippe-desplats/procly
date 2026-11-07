@@ -20,3 +20,12 @@ export function partsOf(item: HTMLElement): RowParts {
     ports: Array.from(item.querySelectorAll(".port")).map((port) => port.textContent ?? ""),
   };
 }
+
+/**
+ * A matcher for the Daemon line of the sidebar by its whole text. The line holds its words and its time in two elements
+ * so that a narrow sidebar cuts the words and never the time, so no single text node carries it.
+ */
+export function daemonLine(text: string): (content: string, element: Element | null) => boolean {
+  return (_content, element) =>
+    element?.classList.contains("daemon-line-text") === true && element.textContent === text;
+}

@@ -356,7 +356,7 @@ describe("the inspector", () => {
 describe("the inspector on a Compose service", () => {
   async function openCompose(rust: Rust): Promise<void> {
     await open(rust);
-    fireEvent.click(screen.getByRole("button", { name: /^main\s*main$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^main\s*Main worktree$/ }));
     fireEvent.click(await screen.findByRole("button", { name: /^db/ }));
   }
 
