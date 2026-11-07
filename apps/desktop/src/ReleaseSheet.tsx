@@ -10,7 +10,7 @@ import {
   previewRelease,
   releaseCommand,
   releaseWorktree,
-  RETENTION_LINE,
+  retentionLine,
   type Ended,
 } from "./release";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
@@ -111,19 +111,27 @@ function Effects({ report, tense }: { report: ReleaseReport; tense: Tense }) {
 }
 
 /**
- * What else a release does, besides stopping and letting go: it applies a Retention policy when the dry run reports
- * one, and it leaves every Foreign process of the Worktree running. Drawn only when it holds a line.
+ * What else a release does, besides stopping and letting go: it applies each Retention policy the dry run reports to
+ * the Isolated container of a Worktree already removed, and it leaves every Foreign process of the Worktree running.
+ * Drawn only when it holds a line.
  */
 function Besides({ report, foreign }: { report: ReleaseReport; foreign: ForeignProcess[] }) {
-  const retention = report.retention.length > 0;
-  if (!retention && foreign.length === 0) {
+  if (report.retention.length === 0 && foreign.length === 0) {
     return null;
   }
   return (
     <>
       <h3 className="caption">It also</h3>
       <ul className="list">
-        {retention ? <li className="item loss">{RETENTION_LINE}</li> : null}
+        {report.retention.map((applied) => (
+          <li
+            key={`retention:${applied.worktree}:${applied.service}`}
+            className="item loss"
+            title={applied.worktree}
+          >
+            {retentionLine(applied)}
+          </li>
+        ))}
         {foreign.map((process) => (
           <li key={foreignId(process)} className="item">
             {foreignLine(process)}

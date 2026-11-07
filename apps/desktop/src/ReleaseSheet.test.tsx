@@ -472,9 +472,30 @@ describe("the Worktree release sheet", () => {
     const sheet = within(await openSheet());
 
     const line = await sheet.findByText(
-      "applies the Retention policy to its Isolated containers, which may delete their data",
+      "applies Retention policy delete of db to the removed Worktree web-old, which deletes its Isolated container and its volumes",
     );
     expect(line).toHaveClass("loss");
+    expect(line).toHaveAttribute("title", "/p/work/acme/web-old");
+  });
+
+  it("names the removed Worktree, the Service and the policy of each Retention entry, never the released Worktree", async () => {
+    app({
+      previewing: () => ({
+        ...emptyReport,
+        retention: [
+          { worktree: "/p/work/acme/web-old", service: "db", policy: "delete" },
+          { worktree: "/p/work/globex/api-spike", service: "cache", policy: "7d" },
+        ],
+      }),
+    });
+
+    const sheet = within(await openSheet());
+
+    const lines = await sheet.findAllByText(/^applies Retention policy/);
+    expect(lines.map((line) => line.textContent)).toEqual([
+      "applies Retention policy delete of db to the removed Worktree web-old, which deletes its Isolated container and its volumes",
+      "applies Retention policy 7d of cache to the removed Worktree api-spike, which deletes its Isolated container and its volumes",
+    ]);
   });
 
   it("draws no Retention policy line when the dry run reports none", async () => {
