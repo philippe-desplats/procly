@@ -231,6 +231,55 @@ describe("the Worktree release sheet", () => {
     expect(calls.map((call) => call.command)).not.toContain("release_worktree");
   });
 
+  it("shows in red what a stopped process held in memory, and keeps `No data is deleted` plain", async () => {
+    app();
+
+    const dialog = await openSheet();
+    const sheet = within(dialog);
+
+    await sheet.findByRole("heading", { name: "Will stop" });
+    expect(sheet.getByText("What it held in memory is lost.")).toHaveClass("loss");
+    expect(sheet.getByText("No data is deleted.")).not.toHaveClass("loss");
+    expect(dialog.querySelectorAll(".loss")).toHaveLength(1);
+    // Cancel stays the default button and the command stays whole.
+    expect(sheet.getByRole("button", { name: "Cancel" })).toHaveClass("default");
+    expect(sheet.getByText(`(cd ${PATH} && procly worktree release)`)).toBeInTheDocument();
+  });
+
+  it("draws no red line when the release stops no process", async () => {
+    app({
+      previewing: () => ({
+        ...emptyReport,
+        response: "worktree_release",
+        leases: [{ service: "web", port_name: "http", port: 24001 }],
+      }),
+    });
+
+    const dialog = await openSheet();
+
+    await within(dialog).findByRole("heading", { name: "Will release" });
+    expect(dialog.querySelector(".loss")).toBeNull();
+    expect(within(dialog).queryByText(/held in memory/)).not.toBeInTheDocument();
+  });
+
+  it("does not say nothing runs when the release only lets go of a Compose service", async () => {
+    app({
+      previewing: () => ({
+        ...emptyReport,
+        compose_services: [{ service: "db", others: 1, grace_ms: 300_000 }],
+      }),
+    });
+
+    const dialog = await openSheet();
+    const sheet = within(dialog);
+
+    await sheet.findByRole("heading", { name: "Will let go of" });
+    expect(sheet.getByText("No Service or Job stops in this Worktree.")).toBeInTheDocument();
+    expect(sheet.queryByText(/Nothing runs in this Worktree/)).not.toBeInTheDocument();
+    expect(sheet.getByText("db: its container keeps running for 1 other Worktree")).toBeInTheDocument();
+    expect(dialog.querySelector(".loss")).toBeNull();
+  });
+
   it("draws no paragraph about ended items when the status holds none", async () => {
     app();
 
@@ -239,6 +288,28 @@ describe("the Worktree release sheet", () => {
     await sheet.findByRole("heading", { name: "Will stop" });
     expect(sheet.queryByText(/The release forgets/)).not.toBeInTheDocument();
     expect(sheet.getByRole("button", { name: "Release" })).toBeEnabled();
+  });
+
+  it("copies exactly the command the box shows, whole", async () => {
+    const copied: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: (text: string) => {
+          copied.push(text);
+          return Promise.resolve();
+        },
+      },
+    });
+    app();
+
+    const sheet = within(await openSheet());
+    await sheet.findByRole("heading", { name: "Will stop" });
+    const command = `(cd ${PATH} && procly worktree release)`;
+    expect(sheet.getByText(command)).toBeInTheDocument();
+    fireEvent.click(sheet.getByRole("button", { name: "Copy" }));
+
+    expect(copied).toEqual([command]);
   });
 
   it("keeps Release enabled when nothing runs but ended Jobs and Services are left to forget", async () => {

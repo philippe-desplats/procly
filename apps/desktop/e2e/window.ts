@@ -9,7 +9,7 @@ import { browser } from "@wdio/globals";
 export const OVERVIEW = 'section[aria-label="Overview"]';
 
 /** The title of the screen the window shows when no Daemon answers. */
-export const NOT_RUNNING = "Daemon not running";
+export const NOT_RUNNING = "The Daemon is not running";
 
 /** The text of the first element `selector` matches, or `null` when none does. */
 export async function textOf(selector: string): Promise<string | null> {
@@ -39,7 +39,8 @@ export async function press(label: string): Promise<boolean> {
 /**
  * Waits until `ready` holds. The poller ticks every 2 to 30 seconds depending on where the window stands, which a
  * window without a window manager does not report faithfully, so each try presses Refresh to ask for a tick now
- * rather than depend on the cadence. Refresh asks the poller and nothing else, it starts nothing in the Daemon.
+ * rather than depend on the cadence. Refresh asks the poller and nothing else, it starts nothing in the Daemon. The
+ * state screens of a Daemon that cannot be read have no Refresh, so there the own tick of the poller answers.
  */
 async function until(what: string, ready: () => Promise<boolean>, within: number): Promise<void> {
   await browser.waitUntil(

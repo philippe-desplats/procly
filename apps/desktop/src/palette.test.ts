@@ -79,6 +79,73 @@ describe("the palette", () => {
     },
   );
 
+  it.each(["light", "dark"] as const)(
+    "keeps the mark cut out of a warning triangle readable in the %s theme",
+    (theme) => {
+      const colours = palette()[theme];
+      const cut = colours.get("--panel") ?? "";
+      // 3:1 is the floor of WCAG 1.4.11 for a graphical object, the bar and the dot are drawn in the pane colour.
+      expect(
+        contrast(cut, colours.get("--warn") ?? ""),
+        `--panel on --warn, ${theme}`,
+      ).toBeGreaterThanOrEqual(3);
+    },
+  );
+
+  it("draws the cross of a failure white in light, as the mockup does, and at 3:1 on the red disc in both themes", () => {
+    const { light, dark } = palette();
+    expect(light.get("--fail-cut")).toBe("#ffffff");
+    for (const [theme, colours] of [
+      ["light", light],
+      ["dark", dark],
+    ] as const) {
+      // White on the dark red would fall to 2.78:1, so the dark theme draws the cross in the colour of the pane.
+      const ratio = contrast(colours.get("--fail-cut") ?? "", colours.get("--fail") ?? "");
+      expect(ratio, `--fail-cut on --fail, ${theme}`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("tints the picked row with the accent, lighter in light than in dark", () => {
+    expect(css).toMatch(/\.item\[data-selected="true"\]\s*\{\s*background: var\(--selected\);/);
+    expect(css).toMatch(/:root\s*\{[^}]*--selected: color-mix\(in srgb, var\(--accent\) 14%, transparent\)/);
+    const dark = /@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?\n\}/.exec(css)?.[0] ?? "";
+    expect(dark).toMatch(/--selected: color-mix\(in srgb, var\(--accent\) 22%, transparent\)/);
+  });
+
+  it.each([
+    ["light", 0.14],
+    ["dark", 0.22],
+  ] as const)(
+    "keeps the text and the state glyphs readable on the tint of the open sidebar entry in the %s theme",
+    (theme, share) => {
+      const colours = palette()[theme];
+      const channel = (hex: string, at: number): number => Number.parseInt(hex.slice(at, at + 2), 16);
+      const side = colours.get("--side") ?? "";
+      const accent = colours.get("--accent") ?? "";
+      // The tint is the accent over the sidebar, as `color-mix` blends them.
+      const tint = `#${[1, 3, 5]
+        .map((at) =>
+          Math.round(channel(accent, at) * share + channel(side, at) * (1 - share))
+            .toString(16)
+            .padStart(2, "0"),
+        )
+        .join("")}`;
+      for (const name of ["--text", "--muted"]) {
+        expect(
+          contrast(colours.get(name) ?? "", tint),
+          `${name} on the open entry, ${theme}`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+      for (const name of ["--ok", "--warn", "--fail", "--ended"]) {
+        // 3:1 is the floor of WCAG 1.4.11 for a graphical object.
+        expect(
+          contrast(colours.get(name) ?? "", tint),
+          `${name} on the open entry, ${theme}`,
+        ).toBeGreaterThanOrEqual(3);
+      }
+    },
+  );
+
   it("falls back to the system accent where WebKit provides it", () => {
     expect(css).toMatch(
       /@supports \(color: -apple-system-control-accent\)\s*\{\s*:root\s*\{\s*--accent: -apple-system-control-accent;/,

@@ -176,6 +176,11 @@ export async function reportedService(scene: Scene, name: string): Promise<Repor
   return null;
 }
 
+/** The test server fixture, which a scene also starts by hand to have a process Procly did not start. */
+export function testServer(): string {
+  return required(TEST_SERVER);
+}
+
 /** Removes everything the run created. Called once, by the runner, after the Daemon is stopped. */
 export function discard(): void {
   const root = process.env[ROOT];

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { CopyBox } from "./CopyBox";
 import { failureMessage } from "./daemon";
@@ -8,37 +8,26 @@ import {
   deleteOrphans,
   describeOrphan,
   groupByWorktree,
-  listOrphans,
   removedWorktreeLabel,
 } from "./orphans";
+import { reportOfScan, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import type { GcReport } from "./protocol/GcReport";
 import type { Orphan } from "./protocol/Orphan";
 
-/** What the screen shows of the last dry run: nothing yet, its answer, or why there is none. */
-type Scan = { kind: "loading" } | { kind: "report"; report: GcReport } | { kind: "failure"; message: string };
-
 /**
  * The Orphans the Daemon found, grouped by the removed Worktree that left them, each naming the data its deletion
- * drops. The screen keeps the `orphans` of its last dry run, and the sheet deletes those and nothing else.
+ * drops. The screen shows the `orphans` of the last dry run, which it asks for when it opens, and the sheet deletes
+ * those and nothing else.
  */
-export function OrphansScreen() {
-  const [scan, setScan] = useState<Scan>({ kind: "loading" });
+export function OrphansScreen({ store }: { store: OrphanScanStore }) {
+  const scan = useOrphanScan(store);
   const [sheet, setSheet] = useState<"closed" | "confirm">("closed");
 
-  const look = useCallback((): Promise<void> => {
-    return listOrphans().then(
-      (report) => {
-        setScan({ kind: "report", report });
-      },
-      (reason: unknown) => {
-        setScan({ kind: "failure", message: failureMessage(reason) });
-      },
-    );
-  }, []);
-
   useEffect(() => {
-    void look();
-  }, [look]);
+    void store.run();
+  }, [store]);
+
+  const report = reportOfScan(scan);
 
   return (
     <section aria-label="Orphans">
@@ -50,18 +39,18 @@ export function OrphansScreen() {
       <ScanView
         scan={scan}
         onLook={() => {
-          void look();
+          void store.run();
         }}
         onDelete={() => {
           setSheet("confirm");
         }}
       />
-      {sheet === "confirm" && scan.kind === "report" ? (
+      {sheet === "confirm" && report !== null ? (
         <CollectSheet
-          shown={scan.report.orphans}
+          shown={report.orphans}
           onClose={() => {
             setSheet("closed");
-            void look();
+            void store.run();
           }}
         />
       ) : null}
@@ -69,10 +58,15 @@ export function OrphansScreen() {
   );
 }
 
-function ScanView({ scan, onLook, onDelete }: { scan: Scan; onLook: () => void; onDelete: () => void }) {
-  if (scan.kind === "loading") {
-    return <p className="caption">Looking for Orphans…</p>;
-  }
+function ScanView({
+  scan,
+  onLook,
+  onDelete,
+}: {
+  scan: OrphanScan;
+  onLook: () => void;
+  onDelete: () => void;
+}) {
   if (scan.kind === "failure") {
     return (
       <>
@@ -85,7 +79,11 @@ function ScanView({ scan, onLook, onDelete }: { scan: Scan; onLook: () => void; 
       </>
     );
   }
-  const { orphans, skipped, warnings } = scan.report;
+  const report = reportOfScan(scan);
+  if (report === null) {
+    return <p className="caption">Looking for Orphans…</p>;
+  }
+  const { orphans, skipped, warnings } = report;
   return (
     <>
       {orphans.length === 0 ? (
@@ -109,7 +107,7 @@ function ScanView({ scan, onLook, onDelete }: { scan: Scan; onLook: () => void; 
                 return (
                   <li key={index} className="item item-block">
                     <span className="item-name">{line.what}</span>
-                    <span className="muted">{line.drops}</span>
+                    <span className={line.loss ? "loss" : "muted"}>{line.drops}</span>
                   </li>
                 );
               })}
@@ -159,6 +157,7 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
     return <ResultSheet report={state.report} onDone={onClose} />;
   }
   const pending = state.kind === "deleting";
+  const effects = collectionEffects(shown);
   return (
     <div className="overlay">
       <div
@@ -177,13 +176,13 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
         </h2>
         <p>Each one is deleted from the Daemon and from disk:</p>
         <ul aria-label="What it deletes" className="list">
-          {collectionEffects(shown).map((effect) => (
-            <li key={effect} className="item">
-              {effect}
+          {effects.map((effect) => (
+            <li key={effect.text} className={effect.loss ? "item loss" : "item"}>
+              {effect.text}
             </li>
           ))}
         </ul>
-        <p>This cannot be undone.</p>
+        <p className={effects.some((effect) => effect.loss) ? "loss" : undefined}>This cannot be undone.</p>
         <p className="caption">From a terminal, which deletes every Orphan it finds, not only these:</p>
         <CopyBox text={COLLECT_COMMAND} />
         {state.kind === "confirm" && state.error !== null ? (

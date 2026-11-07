@@ -49,7 +49,14 @@ function poller(last: Update | null = null, onMarkSeen?: (key: unknown) => Updat
         }
         return undefined;
       }
-      return command === "refresh" ? undefined : Promise.reject(new Error(`unexpected command ${command}`));
+      if (command === "refresh" || command === "stop_follow") {
+        return undefined;
+      }
+      // The inspector follows what is picked: it waits for output that never comes.
+      if (command === "follow_logs") {
+        return new Promise<void>(() => undefined);
+      }
+      return Promise.reject(new Error(`unexpected command ${command}`));
     },
     { shouldMockEvents: true },
   );
@@ -83,13 +90,13 @@ describe("the window", () => {
     expect(commands).toContain("last_update");
   });
 
-  it("never asks the Daemon for anything itself, the poller does, and runs doctor once at launch", async () => {
+  it("never asks the Daemon for a Status itself, the poller does, and runs doctor and the Orphan scan once at launch", async () => {
     const commands = poller(answered(status));
 
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("button", { name: "web-fix" });
 
-    expect(commands).toEqual(["last_update", "doctor"]);
+    expect(commands).toEqual(["last_update", "doctor", "list_orphans"]);
   });
 
   it("follows the poller: a new answer replaces the one on screen without a request", async () => {
@@ -121,7 +128,7 @@ describe("the window", () => {
 
     render(<App store={createDaemonStore()} />);
 
-    expect(await screen.findByRole("heading", { name: "Daemon not running" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
     expect(screen.getByText(/does not start one/)).toBeInTheDocument();
     // Doctor runs when the app enters that state, and it never starts a Daemon.
     expect(commands).toEqual(["last_update", "doctor"]);
@@ -133,10 +140,10 @@ describe("the window", () => {
     render(<App store={createDaemonStore()} />);
 
     expect(await screen.findByText("unreadable answer from the daemon")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Daemon not running" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "The Daemon is not running" })).not.toBeInTheDocument();
   });
 
-  it("asks the poller for a tick when Refresh is pressed, runs doctor, and does not ask the Daemon", async () => {
+  it("asks the poller for a tick when Refresh is pressed, runs doctor and the Orphan scan, and does not ask the Daemon for a Status", async () => {
     const commands = poller(answered(status));
     render(<App store={createDaemonStore()} />);
 
@@ -145,7 +152,7 @@ describe("the window", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(commands).toEqual(["last_update", "doctor", "refresh", "doctor"]);
+    expect(commands).toEqual(["last_update", "doctor", "list_orphans", "refresh", "doctor", "list_orphans"]);
   });
 });
 
@@ -246,13 +253,15 @@ describe("the Overview", () => {
     expect(await screen.findByText("No Service is known.")).toBeInTheDocument();
   });
 
-  it("comes back with ⌘0 from a Worktree", async () => {
+  it("comes back with ⌘0 from a Worktree, which the Overview item of the View menu carries", async () => {
     poller(answered(many));
     render(<App store={createDaemonStore()} />);
     fireEvent.click(await screen.findByRole("button", { name: "docs-preview" }));
     expect(screen.queryByRole("region", { name: "Overview" })).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "0", metaKey: true });
+    await act(async () => {
+      await emit("menu-choice", "overview");
+    });
 
     expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
   });
@@ -316,6 +325,31 @@ describe("the sidebar", () => {
     clearMocks();
   });
 
+  it("draws no title above the entries, the traffic lights sit on its background", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: "docs-preview" });
+    expect(within(sidebar).queryByRole("heading", { level: 1 })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Procly" })).toBeNull();
+  });
+
+  it("opens with a drag region that holds no entry, so that the entries stay clickable", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: "docs-preview" });
+    const region = sidebar.querySelector("[data-tauri-drag-region]");
+    expect(region).not.toBeNull();
+    expect(sidebar.firstElementChild).toBe(region);
+    expect(region?.children).toHaveLength(0);
+    expect(region?.textContent).toBe("");
+  });
+
   it("lists the Worktrees by branch, by folder name when there is no branch, and marks the removed ones", async () => {
     poller(answered(many));
 
@@ -328,7 +362,7 @@ describe("the sidebar", () => {
       .map((button) => button.textContent)
       .filter(
         (text) =>
-          text !== "Overview⌘0" &&
+          text !== "Overview" &&
           text !== "Outside Repositories" &&
           text !== "Orphans" &&
           text !== "Doctor" &&
@@ -404,6 +438,14 @@ describe("Needs you", () => {
     clearMocks();
   });
 
+  /** Picks the row of Needs you whose name starts with `name`, then marks it as Seen from the inspector. */
+  async function markAsSeen(name: RegExp): Promise<void> {
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+    fireEvent.click(within(needs).getByRole("button", { name }));
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Mark as Seen" }));
+  }
+
   /** The rows of the Overview that are not in "Needs you". */
   function serviceRows(): HTMLElement[] {
     const overviewPane = screen.getByRole("region", { name: "Overview" });
@@ -425,15 +467,98 @@ describe("Needs you", () => {
       .getAllByRole("listitem")
       .map((line) => line.textContent);
     expect(lines).toEqual([
-      "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-endMark as Seen",
-      "Foreignnode server.js:3000main",
+      "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
+      "started outside Proclynode server.js:3000main",
     ]);
+    // The same glyph as everywhere else: a cross for the failure, a diamond for the Foreign process.
+    expect(
+      within(needs)
+        .getAllByRole("listitem")
+        .map((line) => line.querySelector("svg")?.getAttribute("data-glyph")),
+    ).toEqual(["failure", "foreign"]);
     const firstService = within(overviewPane).getAllByText("healthy")[0];
     expect(
       needs.compareDocumentPosition(firstService as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // A Foreign process is not an ended failure, there is nothing to mark.
-    expect(within(needs).getAllByRole("button", { name: "Mark as Seen" })).toHaveLength(1);
+    // No row carries the button, it lives in the inspector of the selection.
+    expect(screen.queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+  });
+
+  it("selects a failed Service of Needs you into the inspector, which offers Mark as Seen", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE, FOREIGN] }));
+    render(<App store={createDaemonStore()} />);
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+    const inspector = screen.getByRole("complementary", { name: "Inspector" });
+    expect(within(inspector).getByText("Select a Worktree.")).toBeInTheDocument();
+
+    fireEvent.click(within(needs).getByRole("button", { name: /^api/ }));
+
+    const panel = await within(inspector).findByRole("region", { name: "Selection" });
+    expect(within(panel).getByRole("heading", { name: "api" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Mark as Seen" })).toBeInTheDocument();
+    expect(within(needs).getByRole("button", { name: /^api/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(needs).getByRole("button", { name: /^api/ }).closest("li")).toHaveAttribute(
+      "data-selected",
+      "true",
+    );
+  });
+
+  it("puts Mark as Seen beside the state phrase of the inspector", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+    render(<App store={createDaemonStore()} />);
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+
+    fireEvent.click(within(needs).getByRole("button", { name: /^api/ }));
+
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    const button = within(panel).getByRole("button", { name: "Mark as Seen" });
+    expect(button.parentElement).toContainElement(panel.querySelector(".state"));
+  });
+
+  it("offers no Mark as Seen for a Service that ended in a routine way, or a failure already Seen", async () => {
+    poller(answered(many, { seen: [API_KEY] }));
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("region", { name: "Overview" });
+
+    const seenRow = (): HTMLElement | undefined =>
+      screen.getAllByRole("listitem").find((row) => row.textContent?.startsWith("apiexited 1"));
+    fireEvent.click(within(seenRow() as HTMLElement).getByRole("button"));
+
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    expect(within(panel).getByRole("heading", { name: "api" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+
+    // Rust lists no failure any more: the same Service ended in a routine way.
+    await tick(answered(many));
+    expect(within(panel).queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+  });
+
+  it("picks a Foreign process of Needs you for the inspector, with the kill command and no Mark as Seen", async () => {
+    const withForeign: Response = JSON.parse(JSON.stringify(many)) as Response;
+    if (withForeign.response !== "status") {
+      throw new Error("the recorded answer is a status");
+    }
+    const web = withForeign.repositories
+      .flatMap((repository) => repository.worktrees)
+      .find((worktree) => worktree.path === FOREIGN.worktree);
+    if (web === undefined || FOREIGN.kind !== "foreign") {
+      throw new Error("the recorded answer holds the Worktree of the Foreign process");
+    }
+    web.foreign = [FOREIGN.process];
+    poller(answered(withForeign, { needsYou: [FOREIGN] }));
+    render(<App store={createDaemonStore()} />);
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+
+    const row = within(needs).getByRole("button");
+    expect(row).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(row);
+
+    expect(row).toHaveAttribute("aria-pressed", "true");
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    expect(within(panel).getByRole("heading", { name: "node server.js" })).toBeInTheDocument();
+    expect(within(panel).getByText("kill 4242")).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: /^Stop/ })).not.toBeInTheDocument();
   });
 
   it("draws an ended row as a failure when Rust lists it, unseen or Seen, and as routine otherwise", async () => {
@@ -475,9 +600,7 @@ describe("Needs you", () => {
       return answered(many, { needsYou: [FOREIGN], seen: [API_KEY] });
     });
     render(<App store={createDaemonStore()} />);
-    const needs = await screen.findByRole("region", { name: "Needs you" });
-
-    fireEvent.click(within(needs).getByRole("button", { name: "Mark as Seen" }));
+    await markAsSeen(/^api/);
 
     await waitFor(() => {
       expect(within(screen.getByRole("region", { name: "Needs you" })).getAllByRole("listitem")).toHaveLength(
@@ -502,7 +625,7 @@ describe("Needs you", () => {
     );
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+    await markAsSeen(/^api/);
 
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
@@ -524,6 +647,74 @@ describe("Needs you", () => {
     );
 
     expect(await screen.findByRole("region", { name: "Needs you" })).toBeInTheDocument();
+  });
+
+  describe("counter on the Overview entry", () => {
+    const SECOND_FOREIGN: NeedsYou = {
+      kind: "foreign",
+      worktree: "/p/work/acme/web",
+      process: { kind: "process", pid: 4343, command: "node worker.js", ports: [3001] },
+    };
+
+    /** The Overview entry of the sidebar. */
+    async function overviewEntry(): Promise<HTMLElement> {
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      return within(sidebar).findByRole("button", { name: /^Overview/ });
+    }
+
+    it("says how many items need the developer, as many as the Needs you section lists", async () => {
+      poller(answered(many, { needsYou: [API_FAILURE, FOREIGN, SECOND_FOREIGN] }));
+
+      render(<App store={createDaemonStore()} />);
+
+      const entry = await overviewEntry();
+      expect(within(entry).getByText("3 need you")).toBeInTheDocument();
+      const needs = await screen.findByRole("region", { name: "Needs you" });
+      expect(within(needs).getAllByRole("listitem")).toHaveLength(3);
+    });
+
+    it("is drawn as the count of a sidebar entry, not as a caption", async () => {
+      poller(answered(many, { needsYou: [API_FAILURE, FOREIGN, SECOND_FOREIGN] }));
+
+      render(<App store={createDaemonStore()} />);
+
+      const count = within(await overviewEntry()).getByText("3 need you");
+      expect(count).toHaveClass("row-count");
+      expect(count).not.toHaveClass("caption");
+    });
+
+    it("says 'needs' for a single item", async () => {
+      poller(answered(many, { needsYou: [FOREIGN] }));
+
+      render(<App store={createDaemonStore()} />);
+
+      expect(within(await overviewEntry()).getByText("1 needs you")).toBeInTheDocument();
+    });
+
+    it("shows no count, and no shortcut either, when nothing needs the developer", async () => {
+      poller(answered(many));
+
+      render(<App store={createDaemonStore()} />);
+
+      const entry = await overviewEntry();
+      expect(entry).toHaveTextContent(/^Overview$/);
+    });
+
+    it("drops by 1 when a failure is marked as Seen", async () => {
+      poller(answered(many, { needsYou: [API_FAILURE, FOREIGN, SECOND_FOREIGN] }), () =>
+        answered(many, { needsYou: [FOREIGN, SECOND_FOREIGN], seen: [API_KEY] }),
+      );
+      render(<App store={createDaemonStore()} />);
+      expect(within(await overviewEntry()).getByText("3 need you")).toBeInTheDocument();
+
+      await markAsSeen(/^api/);
+
+      await waitFor(() => {
+        expect(
+          within(screen.getByRole("navigation", { name: "Worktrees" })).getByText("2 need you"),
+        ).toBeInTheDocument();
+      });
+    });
   });
 
   it("marks a Job as Seen by its id and dims its row in its Worktree", async () => {
@@ -559,7 +750,8 @@ describe("Needs you", () => {
     });
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Mark as Seen" }));
+    // The inspector of a failed Job offers it as well.
+    await markAsSeen(/^make test/);
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
     });
@@ -568,5 +760,218 @@ describe("Needs you", () => {
     expect(marked).toEqual([{ kind: "job", id: "j-7" }]);
     const row = (await screen.findByText("make test")).closest("li");
     expect(row).toHaveAttribute("data-seen", "true");
+  });
+});
+
+describe("the reason line of a Worktree in the sidebar", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  const LONG_BRANCH = "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end";
+
+  /** The sidebar entry of the Worktree whose folder is `folder`, found by the tooltip that names it. */
+  async function entryOf(folder: string): Promise<HTMLElement> {
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    await within(sidebar).findByRole("button", { name: /^Overview/ });
+    const entry = within(sidebar)
+      .getAllByRole("button")
+      .find((button) => button.getAttribute("title")?.includes(`Folder: ${folder}\n`));
+    if (entry === undefined) {
+      throw new Error(`no sidebar entry for ${folder}`);
+    }
+    return entry;
+  }
+
+  /** The reason lines of the whole sidebar. */
+  function reasons(): Element[] {
+    return [...screen.getByRole("navigation", { name: "Worktrees" }).querySelectorAll(".row-reason")];
+  }
+
+  it("says under the label why a Worktree needs the developer, with the glyph of the failed Service", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const entry = await entryOf("web-login");
+    const reason = entry.querySelector(".row-reason");
+    expect(reason).toHaveTextContent("api exited 1");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
+    // The label stays on its own line, above the reason.
+    expect(entry.querySelector(".row-line")).toHaveTextContent(LONG_BRANCH);
+    expect(entry.querySelector(".row-line")).not.toContainElement(reason as HTMLElement);
+    // The glyph carries the state, the colour class repeats it.
+    expect(reason).toHaveClass("tone-fail");
+  });
+
+  it("names a Foreign process as a process outside Procly, with the glyph of a Foreign process", async () => {
+    poller(answered(many, { needsYou: [FOREIGN] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web")).querySelector(".row-reason");
+    expect(reason).toHaveTextContent("a process outside Procly");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "foreign");
+    expect(reason).toHaveClass("tone-warn");
+  });
+
+  it("names a failed Job by its command", async () => {
+    const job: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web",
+      id: "j-7",
+      command: "make test",
+      end: { kind: "exited", code: 2 },
+    };
+    poller(answered(many, { needsYou: [job] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web")).querySelector(".row-reason");
+    expect(reason).toHaveTextContent("make test exited 2");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
+  });
+
+  it("puts a failure before a Foreign process of the same Worktree, whatever their order in Needs you", async () => {
+    const job: NeedsYou = {
+      kind: "job",
+      worktree: FOREIGN.worktree,
+      id: "j-7",
+      command: "make test",
+      end: { kind: "exited", code: 2 },
+    };
+    poller(answered(many, { needsYou: [FOREIGN, job] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web")).querySelector(".row-reason");
+    expect(reason).toHaveTextContent("make test exited 2");
+    expect(reason?.querySelector("svg")).toHaveAttribute("data-glyph", "failure");
+  });
+
+  it("gives a Worktree with nothing in Needs you a single line, and its neighbours too", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    await entryOf("web-login");
+    expect(reasons()).toHaveLength(1);
+    const quiet = await entryOf("docs");
+    expect(quiet.querySelector(".row-reason")).toBeNull();
+    expect(quiet).toHaveTextContent(/^mainmain$/);
+  });
+
+  it("draws no reason line at all while nothing needs the developer", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    await entryOf("web-login");
+    expect(reasons()).toHaveLength(0);
+  });
+
+  it("shows the first item of Needs you for the Worktree, and none of another Worktree's", async () => {
+    const second: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web-login",
+      id: "j-8",
+      command: "make lint",
+      end: { kind: "exited", code: 1 },
+    };
+    const outside: NeedsYou = { ...second, worktree: null, id: "j-9", command: "make outside" };
+    poller(answered(many, { needsYou: [outside, API_FAILURE, second, FOREIGN] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const entry = await entryOf("web-login");
+    expect(entry.querySelectorAll(".row-reason")).toHaveLength(1);
+    expect(entry.querySelector(".row-reason")).toHaveTextContent("api exited 1");
+    // A Job outside every Repository belongs to no Worktree of the sidebar.
+    expect(reasons().map((reason) => reason.textContent)).toEqual([
+      "a process outside Procly",
+      "api exited 1",
+    ]);
+  });
+
+  it("keeps a long reason whole in one cut-off text, for the stylesheet to end it with an ellipsis", async () => {
+    const long: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web-login",
+      id: "j-10",
+      command: "cargo test --workspace --locked -- --test-threads 1 --nocapture some_very_long_test_name",
+      end: { kind: "exited", code: 101 },
+    };
+    poller(answered(many, { needsYou: [long] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const reason = (await entryOf("web-login")).querySelector(".row-reason");
+    expect(reason?.querySelectorAll(".row-reason-text")).toHaveLength(1);
+    expect(reason?.querySelector(".row-reason-text")).toHaveTextContent(`${long.command} exited 101`);
+    // One line of its own: the reason is not part of the label's line, which the entry cuts separately.
+    expect(reason?.parentElement?.querySelectorAll(".row-line")).toHaveLength(1);
+  });
+
+  it("draws no reason line while the Daemon answers badly, since the sidebar gives the window to the state screen", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+    render(<App store={createDaemonStore()} />);
+    await entryOf("web-login");
+
+    await tick({
+      at_ms: AT,
+      failure: { kind: "decode", message: "unreadable answer" },
+      needs_you: [],
+      seen: [],
+    });
+
+    expect(await screen.findByRole("heading", { name: "The Daemon did not answer" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Worktrees" })).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".row-reason")).toHaveLength(0);
+  });
+
+  it("names the reason in the accessible name of the entry, after the label", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    const entry = await within(sidebar).findByRole("button", { name: new RegExp(`^${LONG_BRANCH}`) });
+    expect(entry).toHaveAccessibleName(/api exited 1$/);
+  });
+
+  it("follows the poller: the line is gone once the failure is marked as Seen", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }), () =>
+      answered(many, { needsYou: [], seen: [API_KEY] }),
+    );
+    render(<App store={createDaemonStore()} />);
+    expect((await entryOf("web-login")).querySelector(".row-reason")).not.toBeNull();
+
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+    fireEvent.click(within(needs).getByRole("button", { name: /^api/ }));
+    const panel = await screen.findByRole("region", { name: "Selection" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Mark as Seen" }));
+
+    await waitFor(() => {
+      expect(reasons()).toHaveLength(0);
+    });
+    expect((await entryOf("web-login")).querySelector(".row-line")).toHaveTextContent(LONG_BRANCH);
+  });
+
+  it("moves to the next item of the Worktree when the first one is marked as Seen", async () => {
+    const lint: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web-login",
+      id: "j-8",
+      command: "make lint",
+      end: { kind: "exited", code: 1 },
+    };
+    poller(answered(many, { needsYou: [API_FAILURE, lint] }));
+    render(<App store={createDaemonStore()} />);
+    expect((await entryOf("web-login")).querySelector(".row-reason")).toHaveTextContent("api exited 1");
+
+    await tick(answered(many, { needsYou: [lint], seen: [API_KEY] }));
+
+    expect((await entryOf("web-login")).querySelector(".row-reason")).toHaveTextContent("make lint exited 1");
   });
 });

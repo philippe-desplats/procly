@@ -8,13 +8,18 @@ import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
 import { SelectableRow } from "./selectable";
-import { jobWord } from "./state";
+import { foreignId } from "./selection";
+import { foreignWord, jobWord } from "./state";
 import { State } from "./StateMark";
 
-function ForeignRow({ process }: { process: ForeignProcess }) {
+/** A Foreign process of the Worktree. A row picks it for the inspector, which gives the command to stop it by hand. */
+function ForeignRow({ process, worktreePath }: { process: ForeignProcess; worktreePath: string }) {
   return (
-    <li className="item">
-      <span className="mark">Foreign</span>
+    <SelectableRow
+      target={{ kind: "foreign", worktree: worktreePath, process: foreignId(process) }}
+      seen={false}
+    >
+      <State {...foreignWord()} />
       <span className="item-name mono">{process.kind === "process" ? process.command : process.name}</span>
       {process.kind === "process" ? (
         <span className="caption">{`pid ${process.pid}`}</span>
@@ -24,7 +29,7 @@ function ForeignRow({ process }: { process: ForeignProcess }) {
       {process.ports.length === 0 ? null : (
         <span className="caption">{process.ports.map((port) => `:${port}`).join(" ")}</span>
       )}
-    </li>
+    </SelectableRow>
   );
 }
 
@@ -80,7 +85,7 @@ export function WorktreeScreen({
           <h3 className="caption">Foreign processes</h3>
           <ul className="list">
             {foreign.map((process) => (
-              <ForeignRow key={process.kind === "process" ? process.pid : process.name} process={process} />
+              <ForeignRow key={foreignId(process)} process={process} worktreePath={worktree.path} />
             ))}
           </ul>
         </>
@@ -139,7 +144,7 @@ function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
       <State {...jobWord(job, failed)} />
       <span className="item-name mono">{job.command}</span>
       <span className="caption mono">{job.id}</span>
-      <span className="caption mono">{job.cwd}</span>
+      <span className="caption mono item-where">{job.cwd}</span>
       <SeenMark seen={marked} />
     </SelectableRow>
   );

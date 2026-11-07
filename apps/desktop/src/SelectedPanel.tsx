@@ -2,12 +2,19 @@ import { Fragment, memo, useLayoutEffect, useRef } from "react";
 
 import { CopyBox } from "./CopyBox";
 import type { FailureKey } from "./daemon";
-import { composeStatement, jobStatement, serviceStatement, type Statement } from "./inspect";
+import {
+  composeStatement,
+  foreignStatement,
+  jobStatement,
+  serviceStatement,
+  type Statement,
+} from "./inspect";
 import { worktreeLabel, worktreeNames } from "./labels";
-import { useFailed } from "./needs-you";
+import { isSeen, useFailed } from "./needs-you";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
-import type { Selected } from "./selection";
+import type { Followed, Selected } from "./selection";
 import { ServiceActions } from "./ServiceActions";
 import { inWorktree } from "./shell";
 import { State } from "./StateMark";
@@ -15,7 +22,7 @@ import { formatMoment } from "./time";
 import type { Line } from "./transcript";
 
 /** What to follow or read for the selection. A Service or a Job is followed, a Compose service is read once. */
-function targetOf(selected: Selected): OutputTarget {
+function targetOf(selected: Followed): OutputTarget {
   switch (selected.kind) {
     case "service":
       return {
@@ -40,8 +47,11 @@ function targetOf(selected: Selected): OutputTarget {
   }
 }
 
-/** The key of the failure the selection may be, nothing for a Compose service, which is listed because it runs. */
-function failureKeyOf(selected: Selected): FailureKey | null {
+/**
+ * The key of the failure the selection may be, nothing for a Compose service, which is listed because it runs, nor for
+ * a Foreign process, which is not an ended failure.
+ */
+export function failureKeyOf(selected: Selected): FailureKey | null {
   switch (selected.kind) {
     case "service":
       return {
@@ -53,6 +63,7 @@ function failureKeyOf(selected: Selected): FailureKey | null {
     case "job":
       return { kind: "job", id: selected.job.id };
     case "compose":
+    case "foreign":
       return null;
     default: {
       const unhandled: never = selected;
@@ -61,7 +72,7 @@ function failureKeyOf(selected: Selected): FailureKey | null {
   }
 }
 
-function statementOf(selected: Selected, failed: boolean): Statement {
+function statementOf(selected: Followed, failed: boolean): Statement {
   switch (selected.kind) {
     case "service":
       return serviceStatement(selected.service, failed);
@@ -80,7 +91,7 @@ function statementOf(selected: Selected, failed: boolean): Statement {
  * Stop and Restart of the selection. A Job has none, and a Service a Group covers has no row of its own, so the
  * Group's row, selected, holds the actions that reach what runs.
  */
-function Actions({ selected, onChanged }: { selected: Selected; onChanged: () => void }) {
+function Actions({ selected, onChanged }: { selected: Followed; onChanged: () => void }) {
   switch (selected.kind) {
     case "service":
       return (
@@ -119,18 +130,61 @@ function Actions({ selected, onChanged }: { selected: Selected; onChanged: () =>
 export function SelectedPanel({
   selected,
   at,
+  seen,
+  onMarkSeen,
   onChanged,
 }: {
   selected: Selected;
   at: number;
+  /** The failures the developer marked as Seen, which offer no mark any more. */
+  seen: FailureKey[];
+  onMarkSeen: (key: FailureKey) => void;
   onChanged: () => void;
 }) {
-  const statement = statementOf(selected, useFailed(failureKeyOf(selected)));
+  // A Foreign process has no output to follow and no action, and the follow is a hook, so it has a panel of its own.
+  if (selected.kind === "foreign") {
+    return <ForeignPanel worktree={selected.worktree} process={selected.process} />;
+  }
+  return (
+    <FollowedPanel selected={selected} at={at} seen={seen} onMarkSeen={onMarkSeen} onChanged={onChanged} />
+  );
+}
+
+/** The inspector on a Service, a Job or a Compose service, whose output it follows. */
+function FollowedPanel({
+  selected,
+  at,
+  seen,
+  onMarkSeen,
+  onChanged,
+}: {
+  selected: Followed;
+  at: number;
+  seen: FailureKey[];
+  onMarkSeen: (key: FailureKey) => void;
+  onChanged: () => void;
+}) {
+  const key = failureKeyOf(selected);
+  const failed = useFailed(key);
+  const statement = statementOf(selected, failed);
   const output = useOutput(targetOf(selected));
   return (
     <section aria-label="Selection">
       <Heading selected={selected} />
-      <State {...statement.state} />
+      <div className="state-line">
+        <State {...statement.state} />
+        {key !== null && failed && !isSeen(seen, key) ? (
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              onMarkSeen(key);
+            }}
+          >
+            Mark as Seen
+          </button>
+        ) : null}
+      </div>
       <p>{statement.summary}</p>
       <p>
         <span className="caption">Next</span> {statement.next}
@@ -142,7 +196,7 @@ export function SelectedPanel({
   );
 }
 
-function Heading({ selected }: { selected: Selected }) {
+function Heading({ selected }: { selected: Followed }) {
   switch (selected.kind) {
     case "service":
       return <h2 className="title">{selected.service.service}</h2>;
@@ -171,7 +225,65 @@ export function WorktreeNames({ worktree }: { worktree: WorktreeStatus }) {
   );
 }
 
-function Facts({ selected, at }: { selected: Selected; at: number }) {
+/**
+ * The inspector on a Foreign process: what it is, the port and the pid, and the command to stop it, which the
+ * developer runs. Procly never stops a process it did not start, so there is no Stop. A container has no pid, so it
+ * has no command.
+ */
+function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process: ForeignProcess }) {
+  const statement = foreignStatement();
+  return (
+    <section aria-label="Selection">
+      <h2 className="title">{process.kind === "process" ? process.command : process.name}</h2>
+      <p className="caption foreign-where">{`Foreign process in ${worktreeLabel(worktree)}`}</p>
+      <div className="state-line">
+        <State {...statement.state} />
+      </div>
+      <dl className="facts facts-grid">
+        {process.ports.length === 0 ? null : (
+          <>
+            <dt>Port</dt>
+            <dd>
+              {process.ports.map((port) => (
+                <span key={port} className="port mono">
+                  {String(port)}
+                </span>
+              ))}
+            </dd>
+          </>
+        )}
+        {process.kind === "process" ? (
+          <>
+            <dt>Process</dt>
+            <dd>
+              <code className="mono">{process.command}</code>
+              {`, pid ${String(process.pid)}`}
+            </dd>
+          </>
+        ) : (
+          <>
+            <dt>Compose</dt>
+            <dd>
+              {"project "}
+              <code className="mono">{process.project}</code>
+              {", service "}
+              <code className="mono">{process.service}</code>
+            </dd>
+          </>
+        )}
+      </dl>
+      <p className="muted">{statement.summary}</p>
+      {process.kind === "process" ? (
+        <>
+          <p className="caption">Stop it yourself</p>
+          <CopyBox text={`kill ${String(process.pid)}`} />
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function Facts({ selected, at }: { selected: Followed; at: number }) {
   return (
     <dl className="facts">
       {selected.worktree === null ? null : (
@@ -219,7 +331,7 @@ const WORDS: Record<Exclude<OutputView["status"], "snapshot">, string> = {
   failed: "",
 };
 
-function OutputPane({ selected, output }: { selected: Selected; output: OutputView }) {
+function OutputPane({ selected, output }: { selected: Followed; output: OutputView }) {
   const snapshot = selected.kind === "compose";
   return (
     <section aria-label="Output">

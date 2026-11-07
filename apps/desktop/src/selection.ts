@@ -1,4 +1,5 @@
 import type { ContainerStatus } from "./protocol/ContainerStatus";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { StatusReport } from "./protocol/StatusReport";
@@ -12,13 +13,26 @@ import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 export type Selection =
   | { kind: "service"; worktree: string; service: string }
   | { kind: "job"; id: string }
-  | { kind: "compose"; worktree: string; service: string };
+  | { kind: "compose"; worktree: string; service: string }
+  | { kind: "foreign"; worktree: string; process: string };
 
 /** A selection read in the last answer of the Daemon. */
 export type Selected =
   | { kind: "service"; worktree: WorktreeStatus; service: ServiceStatus }
   | { kind: "job"; worktree: WorktreeStatus | null; job: JobStatus }
-  | { kind: "compose"; worktree: WorktreeStatus; container: ContainerStatus };
+  | { kind: "compose"; worktree: WorktreeStatus; container: ContainerStatus }
+  | { kind: "foreign"; worktree: WorktreeStatus; process: ForeignProcess };
+
+/** A selection whose item Procly supervises, so that the inspector follows its output. A Foreign process has none. */
+export type Followed = Exclude<Selected, { kind: "foreign" }>;
+
+/**
+ * What tells a Foreign process from the others of its Worktree: its pid, or the name of its container. A pid is not
+ * kept across a restart of the process, so a process that started again is another one.
+ */
+export function foreignId(process: ForeignProcess): string {
+  return process.kind === "process" ? `pid:${String(process.pid)}` : `container:${process.name}`;
+}
 
 /** Whether `selection` is the item `other` names. */
 export function sameSelection(selection: Selection | null, other: Selection): boolean {
@@ -32,6 +46,12 @@ export function sameSelection(selection: Selection | null, other: Selection): bo
         other.kind === selection.kind &&
         selection.worktree === other.worktree &&
         selection.service === other.service
+      );
+    case "foreign":
+      return (
+        other.kind === "foreign" &&
+        selection.worktree === other.worktree &&
+        selection.process === other.process
       );
     case "job":
       return other.kind === "job" && selection.id === other.id;
@@ -64,6 +84,11 @@ export function resolve(selection: Selection | null, report: StatusReport): Sele
         ? null
         : { kind: "compose", worktree, container };
     }
+    case "foreign": {
+      const worktree = worktrees.find((candidate) => candidate.path === selection.worktree);
+      const process = worktree?.foreign?.find((candidate) => foreignId(candidate) === selection.process);
+      return worktree === undefined || process === undefined ? null : { kind: "foreign", worktree, process };
+    }
     case "job": {
       for (const worktree of worktrees) {
         const job = worktree.jobs.find((candidate) => candidate.id === selection.id);
@@ -88,6 +113,8 @@ export function selectedKey(selected: Selected): string {
       return `service\0${selected.worktree.path}\0${selected.service.service}`;
     case "compose":
       return `compose\0${selected.worktree.path}\0${selected.container.service}`;
+    case "foreign":
+      return `foreign\0${selected.worktree.path}\0${foreignId(selected.process)}`;
     case "job":
       return `job\0${selected.job.id}`;
     default: {
