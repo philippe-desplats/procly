@@ -650,7 +650,11 @@ fn docker_a_dry_run_reports_the_retention_policy_it_would_apply_and_deletes_noth
         !removed.other_project.container().is_empty(),
         "a dry run deleted the container"
     );
-    assert!(!removed.main_project.container().is_empty());
+    assert_ne!(
+        removed.main_project.container(),
+        "",
+        "a dry run deleted the container of the Main worktree"
+    );
 }
 
 #[test]
