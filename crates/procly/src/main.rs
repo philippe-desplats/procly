@@ -404,12 +404,15 @@ enum WorktreeCommand {
     /// Run the Worktree release, before the Worktree is removed: stop its Services and Jobs with their whole process
     /// trees, let go of its Compose services as `down` does, and release its Leases so that another Worktree can be
     /// granted their ports at once. The Leases of a Pinned branch are kept, and so is every Logical resource, which
-    /// `procly gc` lists once the Worktree is removed. Nothing is deleted. The Daemon logs who asked. With `--dry-run`,
-    /// print what the release would stop, let go of and release, and change nothing.
+    /// `procly gc` lists once the Worktree is removed. No data of the Worktree is deleted. It then applies the Retention
+    /// policy of the Isolated containers of the Worktrees already removed, which deletes a container and its volumes
+    /// once its policy says so. The Daemon logs who asked. With `--dry-run`, print what the release would stop, let go
+    /// of, release and apply, and change nothing.
     #[command(
         after_help = "Run it from the pre-remove hook of a worktree manager. Running it again, or in a Worktree Procly \
-                      never saw, prints `nothing to release`. `--dry-run` prints the same report with `would stop` \
-                      and `would release`, and stops and releases nothing. Exit codes: 0 when the Worktree is released, also when \
+                      never saw, prints `nothing to release`. `--dry-run` prints the same report with `would stop`, \
+                      `would release` and `would apply`, and stops, releases and deletes nothing. Exit codes: 0 when \
+                      the Worktree is released, also when \
                       there was nothing to release, 125 when Procly itself fails, such as for a directory that is not \
                       in a git Repository. See docs/worktree-release.md and docs/exit-codes.md."
     )]
