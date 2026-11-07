@@ -730,29 +730,110 @@ body {
   align-items: flex-start;
 }
 
-.item.check {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
+/* A check: its glyph in a narrow column, then the message as the main line and the name of the check as a caption. */
+.item.check,
+.item.check-fold {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 10px;
+  padding: 12px 0;
 }
 
-.check-head {
+.worktree-checks .item.check,
+.worktree-checks .item.check-fold {
+  padding: 8px 0;
+}
+
+.check-glyph {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: center;
+  height: 1.5em;
+}
+
+.check-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .check-message {
   margin: 0;
-  color: var(--muted);
+  color: var(--text);
   white-space: pre-line;
   overflow-wrap: anywhere;
+}
+
+.check-name {
+  color: var(--faint);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: var(--size-small);
+}
+
+.check-fixes {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .fix {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* The line the passed checks fold into: the Show button follows its text, quiet as a caption. */
+.item.check-fold {
+  align-items: center;
+  color: var(--muted);
+}
+
+.check-fold-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The foot of the Doctor screen: where the checks that are not here can be found. */
+.doctor-foot {
+  margin: 14px 0 0;
+  color: var(--faint);
+  font-size: var(--size-small);
+}
+
+.fold-toggle {
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: var(--size-small);
+  cursor: default;
+}
+
+.fold-toggle:hover {
+  color: var(--text);
+}
+
+.fold-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Text for a screen reader that the eye does not see, where the glyph beside it carries the meaning. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .prompt {
