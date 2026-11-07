@@ -506,6 +506,72 @@ body {
   margin: 0;
 }
 
+/* The title line of a Worktree: its folder over its path, then the buttons that open it, then the time of the answer and
+   Refresh. The folder and the path are cut with an ellipsis rather than wrapped. The line is wrapped: the title keeps a
+   width of its own, so that when the 3 do not fit in the column (260px at the narrowest window) the buttons and the
+   controls go down to a line of their own instead of squeezing the title to nothing or leaving the column. */
+.worktree-head {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 52px;
+  padding-block: 6px;
+  row-gap: 6px;
+}
+
+.worktree-title {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.worktree-open,
+.worktree-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.worktree-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.worktree-head .title {
+  flex: 0 1 auto;
+  min-width: 56px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-legend {
+  flex: none;
+  color: var(--faint);
+  font-size: var(--size-small);
+  white-space: nowrap;
+}
+
+.worktree-path {
+  margin: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--size-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-head .button {
+  flex: none;
+}
+
+.worktree-head .caption {
+  flex: none;
+  white-space: nowrap;
+}
+
 /* The Services of the Overview, under the section Needs you pins on top. */
 .services {
   margin-top: 4px;
@@ -891,6 +957,13 @@ body {
   display: flex;
   gap: 8px;
   margin: 12px 0;
+}
+
+/* Release… under the title line of a Worktree. The line sticks 16px below the top of the pane, the padding of the pane,
+   while it takes its place in the flow at the top, so the row clears those 16px and then the 12px of air it has
+   everywhere else. */
+.actions-row.release-row {
+  margin-top: 28px;
 }
 
 /* An item that states more than one line: what it is, then what it drops or why it failed. */

@@ -140,7 +140,7 @@ describe("the output of a Service in the inspector", () => {
     expect(computed(pane).flexGrow).toBe("1");
   });
 
-  it("stays bounded with Find revealed and Wrap on, and the Open buttons follow the panel inside the pane", async () => {
+  it("stays bounded with Find revealed and Wrap on, and the Worktree actions follow the panel inside the pane", async () => {
     const inspector = await openLongOutput();
     const panel = within(inspector);
 
@@ -154,7 +154,8 @@ describe("the output of a Service in the inspector", () => {
     expect(computed(output).position).toBe("absolute");
     expect(computed(box).flexBasis).toBe("0px");
     expect(computed(box).minHeight).toBe("120px");
-    const buttons = panel.getByRole("button", { name: "Open in editor" }).parentElement as HTMLElement;
+    // Open in Editor and Open in Terminal moved to the title line of the Worktree, Reveal in Finder stays here.
+    const buttons = panel.getByRole("button", { name: "Reveal in Finder" }).parentElement as HTMLElement;
     expect(buttons).toHaveClass("worktree-actions");
     expect(buttons.parentElement).toBe(inspector);
     expect(buttons.previousElementSibling).toHaveClass("inspector-panel");

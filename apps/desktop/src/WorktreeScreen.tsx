@@ -3,16 +3,16 @@ import type { ReactNode } from "react";
 import type { FailureKey } from "./daemon";
 import type { DoctorStore } from "./doctor";
 import { WorktreeChecks } from "./DoctorScreen";
-import { worktreeLabel, worktreeTooltip } from "./labels";
 import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ItemRow } from "./ItemRow";
-import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
+import { ContainerRow, JobRow, SeenMark, ServiceRow } from "./Rows";
 import { TitleBar } from "./TitleBar";
 import { foreignId } from "./selection";
 import { foreignWord, jobWord } from "./state";
+import { WorktreeHeader } from "./WorktreeHeader";
 
 /** A Foreign process of the Worktree. A row picks it for the inspector, which gives the command to stop it by hand. */
 function ForeignRow({ process, worktreePath }: { process: ForeignProcess; worktreePath: string }) {
@@ -39,17 +39,26 @@ export function WorktreeScreen({
   at,
   seen,
   doctor,
+  controls,
+  banner,
   onRelease,
+  onNeedEditor,
 }: {
   worktree: WorktreeStatus;
   at: number;
   seen: FailureKey[];
   doctor: DoctorStore;
+  /** The end of the title line: when the answer was read, and Refresh. */
+  controls: ReactNode;
+  /** The notice the screen draws under its title line, nothing when there is none. */
+  banner: ReactNode;
   /**
    * Opens the release sheet. The app holds the sheet, not this screen: a release can leave the Daemon with nothing to
    * report for the Worktree, and the screen is gone by then while the sheet still shows the result.
    */
   onRelease: (worktree: WorktreeStatus) => void;
+  /** Open in Editor found no editor set: the app sends the developer to the field that names one. */
+  onNeedEditor: () => void;
 }) {
   const foreign = worktree.foreign ?? [];
   const containers = worktree.containers ?? [];
@@ -60,11 +69,14 @@ export function WorktreeScreen({
     containers.length === 0;
   return (
     <section>
-      <h2 className="title">
-        <span title={worktreeTooltip(worktree)}>{worktreeLabel(worktree)}</span>{" "}
-        <RemovedMark worktree={worktree} />
-      </h2>
-      <div className="actions-row">
+      <WorktreeHeader
+        key={worktree.path}
+        worktree={worktree}
+        controls={controls}
+        onNeedEditor={onNeedEditor}
+      />
+      {banner}
+      <div className="actions-row release-row">
         <button
           type="button"
           className="button"
