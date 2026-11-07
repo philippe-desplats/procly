@@ -96,6 +96,36 @@ async fn mark_seen(
     saved
 }
 
+/// Marks a Seen failure as Unseen: it comes back in "Needs you" and in the count, and the window is told at once. A key
+/// that is not Seen changes nothing. It changes nothing in the Daemon.
+///
+/// # Errors
+///
+/// When the Seen set cannot be written. The failure needs the developer again until the app quits, and the window is
+/// told of it anyway.
+#[tauri::command]
+async fn mark_unseen(
+    key: FailureKey,
+    app: AppHandle,
+    poller: State<'_, Poller>,
+    attention: State<'_, Attention>,
+    publishing: State<'_, Publishing>,
+) -> Result<(), SeenError> {
+    // As for a mark as Seen, the answers of the poller wait for this one.
+    let _turn = publishing.0.lock().await;
+    let Some(last) = poller.last() else {
+        return Ok(());
+    };
+    let attention = attention.inner().clone();
+    let updates = poller.subscribe();
+    let (presented, saved) =
+        tauri::async_runtime::spawn_blocking(move || attention.unmark(&key, last, || updates.borrow().clone()))
+            .await
+            .map_err(|error| SeenError::task(&error))?;
+    publish(&app, &presented);
+    saved
+}
+
 /// One publish at a time: the answers of the poller and a mark as Seen are presented and published in turn, so that
 /// the last one the window and the menu receive holds the newest answer with the newest Seen set.
 #[derive(Debug, Clone, Default)]
@@ -237,6 +267,39 @@ fn builder() -> tauri::Builder<tauri::Wry> {
     builder
 }
 
+/// Every command the window may invoke.
+fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        last_update,
+        mark_seen,
+        mark_unseen,
+        refresh,
+        menu::set_menu_context,
+        follow::follow_logs,
+        follow::stop_follow,
+        follow::service_logs,
+        lifecycle::start_daemon,
+        lifecycle::restart_daemon,
+        doctor::doctor,
+        apps::detected_apps,
+        opening::open_worktree,
+        opening::reveal_worktree,
+        opening::open_localhost,
+        orphans::list_orphans,
+        orphans::delete_orphans,
+        release::preview_release,
+        release::release_worktree,
+        services::stop_service,
+        services::restart_service,
+        settings::get_settings,
+        settings::save_settings,
+        login_item::get_open_at_login,
+        login_item::set_open_at_login,
+        notifications::set_notify_on_failure,
+        notifications::open_notification_settings,
+    ]
+}
+
 /// Runs the app until the developer quits it. Closing the window leaves it in the menu bar, and neither closing the
 /// window nor quitting the app stops anything in the Daemon.
 ///
@@ -316,34 +379,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| on_menu_event(app, &event))
         .on_window_event(on_window_event)
-        .invoke_handler(tauri::generate_handler![
-            last_update,
-            mark_seen,
-            refresh,
-            menu::set_menu_context,
-            follow::follow_logs,
-            follow::stop_follow,
-            follow::service_logs,
-            lifecycle::start_daemon,
-            lifecycle::restart_daemon,
-            doctor::doctor,
-            apps::detected_apps,
-            opening::open_worktree,
-            opening::reveal_worktree,
-            opening::open_localhost,
-            orphans::list_orphans,
-            orphans::delete_orphans,
-            release::preview_release,
-            release::release_worktree,
-            services::stop_service,
-            services::restart_service,
-            settings::get_settings,
-            settings::save_settings,
-            login_item::get_open_at_login,
-            login_item::set_open_at_login,
-            notifications::set_notify_on_failure,
-            notifications::open_notification_settings,
-        ])
+        .invoke_handler(commands())
         .build(tauri::generate_context!())
         .expect("the Tauri application builds")
         .run(|app, event| {
