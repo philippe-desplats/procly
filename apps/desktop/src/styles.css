@@ -950,9 +950,12 @@ body {
   color: var(--text);
 }
 
+/* Above everything the window draws, the sticky title line of a screen included, so that nothing but the sheet can be
+   clicked while it is open. */
 .overlay {
   position: fixed;
   inset: 0;
+  z-index: 10;
   display: flex;
   align-items: flex-start;
   justify-content: center;

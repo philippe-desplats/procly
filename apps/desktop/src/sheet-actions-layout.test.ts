@@ -22,3 +22,19 @@ describe("the buttons of a sheet", () => {
     expect(actions).not.toMatch(/flex-direction:\s*row-reverse/);
   });
 });
+
+/** The `z-index` a rule declares, `NaN` when it declares none. */
+function zIndex(selector: string): number {
+  return Number(/z-index:\s*(-?\d+)\s*;/.exec(declarations(selector))?.[1] ?? Number.NaN);
+}
+
+describe("the overlay of a sheet", () => {
+  it("covers the whole window, the sticky title line of a screen included", () => {
+    const overlay = declarations(".overlay");
+    expect(overlay).toMatch(/position:\s*fixed\s*;/);
+    expect(overlay).toMatch(/inset:\s*0\s*;/);
+    // The title line sticks above the list it heads with a z-index of its own, so the overlay needs a higher one.
+    expect(zIndex(".title-bar")).toBeGreaterThan(0);
+    expect(zIndex(".overlay")).toBeGreaterThan(zIndex(".title-bar"));
+  });
+});
