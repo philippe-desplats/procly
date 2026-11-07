@@ -1,0 +1,12 @@
+{
+  "response": "worktree_release",
+  "worktree": "/p/work/acme/web-fix",
+  "services": ["web"],
+  "jobs": [],
+  "compose_services": [],
+  "leases": [{ "service": "web", "port_name": "http", "port": 24001 }],
+  "kept_leases": [],
+  "logical_resources": [],
+  "retention": [{ "worktree": "/p/work/acme/web-old", "service": "db", "policy": "delete" }],
+  "warnings": []
+}

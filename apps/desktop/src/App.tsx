@@ -37,6 +37,7 @@ import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
 import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { MenuChoice } from "./protocol/MenuChoice";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
@@ -96,6 +97,7 @@ export function App({
     label: string;
     listed: boolean;
     ended: Ended;
+    foreign: ForeignProcess[];
   } | null>(null);
 
   // The poller of the app keeps the snapshot current, the window only follows it.
@@ -206,6 +208,7 @@ export function App({
       label: worktreeLabel(worktree),
       listed: worktree.listed,
       ended: endedIn(worktree),
+      foreign: worktree.foreign ?? [],
     });
   };
 
@@ -350,6 +353,9 @@ export function App({
               <OutsideRepositoriesScreen
                 jobs={snapshot.report.jobs_outside_repositories}
                 seen={snapshot.seen}
+                controls={
+                  <RefreshControls snapshot={snapshot} store={store} doctor={doctor} orphans={orphanScan} />
+                }
               />
             ) : (
               <>
@@ -408,6 +414,7 @@ export function App({
             label={releasing.label}
             listed={releasing.listed}
             ended={releasing.ended}
+            foreign={releasing.foreign}
             onClose={() => {
               setReleasing(null);
             }}

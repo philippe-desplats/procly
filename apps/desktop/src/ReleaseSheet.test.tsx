@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { createDaemonStore, type Update } from "./daemon";
 import recordedRelease from "./fixtures/release.json";
+import recordedRetention from "./fixtures/release-retention.json";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { Response } from "./protocol/Response";
 
 const AT = Date.UTC(2026, 10, 6, 10, 0, 0);
@@ -14,6 +16,12 @@ const MAIN = "/p/work/acme/web";
 
 /** A dry run in the shape the Daemon gives it, its paths replaced by neutral ones. */
 const dryRun: Response = recordedRelease as Response;
+
+/** A dry run that reports a Retention policy to apply to an Isolated container of a removed Worktree. */
+const dryRunWithRetention: Response = recordedRetention as Response;
+
+/** A process the Worktree holds that Procly did not start, on a port of its own. */
+const node: ForeignProcess = { kind: "process", pid: 4812, command: "node", ports: [24102] };
 
 /** What the status holds for `web-fix` besides the Service `web` that runs: ended Jobs and an ended Service. */
 const ended = {
@@ -42,6 +50,7 @@ function scene(options: {
   listed: boolean;
   ended?: boolean | undefined;
   running?: boolean | undefined;
+  foreign?: ForeignProcess[] | undefined;
 }): Response {
   return {
     response: "status",
@@ -80,6 +89,7 @@ function scene(options: {
               ...(options.ended === true ? [ended.service] : []),
             ],
             jobs: options.ended === true ? [...ended.jobs] : [],
+            ...(options.foreign === undefined ? {} : { foreign: options.foreign }),
           },
         ],
       },
@@ -101,6 +111,8 @@ function app(
     ended?: boolean;
     /** Whether the Service `web` still runs in the status, `true` unless said otherwise. */
     running?: boolean;
+    /** The Foreign processes the status holds for the Worktree, none unless said. */
+    foreign?: ForeignProcess[];
     previewing?: () => unknown;
     releasing?: () => unknown;
   } = {},
@@ -108,7 +120,12 @@ function app(
   const calls: Call[] = [];
   const update: Update = {
     at_ms: AT,
-    response: scene({ listed: options.listed ?? true, ended: options.ended, running: options.running }),
+    response: scene({
+      listed: options.listed ?? true,
+      ended: options.ended,
+      running: options.running,
+      foreign: options.foreign,
+    }),
     needs_you: [],
     seen: [],
   };
@@ -399,6 +416,90 @@ describe("the Worktree release sheet", () => {
     expect(await sheet.findByText("no Daemon answers")).toBeInTheDocument();
     expect(sheet.getByRole("button", { name: "Release" })).toBeDisabled();
     expect(sheet.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
+
+  it("puts Cancel on the right, last and focused, and the button that releases on its left", async () => {
+    app();
+
+    const dialog = await openSheet();
+    const sheet = within(dialog);
+    await sheet.findByRole("heading", { name: "Will stop" });
+
+    const buttons = Array.from(dialog.querySelectorAll(".actions button"), (button) => button.textContent);
+    expect(buttons).toEqual(["Release", "Cancel"]);
+    expect(sheet.getByRole("button", { name: "Cancel" })).toHaveFocus();
+  });
+
+  it("asks a question as its title, and the result states what was done", async () => {
+    app({ releasing: () => emptyReport });
+
+    const sheet = within(await openSheet());
+
+    expect(screen.getByRole("dialog", { name: "Release web-fix?" })).toBeInTheDocument();
+    fireEvent.click(await sheet.findByRole("button", { name: "Release" }));
+    expect(await screen.findByRole("dialog", { name: "Released web-fix" })).toBeInTheDocument();
+  });
+
+  it("says a Foreign process is left alone, with its command, its pid and the port it keeps", async () => {
+    app({ foreign: [node] });
+
+    const sheet = within(await openSheet());
+
+    expect(
+      await sheet.findByText("leaves node, pid 4812, which Procly did not start: it keeps port 24102"),
+    ).toBeInTheDocument();
+  });
+
+  it("says a Foreign container is left alone, and draws no line when the Worktree has no Foreign process", async () => {
+    app({
+      foreign: [{ kind: "container", name: "acme-db-1", project: "acme", service: "db", ports: [] }],
+    });
+
+    const sheet = within(await openSheet());
+
+    expect(await sheet.findByText("leaves acme-db-1, which Procly did not start")).toBeInTheDocument();
+    cleanup();
+
+    app();
+    const plain = within(await openSheet());
+    await plain.findByRole("heading", { name: "Will stop" });
+    expect(plain.queryByText(/which Procly did not start/)).not.toBeInTheDocument();
+  });
+
+  it("shows in red that the release applies the Retention policy when the dry run reports one", async () => {
+    app({ previewing: () => dryRunWithRetention });
+
+    const sheet = within(await openSheet());
+
+    const line = await sheet.findByText(
+      "applies the Retention policy to its Isolated containers, which may delete their data",
+    );
+    expect(line).toHaveClass("loss");
+  });
+
+  it("draws no Retention policy line when the dry run reports none", async () => {
+    app();
+
+    const dialog = await openSheet();
+
+    await within(dialog).findByRole("heading", { name: "Will stop" });
+    expect(within(dialog).queryByText(/Retention policy/)).not.toBeInTheDocument();
+  });
+
+  it("does not say it deletes nothing when a Retention policy applies", async () => {
+    app({
+      previewing: () => ({
+        ...emptyReport,
+        retention: [{ worktree: "/p/work/acme/web-old", service: "db", policy: "7d" }],
+      }),
+    });
+
+    const sheet = within(await openSheet());
+
+    expect(await sheet.findByText(/Retention policy/)).toBeInTheDocument();
+    expect(sheet.queryByText(/Procly holds nothing/)).not.toBeInTheDocument();
+    expect(sheet.queryByText("No data is deleted.")).not.toBeInTheDocument();
+    expect(sheet.getByRole("button", { name: "Release" })).toBeEnabled();
   });
 
   it("sends nothing when cancelled", async () => {

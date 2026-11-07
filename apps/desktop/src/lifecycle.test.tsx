@@ -236,7 +236,7 @@ describe("a Daemon of another protocol version", () => {
       await screen.findByRole("heading", { name: "The Daemon runs an older version" }),
     ).toBeInTheDocument();
     expect(screen.getByText("The Daemon speaks protocol 21, this app speaks 22.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Restart the Daemon" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Restart the Daemon…" })).toBeEnabled();
   });
 
   it("takes the whole window on an older Daemon, with the brand mark and the title", async () => {
@@ -332,13 +332,34 @@ describe("a Daemon of another protocol version", () => {
     expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();
   });
 
+  it("opens the sheet from a button that ends with an ellipsis", async () => {
+    rust(failed(mismatch(21)));
+    render(<App store={createDaemonStore()} />);
+
+    const opener = await screen.findByRole("button", { name: "Restart the Daemon…" });
+
+    expect(opener).toHaveTextContent("Restart the Daemon…");
+  });
+
+  it("puts Cancel on the right, last and focused, and the button that restarts on its left", async () => {
+    rust(failed(mismatch(21)));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Restart the Daemon?" });
+    const buttons = Array.from(sheet.querySelectorAll(".actions button"), (button) => button.textContent);
+    expect(buttons).toEqual(["Restart the Daemon", "Cancel"]);
+    expect(within(sheet).getByRole("button", { name: "Cancel" })).toHaveFocus();
+  });
+
   it("warns that every running Service will stop behind a sheet where Cancel is the default", async () => {
     const commands = rust(failed(mismatch(21)));
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
 
-    const sheet = await screen.findByRole("dialog", { name: "Restart the Daemon" });
+    const sheet = await screen.findByRole("dialog", { name: "Restart the Daemon?" });
     expect(within(sheet).getByText(/every running Service will stop/i)).toBeInTheDocument();
     expect(within(sheet).getByText("procly daemon stop")).toBeInTheDocument();
     const cancel = within(sheet).getByRole("button", { name: "Cancel" });
@@ -352,9 +373,9 @@ describe("a Daemon of another protocol version", () => {
     rust(failed(mismatch(21)));
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
 
-    const sheet = within(await screen.findByRole("dialog", { name: "Restart the Daemon" }));
+    const sheet = within(await screen.findByRole("dialog", { name: "Restart the Daemon?" }));
     expect(sheet.getByText("Every running Service will stop, in every Worktree.")).toHaveClass("loss");
     expect(sheet.getByText("This stops the Daemon, then starts the one this app embeds.")).not.toHaveClass(
       "loss",
@@ -365,11 +386,11 @@ describe("a Daemon of another protocol version", () => {
     const commands = rust(failed(mismatch(21)));
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restart the Daemon…" }));
     fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(commands).toEqual(["last_update"]);
@@ -378,7 +399,7 @@ describe("a Daemon of another protocol version", () => {
   it("restarts the Daemon once confirmed, and recovers on the answer that follows", async () => {
     const commands = rust(failed(mismatch(21)), { restart_daemon: () => undefined });
     render(<App store={createDaemonStore()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
     const sheet = await screen.findByRole("dialog");
 
     fireEvent.click(within(sheet).getByRole("button", { name: "Restart the Daemon" }));
@@ -401,7 +422,7 @@ describe("a Daemon of another protocol version", () => {
         }),
     });
     render(<App store={createDaemonStore()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
     const sheet = await screen.findByRole("dialog");
 
     fireEvent.click(within(sheet).getByRole("button", { name: "Restart the Daemon" }));
