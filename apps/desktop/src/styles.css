@@ -265,11 +265,23 @@ body {
 
 /* A row of the center, as the mockup draws it: the glyph, the name with the word of its state, where it runs, then its
    time and its ports. The first column is the glyph, so every row starts with the shape of its state. */
+/* The name and the word of the state on one line. Only the name gives way, cut at its end, so that a long Job command
+   never swallows the word. */
 .item-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3em;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.item-main .item-name {
+  flex: 0 1 auto;
+}
+
+.item-main .caption {
+  flex: none;
 }
 
 .state-glyph {
@@ -278,6 +290,7 @@ body {
 
 /* The word of a state follows the name. It is grey like the text around it, except a failure and a restart. */
 .item-main .word {
+  flex: none;
   color: var(--muted);
 }
 

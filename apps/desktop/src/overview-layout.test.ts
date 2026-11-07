@@ -25,12 +25,24 @@ describe("a row of the center", () => {
     );
   });
 
-  it("cuts the name and its word with an ellipsis rather than wrapping them", () => {
+  it("keeps the name and its word on one line, never wrapping them", () => {
     const main = declarations(".item-main");
+    expect(main).toMatch(/display:\s*flex\s*;/);
     expect(main).toMatch(/min-width:\s*0\s*;/);
     expect(main).toMatch(/overflow:\s*hidden\s*;/);
-    expect(main).toMatch(/text-overflow:\s*ellipsis\s*;/);
     expect(main).toMatch(/white-space:\s*nowrap\s*;/);
+  });
+
+  it("cuts a long name, a Job command, with an ellipsis and always shows the word of the state whole", () => {
+    // The name gives way, and only it: it may shrink below its content, and it does not grow past it, so the word
+    // follows it rather than sitting at the far end.
+    const name = declarations(".item-main .item-name");
+    expect(name).toMatch(/flex:\s*0 1 auto\s*;/);
+    expect(declarations(".item-name")).toMatch(/min-width:\s*0\s*;/);
+    expect(declarations(".item-name")).toMatch(/text-overflow:\s*ellipsis\s*;/);
+    // The word and the detail never shrink.
+    expect(declarations(".item-main .word")).toMatch(/flex:\s*none\s*;/);
+    expect(declarations(".item-main .caption")).toMatch(/flex:\s*none\s*;/);
   });
 
   it("gives the ports a slot of their own, so that the pills of a list end on the same edge", () => {
