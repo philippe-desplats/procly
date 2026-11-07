@@ -32,7 +32,7 @@ import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectionContext } from "./selectable";
-import { foreignId, resolve, selectedKey, type Selected, type Selection } from "./selection";
+import { foreignId, foreignToShow, resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
@@ -258,8 +258,9 @@ export function App({
   const checking = view.kind === "doctor";
   const orphans = view.kind === "orphans";
   const outside = view.kind === "outside";
-  // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
-  const wide = settings || orphans;
+  // Settings, the Orphans and the checks show nothing the inspector explains. The Jobs outside any Repository are picked
+  // for it.
+  const wide = settings || orphans || checking;
   // The Overview draws its own title line, with the controls of the toolbar at its end, so the toolbar is left out.
   const overviewShown = snapshot.kind === "status" && !checking && current === null;
   // The notice of a Procly release that drifted, which any screen but the Overview shows above its content and the
@@ -274,6 +275,22 @@ export function App({
       />
     ) : null;
   const doctorRun = useDoctor(doctor, null);
+  // Where the Doctor takes the developer from a failed check: the Orphans, and the Foreign process the Status reports
+  // for the Leases the `leased_ports` check names.
+  const leasedPorts =
+    doctorRun.kind === "report" || doctorRun.kind === "running"
+      ? doctorRun.document?.checks.find((check) => check.name === "leased_ports" && check.status === "failed")
+      : undefined;
+  const processToShow =
+    snapshot.kind === "status" && leasedPorts !== undefined
+      ? foreignToShow(snapshot.report, leasedPorts.message)
+      : null;
+  const showProcess = (): void => {
+    if (processToShow?.kind === "foreign") {
+      setView({ kind: "worktree", path: processToShow.worktree });
+      setSelection(processToShow);
+    }
+  };
   const orphanDryRun = useOrphanScan(orphanScan);
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.
@@ -341,7 +358,13 @@ export function App({
                 )}
                 {overviewShown ? null : banner}
                 {view.kind === "doctor" ? (
-                  <DoctorScreen store={doctor} />
+                  <DoctorScreen
+                    store={doctor}
+                    onShowOrphans={() => {
+                      setView({ kind: "orphans" });
+                    }}
+                    onShowProcess={processToShow === null ? null : showProcess}
+                  />
                 ) : (
                   <Center
                     snapshot={snapshot}

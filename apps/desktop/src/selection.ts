@@ -35,6 +35,39 @@ export function foreignId(process: ForeignProcess): string {
   return process.kind === "process" ? `pid:${String(process.pid)}` : `container:${process.name}`;
 }
 
+/** The ports of the Leases a `leased_ports` message names, in the order it names them: `lease web.http port 24081 of ...`. */
+function leasedPortsNamed(message: string): number[] {
+  return [...message.matchAll(/^lease \S+ port (\d+) /gm)].map((found) => Number(found[1]));
+}
+
+/**
+ * The Foreign process the Doctor takes the developer to from a failed `leased_ports` check: one that holds a port a
+ * Service of its own Worktree has, so that the Status vouches for it, and `null` when none does. The message of the
+ * check only orders the candidates, the one on the port of the first Lease it names comes first, then the Status order.
+ */
+export function foreignToShow(report: StatusReport, message: string): Selection | null {
+  const named = leasedPortsNamed(message);
+  const candidates = report.repositories
+    .flatMap((repository) => repository.worktrees)
+    .flatMap((worktree) =>
+      (worktree.foreign ?? []).flatMap((process) => {
+        const held = process.ports.filter((port) =>
+          worktree.services.some((service) => service.port === port),
+        );
+        // How far down the message the first Lease it holds comes, `Infinity` when the message names none.
+        const rank = Math.min(...held.map((port) => (named.includes(port) ? named.indexOf(port) : Infinity)));
+        return held.length === 0 ? [] : [{ worktree, process, rank }];
+      }),
+    );
+  const chosen = candidates.reduce<(typeof candidates)[number] | undefined>(
+    (best, candidate) => (best === undefined || candidate.rank < best.rank ? candidate : best),
+    undefined,
+  );
+  return chosen === undefined
+    ? null
+    : { kind: "foreign", worktree: chosen.worktree.path, process: foreignId(chosen.process) };
+}
+
 /** Whether `selection` is the item `other` names. */
 export function sameSelection(selection: Selection | null, other: Selection): boolean {
   if (selection === null || selection.kind !== other.kind) {
