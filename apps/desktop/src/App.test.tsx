@@ -122,7 +122,7 @@ describe("the window", () => {
 
     const center = screen.getByRole("main");
     expect(await within(center).findByText("exited 3")).toBeInTheDocument();
-    expect(screen.getByText("/p/work/acme/web-fix")).toBeInTheDocument();
+    expect(within(center).getByText("/p/work/acme/web-fix")).toBeInTheDocument();
   });
 
   it("says that no Daemon runs, and sends nothing but the request for the last answer and doctor", async () => {
@@ -354,7 +354,8 @@ describe("the inspector of a Worktree", () => {
     render(<App store={createDaemonStore()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
-    await screen.findByRole("heading", { name: BRANCH, level: 2 });
+    // The title names the folder, the branch is one of the names the inspector gives.
+    await screen.findByRole("heading", { name: "web-login", level: 2 });
 
     expect(facts()).toEqual(
       expect.arrayContaining([`Branch: ${BRANCH}`, "Folder: web-login", "Slug: web_login"]),

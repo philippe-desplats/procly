@@ -633,7 +633,7 @@ describe("opening a Worktree", () => {
     render(<App store={createDaemonStore()} />);
     await selectWorktree();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open in terminal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in Terminal" }));
 
     await waitFor(() => {
       expect(calls.filter((call) => call.command === "open_worktree")).toEqual([
@@ -647,7 +647,7 @@ describe("opening a Worktree", () => {
     render(<App store={createDaemonStore()} />);
     await selectWorktree();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open in editor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in Editor" }));
     fireEvent.click(screen.getByRole("button", { name: "Reveal in Finder" }));
 
     await waitFor(() => {
@@ -668,7 +668,7 @@ describe("opening a Worktree", () => {
     render(<App store={createDaemonStore()} />);
     await selectWorktree();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open in editor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in Editor" }));
 
     const editor = await screen.findByRole("combobox", { name: "Editor" });
     expect(screen.getByRole("heading", { name: "Open with" })).toBeInTheDocument();
@@ -688,7 +688,7 @@ describe("opening a Worktree", () => {
     render(<App store={createDaemonStore()} />);
     await selectWorktree();
 
-    fireEvent.click(screen.getByRole("button", { name: "Open in terminal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in Terminal" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "cannot open /p/work/acme/web-fix with Ghostty: Unable to find application",
@@ -700,7 +700,7 @@ describe("opening a Worktree", () => {
     app({ opening: () => Promise.reject({ kind: "launch", message: "cannot open /p/work/acme/web-fix" }) });
     render(<App store={createDaemonStore()} />);
     await selectWorktree();
-    fireEvent.click(screen.getByRole("button", { name: "Open in terminal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open in Terminal" }));
     await screen.findByRole("alert");
 
     fireEvent.click(screen.getByRole("button", { name: /^main\s*main$/ }));

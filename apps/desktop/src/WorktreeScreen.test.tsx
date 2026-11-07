@@ -301,7 +301,7 @@ describe("the Worktree screen", () => {
     for (const fact of ["Worktree", "Branch", "Folder", "Slug"]) {
       expect(panel.queryByText(fact)).not.toBeInTheDocument();
     }
-    for (const name of ["Open in editor", "Open in terminal", "Reveal in Finder"]) {
+    for (const name of ["Open in Editor", "Open in Terminal", "Reveal in Finder"]) {
       expect(panel.queryByRole("button", { name })).not.toBeInTheDocument();
     }
   });
@@ -607,7 +607,7 @@ describe("the Outside Repositories screen", () => {
     expect(panel.getByText("c0ffee01")).toBeInTheDocument();
     // A Job has no Stop, and a Job outside any Repository has no Worktree to open.
     expect(panel.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
-    expect(panel.queryByRole("button", { name: "Open in editor" })).not.toBeInTheDocument();
+    expect(panel.queryByRole("button", { name: "Open in Editor" })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(calls.filter((call) => call.command === "follow_logs").map((call) => call.args)).toEqual([
         expect.objectContaining({ name: "c0ffee01", cwd: "/p/tmp/scratch" }),
@@ -622,5 +622,166 @@ describe("the Outside Repositories screen", () => {
     fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
 
     expect(await screen.findByText("No Job started outside a Repository.")).toBeInTheDocument();
+  });
+
+  it("draws a Job as its glyph, then its command, then its state", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByText("make watch");
+
+    expect(inOrder(within(center).getByText("make watch").closest("li") as HTMLElement)).toEqual([
+      "glyph",
+      "command",
+      "state",
+    ]);
+  });
+});
+
+/**
+ * The scene with its Worktree on a branch that is not the name of its folder, so that a title cannot pass for the
+ * branch by chance, and optionally the main Worktree.
+ */
+function onBranch(branch: string, main = false): Response {
+  const status = scene as Extract<Response, { response: "status" }>;
+  return {
+    ...status,
+    repositories: status.repositories.map((repository) => ({
+      ...repository,
+      worktrees: repository.worktrees.map((worktree) => ({ ...worktree, branch, main })),
+    })),
+  };
+}
+
+/** What a row says, in the order the document draws it: its glyph, its name, then the word of its state. */
+function inOrder(row: HTMLElement): string[] {
+  const parts: [string, Element | null][] = [
+    ["glyph", row.querySelector("svg[data-glyph]")],
+    ["command", row.querySelector(".item-name")],
+    ["state", row.querySelector(".word")],
+  ];
+  return parts
+    .toSorted(([, first], [, second]) =>
+      first === null || second === null
+        ? 0
+        : first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING
+          ? -1
+          : 1,
+    )
+    .map(([name]) => name);
+}
+
+describe("the header of the Worktree screen", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  /** Opens the Worktree the scene holds, which the sidebar names after its branch. */
+  async function open(branch = "feature/login", main = false): Promise<HTMLElement> {
+    app({ open_worktree: () => undefined, reveal_worktree: () => undefined }, onBranch(branch, main));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: new RegExp(`^${branch.replace("/", "\\/")}`) }),
+    );
+    const center = screen.getByRole("main");
+    await within(center).findByRole("heading", { name: "Services" });
+    return center;
+  }
+
+  /** The commands the window sent to Rust to open or reveal a Worktree. */
+  function openings(calls: Call[]): Call[] {
+    return calls.filter((call) => call.command.endsWith("_worktree"));
+  }
+
+  it("names the Worktree by its folder and shows its path under the name", async () => {
+    const center = await open();
+
+    const title = within(center).getByRole("heading", { level: 2, name: "web-fix" });
+    expect(within(center).queryByRole("heading", { name: "feature/login" })).not.toBeInTheDocument();
+    expect(title.closest("header")).toHaveTextContent(PATH);
+  });
+
+  it("gives the slug and the other names of the Worktree in the tooltip of the title", async () => {
+    const center = await open();
+
+    const tooltip = within(center).getByRole("heading", { level: 2, name: "web-fix" }).closest("[title]");
+    expect(tooltip).toHaveAttribute("title", expect.stringContaining("Slug: web_fix"));
+    expect(tooltip).toHaveAttribute("title", expect.stringContaining("Branch: feature/login"));
+  });
+
+  it("says Main worktree beside the name of the main Worktree, and only of that one", async () => {
+    const center = await open("main", true);
+    const title = within(center).getByRole("heading", { level: 2, name: "web-fix" });
+
+    expect(title.closest("header")).toHaveTextContent("Main worktree");
+    expect(title).not.toHaveTextContent("Main worktree");
+    cleanup();
+    clearMocks();
+
+    const other = await open();
+    expect(
+      within(other).getByRole("heading", { level: 2, name: "web-fix" }).closest("header"),
+    ).not.toHaveTextContent("Main worktree");
+  });
+
+  it("holds Open in Editor and Open in Terminal, which open the Worktree by its path as the inspector did", async () => {
+    const calls = app({ open_worktree: () => undefined }, onBranch("feature/login"));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
+    const header = (await screen.findByRole("heading", { level: 2, name: "web-fix" })).closest("header");
+    expect(header).not.toBeNull();
+
+    fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Editor" }));
+    fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Terminal" }));
+
+    await waitFor(() => {
+      expect(openings(calls)).toEqual([
+        { command: "open_worktree", args: { path: PATH, with: "editor" } },
+        { command: "open_worktree", args: { path: PATH, with: "terminal" } },
+      ]);
+    });
+  });
+
+  it("no longer holds them in the inspector, which keeps Reveal in Finder", async () => {
+    const calls = app(
+      { open_worktree: () => undefined, reveal_worktree: () => undefined },
+      onBranch("feature/login"),
+    );
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByRole("heading", { name: "Services" });
+
+    const bare = within(inspector());
+    expect(bare.queryByRole("button", { name: /^Open in/ })).not.toBeInTheDocument();
+    fireEvent.click(bare.getByRole("button", { name: "Reveal in Finder" }));
+    await waitFor(() => {
+      expect(openings(calls)).toEqual([{ command: "reveal_worktree", args: { path: PATH } }]);
+    });
+
+    const picked = within(pick(center, "web"));
+    expect(picked.queryByRole("button", { name: /^Open in/ })).not.toBeInTheDocument();
+    expect(picked.getByRole("button", { name: "Reveal in Finder" })).toBeInTheDocument();
+  });
+
+  it("shows a failure to open under the header, once", async () => {
+    app(
+      {
+        open_worktree: () => Promise.reject({ kind: "launch", message: "cannot open /p/work/acme/web-fix" }),
+      },
+      onBranch("feature/login"),
+    );
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
+    const header = (await screen.findByRole("heading", { level: 2, name: "web-fix" })).closest("header");
+
+    fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Terminal" }));
+
+    // Found once: the inspector, which also opens a Worktree from the menu bar, does not repeat it.
+    const alert = await screen.findByText("cannot open /p/work/acme/web-fix");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert.previousElementSibling).toBe(header);
   });
 });

@@ -476,6 +476,51 @@ body {
   margin: 0;
 }
 
+/* The title line of a Worktree: its folder over its path, in the column that gives way when the window narrows, then the
+   buttons that open it. The folder and the path are cut with an ellipsis rather than wrapped. */
+.worktree-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.worktree-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.worktree-head .title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-legend {
+  flex: none;
+  color: var(--faint);
+  font-size: var(--size-small);
+}
+
+.worktree-path {
+  margin: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--size-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worktree-head .mark {
+  margin-left: 6px;
+}
+
+.worktree-head .button {
+  flex: none;
+}
+
 /* The Services of the Overview, under the section Needs you pins on top. */
 .services {
   margin-top: 4px;

@@ -36,7 +36,7 @@ import { foreignId, resolve, selectedKey, type Selected, type Selection } from "
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
-import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
+import { OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
 import type { MenuChoice } from "./protocol/MenuChoice";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
@@ -45,12 +45,13 @@ import { ContainerRow, RemovedMark, ServiceRow, worktreeWhere } from "./Rows";
 import { foreignWord, jobEndWord, serviceEndWord } from "./state";
 import { TitleBar } from "./TitleBar";
 import { formatMoment } from "./time";
+import { useOpening } from "./useOpening";
 import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
 
 /**
  * What the center shows: the Overview of every Service, one Worktree, the Jobs outside any Repository, the Orphans,
  * Doctor, or Settings. The Orphans and Settings hide the inspector. `focusEditor`
- * sends the developer to the editor field, because "Open in editor" found none set.
+ * sends the developer to the editor field, because "Open in Editor" found none set.
  */
 type View =
   | { kind: "overview" }
@@ -260,10 +261,11 @@ export function App({
   const outside = view.kind === "outside";
   // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
   const wide = settings || orphans;
-  // The Overview draws its own title line, with the controls of the toolbar at its end, so the toolbar is left out.
-  const overviewShown = snapshot.kind === "status" && !checking && current === null;
-  // The notice of a Procly release that drifted, which any screen but the Overview shows above its content and the
-  // Overview shows under its title line.
+  // The Overview and a Worktree draw their own title line, with the controls of the toolbar at its end, so the toolbar
+  // is left out.
+  const titled = snapshot.kind === "status" && !checking;
+  // The notice of a Procly release that drifted, which any screen but those two shows above its content and they show
+  // under their title line.
   const banner =
     snapshot.kind === "status" ? (
       <ReleaseBanner
@@ -278,6 +280,9 @@ export function App({
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
+  };
+  const needEditor = (): void => {
+    setView({ kind: "settings", focusEditor: true });
   };
 
   // Without a Daemon to read there is nothing for a sidebar or an inspector to hold, so the window is one screen.
@@ -336,10 +341,10 @@ export function App({
               />
             ) : (
               <>
-                {overviewShown ? null : (
+                {titled ? null : (
                   <Toolbar snapshot={snapshot} store={store} doctor={doctor} orphans={orphanScan} />
                 )}
-                {overviewShown ? null : banner}
+                {titled ? null : banner}
                 {view.kind === "doctor" ? (
                   <DoctorScreen store={doctor} />
                 ) : (
@@ -357,6 +362,7 @@ export function App({
                       />
                     }
                     onRelease={release}
+                    onNeedEditor={needEditor}
                   />
                 )}
               </>
@@ -372,9 +378,7 @@ export function App({
                 seen={snapshot.kind === "status" ? snapshot.seen : []}
                 onMarkSeen={onMarkSeen}
                 onChanged={refresh}
-                onNeedEditor={() => {
-                  setView({ kind: "settings", focusEditor: true });
-                }}
+                onNeedEditor={needEditor}
               />
             </aside>
           )}
@@ -610,15 +614,17 @@ function Center({
   controls,
   banner,
   onRelease,
+  onNeedEditor,
 }: {
   snapshot: Exclude<DaemonSnapshot, BlockingSnapshot>;
   current: WorktreeStatus | null;
   doctor: DoctorStore;
-  /** The end of the title line of the Overview: when the answer was read, and Refresh. */
+  /** The end of the title line of the Overview or of a Worktree: when the answer was read, and Refresh. */
   controls: ReactNode;
-  /** The notice the Overview draws under its title line, nothing when there is none. */
+  /** The notice the Overview or a Worktree draws under its title line, nothing when there is none. */
   banner: ReactNode;
   onRelease: (worktree: WorktreeStatus) => void;
+  onNeedEditor: () => void;
 }) {
   switch (snapshot.kind) {
     case "loading":
@@ -639,7 +645,10 @@ function Center({
           at={snapshot.at}
           seen={snapshot.seen}
           doctor={doctor}
+          controls={controls}
+          banner={banner}
           onRelease={onRelease}
+          onNeedEditor={onNeedEditor}
         />
       );
     default: {
@@ -909,8 +918,9 @@ function Inspector({
 }
 
 /**
- * Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. Open in Editor and
- * Open in Terminal of the menu bar open it here, so that a failure shows under the buttons.
+ * Reveals the Worktree in the Finder, and opens it in the editor or the terminal the settings name when Open in Editor
+ * or Open in Terminal of the menu bar ask for it, so that a failure shows here. The buttons that open it live in the
+ * title line of the Worktree.
  */
 function WorktreeActions({
   path,
@@ -918,23 +928,11 @@ function WorktreeActions({
   onNeedEditor,
 }: {
   path: string;
-  /** Whether the buttons are drawn. Without them the menu bar still opens the Worktree, and a failure still shows. */
+  /** Whether the button is drawn. Without it the menu bar still opens the Worktree, and a failure still shows. */
   buttons?: boolean;
   onNeedEditor: () => void;
 }) {
-  const [error, setError] = useState<string | null>(null);
-
-  function run(action: Promise<void>): void {
-    setError(null);
-    action.catch((reason: unknown) => {
-      const failure = failureOf(reason);
-      if (failure.kind === "no_editor") {
-        onNeedEditor();
-      } else {
-        setError(failure.message);
-      }
-    });
-  }
+  const { error, run } = useOpening(onNeedEditor);
 
   useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
     if (choice === "open-in-editor") {
@@ -947,35 +945,15 @@ function WorktreeActions({
   return (
     <div className="worktree-actions">
       {buttons ? (
-        <>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(openWorktree(path, "editor"));
-            }}
-          >
-            Open in editor
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(openWorktree(path, "terminal"));
-            }}
-          >
-            Open in terminal
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(revealWorktree(path));
-            }}
-          >
-            Reveal in Finder
-          </button>
-        </>
+        <button
+          type="button"
+          className="button"
+          onClick={() => {
+            run(revealWorktree(path));
+          }}
+        >
+          Reveal in Finder
+        </button>
       ) : null}
       {error === null ? null : (
         <p role="alert" className="error">
