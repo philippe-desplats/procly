@@ -37,21 +37,42 @@ function answered(at = AT, response: Response = status): Update {
   return { at_ms: at, response, needs_you: [], seen: [] };
 }
 
-/** The recorded answer, with a Foreign process in the Worktree the `leased_ports` check names. */
-const WITH_FOREIGN_PROCESS: Response = {
-  ...recorded,
-  repositories: recorded.repositories.map((repository) => ({
-    ...repository,
-    worktrees: repository.worktrees.map((worktree) =>
-      worktree.path === "/p/work/acme/web-fix"
-        ? {
-            ...worktree,
-            foreign: [{ kind: "process", pid: 4812, command: "node server.js", ports: [24081] }],
-          }
-        : worktree,
-    ),
-  })),
-} as Response;
+/**
+ * The recorded answer, with a Foreign process in the Worktree the `leased_ports` check names. It holds `port`, which the
+ * Service `web` of that Worktree has when `leased` is true.
+ */
+function withForeignProcess(port: number, leased: boolean): Response {
+  return {
+    ...recorded,
+    repositories: recorded.repositories.map((repository) => ({
+      ...repository,
+      worktrees: repository.worktrees.map((worktree) =>
+        worktree.path === "/p/work/acme/web-fix"
+          ? {
+              ...worktree,
+              services: leased
+                ? [
+                    {
+                      service: "web",
+                      port: 24081,
+                      reattached: false,
+                      started_at: AT,
+                      restartable: false,
+                      state: "ended",
+                      end: { kind: "port_mismatch", leased: 24081, actual: 10189 },
+                    },
+                  ]
+                : [],
+              foreign: [{ kind: "process", pid: 4812, command: "node server.js", ports: [port] }],
+            }
+          : worktree,
+      ),
+    })),
+  } as Response;
+}
+
+/** A Foreign process on the port the Lease of a Service holds, which the check names. */
+const WITH_FOREIGN_PROCESS: Response = withForeignProcess(24081, true);
 
 function failed(failure: Failure): Update {
   return { at_ms: AT, failure, needs_you: [], seen: [] };
@@ -382,6 +403,20 @@ describe("the passed checks of the Doctor screen", () => {
     expect(within(doctor).getByRole("button", { name: "Show" })).toBeInTheDocument();
   });
 
+  it("puts Show right beside the text of the line, not at the far end of the row", async () => {
+    rust(answered(), () => FOLDING);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+
+    const text = await within(doctor).findByText("5 checks passed, 1 skipped");
+
+    // Both sit in one line of their own, which the row does not stretch, instead of in 2 columns of the row.
+    const button = within(doctor).getByRole("button", { name: "Show" });
+    expect(text.parentElement).toBe(button.parentElement);
+    expect(text.parentElement?.tagName).toBe("DIV");
+    expect(text.nextElementSibling).toBe(button);
+  });
+
   it("keeps the failed and the warning checks in view, failed first", async () => {
     rust(answered(), () => MACHINE);
     render(<App store={createDaemonStore()} />);
@@ -460,6 +495,25 @@ describe("the actions that show where a problem is", () => {
     expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
   });
 
+  it("offers no Show the Process for a Foreign process that holds no port a Service of its Worktree has", async () => {
+    // The process runs in the Worktree but holds no Lease, so the check does not name it.
+    rust(answered(AT, withForeignProcess(3000, true)), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("leased_ports");
+
+    expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
+  });
+
+  it("offers no Show the Process when the Worktree has no Service on the port the process holds", async () => {
+    rust(answered(AT, withForeignProcess(24081, false)), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("leased_ports");
+
+    expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
+  });
+
   it("offers no Show the Process on a leased ports check that did not fail", async () => {
     const passing: DoctorDocument = {
       ...MACHINE,
@@ -476,6 +530,19 @@ describe("the actions that show where a problem is", () => {
     showTheFolded(doctor);
 
     expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
+  });
+});
+
+describe("the foot of the Doctor screen", () => {
+  it("says where the checks of a Worktree are, under the checks", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    const foot = await within(doctor).findByText(
+      "The checks of a Worktree (configuration, Guard, Worktrunk hooks) are in its view.",
+    );
+
+    expect(before(rowOf(doctor, "session_unit"), foot)).toBe(true);
   });
 });
 

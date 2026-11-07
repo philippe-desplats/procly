@@ -249,15 +249,23 @@ export function App({
   // Settings, the Orphans and the checks show nothing the inspector explains. The Jobs outside any Repository are picked
   // for it.
   const wide = settings || orphans || checking;
-  // Where the Doctor takes the developer from a failed check: the Orphans, and the Foreign process the Status reports.
-  const processToShow = snapshot.kind === "status" ? foreignToShow(snapshot.report) : null;
+  const doctorRun = useDoctor(doctor, null);
+  // Where the Doctor takes the developer from a failed check: the Orphans, and the Foreign process the Status reports
+  // for the Leases the `leased_ports` check names.
+  const leasedPorts =
+    doctorRun.kind === "report" || doctorRun.kind === "running"
+      ? doctorRun.document?.checks.find((check) => check.name === "leased_ports" && check.status === "failed")
+      : undefined;
+  const processToShow =
+    snapshot.kind === "status" && leasedPorts !== undefined
+      ? foreignToShow(snapshot.report, leasedPorts.message)
+      : null;
   const showProcess = (): void => {
     if (processToShow?.kind === "foreign") {
       setView({ kind: "worktree", path: processToShow.worktree });
       setSelection(processToShow);
     }
   };
-  const doctorRun = useDoctor(doctor, null);
   const orphanDryRun = useOrphanScan(orphanScan);
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.

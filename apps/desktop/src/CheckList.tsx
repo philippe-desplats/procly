@@ -114,10 +114,12 @@ function FoldRow({ folded, open, onToggle }: { folded: Check[]; open: boolean; o
   return (
     <li className="item check-fold">
       <StatusGlyph status={passed ? "passed" : "skipped"} />
-      <span className="check-fold-text">{foldedText(folded)}</span>
-      <button type="button" className="fold-toggle" aria-expanded={open} onClick={onToggle}>
-        {open ? "Hide" : "Show"}
-      </button>
+      <div className="check-fold-line">
+        <span className="check-fold-text">{foldedText(folded)}</span>
+        <button type="button" className="fold-toggle" aria-expanded={open} onClick={onToggle}>
+          {open ? "Hide" : "Show"}
+        </button>
+      </div>
     </li>
   );
 }

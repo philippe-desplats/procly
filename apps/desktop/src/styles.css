@@ -640,11 +640,24 @@ body {
   gap: 4px;
 }
 
-/* The line the passed checks fold into: the Show button sits at its end, quiet as a caption. */
+/* The line the passed checks fold into: the Show button follows its text, quiet as a caption. */
 .item.check-fold {
-  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
   color: var(--muted);
+}
+
+.check-fold-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The foot of the Doctor screen: where the checks that are not here can be found. */
+.doctor-foot {
+  margin: 14px 0 0;
+  color: var(--faint);
+  font-size: var(--size-small);
 }
 
 .fold-toggle {

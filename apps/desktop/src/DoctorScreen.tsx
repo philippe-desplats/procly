@@ -68,6 +68,9 @@ export function DoctorScreen({
         <p className="caption">{`Checked ${formatMoment(state.at, state.at)}`}</p>
       ) : null}
       <Checks state={state} pick={machineChecks} fold show={show} />
+      <p className="doctor-foot">
+        The checks of a Worktree (configuration, Guard, Worktrunk hooks) are in its view.
+      </p>
       {document === null || document.prompt === null ? null : <AgentPrompt prompt={document.prompt} />}
     </section>
   );
