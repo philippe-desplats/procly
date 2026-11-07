@@ -55,7 +55,7 @@ describe("the title line of a screen", () => {
   it("is as tall as the strip over the sidebar and separated from the list by a line", () => {
     const bar = declarations(".title-bar");
     expect(bar).toMatch(/display:\s*flex\s*;/);
-    expect(bar).toMatch(/height:\s*52px\s*;/);
+    expect(bar).toMatch(/min-height:\s*52px\s*;/);
     expect(bar).toMatch(/border-bottom:\s*1px solid var\(--line\)\s*;/);
   });
 });

@@ -685,7 +685,7 @@ describe("the Outside Repositories screen", () => {
 
     const center = screen.getByRole("main");
     const title = await within(center).findByRole("heading", { name: "Outside Repositories", level: 2 });
-    const line = title.parentElement;
+    const line = title.closest("header");
     expect(line).toContainElement(within(center).getByText("Updated at 19:35:00"));
     expect(line).toContainElement(within(center).getByRole("button", { name: "Refresh" }));
     // Nothing sits above the line.
@@ -791,7 +791,7 @@ describe("the header of the Worktree screen", () => {
 
     const title = within(center).getByRole("heading", { level: 2, name: "web-fix" });
     expect(within(center).queryByRole("heading", { name: "feature/login" })).not.toBeInTheDocument();
-    expect(title.closest("header")?.querySelector(".worktree-path")).toHaveTextContent(PATH);
+    expect(title.closest("header")?.querySelector(".title-under")).toHaveTextContent(PATH);
   });
 
   it("gives the slug and the other names of the Worktree in the tooltip of the title", async () => {
