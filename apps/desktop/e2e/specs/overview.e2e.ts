@@ -18,6 +18,6 @@ describe("a Service started with the CLI", () => {
     const up = await procly(["up", "--json", scene.service], scene.path);
     expect(up.code).toBe(0);
 
-    await showingText(OVERVIEW, [scene.service, `:${scene.port}`]);
+    await showingText(OVERVIEW, [scene.service, String(scene.port)]);
   });
 });

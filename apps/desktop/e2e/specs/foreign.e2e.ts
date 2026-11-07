@@ -34,14 +34,18 @@ describe("a Foreign process selected in its Worktree", () => {
     const pid = foreign.pid;
     expect(pid).toBeDefined();
 
-    // The Overview pins the Foreign process in Needs you, named by the port it listens on. Each try asks the poller
-    // for a tick, since the Daemon reports the process only once it listens.
+    // The Overview pins the Foreign process in Needs you, with the port it listens on drawn as a pill. Each try asks
+    // the poller for a tick, since the Daemon reports the process only once it listens.
     await browser.waitUntil(
       async () => {
         await press("Refresh");
-        return pick(NEEDS_YOU_ROW, `:${String(port)}`);
+        return pick(NEEDS_YOU_ROW, String(port));
       },
-      { timeout: 60_000, interval: 500, timeoutMsg: `no Foreign process on :${String(port)} in Needs you` },
+      {
+        timeout: 60_000,
+        interval: 500,
+        timeoutMsg: `no Foreign process on port ${String(port)} in Needs you`,
+      },
     );
 
     await showingText(INSPECTOR, ["started outside Procly", "Stop it yourself", `kill ${String(pid)}`]);
