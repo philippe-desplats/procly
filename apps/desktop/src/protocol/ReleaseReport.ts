@@ -34,8 +34,8 @@ kept_leases: Array<KeptLease>,
  */
 logical_resources: Array<KeptResource>, 
 /**
- * The Retention policies it applied to the Isolated containers of the Worktrees already removed. Empty from a
- * Daemon that does not report them.
+ * The Retention policies it applied, or for a dry run would apply, to the Isolated containers of the Worktrees
+ * already removed. Empty from a Daemon that does not report them.
  */
 retention: Array<AppliedRetention>, 
 /**

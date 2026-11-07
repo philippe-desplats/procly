@@ -121,16 +121,16 @@ pub(super) fn would_apply(
     running: BTreeSet<(PathBuf, String)>,
 ) -> anyhow::Result<Vec<AppliedRetention>> {
     let records = registry.isolated.all().context("cannot read the Isolated containers")?;
-    let declared = declared(&records);
+    let declared = with_a_policy(&records);
     if declared.is_empty() {
         return Ok(Vec::new());
     }
     let (worktrees, _) = Removed::list_while(registry, repositories(&declared), running);
-    Ok(applied(&declared, &worktrees))
+    Ok(applied_to_removed(&declared, &worktrees))
 }
 
 /// The records whose Retention policy is not keep, the only ones a sweep applies a policy to.
-fn declared(records: &[IsolatedRecord]) -> Vec<&IsolatedRecord> {
+fn with_a_policy(records: &[IsolatedRecord]) -> Vec<&IsolatedRecord> {
     records
         .iter()
         .filter(|record| record.retention != Retention::Keep)
@@ -143,7 +143,7 @@ fn repositories(declared: &[&IsolatedRecord]) -> BTreeSet<PathBuf> {
 }
 
 /// The Retention policies a sweep applies: those of `declared` whose Worktree `worktrees` lists as removed.
-fn applied(declared: &[&IsolatedRecord], worktrees: &Removed) -> Vec<AppliedRetention> {
+fn applied_to_removed(declared: &[&IsolatedRecord], worktrees: &Removed) -> Vec<AppliedRetention> {
     declared
         .iter()
         .filter(|record| removed(record, worktrees) == Some(true))
@@ -230,7 +230,7 @@ struct Swept {
 /// the others is. Blocking.
 fn sweep_blocking(registry: &Registry) -> anyhow::Result<Swept> {
     let records = registry.isolated.all().context("cannot read the Isolated containers")?;
-    let declared = declared(&records);
+    let declared = with_a_policy(&records);
     if declared.is_empty() {
         return Ok(Swept {
             later: Vec::new(),
@@ -239,7 +239,7 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Swept> {
         });
     }
     let (worktrees, skipped) = Removed::list(registry, repositories(&declared));
-    let applied = applied(&declared, &worktrees);
+    let applied = applied_to_removed(&declared, &worktrees);
     for skipped in &skipped {
         eprintln!(
             "cannot list the Worktrees of {}, the retention policies of its Isolated containers wait: {}",
@@ -409,6 +409,47 @@ mod tests {
             Some(false)
         );
         assert_eq!(removed(&pinned, &worktrees), Some(false));
+    }
+
+    #[test]
+    fn a_sweep_applies_the_policy_of_each_container_of_a_removed_worktree_that_declares_one() {
+        let worktrees = Removed::new(
+            BTreeMap::from([(
+                PathBuf::from("/src/app/.git"),
+                BTreeSet::from([PathBuf::from("/src/app")]),
+            )]),
+            BTreeSet::new(),
+        );
+        let mut deleted = record("/src/app/.git", "/src/app-login");
+        deleted.retention = Retention::Delete;
+        let mut kept = record("/src/app/.git", "/src/app-kept");
+        kept.retention = Retention::Keep;
+        let records = [
+            deleted,
+            record("/src/app/.git", "/src/app-later"),
+            kept,
+            // Listed by git, and of a Repository git cannot list.
+            record("/src/app/.git", "/src/app"),
+            record("/src/api/.git", "/src/api-login"),
+        ];
+
+        let applied = applied_to_removed(&with_a_policy(&records), &worktrees);
+
+        assert_eq!(
+            applied,
+            [
+                AppliedRetention {
+                    worktree: PathBuf::from("/src/app-login"),
+                    service: "db".to_owned(),
+                    policy: "delete".to_owned(),
+                },
+                AppliedRetention {
+                    worktree: PathBuf::from("/src/app-later"),
+                    service: "db".to_owned(),
+                    policy: "1d".to_owned(),
+                },
+            ]
+        );
     }
 
     #[test]

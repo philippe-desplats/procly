@@ -190,12 +190,10 @@ fn dry_run_of(registry: &Registry, topology: &Topology, branch: Option<&str>) ->
         .would_release_worktree(repository, worktree, branch, &running)?;
     report.leases = leases;
     report.kept_leases = kept_leases;
-    // A record that cannot be read only hides the policies, as the release logs it and goes on.
+    // A record that cannot be read leaves the policies out of the report and is only logged, as the release does.
     match retention::would_apply(registry, running_at_sweep) {
         Ok(applied) => report.retention = applied,
-        Err(error) => report
-            .warnings
-            .push(format!("cannot name the Retention policies it would apply: {error:#}")),
+        Err(error) => eprintln!("cannot tell the retention policies a release would apply: {error:#}"),
     }
     // A configuration that cannot be read only hides the resources, the Leases are released whatever it says.
     match logical_resources(registry, topology) {
