@@ -4,6 +4,7 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
+import { APP_VERSION } from "./app-version";
 import { createDaemonStore, type Failure, type Update } from "./daemon";
 import machine from "./fixtures/doctor.json";
 import gc from "./fixtures/gc.json";
@@ -157,6 +158,20 @@ describe("a Daemon that does not run", () => {
     expect(commands).toEqual(["last_update", "doctor"]);
   });
 
+  it("explains what starting the Daemon does and that the window follows, as the mockup words it", async () => {
+    rust(failed(NOT_RUNNING));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon is not running" });
+    expect(
+      screen.getByText(
+        "Procly shows nothing until it runs. Starting it takes back the Services a previous Daemon left running. This window updates by itself once the Daemon runs, also when you start it from a terminal.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("To start it with your session instead")).toBeInTheDocument();
+  });
+
   it("takes the whole window, with the brand mark and the title, and no sidebar, toolbar or inspector", async () => {
     rust(failed(NOT_RUNNING));
 
@@ -238,8 +253,55 @@ describe("a Daemon of another protocol version", () => {
     expect(
       await screen.findByRole("heading", { name: "The Daemon runs an older version" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("The Daemon speaks protocol 21, this app speaks 22.")).toBeInTheDocument();
+    expect(screen.getByText(/^It speaks protocol 21, this app is /)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Restart the Daemon…" })).toBeEnabled();
+  });
+
+  it("explains an older Daemon, what a restart costs and what comes back, as the mockup words it", async () => {
+    rust(failed(mismatch(21)));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon runs an older version" });
+    expect(
+      screen.getByText(
+        `It speaks protocol 21, this app is ${APP_VERSION} and speaks 22. They speak different protocol versions, so the app cannot read anything from it.`,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Restarting it stops every Service and Job of every Repository."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `They come back once your agents or you run procly up again. The new Daemon runs ${APP_VERSION}, the release this app ships.`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Or stop it yourself from a terminal")).toBeInTheDocument();
+  });
+
+  it("names the release the new Daemon runs inside the box of an older Daemon", async () => {
+    rust(failed(mismatch(21)));
+
+    render(<App store={createDaemonStore()} />);
+
+    const warning = (
+      await screen.findByText("Restarting it stops every Service and Job of every Repository.")
+    ).closest(".state-warning");
+    expect(warning).toHaveTextContent(`The new Daemon runs ${APP_VERSION}`);
+  });
+
+  it("explains a newer Daemon, why the app offers no restart and how to update it, as the mockup words it", async () => {
+    rust(failed(mismatch(23)));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon runs a newer version" });
+    expect(
+      screen.getByText(
+        `It speaks protocol 23, this app is ${APP_VERSION} and speaks 22. They speak different protocol versions, so the app cannot read anything from it. Restarting the Daemon from here would replace it with an older one, so the app does not offer it.`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Update the app to match")).toBeInTheDocument();
   });
 
   it("takes the whole window on an older Daemon, with the brand mark and the title", async () => {
@@ -330,8 +392,8 @@ describe("a Daemon of another protocol version", () => {
     expect(
       await screen.findByRole("heading", { name: "The Daemon runs a newer version" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("The Daemon speaks protocol 23, this app speaks 22.")).toBeInTheDocument();
-    expect(screen.getByText(/update Procly/i)).toBeInTheDocument();
+    expect(screen.getByText(/It speaks protocol 23, this app is/)).toBeInTheDocument();
+    expect(screen.getByText("Update the app to match")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();
   });
 

@@ -759,15 +759,16 @@ body {
   color: #ffffff;
 }
 
+/* A command and its Copy button, on the side background so that it sits back from the text around it. */
 .copybox {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding: 6px 8px 6px 10px;
+  gap: 8px;
+  padding: 5px 6px 5px 9px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--raise);
+  background: var(--side);
 }
 
 .error {
@@ -794,14 +795,31 @@ body {
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  line-height: 1.5;
+  user-select: text;
 }
 
-.copybox .button {
+/* Copy is quiet: no border and no fill until the pointer is on it. */
+.copybox-button {
   flex: none;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--size-small);
+  cursor: default;
 }
 
-.copybox-block {
-  align-items: flex-start;
+.copybox-button:hover {
+  background: var(--raise);
+  color: var(--text);
+}
+
+.copybox-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* A check: its glyph in a narrow column, then the message as the main line and the name of the check as a caption. */

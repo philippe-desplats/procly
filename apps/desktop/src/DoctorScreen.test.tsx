@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type Failure, type Update } from "./daemon";
-import { REFRESH_REQUESTED, type DoctorDocument } from "./doctor";
+import { REFRESH_REQUESTED, checksWithoutDaemon, type DoctorDocument } from "./doctor";
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import drift from "./fixtures/doctor-release-drift.json";
@@ -745,28 +745,84 @@ describe("the Worktree screen", () => {
 });
 
 describe("Daemon not running", () => {
-  it("shows the checks that run without the Daemon once doctor ran on entering the state", async () => {
+  it("lists only the 2 problems of the 8 checks that run without the Daemon", async () => {
     rust(failed(NOT_RUNNING), () => NO_DAEMON);
     render(<App store={createDaemonStore()} />);
 
     const checks = await screen.findByRole("region", { name: "Checks without the Daemon" });
 
     expect(await within(checks).findByText("session_unit")).toBeInTheDocument();
-    expect(listed(checks)).toEqual([
-      "daemon",
-      "session_unit",
-      "docker_compose",
-      "state_documents",
-      "configuration",
-      "guard",
-      "portless",
-      "worktrunk_hooks",
-    ]);
-    // The 3 checks that need the Daemon were skipped for want of one: they say nothing the screen does not.
-    for (const name of ["leased_ports", "orphans", "portless_aliases"]) {
-      expect(within(checks).queryByText(name)).not.toBeInTheDocument();
-    }
+    // 8 checks run without the Daemon and 2 of them are problems, the passed and the skipped ones are not listed.
+    expect(listed(checks)).toEqual(["daemon", "session_unit"]);
+    expect(checks.querySelectorAll("li")).toHaveLength(2);
+    expect(within(checks).queryByRole("button", { name: "Show" })).not.toBeInTheDocument();
+    expect(within(checks).queryByText(/checks? passed/)).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
+  });
+
+  // jsdom lays nothing out, so `scrollHeight` cannot be read: the screen stayed 1025 px tall at 820 because it stacked 8
+  // checks, and what makes it short is that it stacks 2, with no fold row, beside 3 copy boxes.
+  it("stacks little enough to hold in a 1280 by 820 window with the scene of 8 checks, 2 of them problems", async () => {
+    rust(failed(NOT_RUNNING), () => NO_DAEMON);
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon is not running" });
+    const screenOfTheDaemon = screen.getByRole("main");
+    await within(screenOfTheDaemon).findByText("session_unit");
+
+    expect(checksWithoutDaemon(NO_DAEMON.checks)).toHaveLength(8);
+    expect(screenOfTheDaemon.querySelectorAll("li")).toHaveLength(2);
+    expect(screenOfTheDaemon.querySelectorAll(".copybox")).toHaveLength(3);
+    expect(screenOfTheDaemon.querySelector(".check-fold")).toBeNull();
+  });
+
+  it("says in a line that nothing is wrong when every check that runs without the Daemon passed", async () => {
+    const quiet: DoctorDocument = {
+      ...NO_DAEMON,
+      checks: NO_DAEMON.checks.map((check) => ({ ...check, status: "passed" as const })),
+    };
+    rust(failed(NOT_RUNNING), () => quiet);
+    render(<App store={createDaemonStore()} />);
+
+    const checks = await screen.findByRole("region", { name: "Checks without the Daemon" });
+
+    expect(await within(checks).findByText("No problem found.")).toBeInTheDocument();
+    expect(checks.querySelectorAll("li")).toHaveLength(0);
+  });
+
+  it("heads the checks with the time they ran at, once they ran", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 10, 5, 14, 1, 30));
+    let answer: (document: DoctorDocument) => void = () => undefined;
+    mockIPC(
+      (command) => {
+        if (command === "last_update") {
+          return failed(NOT_RUNNING);
+        }
+        if (command === "doctor") {
+          return new Promise<DoctorDocument>((resolve) => {
+            answer = resolve;
+          });
+        }
+        return Promise.reject(new Error(`unexpected command ${command}`));
+      },
+      { shouldMockEvents: true },
+    );
+    render(<App store={createDaemonStore()} />);
+
+    const checks = await screen.findByRole("region", { name: "Checks without the Daemon" });
+    // Nothing ran yet, so there is no time to name.
+    expect(within(checks).getByRole("heading")).toHaveTextContent(/^Checks that run without the Daemon$/);
+    expect(within(checks).getByText("Checking…")).toBeInTheDocument();
+
+    await act(async () => {
+      answer(NO_DAEMON);
+      await Promise.resolve();
+    });
+
+    expect(await within(checks).findByRole("heading")).toHaveTextContent(
+      /^Checks that run without the Daemon, at 14:01$/,
+    );
   });
 
   it("runs doctor on entering the state, and copies the fix of a check", async () => {

@@ -12,7 +12,7 @@ import {
   type DoctorStore,
 } from "./doctor";
 import type { Check } from "./protocol/Check";
-import { formatMoment } from "./time";
+import { formatMinute, formatMoment } from "./time";
 
 /** How many checks failed and how many only warn, in a line. */
 function summary(document: DoctorDocument): string {
@@ -82,7 +82,7 @@ function AgentPrompt({ prompt }: { prompt: string }) {
     <div role="group" aria-label="Prompt for your agent" className="prompt">
       <h3 className="subtitle">Hand it to your agent</h3>
       <p className="caption">Paste this prompt into your own coding agent to have it fix the problems.</p>
-      <CopyBox text={prompt} block />
+      <CopyBox text={prompt} />
     </div>
   );
 }
@@ -100,8 +100,9 @@ export function WorktreeChecks({ store, path }: { store: DoctorStore; path: stri
 }
 
 /**
- * The checks that run without the Daemon, for the screen that tells it does not run. The run itself starts when the
- * app enters that state (see `App`), so this only reads what it found.
+ * The checks that run without the Daemon, for the screen that tells it does not run: only the problems, under a header
+ * that names the time they ran at. The run itself starts when the app enters that state (see `App`), so this only reads
+ * what it found.
  */
 export function ChecksWithoutDaemon({ store }: { store: DoctorStore }) {
   const state = useDoctor(store, null);
@@ -109,8 +110,12 @@ export function ChecksWithoutDaemon({ store }: { store: DoctorStore }) {
   const fresh: DoctorState = state.kind === "running" ? { kind: "running", document: null, at: null } : state;
   return (
     <section aria-label="Checks without the Daemon">
-      <h3 className="subtitle">Checks that run without the Daemon</h3>
-      <Checks state={fresh} pick={checksWithoutDaemon} />
+      <h3 className="subtitle">
+        {fresh.kind === "report"
+          ? `Checks that run without the Daemon, at ${formatMinute(fresh.at, fresh.at)}`
+          : "Checks that run without the Daemon"}
+      </h3>
+      <Checks state={fresh} pick={checksWithoutDaemon} problemsOnly />
     </section>
   );
 }
