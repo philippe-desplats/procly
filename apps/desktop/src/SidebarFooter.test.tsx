@@ -14,6 +14,7 @@ import recordedGc from "./fixtures/gc.json";
 import recordedStatus from "./fixtures/status.json";
 import type { OrphanScan } from "./orphan-scan";
 import type { GcReport } from "./protocol/GcReport";
+import { daemonLine } from "./test-rows";
 import type { Response } from "./protocol/Response";
 import { SidebarFooter } from "./SidebarFooter";
 
@@ -171,40 +172,42 @@ describe("the Daemon line of the sidebar footer", () => {
   it("names the version the Daemon runs and the absolute time of the last Status", () => {
     footer();
 
-    expect(screen.getByText("Daemon 0.5.0, updated at 14:01:12")).toBeInTheDocument();
+    expect(screen.getByText(daemonLine("Daemon 0.5.0, updated at 14:01:12"))).toBeInTheDocument();
   });
 
   it("says the Daemon runs another release than this app when it does", () => {
     footer({ doctor: reported(drift) });
 
-    expect(screen.getByText("Daemon 0.4.0, updated at 14:01:12")).toBeInTheDocument();
+    expect(screen.getByText(daemonLine("Daemon 0.4.0, updated at 14:01:12"))).toBeInTheDocument();
   });
 
   it("names the version from the daemon_version field when the message of the daemon check holds none", () => {
     footer({ doctor: reported(reworded) });
 
-    expect(screen.getByText("Daemon 0.5.0, updated at 14:01:12")).toBeInTheDocument();
+    expect(screen.getByText(daemonLine("Daemon 0.5.0, updated at 14:01:12"))).toBeInTheDocument();
   });
 
   it("leaves the version out while doctor has not named one", () => {
     footer({ doctor: NEVER_CHECKED });
 
-    expect(screen.getByText("Daemon, updated at 14:01:12")).toBeInTheDocument();
+    expect(screen.getByText(daemonLine("Daemon, updated at 14:01:12"))).toBeInTheDocument();
   });
 
-  it("holds in one text element that carries the whole line, so that the cut of a narrow sidebar leaves it readable", () => {
+  it("keeps its time apart from its words, so that the cut of a narrow sidebar takes the words and leaves the time", () => {
     footer();
 
-    const text = screen.getByText("Daemon 0.5.0, updated at 14:01:12");
-    expect(text).toHaveClass("daemon-line-text");
+    const text = screen.getByText(daemonLine("Daemon 0.5.0, updated at 14:01:12"));
     expect(text).toHaveAttribute("title", "Daemon 0.5.0, updated at 14:01:12");
+    expect(text.querySelector(".daemon-line-words")).toHaveTextContent("Daemon 0.5.0, updated at");
+    expect(text.querySelector(".daemon-line-time")).toHaveTextContent("14:01:12");
     expect(text.parentElement?.children).toHaveLength(2);
   });
 
   it("is a quiet dot beside the line, not a control", () => {
     const { container } = footer();
 
-    const line = screen.getByText("Daemon 0.5.0, updated at 14:01:12").parentElement as HTMLElement;
+    const line = screen.getByText(daemonLine("Daemon 0.5.0, updated at 14:01:12"))
+      .parentElement as HTMLElement;
     expect(line.querySelector('[data-glyph="healthy"]')).not.toBeNull();
     expect(within(container).getAllByRole("button")).toHaveLength(3);
   });
@@ -285,13 +288,13 @@ describe("the sidebar footer of the window", () => {
       }),
     ).toBeVisible();
     expect(within(sidebar).getByRole("button", { name: /^Orphans6$/ })).toBeVisible();
-    expect(within(sidebar).getByText("Daemon 0.5.0, updated at 14:01:12")).toBeVisible();
+    expect(within(sidebar).getByText(daemonLine("Daemon 0.5.0, updated at 14:01:12"))).toBeVisible();
   });
 
   it("scans again on Refresh, and only then, since nothing runs on a timer", async () => {
     const commands = rust();
     render(<App store={createDaemonStore()} />);
-    await screen.findByText("Daemon 0.5.0, updated at 14:01:12");
+    await screen.findByText(daemonLine("Daemon 0.5.0, updated at 14:01:12"));
     expect(commands.filter((command) => command === "list_orphans")).toHaveLength(1);
 
     fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));

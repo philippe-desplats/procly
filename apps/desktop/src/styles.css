@@ -589,12 +589,22 @@ body {
   color: var(--ok);
 }
 
-/* One row, never wrapped: where the sidebar is too narrow the end is cut with an ellipsis. */
+/* One row, never wrapped: where the sidebar is too narrow the words give way with an ellipsis, the time stays whole. */
 .daemon-line-text {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.daemon-line-words {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.daemon-line-time {
+  flex: none;
+  margin-left: 0.3em;
 }
 
 .field {

@@ -9,6 +9,7 @@ import machine from "./fixtures/doctor.json";
 import gc from "./fixtures/gc.json";
 import recorded from "./fixtures/status.json";
 import type { Response } from "./protocol/Response";
+import { daemonLine } from "./test-rows";
 
 const status: Response = recorded as Response;
 
@@ -116,12 +117,14 @@ describe("a Daemon that does not answer well", () => {
     rust(answered(), { doctor: () => machine, list_orphans: () => gc });
     render(<App store={createDaemonStore()} />);
     const sidebar = await screen.findByRole("navigation", { name: "Worktrees" });
-    await within(sidebar).findByText("Daemon 0.5.0, updated at 19:35:00");
+    await within(sidebar).findByText(daemonLine("Daemon 0.5.0, updated at 19:35:00"));
 
     await tick({ ...failed(UNREADABLE), at_ms: AT + 60_000 });
 
-    const line = await screen.findByText("Daemon 0.5.0, updated at 19:35:00");
-    expect(within(screen.getByRole("main")).getByText("Daemon 0.5.0, updated at 19:35:00")).toBe(line);
+    const line = await screen.findByText(daemonLine("Daemon 0.5.0, updated at 19:35:00"));
+    expect(within(screen.getByRole("main")).getByText(daemonLine("Daemon 0.5.0, updated at 19:35:00"))).toBe(
+      line,
+    );
     // The quiet glyph says the Daemon answers, which it no longer does.
     expect(line.parentElement?.querySelector("[data-glyph]")).toBeNull();
   });

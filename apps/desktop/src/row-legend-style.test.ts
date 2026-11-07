@@ -19,8 +19,10 @@ describe("the legend of a Worktree in the sidebar", () => {
     expect(declarations(".row-legend")).toMatch(/flex:\s*none\s*;/);
     expect(declarations(".row-legend")).toMatch(/white-space:\s*nowrap\s*;/);
   });
+});
 
-  it("is followed under the name by the detail of an entry, small and muted", () => {
+describe("the detail of an entry in the sidebar", () => {
+  it("is small and muted under the name, as the count of Jobs of Outside Repositories", () => {
     const detail = declarations(".row-detail");
     expect(detail).toMatch(/color:\s*var\(--muted\)\s*;/);
     expect(detail).toMatch(/font-size:\s*var\(--size-small\)\s*;/);
