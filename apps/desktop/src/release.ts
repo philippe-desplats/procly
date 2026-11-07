@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { commandIn } from "./services";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { ReleaseReport } from "./protocol/ReleaseReport";
 import type { Response } from "./protocol/Response";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
@@ -45,6 +46,23 @@ export function holdsNothing(report: ReleaseReport): boolean {
     report.leases.length === 0 &&
     report.retention.length === 0
   );
+}
+
+/**
+ * What a release applies to the Isolated containers of the Worktrees already removed, which may delete their data. The
+ * sheet draws it only when the dry run reports a Retention policy to apply.
+ */
+export const RETENTION_LINE =
+  "applies the Retention policy to its Isolated containers, which may delete their data";
+
+/** What a release does to a Foreign process of the Worktree: nothing, it is left running on the ports it holds. */
+export function foreignLine(process: ForeignProcess): string {
+  const what = process.kind === "process" ? `${process.command}, pid ${String(process.pid)}` : process.name;
+  const ports =
+    process.ports.length === 0
+      ? ""
+      : `: it keeps ${process.ports.length === 1 ? "port" : "ports"} ${process.ports.join(", ")}`;
+  return `leaves ${what}, which Procly did not start${ports}`;
 }
 
 /** The ended Jobs and Services of a Worktree, which a release forgets. */

@@ -27,7 +27,7 @@ describe("a Worktree released through its sheet", () => {
     await browser.waitUntil(() => press("Release…"), { timeout: 60_000, interval: 500 });
 
     // The dry run names the Service it would stop, and the Daemon has not touched it.
-    await showingTitle("Release main");
+    await showingTitle("Release main?");
     await showingText(SHEET, ["Will stop", scene.service]);
     expect((await reportedService(scene, scene.service))?.state).toBe("healthy");
 

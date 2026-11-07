@@ -5,14 +5,18 @@ import { failureMessage } from "./daemon";
 import {
   composeLine,
   endedWords,
+  foreignLine,
   holdsNothing,
   previewRelease,
   releaseCommand,
   releaseWorktree,
+  RETENTION_LINE,
   type Ended,
 } from "./release";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { KeptLease } from "./protocol/KeptLease";
 import type { ReleaseReport } from "./protocol/ReleaseReport";
+import { foreignId } from "./selection";
 
 /** Whether a report says what a release would do, or what it did. Only the verbs of the headings differ. */
 type Tense = "preview" | "result";
@@ -107,15 +111,41 @@ function Effects({ report, tense }: { report: ReleaseReport; tense: Tense }) {
 }
 
 /**
+ * What else a release does, besides stopping and letting go: it applies a Retention policy when the dry run reports
+ * one, and it leaves every Foreign process of the Worktree running. Drawn only when it holds a line.
+ */
+function Besides({ report, foreign }: { report: ReleaseReport; foreign: ForeignProcess[] }) {
+  const retention = report.retention.length > 0;
+  if (!retention && foreign.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      <h3 className="caption">It also</h3>
+      <ul className="list">
+        {retention ? <li className="item loss">{RETENTION_LINE}</li> : null}
+        {foreign.map((process) => (
+          <li key={foreignId(process)} className="item">
+            {foreignLine(process)}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/**
  * The sheet that releases a Worktree. It reads what a release would do once, when it opens, with a dry run, then
  * names every effect and the command it stands for. Confirming sends the real release and shows the report it
- * returns, which is not compared with the dry run. Cancel takes the focus, so that Enter never releases by reflex.
+ * returns, which is not compared with the dry run. Cancel takes the focus, so that Enter never releases by reflex, and
+ * sits on the right, after the button that releases.
  */
 export function ReleaseSheet({
   path,
   label,
   listed,
   ended,
+  foreign,
   onClose,
   onChanged,
 }: {
@@ -125,6 +155,8 @@ export function ReleaseSheet({
   listed: boolean;
   /** The ended Jobs and Services the status held for the Worktree when the sheet opened, which a release forgets. */
   ended: Ended;
+  /** The Foreign processes the status held for the Worktree when the sheet opened, which a release leaves alone. */
+  foreign: ForeignProcess[];
   onClose: () => void;
   /** Called once the real release is over, so the window shows its effect without waiting for the poller. */
   onChanged: () => void;
@@ -191,7 +223,7 @@ export function ReleaseSheet({
         }}
       >
         <h2 id="release-title" className="title">
-          {`Release ${label}`}
+          {`Release ${label}?`}
         </h2>
         {listed ? (
           <p role="alert" className="warning">
@@ -220,12 +252,13 @@ export function ReleaseSheet({
               <p>Nothing runs in this Worktree.</p>
             )}
             <Effects report={report} tense="preview" />
+            <Besides report={report} foreign={foreign} />
             {forgotten === "" ? null : (
               <p>
                 {`The release forgets ${forgotten} of this Worktree, so procly wait, procly logs and procly status no longer know them.`}
               </p>
             )}
-            {nothing ? null : <p>No data is deleted.</p>}
+            {nothing || report.retention.length > 0 ? null : <p>No data is deleted.</p>}
             <p className="caption">From a terminal, in the Worktree:</p>
             <CopyBox text={releaseCommand(path)} />
           </>
@@ -237,9 +270,6 @@ export function ReleaseSheet({
         ) : null}
         {pending ? <p className="caption">Releasing…</p> : null}
         <div className="actions">
-          <button type="button" className="button default" autoFocus disabled={pending} onClick={onClose}>
-            Cancel
-          </button>
           <button
             type="button"
             className="button"
@@ -251,6 +281,9 @@ export function ReleaseSheet({
             }}
           >
             Release
+          </button>
+          <button type="button" className="button default" autoFocus disabled={pending} onClick={onClose}>
+            Cancel
           </button>
         </div>
       </div>

@@ -615,6 +615,36 @@ describe("the Outside Repositories screen", () => {
     });
   });
 
+  it("has the refresh bar of the other screens, the title, the time of the last answer and Refresh on one line", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+
+    const center = screen.getByRole("main");
+    const title = await within(center).findByRole("heading", { name: "Outside Repositories", level: 2 });
+    const line = title.parentElement;
+    expect(line).toContainElement(within(center).getByText("Updated at 19:35:00"));
+    expect(line).toContainElement(within(center).getByRole("button", { name: "Refresh" }));
+    // Nothing sits above the line.
+    expect(center.querySelector("header.toolbar")).toBeNull();
+  });
+
+  it("asks for the same refresh as the other screens when Refresh is pressed", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByText("make watch");
+    const before = calls.length;
+
+    fireEvent.click(within(center).getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(calls.slice(before).map((call) => call.command)).toEqual(["refresh", "doctor", "list_orphans"]);
+    });
+  });
+
   it("says so when no Job started outside a Repository", async () => {
     app({}, { ...(scene as Extract<Response, { response: "status" }>), jobs_outside_repositories: [] });
     render(<App store={createDaemonStore()} />);

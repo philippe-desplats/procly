@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import type { FailureKey } from "./daemon";
 import type { DoctorStore } from "./doctor";
 import { WorktreeChecks } from "./DoctorScreen";
@@ -8,6 +10,7 @@ import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ItemRow } from "./ItemRow";
 import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
+import { TitleBar } from "./TitleBar";
 import { foreignId } from "./selection";
 import { foreignWord, jobWord } from "./state";
 
@@ -151,10 +154,19 @@ function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
  * The Jobs started in a directory outside any Repository. They have no Worktree, so nothing here stops them, and a row
  * picks the Job for the inspector.
  */
-export function OutsideRepositoriesScreen({ jobs, seen }: { jobs: JobStatus[]; seen: FailureKey[] }) {
+export function OutsideRepositoriesScreen({
+  jobs,
+  seen,
+  controls,
+}: {
+  jobs: JobStatus[];
+  seen: FailureKey[];
+  /** The time of the last answer and the button that asks for another, which every screen carries on its title line. */
+  controls: ReactNode;
+}) {
   return (
     <section aria-label="Outside Repositories">
-      <h2 className="title">Outside Repositories</h2>
+      <TitleBar title="Outside Repositories">{controls}</TitleBar>
       {jobs.length === 0 ? <p className="muted">No Job started outside a Repository.</p> : null}
       <ul className="list">
         {jobs.map((job) => (

@@ -187,7 +187,7 @@ function DaemonOfAnotherVersion({ daemon, app, store }: { daemon: number; app: n
                 setConfirming(true);
               }}
             >
-              Restart the Daemon
+              Restart the Daemon…
             </button>
           </p>
           <p className="caption">Or stop it yourself from a terminal:</p>
@@ -229,7 +229,7 @@ function RestartSheet({ store, onCancel }: { store: DaemonStore; onCancel: () =>
         }}
       >
         <h2 id="restart-title" className="title">
-          Restart the Daemon
+          Restart the Daemon?
         </h2>
         <p>This stops the Daemon, then starts the one this app embeds.</p>
         <p className="loss">Every running Service will stop, in every Worktree.</p>
@@ -242,7 +242,10 @@ function RestartSheet({ store, onCancel }: { store: DaemonStore; onCancel: () =>
         )}
         {restart.pending ? <p className="caption">Restarting…</p> : null}
         <div className="actions">
-          {/* Cancel takes the focus, so that Enter never restarts by reflex. */}
+          <button type="button" className="button" disabled={restart.pending} onClick={restart.start}>
+            Restart the Daemon
+          </button>
+          {/* Cancel sits on the right and takes the focus, so that Enter never restarts by reflex. */}
           <button
             type="button"
             className="button default"
@@ -251,9 +254,6 @@ function RestartSheet({ store, onCancel }: { store: DaemonStore; onCancel: () =>
             onClick={onCancel}
           >
             Cancel
-          </button>
-          <button type="button" className="button" disabled={restart.pending} onClick={restart.start}>
-            Restart the Daemon
           </button>
         </div>
       </div>
