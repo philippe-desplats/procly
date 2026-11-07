@@ -330,6 +330,7 @@ pub fn run() {
             apps::detected_apps,
             opening::open_worktree,
             opening::reveal_worktree,
+            opening::open_localhost,
             orphans::list_orphans,
             orphans::delete_orphans,
             release::preview_release,

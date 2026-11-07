@@ -202,6 +202,6 @@ export function foreignStatement(): Pick<Statement, "state" | "summary"> {
   return {
     state: foreignWord(),
     summary:
-      "Started outside Procly in this Worktree, often by an agent the Guard did not steer. Procly never stops a process it did not start.",
+      "Started outside Procly in this Worktree, often an agent the Guard did not steer. Procly never stops a process it did not start.",
   };
 }
