@@ -712,3 +712,29 @@ fn docker_a_real_release_says_which_retention_policy_it_applied() {
         "the container is deleted before its delay"
     );
 }
+
+#[test]
+fn docker_a_release_that_only_applies_a_retention_policy_does_not_say_it_has_nothing_to_release() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let removed = removed_with_retention("delete");
+    // A Worktree Procly holds nothing in, whose release only applies the policy of the removed one.
+    let idle = git_worktree_add(&removed.main, "app-idle");
+    let line = format!(
+        "Retention policy delete of db applied to the Isolated container of the removed Worktree {}\n",
+        removed.other.display()
+    );
+
+    let planned = removed.procly.procly_in(&idle, &["worktree", "release", "--dry-run"]);
+    let released = removed.procly.procly_in(&idle, &["worktree", "release"]);
+
+    assert_success(&planned);
+    assert_eq!(stdout(&planned), line.replace("applied to", "would apply to"));
+    assert_success(&released);
+    assert_eq!(stdout(&released), line);
+    assert_eq!(removed.other_project.container(), "", "the release kept the container");
+    // Once the policy is applied, there is nothing left to do.
+    let again = removed.procly.procly_in(&idle, &["worktree", "release"]);
+    assert_eq!(stdout(&again), "nothing to release\n");
+}

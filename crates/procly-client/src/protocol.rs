@@ -495,10 +495,15 @@ pub struct AppliedRetention {
 }
 
 impl ReleaseReport {
-    /// Whether nothing was stopped, let go of nor released, as for a second release or a Worktree Procly never saw.
+    /// Whether nothing was stopped, let go of nor released, and no Retention policy applied, as for a second release or
+    /// a Worktree Procly never saw. A policy may delete an Isolated container and its volumes, which is not nothing.
     #[must_use]
     pub fn released_nothing(&self) -> bool {
-        self.services.is_empty() && self.jobs.is_empty() && self.compose_services.is_empty() && self.leases.is_empty()
+        self.services.is_empty()
+            && self.jobs.is_empty()
+            && self.compose_services.is_empty()
+            && self.leases.is_empty()
+            && self.retention.is_empty()
     }
 }
 
