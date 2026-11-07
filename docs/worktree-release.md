@@ -22,7 +22,7 @@ Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it on
 3. It forgets every Job and Service of the Worktree that has ended, the ones it has just stopped included, so that `procly wait`, `procly logs` and `procly status` no longer know them.
 4. It releases the Leases of the Worktree, so that the next Worktree can be granted their ports at once, without waiting for them to expire. With `portless = true`, it removes their [Portless alias](configuration.md#portless-aliases) too.
 
-It also applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers of the Worktrees already removed, of every Repository: those set to `"delete"` are removed, and those set to a duration are removed once it has passed. The Worktree being released still exists, so its own container is kept until a later release, or the next start of the Daemon, finds it removed. Each policy it applies is printed with the container it applies to, whether the deletion happens at once or once its delay has passed:
+It also applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers of the Worktrees already removed, of every Repository: those set to `"delete"` are removed, and those set to a duration are removed once it has passed. The Worktree being released still exists, so its own container is kept until a later release, or the next start of the Daemon, finds it removed. Each policy whose deletion is due is printed with the container it applies to. A duration that has not passed yet is neither applied nor printed, the Daemon waits for it and deletes the container once it has passed:
 
 ```console
 $ procly worktree release
