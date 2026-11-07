@@ -163,7 +163,7 @@ function DaemonNotRunning({ store, doctor }: { store: DaemonStore; doctor: Docto
 
 /**
  * Why the app reads nothing from the Daemon. The release of a Daemon that speaks another protocol is unknown, since it
- * refuses Status and doctor leaves `daemon_version` empty, so the two protocols are what is named beside the app's.
+ * refuses Status and doctor leaves `daemon_version` empty, so the 2 protocols are what is named beside the app's.
  */
 function differentProtocols(daemon: number, app: number): string {
   return `It speaks protocol ${daemon}, this app is ${APP_VERSION} and speaks ${app}. They speak different protocol versions, so the app cannot read anything from it.`;

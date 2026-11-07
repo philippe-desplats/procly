@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type Failure, type Update } from "./daemon";
-import { REFRESH_REQUESTED, type DoctorDocument } from "./doctor";
+import { REFRESH_REQUESTED, checksWithoutDaemon, type DoctorDocument } from "./doctor";
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import drift from "./fixtures/doctor-release-drift.json";
@@ -770,11 +770,7 @@ describe("Daemon not running", () => {
     const screenOfTheDaemon = screen.getByRole("main");
     await within(screenOfTheDaemon).findByText("session_unit");
 
-    expect(
-      NO_DAEMON.checks.filter(
-        (check) => !["leased_ports", "orphans", "portless_aliases"].includes(check.name),
-      ),
-    ).toHaveLength(8);
+    expect(checksWithoutDaemon(NO_DAEMON.checks)).toHaveLength(8);
     expect(screenOfTheDaemon.querySelectorAll("li")).toHaveLength(2);
     expect(screenOfTheDaemon.querySelectorAll(".copybox")).toHaveLength(3);
     expect(screenOfTheDaemon.querySelector(".check-fold")).toBeNull();
