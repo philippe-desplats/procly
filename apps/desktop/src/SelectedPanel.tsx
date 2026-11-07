@@ -14,7 +14,7 @@ import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
-import { PortPills } from "./PortPill";
+import { PortPill, PortPills } from "./PortPill";
 import type { Followed, Selected } from "./selection";
 import { ServiceActions } from "./ServiceActions";
 import { failureOf, openLocalhost } from "./settings";
@@ -171,7 +171,7 @@ function FollowedPanel({
   const statement = statementOf(selected, failed);
   const output = useOutput(targetOf(selected));
   return (
-    <section aria-label="Selection">
+    <section aria-label="Selection" className="inspector-panel">
       <Heading selected={selected} />
       <div className="state-line">
         <State {...statement.state} />
@@ -214,7 +214,16 @@ function Heading({ selected }: { selected: Followed }) {
         </>
       );
     case "job":
-      return <h2 className="title mono">{selected.job.command}</h2>;
+      return (
+        <>
+          <h2 className="title mono">{selected.job.command}</h2>
+          <p className="caption foreign-where">
+            {selected.worktree === null
+              ? "Job outside Repositories"
+              : `Job in ${worktreeLabel(selected.worktree)}`}
+          </p>
+        </>
+      );
     case "compose":
       return <h2 className="title">{selected.container.service}</h2>;
     default: {
@@ -338,15 +347,10 @@ function Facts({ selected, at }: { selected: Followed; at: number }) {
           {selected.service.port === null ? null : (
             <>
               <dt className="caption">Port</dt>
-              <dd className="mono">{`:${String(selected.service.port)}`}</dd>
-              {selected.service.state === "ended" ? null : (
-                <>
-                  <dt className="caption">Browser</dt>
-                  <dd>
-                    <OpenLocalhost port={selected.service.port} />
-                  </dd>
-                </>
-              )}
+              <dd className="port-line">
+                <PortPill port={selected.service.port} />
+                {selected.service.state === "ended" ? null : <OpenLocalhost port={selected.service.port} />}
+              </dd>
             </>
           )}
           <dt className="caption">Started</dt>
@@ -356,7 +360,9 @@ function Facts({ selected, at }: { selected: Followed; at: number }) {
       {selected.kind === "compose" && selected.container.port !== null ? (
         <>
           <dt className="caption">Port</dt>
-          <dd className="mono">{`:${String(selected.container.port)}`}</dd>
+          <dd>
+            <PortPill port={selected.container.port} />
+          </dd>
         </>
       ) : null}
       {selected.kind === "job" ? (
@@ -386,41 +392,44 @@ function textOf(line: Line): string {
 
 function OutputPane({ selected, output }: { selected: Followed; output: OutputView }) {
   const snapshot = selected.kind === "compose";
+  // The field of Find is revealed by its button, and closing it drops the filter.
+  const [finding, setFinding] = useState(false);
   const [query, setQuery] = useState("");
   const [wrap, setWrap] = useState(false);
-  const needle = query.toLowerCase();
+  const needle = finding ? query.toLowerCase() : "";
   const lines =
     needle === "" ? output.lines : output.lines.filter((line) => textOf(line).toLowerCase().includes(needle));
   return (
-    <section aria-label="Output">
+    <section aria-label="Output" className="output-pane">
       <h3 className="caption">Output</h3>
-      {output.status === "failed" ? (
-        <>
-          <p role="alert" className="error">
+      <div className="output-tools">
+        {output.status === "failed" ? (
+          <p role="alert" className="error output-status">
             {output.message}
           </p>
-          {snapshot ? (
-            <CopyBox text={inWorktree(selected.worktree.path, ["logs", selected.container.service])} />
-          ) : null}
-        </>
-      ) : (
-        <p role="status" className="caption">
-          {output.status === "snapshot" && output.at !== null
-            ? `Snapshot at ${formatMoment(output.at, output.at)}`
-            : WORDS[output.status === "snapshot" ? "connecting" : output.status]}
-        </p>
-      )}
-      <div className="output-tools">
-        <input
-          type="search"
-          className="output-find"
-          aria-label="Find in output"
-          placeholder="Find"
-          value={query}
-          onChange={(event) => {
-            setQuery(event.target.value);
+        ) : (
+          <p role="status" className="caption output-status">
+            {output.status === "snapshot" && output.at !== null
+              ? `Snapshot at ${formatMoment(output.at, output.at)}`
+              : WORDS[output.status === "snapshot" ? "connecting" : output.status]}
+          </p>
+        )}
+        {snapshot ? (
+          <button type="button" className="button" onClick={output.refresh}>
+            Refresh
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="button"
+          aria-expanded={finding}
+          onClick={() => {
+            setFinding(!finding);
+            setQuery("");
           }}
-        />
+        >
+          Find
+        </button>
         <button
           type="button"
           className="button"
@@ -430,12 +439,23 @@ function OutputPane({ selected, output }: { selected: Followed; output: OutputVi
         >
           {wrap ? "No Wrap" : "Wrap"}
         </button>
-        {snapshot ? (
-          <button type="button" className="button" onClick={output.refresh}>
-            Refresh
-          </button>
-        ) : null}
       </div>
+      {output.status === "failed" && snapshot ? (
+        <CopyBox text={inWorktree(selected.worktree.path, ["logs", selected.container.service])} />
+      ) : null}
+      {finding ? (
+        <input
+          type="search"
+          className="output-find"
+          aria-label="Find in output"
+          placeholder="Find"
+          autoFocus
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+          }}
+        />
+      ) : null}
       {needle === "" ? null : (
         <p className="caption">
           {lines.length === 0

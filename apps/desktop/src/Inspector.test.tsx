@@ -141,7 +141,7 @@ describe("the inspector", () => {
     const panel = within(inspector());
     expect(await panel.findByText("Running and healthy.")).toBeInTheDocument();
     expect(panel.getByText("Nothing to do.")).toBeInTheDocument();
-    expect(panel.getByText(":18731")).toBeInTheDocument();
+    expect(panel.getByText("18731")).toHaveClass("port");
     expect(panel.getByText(/Started/)).toHaveTextContent("Started");
     await waitFor(() => {
       expect(rust.count("follow_logs")).toBe(1);
@@ -445,7 +445,37 @@ function clipboard(): string[] {
   return written;
 }
 
+/** Presses Find, which reveals the field, and answers the field. */
+function revealFind(): HTMLElement {
+  fireEvent.click(within(inspector()).getByRole("button", { name: "Find" }));
+  return within(inspector()).getByRole("searchbox", { name: "Find in output" });
+}
+
 describe("the inspector of a Job", () => {
+  it("says under the command in which Worktree the Job runs, or that it runs outside Repositories", async () => {
+    const outside = structuredClone(status);
+    outside.jobs_outside_repositories = [
+      { id: "c0ffee01", command: "sleep 5", cwd: "/p/work/tmp", state: "running" },
+    ];
+    const rust = new Rust(answered(status));
+    await open(rust);
+    fireEvent.click(screen.getByRole("button", { name: "web-fix" }));
+    fireEvent.click(await screen.findByRole("button", { name: /sh -c 'exit 3'/ }));
+
+    const heading = await within(inspector()).findByRole("heading", { name: "sh -c 'exit 3'" });
+    expect(heading.nextElementSibling).toHaveTextContent("Job in web-fix");
+    cleanup();
+    clearMocks();
+
+    const other = new Rust(answered(outside));
+    await open(other);
+    fireEvent.click(screen.getByRole("button", { name: /^Outside Repositories/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /sleep 5/ }));
+
+    const outsideHeading = await within(inspector()).findByRole("heading", { name: "sleep 5" });
+    expect(outsideHeading.nextElementSibling).toHaveTextContent("Job outside Repositories");
+  });
+
   it("gives the command to wait for it from a terminal, in a copy box that copies exactly that", async () => {
     const rust = new Rust(answered(status));
     const written = clipboard();
@@ -501,6 +531,71 @@ describe("the inspector of a Service", () => {
     });
   });
 
+  it("draws the port as a pill with Open localhost beside it on the same line, and no Browser row", async () => {
+    const rust = new Rust(answered(status));
+    await open(rust);
+    fireEvent.click(screen.getByRole("button", { name: /^api/ }));
+
+    const button = await within(inspector()).findByRole("button", { name: "Open localhost:18731" });
+    const pill = within(inspector()).getByText("18731");
+
+    expect(pill).toHaveClass("port");
+    expect(pill.parentElement).toContainElement(button);
+    expect(within(inspector()).queryByText("Browser")).not.toBeInTheDocument();
+  });
+
+  it("keeps the field of Find away until Find is pressed, and pressing Find again closes it and clears the filter", async () => {
+    const rust = new Rust(answered(status));
+    await open(rust);
+    fireEvent.click(screen.getByRole("button", { name: /^api/ }));
+    await waitFor(() => {
+      expect(rust.follows).toHaveLength(1);
+    });
+    await rust.write(logs("booting\nready\n"));
+    expect(within(inspector()).queryByRole("searchbox")).not.toBeInTheDocument();
+
+    const field = revealFind();
+    expect(field).toHaveFocus();
+    fireEvent.change(field, { target: { value: "ready" } });
+    await waitFor(() => {
+      expect(shown()).not.toContain("booting");
+    });
+    fireEvent.click(within(inspector()).getByRole("button", { name: "Find" }));
+
+    expect(within(inspector()).queryByRole("searchbox")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(shown()).toContain("booting");
+    });
+  });
+
+  it("keeps the live follow and its caption beside Find and Wrap", async () => {
+    const rust = new Rust(answered(status));
+    await open(rust);
+    fireEvent.click(screen.getByRole("button", { name: /^api/ }));
+    await waitFor(() => {
+      expect(rust.follows).toHaveLength(1);
+    });
+    await rust.write(logs("booting\n"));
+
+    const status_ = within(inspector()).getByRole("status");
+    await waitFor(() => {
+      expect(status_).toHaveTextContent("Following");
+    });
+    expect(status_.parentElement).toContainElement(within(inspector()).getByRole("button", { name: "Find" }));
+    expect(status_.parentElement).toContainElement(within(inspector()).getByRole("button", { name: "Wrap" }));
+  });
+
+  it("gives the output the room that is left of the inspector", async () => {
+    const rust = new Rust(answered(status));
+    await open(rust);
+    fireEvent.click(screen.getByRole("button", { name: /^api/ }));
+
+    const output = await within(inspector()).findByRole("region", { name: "Output" });
+
+    expect(output).toHaveClass("output-pane");
+    expect(output.parentElement).toHaveClass("inspector-panel");
+  });
+
   it("offers no localhost for a Service without a port, nor for one that ended", async () => {
     const withoutPort = structuredClone(status);
     const api = withoutPort.repositories[0]?.worktrees[0]?.services[0];
@@ -536,7 +631,7 @@ describe("the inspector of a Service", () => {
       expect(shown()).toContain("booting");
     });
 
-    const find = within(inspector()).getByRole("searchbox", { name: "Find in output" });
+    const find = revealFind();
     fireEvent.change(find, { target: { value: "READY" } });
 
     await waitFor(() => {
@@ -564,9 +659,7 @@ describe("the inspector of a Service", () => {
     });
     await rust.write(logs("booting\n"));
 
-    fireEvent.change(within(inspector()).getByRole("searchbox", { name: "Find in output" }), {
-      target: { value: "absent" },
-    });
+    fireEvent.change(revealFind(), { target: { value: "absent" } });
 
     await waitFor(() => {
       expect(within(inspector()).getByText("No line holds this text.")).toBeInTheDocument();

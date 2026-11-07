@@ -78,7 +78,7 @@ body {
 
 .window {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) minmax(320px, 400px);
+  grid-template-columns: 220px minmax(260px, 1fr) minmax(320px, 400px);
   height: 100%;
 }
 
@@ -110,6 +110,8 @@ body {
 }
 
 .inspector {
+  display: flex;
+  flex-direction: column;
   background: var(--panel);
   border-left: 1px solid var(--line);
 }
@@ -853,7 +855,8 @@ body {
 
 /* The output of a Service or a Job, drawn as text on the panel so that every colour holds its contrast. */
 .output {
-  max-height: 40vh;
+  flex: 1;
+  min-height: 80px;
   margin: 8px 0 0;
   padding: 8px;
   overflow: auto;
@@ -871,7 +874,21 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* Find and Wrap above the output, Find taking the room the buttons leave. */
+/* The inspector of a Service or a Job: the facts take what they need and the output takes the rest of the pane. */
+.inspector-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+}
+
+.output-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 140px;
+}
+
+/* What the output is doing on the left, Find and Wrap on the right, as the mockup draws the line. */
 .output-tools {
   display: flex;
   align-items: center;
@@ -879,10 +896,29 @@ body {
   margin: 4px 0 0;
 }
 
-.output-find {
+.output-tools .output-status {
   flex: 1;
   min-width: 0;
+  margin: 0;
+}
+
+.output-find {
+  margin: 6px 0 0;
+  min-width: 0;
   font-size: var(--size-small);
+}
+
+/* The port of a Service with the action that opens it, on one line. */
+.port-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.port-line .error {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 .output .bold {
