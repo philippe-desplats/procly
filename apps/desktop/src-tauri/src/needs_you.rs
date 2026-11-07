@@ -203,6 +203,11 @@ impl Seen {
         failures(report).iter().any(|(held, _)| *held == key) && self.seen.insert(key)
     }
 
+    /// Takes the failure `key` out of the set, so that it needs the developer again, and tells whether the set changed.
+    fn unmark(&mut self, key: &FailureKey) -> bool {
+        self.seen.remove(key)
+    }
+
     /// Drops every key the answer does not hold a failure for, and tells whether the set changed.
     fn prune(&mut self, report: &StatusReport) -> bool {
         let held: BTreeSet<FailureKey> = failures(report).into_iter().map(|(key, _)| key).collect();
@@ -370,6 +375,23 @@ impl Attention {
         let saved = match report_of(&last) {
             Some(report) if seen.mark(key, report) => seen.save(&self.inner.path),
             Some(_) | None => Ok(()),
+        };
+        (Self::present(newest().unwrap_or(last), &seen), saved)
+    }
+
+    /// The developer marked `key` as Unseen: a Seen failure needs them again, in "Needs you" and in the count. `last`
+    /// and `newest` are as for [`Attention::mark`]. A key that is not Seen changes nothing and writes nothing.
+    pub(crate) fn unmark(
+        &self,
+        key: &FailureKey,
+        last: Arc<Update>,
+        newest: impl FnOnce() -> Option<Arc<Update>>,
+    ) -> (Presented, Result<(), SeenError>) {
+        let mut seen = self.seen();
+        let saved = if seen.unmark(key) {
+            seen.save(&self.inner.path)
+        } else {
+            Ok(())
         };
         (Self::present(newest().unwrap_or(last), &seen), saved)
     }
@@ -776,6 +798,54 @@ mod tests {
 
         assert_eq!(presented.needs_you, []);
         assert_eq!(presented.seen, [key(1_000)]);
+    }
+
+    #[test]
+    fn a_failure_marked_as_unseen_comes_back_in_needs_you_and_the_file_forgets_it() {
+        let (_dir, path) = state_file();
+        let attention = Attention::open(path.clone());
+        attention
+            .mark(key(1_000), update(failed_at(1_000)), || None)
+            .1
+            .expect("the set is written");
+
+        let (presented, saved) = attention.unmark(&key(1_000), update(failed_at(1_000)), || None);
+        saved.expect("the set is written again");
+
+        assert_eq!(presented.seen, []);
+        assert_eq!(presented.needs_you.len(), 1);
+        assert_eq!(Seen::load(&path), Seen::default());
+    }
+
+    #[test]
+    fn marking_as_unseen_a_failure_that_is_not_seen_writes_nothing() {
+        let (_dir, path) = state_file();
+        let attention = Attention::open(path.clone());
+
+        let (presented, saved) = attention.unmark(&key(1_000), update(failed_at(1_000)), || None);
+        saved.expect("nothing to write");
+
+        assert_eq!(presented.needs_you.len(), 1);
+        assert!(!path.exists(), "no file is written for a mark that changed nothing");
+    }
+
+    #[test]
+    fn an_unmark_presents_the_answer_that_came_while_the_set_was_written() {
+        let (_dir, path) = state_file();
+        let attention = Attention::open(path);
+        attention
+            .mark(key(1_000), update(failed_at(1_000)), || None)
+            .1
+            .expect("the set is written");
+        let newer = Arc::new(Update {
+            at_ms: 2,
+            answer: Answer::Response(Response::Status(failed_at(1_000))),
+        });
+
+        let (presented, _) = attention.unmark(&key(1_000), update(failed_at(1_000)), || Some(Arc::clone(&newer)));
+
+        assert_eq!(presented.update().at_ms, 2);
+        assert_eq!(presented.needs_you.len(), 1);
     }
 
     #[test]

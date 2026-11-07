@@ -26,8 +26,38 @@ pub(crate) struct Snapshot {
     needs_you: Vec<String>,
     /// Where a click on each line of `needs_you` opens the window, in the same order.
     places: Vec<Place>,
+    /// The state glyph each line of `needs_you` leads with, in the same order.
+    glyphs: Vec<LineGlyph>,
     /// The ports of what runs, which Copy Port copies.
     ports: Vec<CopyPort>,
+}
+
+/// The state glyph a line of "Needs you" leads with, the one the window draws in front of the same item. It is not the
+/// glyph of the menu bar icon, which `glyph.rs` decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineGlyph {
+    /// An ended failure, a Service or a Job: the red disc with a cross.
+    Failure,
+    /// A Foreign process: the amber diamond.
+    Foreign,
+}
+
+impl LineGlyph {
+    /// The PNG drawn in front of the line, exported from `glyphs/menu-*.svg` by `bun run glyphs`.
+    pub(crate) fn png(self) -> &'static [u8] {
+        match self {
+            Self::Failure => include_bytes!("../icons/menu-failure.png"),
+            Self::Foreign => include_bytes!("../icons/menu-foreign.png"),
+        }
+    }
+
+    /// The glyph of what needs the developer.
+    fn of(item: &NeedsYou) -> Self {
+        match item {
+            NeedsYou::Service { .. } | NeedsYou::Job { .. } => Self::Failure,
+            NeedsYou::Foreign { .. } => Self::Foreign,
+        }
+    }
 }
 
 /// One entry of the Copy Port submenu.
@@ -46,6 +76,8 @@ pub(crate) struct Model {
     pub(crate) needs_you: Vec<String>,
     /// Where a click on each line of "Needs you" opens the window, in the same order.
     pub(crate) places: Vec<Place>,
+    /// The state glyph of each line of "Needs you", in the same order.
+    pub(crate) glyphs: Vec<LineGlyph>,
     /// The entries of Copy Port.
     pub(crate) ports: Vec<CopyPort>,
 }
@@ -195,6 +227,7 @@ pub(crate) fn snapshot(update: &Update, needs_you: &[NeedsYou]) -> Option<Snapsh
         at_ms: update.at_ms,
         needs_you: needs_you.iter().map(|item| line(item, report)).collect(),
         places: needs_you.iter().map(NeedsYou::place).collect(),
+        glyphs: needs_you.iter().map(LineGlyph::of).collect(),
         ports: copy_ports(report),
     })
 }
@@ -237,6 +270,7 @@ pub(crate) fn model(glyph: Glyph, last: Option<&Snapshot>, when: impl Fn(u64) ->
         header: header(glyph, last, when),
         needs_you: last.map_or_else(Vec::new, |last| last.needs_you.clone()),
         places: last.map_or_else(Vec::new, |last| last.places.clone()),
+        glyphs: last.map_or_else(Vec::new, |last| last.glyphs.clone()),
         ports: last.map_or_else(Vec::new, |last| last.ports.clone()),
     }
 }
@@ -280,6 +314,8 @@ pub(crate) struct Item {
     pub(crate) id: String,
     pub(crate) label: String,
     pub(crate) enabled: bool,
+    /// The state glyph drawn in front of the label, which only the lines of "Needs you" have.
+    pub(crate) glyph: Option<LineGlyph>,
 }
 
 impl Item {
@@ -288,6 +324,7 @@ impl Item {
             id: id.into(),
             label: label.into(),
             enabled: true,
+            glyph: None,
         }
     }
 }
@@ -320,7 +357,9 @@ pub(crate) fn layout(model: &Model) -> Layout {
     header.enabled = false;
     let mut entries = vec![Entry::Separator];
     for (index, line) in model.needs_you.iter().enumerate() {
-        entries.push(Entry::Item(Item::new(needs_you_id(index), line)));
+        let mut item = Item::new(needs_you_id(index), line);
+        item.glyph = model.glyphs.get(index).copied();
+        entries.push(Entry::Item(item));
     }
     if !model.needs_you.is_empty() {
         entries.push(Entry::Separator);
@@ -723,13 +762,17 @@ mod tests {
                 id: HEADER_ID.to_owned(),
                 label: "Needs you: 1 (19:35:12)".to_owned(),
                 enabled: false,
+                glyph: None,
             }
         );
         assert_eq!(
             built.entries,
             [
                 Entry::Separator,
-                item("tray-needs-you-0", "web-fix: api exited 1"),
+                Entry::Item(Item {
+                    glyph: Some(LineGlyph::Failure),
+                    ..Item::new("tray-needs-you-0", "web-fix: api exited 1")
+                }),
                 Entry::Separator,
                 Entry::Submenu {
                     label: "Copy Port",
@@ -766,6 +809,72 @@ mod tests {
                 item(QUIT_ID, "Quit Procly"),
             ]
         );
+    }
+
+    #[test]
+    fn each_line_of_needs_you_leads_with_the_state_glyph_the_window_draws_for_it() {
+        let job = NeedsYou::Job {
+            worktree: None,
+            id: "j1".to_owned(),
+            command: "make".to_owned(),
+            end: JobEnd::Exited { code: 2 },
+        };
+        let foreign = NeedsYou::Foreign {
+            worktree: PathBuf::from("/p/work/acme/web-fix"),
+            process: ForeignProcess::Process {
+                pid: 7,
+                command: "node server.js".to_owned(),
+                ports: vec![3000],
+            },
+        };
+        let model = model(Glyph::NeedsYou, Some(&known(&[failed_service(), job, foreign])), clock);
+
+        let lines: Vec<_> = layout(&model)
+            .entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                Entry::Item(item) if item.id.starts_with("tray-needs-you-") => Some((item.label, item.glyph)),
+                Entry::Item(_) | Entry::Separator | Entry::Submenu { .. } => None,
+            })
+            .collect();
+
+        assert_eq!(
+            lines,
+            [
+                ("web-fix: api exited 1".to_owned(), Some(LineGlyph::Failure)),
+                ("make exited 2".to_owned(), Some(LineGlyph::Failure)),
+                (
+                    "web-fix: foreign node server.js :3000".to_owned(),
+                    Some(LineGlyph::Foreign)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_line_glyph_ships_as_a_png_the_size_of_an_image_in_a_menu_item() {
+        for glyph in [LineGlyph::Failure, LineGlyph::Foreign] {
+            let png = glyph.png();
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{glyph:?}");
+            let width = u32::from_be_bytes(png[16..20].try_into().expect("4 bytes"));
+            let height = u32::from_be_bytes(png[20..24].try_into().expect("4 bytes"));
+            assert_eq!((width, height), (32, 32), "{glyph:?}");
+        }
+        assert_ne!(LineGlyph::Failure.png(), LineGlyph::Foreign.png());
+    }
+
+    #[test]
+    fn only_the_lines_of_needs_you_carry_a_glyph() {
+        let built = layout(&model(Glyph::NeedsYou, Some(&known(&[failed_service()])), clock));
+
+        assert_eq!(built.header.glyph, None);
+        for entry in &built.entries {
+            match entry {
+                Entry::Item(item) if !item.id.starts_with("tray-needs-you-") => assert_eq!(item.glyph, None),
+                Entry::Submenu { items, .. } => assert!(items.iter().all(|item| item.glyph.is_none())),
+                Entry::Item(_) | Entry::Separator => {}
+            }
+        }
     }
 
     #[test]

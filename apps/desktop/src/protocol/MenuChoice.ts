@@ -6,4 +6,4 @@
  * The window receives a choice it carries out as its id, and reads it through the type ts-rs exports from this enum
  * (ADR 0015), so the ids cannot drift between the two.
  */
-export type MenuChoice = "settings" | "overview" | "doctor" | "orphans" | "refresh" | "copy-logs-command" | "restart" | "stop" | "mark-seen" | "open-in-editor" | "open-in-terminal" | "copy-path" | "release";
+export type MenuChoice = "settings" | "overview" | "doctor" | "orphans" | "refresh" | "copy-logs-command" | "restart" | "stop" | "mark-seen" | "open-in-editor" | "open-in-terminal" | "copy-path" | "release" | "copy-main-value" | "find-in-output" | "reveal-in-finder" | "copy-slug" | "help";

@@ -8,7 +8,10 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use tauri::menu::{HELP_SUBMENU_ID, Menu, MenuEvent, MenuItem, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID};
+use tauri::menu::{
+    HELP_SUBMENU_ID, Menu, MenuEvent, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu as NativeSubmenu,
+    SubmenuBuilder, WINDOW_SUBMENU_ID,
+};
 use tauri::{AppHandle, State, Wry};
 
 /// An item of the menu bar the app handles itself, as opposed to the standard items macOS handles.
@@ -45,10 +48,25 @@ pub(crate) enum Choice {
     CopyPath,
     /// Opens the release sheet of the Worktree.
     Release,
+    /// `⌘C` while the selection has a main value and no text is selected in the window: copies the main value, the
+    /// port of a Service or the command that stops a Foreign process. It stands in the place of the standard Copy,
+    /// which comes back as soon as text is selected, so that one item only ever holds `⌘C`.
+    CopyMainValue,
+    /// Opens the Find of the output of the selection and focuses it.
+    FindInOutput,
+    /// Shows the Worktree in the Finder.
+    RevealInFinder,
+    /// Copies the slug of the Worktree.
+    CopySlug,
+    /// Opens the documentation of Procly, [`HELP_URL`], in the browser.
+    Help,
 }
 
+/// What Procly Help opens: the README of the repository, the address `Cargo.toml` declares.
+pub(crate) const HELP_URL: &str = "https://github.com/philippe-desplats/procly#readme";
+
 /// Every [`Choice`], so that an id is read back and every item is drawn.
-const CHOICES: [Choice; 13] = [
+const CHOICES: [Choice; 18] = [
     Choice::Settings,
     Choice::Overview,
     Choice::Doctor,
@@ -62,9 +80,20 @@ const CHOICES: [Choice; 13] = [
     Choice::OpenInTerminal,
     Choice::CopyPath,
     Choice::Release,
+    Choice::CopyMainValue,
+    Choice::FindInOutput,
+    Choice::RevealInFinder,
+    Choice::CopySlug,
+    Choice::Help,
 ];
 
 impl Choice {
+    /// Every item of the bar the app handles itself.
+    #[cfg(test)]
+    pub(crate) fn all() -> &'static [Self] {
+        &CHOICES
+    }
+
     /// The id of the item, which is also what the window receives for the choices it carries out.
     pub(crate) fn id(self) -> &'static str {
         match self {
@@ -81,6 +110,19 @@ impl Choice {
             Self::OpenInTerminal => "open-in-terminal",
             Self::CopyPath => "copy-path",
             Self::Release => "release",
+            Self::CopyMainValue => "copy-main-value",
+            Self::FindInOutput => "find-in-output",
+            Self::RevealInFinder => "reveal-in-finder",
+            Self::CopySlug => "copy-slug",
+            Self::Help => "help",
+        }
+    }
+
+    /// The title of the item while the window sent `context`. Only Copy names what it copies.
+    fn title_in(self, context: &MenuContext) -> String {
+        match (self, context.main_value()) {
+            (Self::CopyMainValue, Some((title, _))) => title,
+            _ => self.title().to_owned(),
         }
     }
 
@@ -100,6 +142,11 @@ impl Choice {
             Self::OpenInTerminal => "Open in Terminal",
             Self::CopyPath => "Copy Path",
             Self::Release => "Release…",
+            Self::CopyMainValue => "Copy",
+            Self::FindInOutput => "Find in Output…",
+            Self::RevealInFinder => "Reveal in Finder",
+            Self::CopySlug => "Copy Slug",
+            Self::Help => "Procly Help",
         }
     }
 
@@ -115,7 +162,16 @@ impl Choice {
             Self::OpenInEditor => Some("CmdOrCtrl+E"),
             Self::OpenInTerminal => Some("CmdOrCtrl+T"),
             Self::CopyPath => Some("CmdOrCtrl+Alt+C"),
-            Self::Orphans | Self::CopyLogsCommand | Self::Restart | Self::MarkSeen | Self::Release => None,
+            Self::CopyMainValue => Some("CmdOrCtrl+C"),
+            Self::FindInOutput => Some("CmdOrCtrl+F"),
+            Self::Orphans
+            | Self::CopyLogsCommand
+            | Self::Restart
+            | Self::MarkSeen
+            | Self::Release
+            | Self::RevealInFinder
+            | Self::CopySlug
+            | Self::Help => None,
         }
     }
 
@@ -132,12 +188,17 @@ impl Choice {
     /// can.
     fn enabled(self, context: &MenuContext) -> bool {
         match self {
-            Self::Settings | Self::Overview | Self::Doctor | Self::Orphans | Self::Refresh => true,
+            Self::Settings | Self::Overview | Self::Doctor | Self::Orphans | Self::Refresh | Self::Help => true,
             Self::CopyLogsCommand => context.logs_command.is_some(),
             Self::Restart => context.restart,
             Self::Stop => context.stop,
             Self::MarkSeen => context.mark_seen,
-            Self::OpenInEditor | Self::OpenInTerminal | Self::CopyPath | Self::Release => context.worktree.is_some(),
+            Self::OpenInEditor | Self::OpenInTerminal | Self::CopyPath | Self::Release | Self::RevealInFinder => {
+                context.worktree.is_some()
+            }
+            Self::CopyMainValue => context.main_value().is_some(),
+            Self::FindInOutput => context.find,
+            Self::CopySlug => context.slug.is_some(),
         }
     }
 }
@@ -170,6 +231,29 @@ enum Entry {
     Item(Choice),
     Standard(Standard),
     Separator,
+    /// The Copy of Edit, which is the standard Copy or [`Choice::CopyMainValue`] after what the window sent.
+    Copy,
+}
+
+/// One line of a menu as it shows for a context the window sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Line {
+    Item(Choice),
+    Standard(Standard),
+    Separator,
+}
+
+impl Entry {
+    /// The line this entry shows while the window sent `context`.
+    fn resolve(self, context: &MenuContext) -> Line {
+        match self {
+            Self::Item(choice) => Line::Item(choice),
+            Self::Standard(standard) => Line::Standard(standard),
+            Self::Separator => Line::Separator,
+            Self::Copy if context.main_value().is_some() => Line::Item(Choice::CopyMainValue),
+            Self::Copy => Line::Standard(Standard::Copy),
+        }
+    }
 }
 
 /// One menu of the bar: its title, the id Tauri knows it by when it gives it a role in macOS, and its lines.
@@ -210,9 +294,11 @@ const BAR: [Submenu; 8] = [
             Entry::Standard(Standard::Redo),
             Entry::Separator,
             Entry::Standard(Standard::Cut),
-            Entry::Standard(Standard::Copy),
+            Entry::Copy,
             Entry::Standard(Standard::Paste),
             Entry::Standard(Standard::SelectAll),
+            Entry::Separator,
+            Entry::Item(Choice::FindInOutput),
         ],
     },
     Submenu {
@@ -243,8 +329,10 @@ const BAR: [Submenu; 8] = [
         entries: &[
             Entry::Item(Choice::OpenInEditor),
             Entry::Item(Choice::OpenInTerminal),
+            Entry::Item(Choice::RevealInFinder),
             Entry::Separator,
             Entry::Item(Choice::CopyPath),
+            Entry::Item(Choice::CopySlug),
             Entry::Separator,
             Entry::Item(Choice::Release),
         ],
@@ -262,7 +350,7 @@ const BAR: [Submenu; 8] = [
     Submenu {
         title: "Help",
         id: Some(HELP_SUBMENU_ID),
-        entries: &[],
+        entries: &[Entry::Item(Choice::Help)],
     },
 ];
 
@@ -270,6 +358,10 @@ const BAR: [Submenu; 8] = [
 /// while nothing is selected: every item of Actions and Worktree is disabled.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one thing the window says the selection allows, read by one item, never a state machine"
+)]
 pub(crate) struct MenuContext {
     /// The `procly logs` command of the selection, which Copy Logs Command copies.
     pub(crate) logs_command: Option<String>,
@@ -281,15 +373,68 @@ pub(crate) struct MenuContext {
     pub(crate) mark_seen: bool,
     /// The path of the Worktree the inspector acts on, which the Worktree menu acts on too.
     pub(crate) worktree: Option<String>,
+    /// The slug of that Worktree, which Copy Slug copies.
+    pub(crate) slug: Option<String>,
+    /// The port the selection listens on, the main value of a Service.
+    pub(crate) port: Option<u16>,
+    /// The command that stops a Foreign process, its main value, which Procly never runs.
+    pub(crate) stop_command: Option<String>,
+    /// Whether text is selected in the window, in its output or in a field, which the standard Copy copies.
+    pub(crate) text_selected: bool,
+    /// Whether the selection has an output to find in, which a Foreign process does not.
+    pub(crate) find: bool,
 }
 
 impl MenuContext {
+    /// The title and the text of `⌘C`, none while text is selected in the window or the selection has no main value:
+    /// the command that stops a Foreign process, otherwise the port of the selection.
+    pub(crate) fn main_value(&self) -> Option<(String, String)> {
+        if self.text_selected {
+            return None;
+        }
+        if let Some(command) = &self.stop_command {
+            return Some((format!("Copy {command}"), command.clone()));
+        }
+        self.port.map(|port| (format!("Copy Port {port}"), port.to_string()))
+    }
+
     /// The text a copy item puts on the clipboard, none for another item or when there is nothing to copy.
-    pub(crate) fn copied(&self, choice: Choice) -> Option<&str> {
+    pub(crate) fn copied(&self, choice: Choice) -> Option<String> {
         match choice {
-            Choice::CopyLogsCommand => self.logs_command.as_deref(),
-            Choice::CopyPath => self.worktree.as_deref(),
+            Choice::CopyLogsCommand => self.logs_command.clone(),
+            Choice::CopyPath => self.worktree.clone(),
+            Choice::CopySlug => self.slug.clone(),
+            Choice::CopyMainValue => self.main_value().map(|(_, text)| text),
             _ => None,
+        }
+    }
+}
+
+/// The Copy line of Edit: the standard Copy and the item that copies the main value, one of which is in the menu at a
+/// time, at `position`.
+struct CopyLine {
+    edit: NativeSubmenu<Wry>,
+    position: usize,
+    standard: PredefinedMenuItem<Wry>,
+    main_value: MenuItem<Wry>,
+}
+
+impl CopyLine {
+    /// Puts in the menu the line `after` calls for in place of the one `before` did, and names it.
+    fn show(&self, before: &MenuContext, after: &MenuContext) -> tauri::Result<()> {
+        match (Entry::Copy.resolve(before), Entry::Copy.resolve(after)) {
+            (Line::Standard(_), Line::Item(choice)) => {
+                self.edit.remove(&self.standard)?;
+                self.main_value.set_text(choice.title_in(after))?;
+                self.edit.insert(&self.main_value, self.position)
+            }
+            (Line::Item(_), Line::Item(choice)) => self.main_value.set_text(choice.title_in(after)),
+            (Line::Item(_), Line::Standard(_)) => {
+                self.edit.remove(&self.main_value)?;
+                self.edit.insert(&self.standard, self.position)
+            }
+            // The Copy line is never a separator, and a standard Copy stays as it is.
+            _ => Ok(()),
         }
     }
 }
@@ -297,6 +442,7 @@ impl MenuContext {
 /// The items of the bar that depend on the selection, and the last context the window sent.
 pub(crate) struct MenuBar {
     items: Vec<(Choice, MenuItem<Wry>)>,
+    copy: Option<CopyLine>,
     context: Mutex<MenuContext>,
 }
 
@@ -306,14 +452,20 @@ impl MenuBar {
         self.context.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Enables the items `context` allows and disables the others.
+    /// Enables the items `context` allows and disables the others, and gives `⌘C` to what it copies.
     fn apply(&self, context: MenuContext) {
         for (choice, item) in &self.items {
             if let Err(error) = item.set_enabled(choice.enabled(&context)) {
                 eprintln!("procly: cannot update the menu item {}: {error}", choice.id());
             }
         }
-        *self.context() = context;
+        let mut held = self.context();
+        if let Some(copy) = &self.copy
+            && let Err(error) = copy.show(&held, &context)
+        {
+            eprintln!("procly: cannot update the Copy item: {error}");
+        }
+        *held = context;
     }
 }
 
@@ -325,36 +477,70 @@ impl MenuBar {
 pub(crate) fn install(app: &AppHandle) -> tauri::Result<MenuBar> {
     let context = MenuContext::default();
     let mut items = Vec::new();
+    let mut copy = None;
     let menu = Menu::new(app)?;
     for submenu in &BAR {
         let mut builder = match submenu.id {
             Some(id) => SubmenuBuilder::with_id(app, id, submenu.title),
             None => SubmenuBuilder::new(app, submenu.title),
         };
-        for entry in submenu.entries {
+        let mut copy_at = None;
+        for (position, entry) in submenu.entries.iter().enumerate() {
             builder = match *entry {
                 Entry::Item(choice) => {
-                    let mut item =
-                        MenuItemBuilder::with_id(choice.id(), choice.title()).enabled(choice.enabled(&context));
-                    if let Some(accelerator) = choice.accelerator() {
-                        item = item.accelerator(accelerator);
-                    }
-                    let item = item.build(app)?;
+                    let item = item(app, choice, &context)?;
                     let builder = builder.item(&item);
                     items.push((choice, item));
                     builder
                 }
                 Entry::Standard(standard) => standard_item(builder, standard),
                 Entry::Separator => builder.separator(),
+                Entry::Copy => {
+                    // Nothing is selected yet, so the standard Copy holds `⌘C`.
+                    let standard = PredefinedMenuItem::copy(app, None)?;
+                    let builder = builder.item(&standard);
+                    copy_at = Some((position, standard));
+                    builder
+                }
             };
         }
-        menu.append(&builder.build()?)?;
+        let built = builder.build()?;
+        menu.append(&built)?;
+        if let Some((position, standard)) = copy_at {
+            copy = Some(CopyLine {
+                edit: built,
+                position,
+                standard,
+                main_value: main_value_item(app)?,
+            });
+        }
     }
     app.set_menu(menu)?;
     Ok(MenuBar {
         items,
+        copy,
         context: Mutex::new(context),
     })
+}
+
+/// The native item that copies the main value. It is enabled for good, since it is in the menu only while there is a
+/// main value to copy, and [`CopyLine::show`] names it each time it shows.
+fn main_value_item(app: &AppHandle) -> tauri::Result<MenuItem<Wry>> {
+    let choice = Choice::CopyMainValue;
+    let mut item = MenuItemBuilder::with_id(choice.id(), choice.title()).enabled(true);
+    if let Some(accelerator) = choice.accelerator() {
+        item = item.accelerator(accelerator);
+    }
+    item.build(app)
+}
+
+/// The native item of `choice`, as `context` enables it.
+fn item(app: &AppHandle, choice: Choice, context: &MenuContext) -> tauri::Result<MenuItem<Wry>> {
+    let mut item = MenuItemBuilder::with_id(choice.id(), choice.title_in(context)).enabled(choice.enabled(context));
+    if let Some(accelerator) = choice.accelerator() {
+        item = item.accelerator(accelerator);
+    }
+    item.build(app)
 }
 
 /// Adds the standard item `standard` to `builder`.
@@ -395,8 +581,9 @@ pub(crate) fn set_menu_context(context: MenuContext, bar: State<'_, MenuBar>) {
 mod tests {
     use super::*;
 
-    /// The lines of the menu titled `title`, a custom item as its title and key equivalent, a standard one by its name.
-    fn lines(title: &str) -> Vec<String> {
+    /// The lines of the menu titled `title` while the window sent `context`, a custom item as its title and key
+    /// equivalent, a standard one by its name.
+    fn lines_in(title: &str, context: &MenuContext) -> Vec<String> {
         let submenu = BAR
             .iter()
             .find(|submenu| submenu.title == title)
@@ -404,15 +591,122 @@ mod tests {
         submenu
             .entries
             .iter()
-            .map(|entry| match entry {
-                Entry::Item(choice) => match choice.accelerator() {
-                    Some(accelerator) => format!("{} {accelerator}", choice.title()),
-                    None => choice.title().to_owned(),
+            .map(|entry| match entry.resolve(context) {
+                Line::Item(choice) => match choice.accelerator() {
+                    Some(accelerator) => format!("{} {accelerator}", choice.title_in(context)),
+                    None => choice.title_in(context),
                 },
-                Entry::Standard(standard) => format!("{standard:?}"),
-                Entry::Separator => "---".to_owned(),
+                Line::Standard(standard) => format!("{standard:?}"),
+                Line::Separator => "---".to_owned(),
             })
             .collect()
+    }
+
+    /// The lines of the menu titled `title` while nothing is selected.
+    fn lines(title: &str) -> Vec<String> {
+        lines_in(title, &MenuContext::default())
+    }
+
+    /// What the window sends while a Process service of `/p/work/acme/web` listening on 4101 is selected.
+    fn service_on_4101() -> MenuContext {
+        MenuContext {
+            logs_command: Some("(cd /p/work/acme/web && procly logs api)".to_owned()),
+            restart: true,
+            stop: true,
+            worktree: Some("/p/work/acme/web".to_owned()),
+            slug: Some("acme_web".to_owned()),
+            port: Some(4101),
+            find: true,
+            ..MenuContext::default()
+        }
+    }
+
+    #[test]
+    fn edit_copies_the_port_of_a_selected_service_with_command_c_and_names_it() {
+        let edit = lines_in("Edit", &service_on_4101());
+
+        assert_eq!(edit[4], "Copy Port 4101 CmdOrCtrl+C");
+        assert!(!edit.contains(&"Copy".to_owned()), "one item holds ⌘C: {edit:?}");
+        assert_eq!(service_on_4101().copied(Choice::CopyMainValue).as_deref(), Some("4101"));
+    }
+
+    #[test]
+    fn edit_keeps_the_standard_copy_when_nothing_is_selected() {
+        assert_eq!(
+            lines("Edit"),
+            [
+                "Undo",
+                "Redo",
+                "---",
+                "Cut",
+                "Copy",
+                "Paste",
+                "SelectAll",
+                "---",
+                "Find in Output… CmdOrCtrl+F"
+            ]
+        );
+        assert_eq!(MenuContext::default().copied(Choice::CopyMainValue), None);
+    }
+
+    #[test]
+    fn edit_keeps_the_standard_copy_while_text_is_selected_in_the_window() {
+        let selecting = MenuContext {
+            text_selected: true,
+            ..service_on_4101()
+        };
+
+        assert_eq!(lines_in("Edit", &selecting)[4], "Copy");
+        assert_eq!(selecting.copied(Choice::CopyMainValue), None);
+    }
+
+    #[test]
+    fn edit_keeps_the_standard_copy_for_a_selection_without_a_main_value() {
+        let job = MenuContext {
+            logs_command: Some("(cd /p/work/acme/web && procly logs j1)".to_owned()),
+            find: true,
+            ..MenuContext::default()
+        };
+
+        assert_eq!(lines_in("Edit", &job)[4], "Copy");
+    }
+
+    #[test]
+    fn the_main_value_of_a_foreign_process_is_the_command_that_stops_it() {
+        let foreign = MenuContext {
+            port: Some(3000),
+            stop_command: Some("kill 4812".to_owned()),
+            worktree: Some("/p/work/acme/web".to_owned()),
+            ..MenuContext::default()
+        };
+
+        assert_eq!(lines_in("Edit", &foreign)[4], "Copy kill 4812 CmdOrCtrl+C");
+        assert_eq!(foreign.copied(Choice::CopyMainValue).as_deref(), Some("kill 4812"));
+    }
+
+    #[test]
+    fn find_in_output_is_enabled_only_when_the_selection_has_an_output() {
+        assert!(Choice::FindInOutput.enabled(&service_on_4101()));
+        let foreign = MenuContext {
+            stop_command: Some("kill 4812".to_owned()),
+            ..MenuContext::default()
+        };
+        assert!(!Choice::FindInOutput.enabled(&foreign));
+        assert!(!Choice::FindInOutput.enabled(&MenuContext::default()));
+    }
+
+    #[test]
+    fn copy_slug_copies_the_slug_of_the_worktree() {
+        assert_eq!(service_on_4101().copied(Choice::CopySlug).as_deref(), Some("acme_web"));
+        assert!(Choice::CopySlug.enabled(&service_on_4101()));
+        assert!(!Choice::CopySlug.enabled(&MenuContext::default()));
+    }
+
+    #[test]
+    fn help_holds_procly_help() {
+        assert_eq!(lines("Help"), ["Procly Help"]);
+        assert!(Choice::Help.enabled(&MenuContext::default()));
+        assert!(HELP_URL.starts_with("https://github.com/philippe-desplats/procly"));
     }
 
     #[test]
@@ -480,14 +774,16 @@ mod tests {
     }
 
     #[test]
-    fn worktree_opens_copies_the_path_and_releases_the_worktree() {
+    fn worktree_opens_reveals_copies_the_path_and_the_slug_and_releases_the_worktree() {
         assert_eq!(
             lines("Worktree"),
             [
                 "Open in Editor CmdOrCtrl+E",
                 "Open in Terminal CmdOrCtrl+T",
+                "Reveal in Finder",
                 "---",
                 "Copy Path CmdOrCtrl+Alt+C",
+                "Copy Slug",
                 "---",
                 "Release…"
             ]
@@ -521,6 +817,7 @@ mod tests {
             .flat_map(|submenu| submenu.entries)
             .filter_map(|entry| match entry {
                 Entry::Item(choice) => Some(*choice),
+                Entry::Copy => Some(Choice::CopyMainValue),
                 Entry::Standard(_) | Entry::Separator => None,
             })
             .collect();
@@ -553,21 +850,17 @@ mod tests {
             .map(Choice::title)
             .collect();
 
-        assert_eq!(enabled, ["Settings…", "Overview", "Doctor", "Orphans", "Refresh"]);
+        assert_eq!(
+            enabled,
+            ["Settings…", "Overview", "Doctor", "Orphans", "Refresh", "Procly Help"]
+        );
     }
 
     #[test]
     fn the_selection_enables_what_it_allows_and_nothing_else() {
-        let running = MenuContext {
-            logs_command: Some("(cd /p/work/acme/web && procly logs api)".to_owned()),
-            restart: true,
-            stop: true,
-            mark_seen: false,
-            worktree: Some("/p/work/acme/web".to_owned()),
-        };
         let disabled: Vec<_> = CHOICES
             .into_iter()
-            .filter(|choice| !choice.enabled(&running))
+            .filter(|choice| !choice.enabled(&service_on_4101()))
             .map(Choice::title)
             .collect();
 
@@ -583,10 +876,10 @@ mod tests {
         };
 
         assert_eq!(
-            context.copied(Choice::CopyLogsCommand),
+            context.copied(Choice::CopyLogsCommand).as_deref(),
             Some("(cd /p/work/acme/web && procly logs api)")
         );
-        assert_eq!(context.copied(Choice::CopyPath), Some("/p/work/acme/web"));
+        assert_eq!(context.copied(Choice::CopyPath).as_deref(), Some("/p/work/acme/web"));
         assert_eq!(context.copied(Choice::Restart), None);
         assert_eq!(MenuContext::default().copied(Choice::CopyPath), None);
     }

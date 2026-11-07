@@ -1,7 +1,8 @@
-import { Fragment, memo, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { CopyBox } from "./CopyBox";
 import type { FailureKey } from "./daemon";
+import { useTauriEvent } from "./doctor";
 import {
   composeStatement,
   foreignStatement,
@@ -10,8 +11,10 @@ import {
   type Statement,
 } from "./inspect";
 import { worktreeLabel, worktreeNames } from "./labels";
+import { MENU_CHOICE, stopCommand } from "./menu";
 import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
+import type { MenuChoice } from "./protocol/MenuChoice";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
 import { PortPill, PortPills } from "./PortPill";
@@ -254,6 +257,7 @@ export function WorktreeNames({ worktree }: { worktree: WorktreeStatus }) {
  */
 function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process: ForeignProcess }) {
   const statement = foreignStatement();
+  const stop = stopCommand(process);
   return (
     <section aria-label="Selection">
       <header className="inspector-head">
@@ -293,12 +297,12 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
         )}
       </dl>
       <p className="muted">{statement.summary}</p>
-      {process.kind === "process" ? (
+      {stop === null ? null : (
         <>
           <p className="caption">Stop it yourself</p>
-          <CopyBox text={`kill ${String(process.pid)}`} />
+          <CopyBox text={stop} />
         </>
-      ) : null}
+      )}
     </section>
   );
 }
@@ -396,6 +400,20 @@ function OutputPane({ selected, output }: { selected: Followed; output: OutputVi
   const [finding, setFinding] = useState(false);
   const [query, setQuery] = useState("");
   const [wrap, setWrap] = useState(false);
+  // Find in Output of the menu bar opens the field and focuses it, also when it is already open.
+  const field = useRef<HTMLInputElement>(null);
+  const [findAsked, setFindAsked] = useState(0);
+  useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
+    if (choice === "find-in-output") {
+      setFinding(true);
+      setFindAsked((asked) => asked + 1);
+    }
+  });
+  useEffect(() => {
+    if (findAsked > 0) {
+      field.current?.focus();
+    }
+  }, [findAsked]);
   const needle = finding ? query.toLowerCase() : "";
   const lines =
     needle === "" ? output.lines : output.lines.filter((line) => textOf(line).toLowerCase().includes(needle));
@@ -445,6 +463,7 @@ function OutputPane({ selected, output }: { selected: Followed; output: OutputVi
       ) : null}
       {finding ? (
         <input
+          ref={field}
           type="search"
           className="output-find"
           aria-label="Find in output"

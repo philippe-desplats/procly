@@ -6,6 +6,7 @@
 mod apps;
 mod atomic;
 mod clipboard;
+mod context_menu;
 mod daemon;
 mod dock;
 mod doctor;
@@ -29,6 +30,7 @@ mod window;
 
 use std::sync::{Arc, Mutex};
 
+use context_menu::{ContextMenus, Picked};
 use daemon::DaemonClient;
 use dock::DockIcon;
 use follow::{Follower, WINDOW_VISIBLE};
@@ -96,6 +98,36 @@ async fn mark_seen(
     saved
 }
 
+/// Marks a Seen failure as Unseen: it comes back in "Needs you" and in the count, and the window is told at once. A key
+/// that is not Seen changes nothing. It changes nothing in the Daemon.
+///
+/// # Errors
+///
+/// When the Seen set cannot be written. The failure needs the developer again until the app quits, and the window is
+/// told of it anyway.
+#[tauri::command]
+async fn mark_unseen(
+    key: FailureKey,
+    app: AppHandle,
+    poller: State<'_, Poller>,
+    attention: State<'_, Attention>,
+    publishing: State<'_, Publishing>,
+) -> Result<(), SeenError> {
+    // As for a mark as Seen, the answers of the poller wait for this one.
+    let _turn = publishing.0.lock().await;
+    let Some(last) = poller.last() else {
+        return Ok(());
+    };
+    let attention = attention.inner().clone();
+    let updates = poller.subscribe();
+    let (presented, saved) =
+        tauri::async_runtime::spawn_blocking(move || attention.unmark(&key, last, || updates.borrow().clone()))
+            .await
+            .map_err(|error| SeenError::task(&error))?;
+    publish(&app, &presented);
+    saved
+}
+
 /// One publish at a time: the answers of the poller and a mark as Seen are presented and published in turn, so that
 /// the last one the window and the menu receive holds the newest answer with the newest Seen set.
 #[derive(Debug, Clone, Default)]
@@ -150,9 +182,29 @@ fn window_state<R: Runtime>(window: &Window<R>) -> WindowState {
     )
 }
 
+/// Puts `text` on the clipboard, which a copy item of a menu asked for.
+fn copy_text(text: &str) {
+    if let Err(error) = clipboard::copy(text) {
+        eprintln!("procly: cannot copy {text}: {error}");
+    }
+}
+
 /// Handles a choice in the native menu bar. Refresh asks the poller for an answer at once, the copy items copy what the
 /// window last said the selection holds, and every other item is carried out by the window.
 fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
+    if let Some(menus) = app.try_state::<ContextMenus>() {
+        // The entries are let go of before copying, which waits for the clipboard tool.
+        let picked = context_menu::picked(&menus.shown(), event.id().as_ref());
+        match picked {
+            Some(Picked::Copy(text)) => return copy_text(&text),
+            Some(Picked::Act(index)) => {
+                // A window that is gone has nothing to carry out.
+                let _ = app.emit(context_menu::CONTEXT_CHOICE, index);
+                return;
+            }
+            None => {}
+        }
+    }
     let Some(choice) = Choice::of(event) else {
         return;
     };
@@ -168,15 +220,19 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
             // A window that is gone has nothing to be told, and Settings opens from the sidebar anyway.
             let _ = app.emit(OPEN_SETTINGS, ());
         }
-        Choice::CopyLogsCommand | Choice::CopyPath => {
-            let copied = app
-                .try_state::<MenuBar>()
-                .and_then(|bar| bar.context().copied(choice).map(ToOwned::to_owned));
-            if let Some(text) = copied
-                && let Err(error) = clipboard::copy(&text)
-            {
-                eprintln!("procly: cannot copy {text}: {error}");
+        Choice::CopyLogsCommand | Choice::CopyPath | Choice::CopySlug | Choice::CopyMainValue => {
+            let copied = app.try_state::<MenuBar>().and_then(|bar| bar.context().copied(choice));
+            if let Some(text) = copied {
+                copy_text(&text);
             }
+        }
+        Choice::Help => {
+            // Opening the browser waits for `open`, which the thread of the menu should not.
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Err(error) = opening::Launcher::open_url(&opening::Opener, menu::HELP_URL) {
+                    eprintln!("procly: cannot open {}: {error}", menu::HELP_URL);
+                }
+            });
         }
         Choice::Overview
         | Choice::Doctor
@@ -186,6 +242,8 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
         | Choice::MarkSeen
         | Choice::OpenInEditor
         | Choice::OpenInTerminal
+        | Choice::RevealInFinder
+        | Choice::FindInOutput
         | Choice::Release => {
             // A window that is gone has nothing selected to act on.
             let _ = app.emit(MENU_CHOICE, choice);
@@ -235,6 +293,40 @@ fn builder() -> tauri::Builder<tauri::Wry> {
     #[cfg(feature = "e2e")]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
     builder
+}
+
+/// Every command the window may invoke.
+fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        last_update,
+        mark_seen,
+        mark_unseen,
+        refresh,
+        menu::set_menu_context,
+        context_menu::show_context_menu,
+        follow::follow_logs,
+        follow::stop_follow,
+        follow::service_logs,
+        lifecycle::start_daemon,
+        lifecycle::restart_daemon,
+        doctor::doctor,
+        apps::detected_apps,
+        opening::open_worktree,
+        opening::reveal_worktree,
+        opening::open_localhost,
+        orphans::list_orphans,
+        orphans::delete_orphans,
+        release::preview_release,
+        release::release_worktree,
+        services::stop_service,
+        services::restart_service,
+        settings::get_settings,
+        settings::save_settings,
+        login_item::get_open_at_login,
+        login_item::set_open_at_login,
+        notifications::set_notify_on_failure,
+        notifications::open_notification_settings,
+    ]
 }
 
 /// Runs the app until the developer quits it. Closing the window leaves it in the menu bar, and neither closing the
@@ -301,6 +393,7 @@ pub fn run() {
             app.manage(attention);
             app.manage(publishing);
             app.manage(Follower::new());
+            app.manage(ContextMenus::default());
             app.manage(menu::install(app.handle())?);
             Ok(())
         })
@@ -316,34 +409,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| on_menu_event(app, &event))
         .on_window_event(on_window_event)
-        .invoke_handler(tauri::generate_handler![
-            last_update,
-            mark_seen,
-            refresh,
-            menu::set_menu_context,
-            follow::follow_logs,
-            follow::stop_follow,
-            follow::service_logs,
-            lifecycle::start_daemon,
-            lifecycle::restart_daemon,
-            doctor::doctor,
-            apps::detected_apps,
-            opening::open_worktree,
-            opening::reveal_worktree,
-            opening::open_localhost,
-            orphans::list_orphans,
-            orphans::delete_orphans,
-            release::preview_release,
-            release::release_worktree,
-            services::stop_service,
-            services::restart_service,
-            settings::get_settings,
-            settings::save_settings,
-            login_item::get_open_at_login,
-            login_item::set_open_at_login,
-            notifications::set_notify_on_failure,
-            notifications::open_notification_settings,
-        ])
+        .invoke_handler(commands())
         .build(tauri::generate_context!())
         .expect("the Tauri application builds")
         .run(|app, event| {

@@ -8,7 +8,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::menu::{
+    IconMenuItem, IconMenuItemBuilder, Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder,
+};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Emitter as _, Manager as _, Wry};
 
@@ -17,7 +19,7 @@ use crate::glyph::{Glyph, GlyphTracker};
 use crate::needs_you::{Place, Presented};
 use crate::notifications::OPEN_FAILURE;
 use crate::settings::OPEN_SETTINGS;
-use crate::tray_menu::{self, Action, Entry, Item, Model, Snapshot};
+use crate::tray_menu::{self, Action, Entry, Item, LineGlyph, Model, Snapshot};
 use crate::window::MainWindow;
 
 /// The id of the one tray icon.
@@ -71,6 +73,14 @@ fn native(app: &AppHandle, item: &Item) -> tauri::Result<MenuItem<Wry>> {
         .build(app)
 }
 
+/// The native item of a line that leads with the state glyph `glyph`.
+fn native_with(app: &AppHandle, item: &Item, glyph: LineGlyph) -> tauri::Result<IconMenuItem<Wry>> {
+    IconMenuItemBuilder::with_id(&item.id, &item.label)
+        .enabled(item.enabled)
+        .icon(Image::from_bytes(glyph.png())?)
+        .build(app)
+}
+
 /// The native menu of `model`, and its header. Which items it holds is decided by `tray_menu::layout`.
 fn menu(app: &AppHandle, model: &Model) -> tauri::Result<(Menu<Wry>, MenuItem<Wry>)> {
     let layout = tray_menu::layout(model);
@@ -79,7 +89,10 @@ fn menu(app: &AppHandle, model: &Model) -> tauri::Result<(Menu<Wry>, MenuItem<Wr
     menu.append(&header)?;
     for entry in &layout.entries {
         match entry {
-            Entry::Item(item) => menu.append(&native(app, item)?)?,
+            Entry::Item(item) => match item.glyph {
+                Some(glyph) => menu.append(&native_with(app, item, glyph)?)?,
+                None => menu.append(&native(app, item)?)?,
+            },
             Entry::Separator => menu.append(&PredefinedMenuItem::separator(app)?)?,
             Entry::Submenu { label, enabled, items } => {
                 let mut submenu = SubmenuBuilder::new(app, *label).enabled(*enabled);
