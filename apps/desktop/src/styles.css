@@ -265,28 +265,39 @@ body {
 
 /* A row of the center, as the mockup draws it: the glyph, the name with the word of its state, where it runs, then its
    time and its ports. The first column is the glyph, so every row starts with the shape of its state. */
-/* The name and the word of the state on one line. The name comes first: it keeps its width up to the larger of 60% of
-   the line and all of it but 8em, so that a long Job command leaves its word whole and a short line still shows a
-   readable name. The word, then the detail, give way after it, each cut at its end. */
+/* The name and the word of the state on one line. The word is never cut: the line is not clipped, so the least width
+   of the line, the word and the floor of the name, is the least width of its column, and the where column gives way
+   first. The name, then the detail, give way inside the line, each cut on one line with an ellipsis. The name keeps a
+   floor of 0.4em a character, which stays under the width of the name, up to 5.5em. Breaking anywhere is what lets
+   them give the line no least width past that floor: the clamp keeps them on one line. */
 .item-main {
   display: flex;
   align-items: baseline;
   gap: 0.3em;
   min-width: 0;
-  overflow: hidden;
   white-space: nowrap;
 }
 
 .item-main .item-name {
-  flex: none;
-  max-width: max(60%, 100% - 8em);
+  display: -webkit-box;
+  flex: 0 1 auto;
+  min-width: min(calc(var(--name-chars, 0) * 0.4em), 5.5em);
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .item-main .caption {
+  display: -webkit-box;
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .state-glyph {
@@ -295,11 +306,8 @@ body {
 
 /* The word of a state follows the name. It is grey like the text around it, except a failure and a restart. */
 .item-main .word {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
+  flex: none;
   color: var(--muted);
-  text-overflow: ellipsis;
 }
 
 .item-main .word.tone-warn {
@@ -1034,7 +1042,7 @@ body {
 .item-select {
   display: grid;
   flex: 1;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  grid-template-columns: 14px minmax(auto, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -1048,9 +1056,9 @@ body {
 }
 
 /* A row that says where it runs has a column for it. */
-/* Where the row runs gives way before the name does. */
+/* Where the row runs gives way before the name does, and the main column never goes below the least width of its line. */
 .item-select-wide {
-  grid-template-columns: 14px minmax(0, 2fr) minmax(0, 1fr) auto;
+  grid-template-columns: 14px minmax(auto, 2fr) minmax(0, 1fr) auto;
 }
 
 .item-select:focus-visible {

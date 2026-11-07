@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { PortPills } from "./PortPill";
 import { SelectableRow } from "./selectable";
@@ -45,7 +45,13 @@ export function ItemRow({
     <SelectableRow target={target} seen={seen} wide={where !== undefined}>
       <StateGlyph tone={state.tone} glyph={state.glyph} />
       <span className="item-main">
-        <span className={mono ? "item-name mono" : "item-name"}>{name}</span>{" "}
+        {/* The length of the name sets the floor it keeps when the line is short, see `.item-main .item-name`. */}
+        <span
+          className={mono ? "item-name mono" : "item-name"}
+          style={{ "--name-chars": String(name.length) } as CSSProperties}
+        >
+          {name}
+        </span>{" "}
         {detail === undefined ? null : (
           <>
             <span className="caption">{detail}</span>{" "}
