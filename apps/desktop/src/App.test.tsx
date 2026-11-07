@@ -133,7 +133,7 @@ describe("the window", () => {
     render(<App store={createDaemonStore()} />);
 
     expect(await screen.findByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
-    expect(screen.getByText(/does not start one/)).toBeInTheDocument();
+    expect(screen.getByText(/^Procly shows nothing until it runs\./)).toBeInTheDocument();
     // Doctor runs when the app enters that state, and it never starts a Daemon.
     expect(commands).toEqual(["last_update", "doctor"]);
   });

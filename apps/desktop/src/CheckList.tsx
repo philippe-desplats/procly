@@ -127,21 +127,27 @@ function FoldRow({ folded, open, onToggle }: { folded: Check[]; open: boolean; o
 /**
  * The checks, the failed and the warnings first, each with its message and the fix doctor names for it. With `fold`,
  * what passed or was skipped sits behind one line and a Show button, so that the problems are all that is in view.
+ * With `problemsOnly`, it is not there at all: the list holds the problems and nothing else.
  */
 export function CheckList({
   checks,
   worktree,
   fold = false,
+  problemsOnly = false,
   show,
 }: {
   checks: Check[];
   worktree: string | null;
   fold?: boolean;
+  problemsOnly?: boolean;
   show?: ShowActions | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const ordered = problemsFirst(checks);
-  const upfront = fold ? ordered.filter(isProblem) : ordered;
+  const upfront = fold || problemsOnly ? ordered.filter(isProblem) : ordered;
+  if (problemsOnly && upfront.length === 0) {
+    return <p className="caption">No problem found.</p>;
+  }
   const folded = fold ? ordered.filter((check) => !isProblem(check)) : [];
   return (
     <ul className="list checks">
@@ -167,19 +173,22 @@ export function CheckList({
 /**
  * What a scope shows: its checks once doctor answered, why it could not run, or that it is running. `pick` chooses the
  * checks of the document that belong on the screen, and `worktree` is the directory the fixes run in, `null` for the
- * machine. `fold` folds the checks that passed, and `show` gives a check the button that takes to its problem.
+ * machine. `fold` folds the checks that passed, `problemsOnly` leaves them out, and `show` gives a check the button that
+ * takes to its problem.
  */
 export function Checks({
   state,
   pick,
   worktree = null,
   fold = false,
+  problemsOnly = false,
   show,
 }: {
   state: DoctorState;
   pick: (checks: Check[]) => Check[];
   worktree?: string | null;
   fold?: boolean;
+  problemsOnly?: boolean;
   show?: ShowActions | undefined;
 }) {
   switch (state.kind) {
@@ -189,10 +198,24 @@ export function Checks({
       return state.document === null ? (
         <p className="caption">Checking…</p>
       ) : (
-        <CheckList checks={pick(state.document.checks)} worktree={worktree} fold={fold} show={show} />
+        <CheckList
+          checks={pick(state.document.checks)}
+          worktree={worktree}
+          fold={fold}
+          problemsOnly={problemsOnly}
+          show={show}
+        />
       );
     case "report":
-      return <CheckList checks={pick(state.document.checks)} worktree={worktree} fold={fold} show={show} />;
+      return (
+        <CheckList
+          checks={pick(state.document.checks)}
+          worktree={worktree}
+          fold={fold}
+          problemsOnly={problemsOnly}
+          show={show}
+        />
+      );
     case "failure":
       return (
         <p role="alert" className="error">
