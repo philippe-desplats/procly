@@ -139,7 +139,7 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
     { kind: "confirm"; error: string | null } | { kind: "deleting" } | { kind: "result"; report: GcReport }
   >({ kind: "confirm", error: null });
   const label = `Delete ${orphansCount(shown.length)}`;
-  const question = `Collect ${orphansCount(shown.length)}?`;
+  const question = `${label}?`;
 
   function collect(): void {
     setState({ kind: "deleting" });
