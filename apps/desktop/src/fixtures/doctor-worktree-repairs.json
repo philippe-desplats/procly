@@ -60,5 +60,6 @@
     }
   ],
   "prompt": "`procly doctor` checked this machine and found 2 problems listed below.\n\n1. guard: the Guard left the settings\n   Commands:\n   - procly agent install\n\n2. worktrunk_hooks: the hooks block left the file\n   Commands:\n   - procly worktree hooks\n",
-  "agent": null
+  "agent": null,
+  "daemon_version": "0.5.0"
 }

@@ -60,5 +60,6 @@
     }
   ],
   "prompt": "`procly doctor` checked this machine and found 1 problem listed below.\n\n1. configuration: /p/work/acme/web-fix/procly.toml is invalid\n   Commands:\n   - ${EDITOR:-vi} /p/work/acme/web-fix/procly.toml\n",
-  "agent": null
+  "agent": null,
+  "daemon_version": "0.5.0"
 }

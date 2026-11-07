@@ -198,12 +198,25 @@ body {
   gap: 1px;
 }
 
+/* The label, then what is said of it beside it ("Main worktree", Removed), not pushed to the far end of the row. */
 .row-line {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 6px;
   min-width: 0;
+}
+
+/* The legend of a Worktree keeps its words whole: the label gives way to it, never the other way round. */
+.row-legend {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* What an entry holds, on the line under its name: "2 Jobs" under Outside Repositories. */
+.row-detail {
+  color: var(--muted);
+  font-size: var(--size-small);
 }
 
 .row-reason {
@@ -565,6 +578,7 @@ body {
   display: flex;
   align-items: center;
   gap: 7px;
+  min-width: 0;
   margin: 0;
   padding: 6px 8px 2px;
   color: var(--muted);
@@ -573,6 +587,14 @@ body {
 
 .daemon-line .glyph {
   color: var(--ok);
+}
+
+/* One row, never wrapped: where the sidebar is too narrow the end is cut with an ellipsis. */
+.daemon-line-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .field {

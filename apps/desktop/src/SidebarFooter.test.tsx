@@ -6,6 +6,7 @@ import { App } from "./App";
 import { createDaemonStore, type Update } from "./daemon";
 import type { DoctorDocument, DoctorState } from "./doctor";
 import machine from "./fixtures/doctor.json";
+import reworded from "./fixtures/doctor-daemon-reworded.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import drift from "./fixtures/doctor-release-drift.json";
 import repairs from "./fixtures/doctor-worktree-repairs.json";
@@ -179,10 +180,25 @@ describe("the Daemon line of the sidebar footer", () => {
     expect(screen.getByText("Daemon 0.4.0, updated at 14:01:12")).toBeInTheDocument();
   });
 
+  it("names the version from the daemon_version field when the message of the daemon check holds none", () => {
+    footer({ doctor: reported(reworded) });
+
+    expect(screen.getByText("Daemon 0.5.0, updated at 14:01:12")).toBeInTheDocument();
+  });
+
   it("leaves the version out while doctor has not named one", () => {
     footer({ doctor: NEVER_CHECKED });
 
     expect(screen.getByText("Daemon, updated at 14:01:12")).toBeInTheDocument();
+  });
+
+  it("holds in one text element that carries the whole line, so that the cut of a narrow sidebar leaves it readable", () => {
+    footer();
+
+    const text = screen.getByText("Daemon 0.5.0, updated at 14:01:12");
+    expect(text).toHaveClass("daemon-line-text");
+    expect(text).toHaveAttribute("title", "Daemon 0.5.0, updated at 14:01:12");
+    expect(text.parentElement?.children).toHaveLength(2);
   });
 
   it("is a quiet dot beside the line, not a control", () => {
