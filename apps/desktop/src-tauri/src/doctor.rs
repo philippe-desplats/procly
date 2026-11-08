@@ -89,12 +89,12 @@ pub(crate) async fn doctor(cwd: Option<PathBuf>, client: State<'_, DaemonClient>
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
 
     use procly_client::state_dir::StateDir;
 
     use crate::daemon::{CommandError, DaemonClient};
+    use crate::stand_in;
 
     /// A temporary directory holding the state directory, a Worktree and the stand-in for the embedded `procly`.
     struct Scene {
@@ -134,8 +134,7 @@ mod tests {
                  printf '%s' '{stdout}'\nprintf '%s' '{stderr}' >&2\nexit {code}\n",
                 calls = self.calls().display(),
             );
-            fs::write(&path, script).expect("the stand-in can be written");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("the stand-in can be made executable");
+            stand_in::write(&path, &script);
             path
         }
 

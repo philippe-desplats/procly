@@ -2,10 +2,11 @@
 //! directory: framing, streams of responses, `connect` and `connect_or_start`.
 
 use std::fs;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, ErrorKind, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,8 @@ fn daemon(state: &StateDir, lines: Vec<String>) -> JoinHandle<String> {
     thread::spawn(move || answer(&listener, &lines))
 }
 
+/// Writes `lines` to the first client, and stops early when that client has closed the connection, as a client that
+/// has its answer does: what is left of the script has nobody to read it.
 fn answer(listener: &UnixListener, lines: &[String]) -> String {
     let (stream, _) = listener.accept().expect("the client connects");
     let mut request = String::new();
@@ -42,9 +45,11 @@ fn answer(listener: &UnixListener, lines: &[String]) -> String {
         .read_line(&mut request)
         .expect("the client sends its request");
     for line in lines {
-        (&stream)
-            .write_all(line.as_bytes())
-            .expect("the client reads the responses");
+        match (&stream).write_all(line.as_bytes()) {
+            Ok(()) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset) => break,
+            Err(error) => panic!("the client reads the responses: {error}"),
+        }
     }
     request
 }
@@ -84,8 +89,14 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 /// An executable that records the arguments it was started with in `marker`, and does nothing else.
 fn recording_exe(dir: &Path, marker: &Path) -> PathBuf {
     let exe = dir.join("fake-procly");
-    fs::write(&exe, format!("#!/bin/sh\necho \"$@\" > '{}'\n", marker.display()))
-        .expect("the executable can be written");
+    // Written by this process, the executable could still be open for writing in a child that another test forks at
+    // that moment, and running it would fail with "Text file busy" until that child execs. `cp` writes it in a
+    // process of its own, which no test forks from.
+    let source = dir.join("fake-procly.sh");
+    fs::write(&source, format!("#!/bin/sh\necho \"$@\" > '{}'\n", marker.display()))
+        .expect("the source of the executable can be written");
+    let copied = Command::new("cp").arg(&source).arg(&exe).status().expect("cp can run");
+    assert!(copied.success(), "cp writes the executable: {copied}");
     fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).expect("the executable can be made executable");
     exe
 }

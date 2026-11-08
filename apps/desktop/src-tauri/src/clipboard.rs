@@ -17,6 +17,9 @@ fn tools() -> &'static [(&'static str, &'static [&'static str])] {
 }
 
 /// Feeds `text` to the standard input of `program` and waits for it.
+///
+/// A tool that exits before reading all of `text` makes the write fail with a broken pipe, and how it exited is then
+/// the error, since it says why the copy did not happen.
 fn pipe_to(program: &str, args: &[&str], text: &str) -> io::Result<()> {
     let mut child = Command::new(program)
         .args(args)
@@ -24,12 +27,14 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> io::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
-    }
+    // The standard input is closed at the end of the statement, so the tool sees the end of `text` before the wait.
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(text.as_bytes()));
     let status = child.wait()?;
     if status.success() {
-        Ok(())
+        written
     } else {
         Err(io::Error::other(format!("{program} exited with {status}")))
     }
@@ -70,6 +75,16 @@ mod tests {
     #[test]
     fn a_tool_that_fails_is_an_error() {
         let error = pipe_to("sh", &["-c", "exit 3"], "24001").expect_err("the tool fails");
+
+        assert!(error.to_string().contains("exited with"), "{error}");
+    }
+
+    #[test]
+    fn a_tool_that_exits_before_reading_is_reported_by_how_it_exited() {
+        // Far more than a pipe holds, so the write is still under way when the tool exits without reading any of it.
+        let text = "24001\n".repeat(200_000);
+
+        let error = pipe_to("sh", &["-c", "exit 3"], &text).expect_err("the tool fails");
 
         assert!(error.to_string().contains("exited with"), "{error}");
     }

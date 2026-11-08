@@ -106,7 +106,6 @@ pub(crate) async fn restart_daemon(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
     use std::thread;
@@ -115,6 +114,7 @@ mod tests {
     use procly_client::state_dir::StateDir;
 
     use crate::daemon::{CommandError, DaemonClient};
+    use crate::stand_in;
 
     /// A temporary directory short enough for the socket path limit of macOS, holding the state directory and the
     /// stand-in for the embedded `procly`.
@@ -147,8 +147,7 @@ mod tests {
                  if [ \"$1 $2\" = \"daemon stop\" ]; then echo '{stop_message}' >&2; exit {stop_code}; fi\n",
                 calls = self.calls().display(),
             );
-            fs::write(&path, script).expect("the stand-in can be written");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("the stand-in can be made executable");
+            stand_in::write(&path, &script);
             path
         }
 
