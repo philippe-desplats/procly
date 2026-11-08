@@ -75,6 +75,16 @@ impl Project {
             .status
             .success()
     }
+
+    /// The names of the networks compose created for the project, none once it is gone.
+    fn networks(&self) -> Vec<String> {
+        let output = Command::new("docker")
+            .args(["network", "ls", "--format", "{{.Name}}", "--filter"])
+            .arg(format!("label=com.docker.compose.project={}", self.name))
+            .output()
+            .expect("docker runs");
+        stdout(&output).lines().map(str::to_owned).collect()
+    }
 }
 
 impl Drop for Project {
@@ -596,6 +606,12 @@ fn docker_gc_lists_the_container_and_volume_of_a_removed_worktree_and_gc_apply_r
         "the container of another directory was removed"
     );
     assert!(!fixture.other_project.volume_exists(), "the volume is left");
+    // The impostor is still a container of the project, whose network goes with the last one.
+    assert_eq!(
+        fixture.other_project.networks(),
+        [format!("{project}_default")],
+        "the network was removed while a container of the project is left"
+    );
     // The container of the Main worktree is not an Orphan.
     assert!(fixture.main_project.is_running() && fixture.main_project.volume_exists());
     assert_eq!(stdout(&fixture.procly.procly(&["gc"])), "no Orphans\n");
@@ -840,6 +856,122 @@ fn docker_a_retention_delete_removes_the_container_and_volume_of_a_removed_workt
         Vec::<String>::new()
     );
     assert!(!fixture.main_project.container().is_empty() && fixture.main_project.volume_exists());
+}
+
+#[test]
+fn docker_a_retention_delete_leaves_no_container_volume_or_network_of_the_project() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "delete");
+    let project = &fixture.other_project.name;
+    assert_eq!(
+        fixture.other_project.networks(),
+        [format!("{project}_default")],
+        "the project has its network before the release"
+    );
+
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["worktree", "release"]));
+
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+    assert_eq!(
+        fixture.other_project.networks(),
+        Vec::<String>::new(),
+        "the network is left"
+    );
+    // The Main worktree has a project of its own, and keeps its network.
+    assert_eq!(
+        fixture.main_project.networks(),
+        [format!("{}_default", fixture.main_project.name)]
+    );
+}
+
+#[test]
+fn docker_a_network_still_used_by_another_container_is_kept_and_reported_by_a_retention_delete_and_a_dry_run_agrees() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_with_retention(&fixture, "delete");
+    let project = &fixture.other_project.name;
+    let network = format!("{project}_default");
+    // A container outside Procly is attached to the network, so that the engine refuses to remove it.
+    let holder = Holder(format!("{project}-holder"));
+    let held = Command::new("docker")
+        .args(["run", "--detach", "--name", &holder.0, "--network", &network])
+        .args(["alpine", "sleep", "300"])
+        .output()
+        .expect("docker runs");
+    assert_success(&held);
+
+    let planned = json_succeeded(
+        &fixture
+            .procly
+            .procly_in(&fixture.main, &["worktree", "release", "--dry-run", "--json"]),
+    );
+    let released = fixture
+        .procly
+        .procly_in(&fixture.main, &["worktree", "release", "--json"]);
+
+    let released = json_succeeded(&released);
+    assert_eq!(planned["retention"], released["retention"], "{planned} {released}");
+    assert_eq!(planned["warnings"], released["warnings"], "{planned} {released}");
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+    assert_eq!(
+        fixture.other_project.networks(),
+        std::slice::from_ref(&network),
+        "the network was removed"
+    );
+    let log = fixture.procly.daemon_log();
+    assert!(
+        log.contains(&format!(
+            "retention policy delete of service db: the network {network} of compose project {project} is kept: "
+        )),
+        "{log}"
+    );
+}
+
+#[test]
+fn docker_a_network_still_used_by_another_container_is_kept_and_reported_as_a_warning_by_gc_apply() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    leave_behind_the_other_container(&fixture);
+    let project = &fixture.other_project.name;
+    let network = format!("{project}_default");
+    let holder = Holder(format!("{project}-holder"));
+    let held = Command::new("docker")
+        .args(["run", "--detach", "--name", &holder.0, "--network", &network])
+        .args(["alpine", "sleep", "300"])
+        .output()
+        .expect("docker runs");
+    assert_success(&held);
+    let worktree = fixture.other.display();
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&applied);
+    assert_eq!(
+        isolated_lines(&stdout(&applied)),
+        [
+            format!("deleted isolated container db (compose project {project}, service db) of {worktree}"),
+            format!("deleted isolated volume {project}_data (compose project {project}) of {worktree}"),
+        ],
+        "{}",
+        stdout(&applied)
+    );
+    assert!(
+        stderr(&applied).contains(&format!(
+            "procly: warning: the network {network} of compose project {project} is kept: "
+        )),
+        "{}",
+        stderr(&applied)
+    );
+    assert_eq!(fixture.other_project.networks(), [network], "the network was removed");
 }
 
 #[test]

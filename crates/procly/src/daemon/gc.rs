@@ -80,12 +80,16 @@ pub(super) async fn run(
                 .copied()
                 .unwrap_or_else(|| Settings::default().driver_timeout);
             match delete(registry, &collected.found, &orphan, timeout).await {
-                Ok(Dropped::Dropped) => {
+                Ok((Dropped::Dropped, kept)) => {
                     orphan.deleted = true;
                     eprintln!("gc deleted {}, requested by {who}", orphan.describe());
+                    for warning in &kept {
+                        eprintln!("gc: {warning}, requested by {who}");
+                    }
+                    collected.report.warnings.extend(kept);
                 }
                 // No longer an Orphan, so no longer reported as one, unless a client listed it.
-                Ok(Dropped::Held) => {
+                Ok((Dropped::Held, _)) => {
                     eprintln!(
                         "gc kept {}, a Worktree uses it again, requested by {who}",
                         orphan.describe()
@@ -578,10 +582,21 @@ fn mounted_volumes(container: &str, env: &[(String, String)]) -> Option<Vec<Stri
 /// The named volumes compose created for the project `project`: labelled with it and named after it, which a volume
 /// the compose file gives a name of its own is not. `None` when Docker did not answer. Blocking.
 fn project_volumes(project: &str, env: &[(String, String)]) -> Option<BTreeSet<String>> {
+    project_resources("volume", project, env)
+}
+
+/// The networks compose created for the project `project`, labelled with it and named after it, which a network
+/// the compose file gives a name of its own is not. `None` when Docker did not answer. Blocking.
+fn project_networks(project: &str, env: &[(String, String)]) -> Option<BTreeSet<String>> {
+    project_resources("network", project, env)
+}
+
+/// The names of the `kind`, `volume` or `network`, compose created for the project `project`. Blocking.
+fn project_resources(kind: &str, project: &str, env: &[(String, String)]) -> Option<BTreeSet<String>> {
     let label = format!("label=com.docker.compose.project={project}");
-    let format = "{{.Name}}\t{{.Label \"com.docker.compose.volume\"}}";
+    let format = format!("{{{{.Name}}}}\t{{{{.Label \"com.docker.compose.{kind}\"}}}}");
     Some(
-        lines(&["volume", "ls", "--filter", &label, "--format", format], env)?
+        lines(&[kind, "ls", "--filter", &label, "--format", &format], env)?
             .into_iter()
             .filter_map(|line| {
                 let (name, key) = line.split_once('\t')?;
@@ -589,6 +604,41 @@ fn project_volumes(project: &str, env: &[(String, String)]) -> Option<BTreeSet<S
             })
             .collect(),
     )
+}
+
+/// Removes the networks compose created for the project `project` once no container of it is left, and returns a
+/// warning for each one it keeps: another container is still attached to it, or Docker did not answer. The container
+/// and volumes are gone by then, so none of this fails the deletion. A project that still has a container, such as
+/// another service of it that is deleted next, keeps its networks, the deletion of its last container removes them.
+/// Blocking.
+fn remove_networks(project: &str, env: &[(String, String)]) -> Vec<String> {
+    let label = format!("label=com.docker.compose.project={project}");
+    match lines(&["container", "ls", "--all", "--quiet", "--filter", &label], env) {
+        Some(left) if !left.is_empty() => return Vec::new(),
+        Some(_) => {}
+        None => {
+            return vec![format!(
+                "the networks of compose project {project} are kept: Docker did not answer"
+            )];
+        }
+    }
+    let Some(networks) = project_networks(project, env) else {
+        return vec![format!(
+            "the networks of compose project {project} are kept: Docker did not answer"
+        )];
+    };
+    networks
+        .iter()
+        .filter_map(|network| {
+            remove(&["network", "rm", network], env).err().map(|error| {
+                let reason = match error {
+                    DeleteError::Docker { reason, .. } => reason,
+                    other => other.to_string(),
+                };
+                format!("the network {network} of compose project {project} is kept: {reason}")
+            })
+        })
+        .collect()
 }
 
 /// The lines `docker args` prints, `None` when it fails or does not answer. Blocking.
@@ -700,13 +750,14 @@ pub(super) enum DeleteError {
 /// Deletes `orphan`, a Logical resource with Driver commands that may run for `timeout`, or an Isolated container or
 /// volume as `found` holds it. A directory, a container or a volume already gone counts as deleted, as does a resource
 /// the Driver no longer finds. A Logical resource that is no longer an Orphan by the time its container is held is
-/// left as it is, [`Dropped::Held`].
+/// left as it is, [`Dropped::Held`]. Returns with it the warnings about what the deletion keeps, see
+/// [`delete_blocking`].
 async fn delete(
     registry: &Arc<Registry>,
     found: &Arc<Vec<Found>>,
     orphan: &Orphan,
     timeout: Duration,
-) -> Result<Dropped, DeleteError> {
+) -> Result<(Dropped, Vec<String>), DeleteError> {
     if let OrphanKind::LogicalResource {
         service,
         resource,
@@ -737,14 +788,18 @@ async fn delete(
             name,
             driver,
         };
-        return registry.composes.drop_resource(to_drop, timeout, still, forget).await;
+        return registry
+            .composes
+            .drop_resource(to_drop, timeout, still, forget)
+            .await
+            .map(|dropped| (dropped, Vec::new()));
     }
     let (registry, found, orphan) = (Arc::clone(registry), Arc::clone(found), orphan.clone());
     // Writing the documents, removing the directories and running docker are blocking.
-    tokio::task::spawn_blocking(move || delete_blocking(&registry, &found, &orphan))
+    let warnings = tokio::task::spawn_blocking(move || delete_blocking(&registry, &found, &orphan))
         .await
         .map_err(|error| DeleteError::Blocking(error.to_string()))??;
-    Ok(Dropped::Dropped)
+    Ok((Dropped::Dropped, warnings))
 }
 
 /// Whether the Logical resource `key`, named `name`, whose key holds the index `index`, is still an Orphan, worked
@@ -785,8 +840,14 @@ fn forget(registry: &Registry, key: &ResourceKey, name: &str) -> Result<bool, De
     })
 }
 
-/// Deletes `orphan`, anything but a Logical resource, an Isolated container or volume as `found` holds it. Blocking.
-pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orphan) -> Result<(), DeleteError> {
+/// Deletes `orphan`, anything but a Logical resource, an Isolated container or volume as `found` holds it, and returns
+/// the warnings about what it keeps: the networks of the project of an Isolated container that something else still
+/// uses. Blocking.
+pub(super) fn delete_blocking(
+    registry: &Registry,
+    found: &[Found],
+    orphan: &Orphan,
+) -> Result<Vec<String>, DeleteError> {
     let of = |service: &str| {
         found.iter().find(|found| {
             found.record.repository == orphan.id.repository
@@ -808,22 +869,24 @@ pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orp
                 port_name: port_name.clone(),
                 port: *port,
             })?;
-            Ok(())
+            Ok(Vec::new())
         }
         OrphanKind::LogicalResource { .. } => unreachable!("a Logical resource is deleted under its container"),
         OrphanKind::OutputDirectory { path } | OrphanKind::SetupDirectory { path } => worktree_dir::remove(path)
+            .map(|()| Vec::new())
             .map_err(|source| DeleteError::Remove {
                 path: path.clone(),
                 source,
             }),
         OrphanKind::IsolatedContainer { service, .. } => {
             let Some(found) = of(service) else {
-                return Ok(());
+                return Ok(Vec::new());
             };
             let containers = found.containers.as_ref().ok_or(DeleteError::Unanswered)?;
             let mut args = vec!["container", "rm", "--force", "--volumes"];
             args.extend(containers.iter().map(String::as_str));
-            remove(&args, &found.record.env)
+            remove(&args, &found.record.env)?;
+            Ok(remove_networks(&found.record.project, &found.record.env))
         }
         OrphanKind::IsolatedVolume { volume, .. } => {
             // Never the engine of the Daemon in place of the one the volume is on.
@@ -831,7 +894,7 @@ pub(super) fn delete_blocking(registry: &Registry, found: &[Found], orphan: &Orp
                 .iter()
                 .find(|found| found.record.repository == orphan.id.repository && found.volumes.contains(volume))
                 .ok_or(DeleteError::Unrecorded)?;
-            remove(&["volume", "rm", volume], &found.record.env)
+            remove(&["volume", "rm", volume], &found.record.env).map(|()| Vec::new())
         }
     }
 }
