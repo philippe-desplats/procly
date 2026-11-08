@@ -2,7 +2,7 @@
 //! directory: framing, streams of responses, `connect` and `connect_or_start`.
 
 use std::fs;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, ErrorKind, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,8 @@ fn daemon(state: &StateDir, lines: Vec<String>) -> JoinHandle<String> {
     thread::spawn(move || answer(&listener, &lines))
 }
 
+/// Writes `lines` to the first client, and stops early when that client has closed the connection, as a client that
+/// has its answer does: what is left of the script has nobody to read it.
 fn answer(listener: &UnixListener, lines: &[String]) -> String {
     let (stream, _) = listener.accept().expect("the client connects");
     let mut request = String::new();
@@ -42,9 +44,11 @@ fn answer(listener: &UnixListener, lines: &[String]) -> String {
         .read_line(&mut request)
         .expect("the client sends its request");
     for line in lines {
-        (&stream)
-            .write_all(line.as_bytes())
-            .expect("the client reads the responses");
+        match (&stream).write_all(line.as_bytes()) {
+            Ok(()) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset) => break,
+            Err(error) => panic!("the client reads the responses: {error}"),
+        }
     }
     request
 }
