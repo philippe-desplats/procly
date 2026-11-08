@@ -269,7 +269,7 @@ describe("the Overview", () => {
     render(<App store={createDaemonStore()} />);
 
     const title = await screen.findByRole("heading", { name: "Overview", level: 2 });
-    const line = title.parentElement;
+    const line = title.closest("header");
     expect(line).not.toBeNull();
     expect(line).toContainElement(screen.getByText("Updated at 19:35:00"));
     expect(line).toContainElement(screen.getByRole("button", { name: "Refresh" }));
@@ -304,7 +304,7 @@ describe("the Overview", () => {
     render(<App store={createDaemonStore()} />);
 
     const title = await screen.findByRole("heading", { name: "Overview", level: 2 });
-    expect(title.parentElement).toContainElement(screen.getByRole("button", { name: "Refresh" }));
+    expect(title.closest("header")).toContainElement(screen.getByRole("button", { name: "Refresh" }));
   });
 
   it("is not the empty Overview when a Foreign process needs the developer, whatever runs", async () => {

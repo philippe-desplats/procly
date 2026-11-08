@@ -28,8 +28,8 @@ const px = (text: string | undefined): number => {
 };
 
 /**
- * What the window really draws, measured on the real app at the widths of the verifier. jsdom lays nothing out, so these
- * stand in for the width of the content the stylesheet has to make room for.
+ * What the window really draws, measured on the real app by the verifier. jsdom lays nothing out, so these stand in
+ * for the width of the content the stylesheet has to make room for.
  */
 const MEASURED = {
   openInEditor: 108.2,
@@ -40,42 +40,48 @@ const MEASURED = {
   legend: 80,
 };
 
-/** The widths the center column takes at the 2 windows that bound the layout: the minimum one once #156 narrows it. */
-const COLUMN = { widest: 780, narrowest: 260 };
+/**
+ * The name of a folder in the title size, a little wider than `acme-web`, which the 164 px title column of the
+ * previous layout cut at 1280 px together with its legend.
+ */
+const NAME = 90;
+
+/** The widths the center column takes at the 2 windows that bound the layout: 1280 px, and the minimum of 960 px. */
+const COLUMN = { at1280: 660, narrowest: 380 };
 
 interface Item {
   name: string;
   /** The width it asks for, which is what decides whether it fits on the line. */
   size: number;
-  /** The least it can be squeezed to without something leaving the column. */
+  /** The least it can be squeezed to without something leaving the column or being cut. */
   least: number;
 }
 
 /**
  * Lays the title line of a Worktree out the way a wrapping flex line does: the items go on a line in turn, and an item
- * that does not fit starts the next one. Returns the lines of items, and what overflows the column.
+ * that does not fit starts the next one. Returns the lines of items, what overflows the column, and the width the
+ * title gets on its own line.
  */
-function layOut(column: number): { lines: Item[][]; overflow: string[]; titleRoom: number } {
+function layOut(column: number): { lines: Item[][]; overflow: string[]; titleWidth: number } {
   const bar = declarations(".title-bar");
   const [, right = "", , left = ""] = (value(bar, "padding") ?? "").split(/\s+/);
   const inner = column - px(left) - px(right);
-  const wraps = value(declarations(".worktree-head"), "flex-wrap") === "wrap";
-  const gap = px(value(bar, "gap"));
-  const groupGap = px(value(declarations(".worktree-open"), "gap"));
-  const groupWraps = value(declarations(".worktree-open"), "flex-wrap") === "wrap";
-  const title = px(value(declarations(".worktree-title"), "flex")?.split(/\s+/)[2]);
-  const nameLeast = px(value(declarations(".worktree-head .title"), "min-width"));
-  const group = (name: string, sizes: number[]): Item => ({
-    name,
-    size: sizes.reduce((sum, one) => sum + one, 0) + groupGap * (sizes.length - 1),
-    // A group that wraps can drop to its widest button, one that does not keeps its whole width.
-    least: groupWraps
-      ? Math.max(...sizes)
-      : sizes.reduce((sum, one) => sum + one, 0) + groupGap * (sizes.length - 1),
-  });
+  const wraps = value(bar, "flex-wrap") === "wrap";
+  const gaps = (value(bar, "gap") ?? "").split(/\s+/);
+  const gap = px(gaps[1] ?? gaps[0]);
+  const groupGap = px(value(declarations(".title-actions"), "gap"));
+  const block = (value(declarations(".title-block"), "flex") ?? "").split(/\s+/);
+  // A basis of auto is the width of its words: the name, the gap of its line and the legend. The path under it adds
+  // nothing, it is given no width of its own.
+  const words = NAME + px(value(declarations(".title-line"), "gap")) + MEASURED.legend;
+  const shrinks = block[1] !== "0";
+  const group = (name: string, sizes: number[]): Item => {
+    const size = sizes.reduce((sum, one) => sum + one, 0) + groupGap * (sizes.length - 1);
+    return { name, size, least: Math.max(...sizes) };
+  };
   const items: Item[] = [
-    { name: "title", size: Number.isNaN(title) ? 0 : title, least: Number.isNaN(nameLeast) ? 0 : nameLeast },
-    group("open", [MEASURED.openInEditor, MEASURED.openInTerminal]),
+    { name: "title", size: block[2] === "auto" ? words : px(block[2]), least: shrinks ? 0 : words },
+    group("actions", [MEASURED.openInEditor, MEASURED.openInTerminal]),
     group("controls", [MEASURED.updatedAt, MEASURED.refresh]),
   ];
   const lines: Item[][] = [[]];
@@ -96,71 +102,67 @@ function layOut(column: number): { lines: Item[][]; overflow: string[]; titleRoo
     );
   const own = lines.find((line) => line.some((one) => one.name === "title")) ?? [];
   const others = own.filter((one) => one.name !== "title").reduce((sum, one) => sum + one.size + gap, 0);
-  return { lines, overflow, titleRoom: inner - others };
+  // The title grows into what its line leaves, and never shrinks below its words.
+  return { lines, overflow, titleWidth: Math.max(inner - others, shrinks ? 0 : words) };
 }
 
-describe("the title line of a Worktree", () => {
+describe("the title line of a screen", () => {
   // jsdom loads no stylesheet and lays nothing out, so the layout is read from the CSS text and worked out from it.
-  it("wraps, and is as tall as the strip over the sidebar only while it holds a single line", () => {
-    const head = declarations(".worktree-head");
-    expect(value(head, "flex-wrap")).toBe("wrap");
-    expect(value(head, "height")).toBe("auto");
-    expect(value(head, "min-height")).toBe("52px");
+  it("wraps, and is as tall as the strip over the sidebar while it holds a single line", () => {
+    const bar = declarations(".title-bar");
+    expect(value(bar, "flex-wrap")).toBe("wrap");
+    expect(value(bar, "height")).toBe("auto");
+    expect(value(bar, "min-height")).toBe("52px");
   });
 
-  it("stays on one line at the widest window, as it was", () => {
-    const { lines, overflow } = layOut(COLUMN.widest);
+  it("shows the name of a Worktree whole at 1280 px, on one line with its buttons and controls", () => {
+    const { lines, overflow, titleWidth } = layOut(COLUMN.at1280);
 
-    expect(lines.map((line) => line.map((item) => item.name))).toEqual([["title", "open", "controls"]]);
+    expect(lines.map((line) => line.map((item) => item.name))).toEqual([["title", "actions", "controls"]]);
     expect(overflow).toEqual([]);
+    expect(titleWidth).toBeGreaterThanOrEqual(NAME + MEASURED.legend);
   });
 
-  it("puts the buttons and the controls on lines of their own at the narrowest window, none leaving the column", () => {
-    const { lines, overflow } = layOut(COLUMN.narrowest);
+  it("puts the buttons and the controls under the title at the narrowest window, none leaving the column", () => {
+    const { lines, overflow, titleWidth } = layOut(COLUMN.narrowest);
 
-    expect(lines.map((line) => line.map((item) => item.name))).toEqual([["title"], ["open"], ["controls"]]);
+    expect(lines.map((line) => line.map((item) => item.name))).toEqual([
+      ["title"],
+      ["actions"],
+      ["controls"],
+    ]);
     expect(overflow).toEqual([]);
+    expect(titleWidth).toBeGreaterThanOrEqual(NAME + MEASURED.legend);
   });
 
-  it("leaves the title a width of its own that never falls to nothing, at either window", () => {
-    for (const column of Object.values(COLUMN)) {
-      const { titleRoom } = layOut(column);
-      expect(px(value(declarations(".worktree-title"), "flex")?.split(/\s+/)[2])).toBeGreaterThan(0);
-      expect(titleRoom).toBeGreaterThanOrEqual(
-        px(value(declarations(".worktree-title"), "flex")?.split(/\s+/)[2]),
-      );
-    }
+  it("never shrinks the title below its words, and only cuts it at the width of the column", () => {
+    const block = declarations(".title-block");
+    expect(value(block, "flex")).toBe("1 0 auto");
+    expect(value(block, "max-width")).toBe("100%");
+    expect(value(block, "min-width")).toBe("0");
+    const title = declarations(".title-bar .title");
+    expect(value(title, "text-overflow")).toBe("ellipsis");
+    expect(value(title, "white-space")).toBe("nowrap");
+    expect(value(declarations(".title-legend"), "flex")).toBe("none");
+    expect(value(declarations(".title-legend"), "white-space")).toBe("nowrap");
   });
 
-  it("keeps the name readable and the legend of the main Worktree beside it rather than under a button", () => {
-    const basis = px(value(declarations(".worktree-title"), "flex")?.split(/\s+/)[2]);
-    const name = declarations(".worktree-head .title");
-    const gap = px(value(declarations(".worktree-name"), "gap"));
-
-    expect(px(value(name, "min-width"))).toBeGreaterThanOrEqual(48);
-    expect(value(name, "text-overflow")).toBe("ellipsis");
-    expect(value(name, "white-space")).toBe("nowrap");
-    // The name at its least, the gap and the legend all fit in the width the title is given, so nothing spills over.
-    expect(px(value(name, "min-width")) + gap + MEASURED.legend).toBeLessThanOrEqual(basis);
-    expect(value(declarations(".worktree-legend"), "flex")).toBe("none");
-    expect(value(declarations(".worktree-legend"), "white-space")).toBe("nowrap");
-  });
-
-  it("cuts the path with an ellipsis rather than wrapping it", () => {
-    const path = declarations(".worktree-path");
-    expect(value(declarations(".worktree-title"), "min-width")).toBe("0");
+  it("gives the path under the title no width of its own and cuts it with an ellipsis", () => {
+    const path = declarations(".title-under");
+    expect(value(path, "width")).toBe("0");
+    expect(value(path, "min-width")).toBe("100%");
     expect(value(path, "overflow")).toBe("hidden");
     expect(value(path, "text-overflow")).toBe("ellipsis");
     expect(value(path, "white-space")).toBe("nowrap");
   });
 
   it("lets the groups of buttons wrap inside the column and keeps each button and the time whole", () => {
-    for (const group of [".worktree-open", ".worktree-controls"]) {
+    for (const group of [".title-actions", ".title-controls"]) {
       expect(value(declarations(group), "flex-wrap")).toBe("wrap");
       expect(value(declarations(group), "min-width")).toBe("0");
     }
-    expect(value(declarations(".worktree-head .button"), "flex")).toBe("none");
-    expect(value(declarations(".worktree-head .caption"), "white-space")).toBe("nowrap");
+    expect(value(declarations(".title-bar .button"), "flex")).toBe("none");
+    expect(value(declarations(".title-bar .caption"), "white-space")).toBe("nowrap");
   });
 
   it("gives Release… the room under the bar that sticks 16px down, then the 12px it has everywhere else", () => {

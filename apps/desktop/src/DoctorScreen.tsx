@@ -94,7 +94,7 @@ export function WorktreeChecks({ store, path }: { store: DoctorStore; path: stri
   return (
     <section aria-label="Doctor checks" className="worktree-checks">
       <h3 className="caption">Doctor checks</h3>
-      <Checks state={state} pick={worktreeChecks} worktree={path} fold />
+      <Checks state={state} pick={worktreeChecks} worktree={path} />
     </section>
   );
 }

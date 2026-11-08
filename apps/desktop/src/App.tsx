@@ -370,16 +370,14 @@ export function App({
       />
     ) : null;
   const doctorRun = useDoctor(doctor, null);
-  // Where the Doctor takes the developer from a failed check: the Orphans, and the Foreign process the Status reports
-  // for the Leases the `leased_ports` check names.
-  const leasedPorts =
-    doctorRun.kind === "report" || doctorRun.kind === "running"
-      ? doctorRun.document?.checks.find((check) => check.name === "leased_ports" && check.status === "failed")
-      : undefined;
+  // Where the Doctor takes the developer from a failed check: the Orphans, and, when the `leased_ports` check fails, a
+  // Foreign process the Status reports on a port of a Service of its own Worktree.
+  const leasedPortsFailed =
+    (doctorRun.kind === "report" || doctorRun.kind === "running") &&
+    doctorRun.document?.checks.some((check) => check.name === "leased_ports" && check.status === "failed") ===
+      true;
   const processToShow =
-    snapshot.kind === "status" && leasedPorts !== undefined
-      ? foreignToShow(snapshot.report, leasedPorts.message)
-      : null;
+    snapshot.kind === "status" && leasedPortsFailed ? foreignToShow(snapshot.report) : null;
   const showProcess = (): void => {
     if (processToShow?.kind === "foreign") {
       setView({ kind: "worktree", path: processToShow.worktree });

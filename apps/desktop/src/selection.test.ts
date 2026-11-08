@@ -41,22 +41,12 @@ function node(pid: number, port: number): ForeignProcess {
   return { kind: "process", pid, command: "node server.js", ports: [port] };
 }
 
-/** The message of a failed `leased_ports` check naming one Lease per `[service, port, worktree]`. */
-function message(...leases: [string, number, string][]): string {
-  return leases
-    .map(
-      ([name, port, path]) =>
-        `lease ${name}.http port ${String(port)} of ${path} is held by process 1 node, which Procly did not start`,
-    )
-    .join("\n");
-}
-
 const WEB = "/p/work/acme/web";
 const FIX = "/p/work/acme/web-fix";
 
 describe("the Foreign process the Doctor shows", () => {
   it("is none when the Status reports no Foreign process", () => {
-    expect(foreignToShow(report(worktree(WEB)), message(["web", 24081, FIX]))).toBeNull();
+    expect(foreignToShow(report(worktree(WEB)))).toBeNull();
   });
 
   it("is a Foreign process that holds a port a Service of its own Worktree has, named by Worktree and pid", () => {
@@ -65,7 +55,6 @@ describe("the Foreign process the Doctor shows", () => {
         worktree(WEB),
         worktree(FIX, { services: [service("web", 24081)], foreign: [node(4812, 24081)] }),
       ),
-      message(["web", 24081, FIX]),
     );
 
     expect(found).toEqual({ kind: "foreign", worktree: FIX, process: "pid:4812" });
@@ -78,7 +67,6 @@ describe("the Foreign process the Doctor shows", () => {
         worktree(WEB, { foreign: [node(100, 3000)] }),
         worktree(FIX, { services: [service("web", 24081)], foreign: [node(4812, 3000)] }),
       ),
-      message(["web", 24081, FIX]),
     );
 
     expect(found).toBeNull();
@@ -90,35 +78,30 @@ describe("the Foreign process the Doctor shows", () => {
         worktree(WEB, { foreign: [node(100, 24081)] }),
         worktree(FIX, { services: [service("web", 24081)] }),
       ),
-      message(["web", 24081, FIX]),
     );
 
     expect(found).toBeNull();
   });
 
-  it("prefers, among several, the one on the port of the first Lease the check names", () => {
-    const worktrees = report(
+  it("takes, among several, the first in Status order", () => {
+    const first = report(
       worktree(WEB, { services: [service("api", 24000)], foreign: [node(100, 24000)] }),
       worktree(FIX, { services: [service("web", 24081)], foreign: [node(4812, 24081)] }),
     );
+    const swapped = report(
+      worktree(FIX, { services: [service("web", 24081)], foreign: [node(4812, 24081)] }),
+      worktree(WEB, { services: [service("api", 24000)], foreign: [node(100, 24000)] }),
+    );
 
-    // The Status lists web first, the check names the Lease of web-fix first.
-    expect(foreignToShow(worktrees, message(["web", 24081, FIX], ["api", 24000, WEB]))).toEqual({
-      kind: "foreign",
-      worktree: FIX,
-      process: "pid:4812",
-    });
-    expect(foreignToShow(worktrees, message(["api", 24000, WEB], ["web", 24081, FIX]))).toEqual({
-      kind: "foreign",
-      worktree: WEB,
-      process: "pid:100",
-    });
+    expect(foreignToShow(first)).toEqual({ kind: "foreign", worktree: WEB, process: "pid:100" });
+    expect(foreignToShow(swapped)).toEqual({ kind: "foreign", worktree: FIX, process: "pid:4812" });
   });
 
-  it("takes the first of the Status when the check names none of the candidates", () => {
+  it("skips, within a Worktree, a Foreign process on no port of its Services for the next one that is", () => {
     const found = foreignToShow(
-      report(worktree(FIX, { services: [service("web", 24081)], foreign: [node(4812, 24081)] })),
-      "service web of /p/work/acme/web-fix listens on port 10189 instead of its Lease, port 24081 (Port mismatch)",
+      report(
+        worktree(FIX, { services: [service("web", 24081)], foreign: [node(100, 3000), node(4812, 24081)] }),
+      ),
     );
 
     expect(found).toEqual({ kind: "foreign", worktree: FIX, process: "pid:4812" });
@@ -134,7 +117,6 @@ describe("the Foreign process the Doctor shows", () => {
           ],
         }),
       ),
-      message(["db", 5432, FIX]),
     );
 
     expect(found).toEqual({ kind: "foreign", worktree: FIX, process: "container:legacy-db" });

@@ -2,7 +2,8 @@
 
 /**
  * The Retention policy a Worktree release applied, or for a dry run would apply, to the Isolated container of a
- * Worktree already removed, which deletes the container and its volumes at once or once its delay has passed.
+ * Worktree already removed, whose deletion is due: at once for `delete`, once its delay has passed for a delay. A delay
+ * that has not passed yet is not applied, nor reported.
  */
 export type AppliedRetention = { 
 /**

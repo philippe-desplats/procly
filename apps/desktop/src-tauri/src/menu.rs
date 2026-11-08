@@ -63,7 +63,7 @@ pub(crate) enum Choice {
 }
 
 /// What Procly Help opens: the README of the repository, the address `Cargo.toml` declares.
-pub(crate) const HELP_URL: &str = "https://github.com/philippe-desplats/procly#readme";
+pub(crate) const HELP_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "#readme");
 
 /// Every [`Choice`], so that an id is read back and every item is drawn.
 const CHOICES: [Choice; 18] = [
@@ -706,7 +706,15 @@ mod tests {
     fn help_holds_procly_help() {
         assert_eq!(lines("Help"), ["Procly Help"]);
         assert!(Choice::Help.enabled(&MenuContext::default()));
-        assert!(HELP_URL.starts_with("https://github.com/philippe-desplats/procly"));
+        // The address the workspace manifest declares, read from the manifest itself so that a move of the
+        // repository moves Procly Help with it.
+        let manifest = include_str!("../../../../Cargo.toml");
+        let repository = manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("repository = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("the workspace manifest declares its repository");
+        assert_eq!(HELP_URL, format!("{repository}#readme"));
     }
 
     #[test]

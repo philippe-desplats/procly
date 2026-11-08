@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { basename } from "./labels";
 import { commandIn } from "./services";
+import type { AppliedRetention } from "./protocol/AppliedRetention";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { ReleaseReport } from "./protocol/ReleaseReport";
 import type { Response } from "./protocol/Response";
@@ -49,11 +51,13 @@ export function holdsNothing(report: ReleaseReport): boolean {
 }
 
 /**
- * What a release applies to the Isolated containers of the Worktrees already removed, which may delete their data. The
- * sheet draws it only when the dry run reports a Retention policy to apply.
+ * What a release does to the Isolated container of a Worktree already removed, worded from one entry of the report:
+ * the removed Worktree, the Service and the Retention policy that deletes the container now. The Worktree being
+ * released keeps its own container, so the line never says "its" of it.
  */
-export const RETENTION_LINE =
-  "applies the Retention policy to its Isolated containers, which may delete their data";
+export function retentionLine(applied: AppliedRetention): string {
+  return `applies Retention policy ${applied.policy} of ${applied.service} to the removed Worktree ${basename(applied.worktree)}, which deletes its Isolated container and its volumes`;
+}
 
 /** What a release does to a Foreign process of the Worktree: nothing, it is left running on the ports it holds. */
 export function foreignLine(process: ForeignProcess): string {

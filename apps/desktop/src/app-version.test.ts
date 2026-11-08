@@ -15,4 +15,12 @@ describe("the release this app ships", () => {
     expect(workspace).toBeDefined();
     expect(APP_VERSION).toBe(workspace);
   });
+
+  it("is read from the Cargo.toml of the workspace, the one source of the release, never from package.json", () => {
+    // The 2 files say the same today, so the value alone cannot tell where the build reads it from.
+    const config = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
+
+    expect(config).toContain('new URL("../../Cargo.toml", import.meta.url)');
+    expect(config).not.toContain("package.json");
+  });
 });

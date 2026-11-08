@@ -438,14 +438,16 @@ describe("the passed checks of the Doctor screen", () => {
     expect(await within(doctor).findByText("1 check passed")).toBeInTheDocument();
   });
 
-  it("folds the passed checks of a Worktree the same way", async () => {
+  it("does not fold the checks of a Worktree, which the Worktree screen lists every one of", async () => {
     rust(answered(), (cwd) => (cwd === WORKTREE_PATH ? WORKTREE : MACHINE));
     render(<App store={createDaemonStore()} />);
     fireEvent.click(await screen.findByRole("button", { name: /web_fix|web-fix/ }));
     const checks = await screen.findByRole("region", { name: "Doctor checks" });
 
-    expect(await within(checks).findByText("1 check passed, 2 skipped")).toBeInTheDocument();
-    expect(listed(checks)).toEqual(["configuration"]);
+    await within(checks).findByText("configuration");
+    expect(within(checks).queryByText("1 check passed, 2 skipped")).toBeNull();
+    expect(checks.querySelector(".check-fold")).toBeNull();
+    expect(listed(checks)).toEqual(["configuration", "worktrunk_hooks", "guard", "portless"]);
   });
 });
 
@@ -694,7 +696,6 @@ describe("the Worktree screen", () => {
 
     const checks = await screen.findByRole("region", { name: "Doctor checks" });
     expect(await within(checks).findByText("configuration")).toBeInTheDocument();
-    showTheFolded(checks);
     expect(listed(checks)).toEqual(["configuration", "worktrunk_hooks", "guard", "portless"]);
     // Whatever their status, the checks of a Worktree wear the same shapes as the checks of the machine.
     const shapes = glyphsByStatus(checks);

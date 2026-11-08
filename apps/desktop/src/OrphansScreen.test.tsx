@@ -213,14 +213,14 @@ describe("the Orphans screen", () => {
     expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
   });
 
-  it("asks a question as its title", async () => {
+  it("asks a question as its title, with the word of its buttons", async () => {
     app();
     render(<App store={createDaemonStore()} />);
     await openOrphans();
 
     fireEvent.click(await screen.findByRole("button", { name: /^Delete 6 Orphans/ }));
 
-    expect(await screen.findByRole("dialog", { name: "Collect 6 Orphans?" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Delete 6 Orphans?" })).toBeInTheDocument();
   });
 
   it("names in the sheet itself how many Orphans of each kind it deletes and the data they drop", async () => {

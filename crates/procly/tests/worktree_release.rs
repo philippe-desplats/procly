@@ -690,23 +690,26 @@ fn docker_a_dry_run_then_a_real_release_give_the_same_report_retention_policy_in
 }
 
 #[test]
-fn docker_a_real_release_says_which_retention_policy_it_applied() {
+fn docker_a_retention_policy_whose_delay_has_not_passed_is_neither_reported_nor_applied() {
     let Some(_docker) = require_docker() else {
         return;
     };
     let removed = removed_with_retention("7d");
+    // A Worktree Procly holds nothing in, whose release only finds the removed one waiting for its delay.
+    let idle = git_worktree_add(&removed.main, "app-idle");
+    let release = |args: &[&str]| removed.procly.procly_in(&idle, args);
 
-    let released = removed.procly.procly_in(&removed.main, &["worktree", "release"]);
+    let planned_text = release(&["worktree", "release", "--dry-run"]);
+    let planned = json_succeeded(&release(&["worktree", "release", "--dry-run", "--json"]));
+    let released_text = release(&["worktree", "release"]);
+    let released = json_succeeded(&release(&["worktree", "release", "--json"]));
 
-    assert_success(&released);
-    assert!(
-        stdout(&released).contains(&format!(
-            "Retention policy 7d of db applied to the Isolated container of the removed Worktree {}\n",
-            removed.other.display()
-        )),
-        "{}",
-        stdout(&released)
-    );
+    assert_success(&planned_text);
+    assert_eq!(stdout(&planned_text), "nothing to release\n");
+    assert_success(&released_text);
+    assert_eq!(stdout(&released_text), "nothing to release\n");
+    assert_eq!(planned["retention"], serde_json::json!([]), "{planned}");
+    assert_eq!(released["retention"], serde_json::json!([]), "{released}");
     assert!(
         !removed.other_project.container().is_empty(),
         "the container is deleted before its delay"

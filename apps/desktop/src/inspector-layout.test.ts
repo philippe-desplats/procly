@@ -22,13 +22,13 @@ function minimumWindowWidth(): number {
 
 describe("the width of the inspector", () => {
   // jsdom loads no stylesheet, so the width is read from the CSS text.
-  it("is drawn between 320 and 400 px, and the center keeps at least 260 px", () => {
+  it("is drawn between 320 and 400 px, and the center keeps at least 380 px", () => {
     const columns = /grid-template-columns:\s*([^;]*);/.exec(declarations(".window"))?.[1] ?? "";
 
-    expect(columns.replace(/\s+/g, " ")).toBe("220px minmax(260px, 1fr) minmax(320px, 400px)");
+    expect(columns.replace(/\s+/g, " ")).toBe("220px minmax(380px, 1fr) minmax(320px, 400px)");
   });
 
-  it("gives way before the center does: at the smallest window the 3 minimums fit, so the inspector sits at 320 px", () => {
+  it("gives way before the center does: at the smallest window, 960 px, the 3 minimums fit and the center keeps 380 px", () => {
     const columns = /grid-template-columns:\s*([^;]*);/.exec(declarations(".window"))?.[1] ?? "";
     const widths = [...columns.matchAll(/(\d+)px/g)].map((match) => Number(match[1]));
     // The sidebar, the minimum of the center, the minimum of the inspector, then its maximum.
@@ -37,7 +37,8 @@ describe("the width of the inspector", () => {
     expect(sidebar + center + inspector).toBeLessThanOrEqual(minimumWindowWidth());
     // The grid hands the free space to the inspector first, up to its maximum, so the center only keeps its minimum
     // when the window is too narrow for the inspector to reach it.
-    expect(center).toBeGreaterThanOrEqual(260);
+    expect(center).toBeGreaterThanOrEqual(380);
+    expect(minimumWindowWidth()).toBe(960);
   });
 
   it("leaves Settings its 2 panes, with no inspector to size", () => {

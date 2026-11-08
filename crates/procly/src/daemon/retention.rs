@@ -81,7 +81,8 @@ impl Retentions {
 }
 
 /// Applies the Retention policy of every recorded Isolated container whose Worktree is removed: deletes those that
-/// are due, and waits for the others. Returns the policies it applied, whether their deletion is done or not. Logs
+/// are due, and waits for the others. Returns the policies it applied, those whose deletion was due, whether the
+/// deletion is done or not. Logs
 /// what it cannot do, nobody else is told, and runs again later.
 pub(super) async fn sweep(registry: &Arc<Registry>) -> Vec<AppliedRetention> {
     let _sweeping = registry.retentions.sweeping.lock().await;
@@ -126,7 +127,8 @@ pub(super) fn would_apply(
         return Ok(Vec::new());
     }
     let (worktrees, _) = Removed::list_while(registry, repositories(&declared), running);
-    Ok(applied_to_removed(&declared, &worktrees))
+    let now = registry.retentions.clock.since_epoch();
+    Ok(applied_to_removed(&declared, &worktrees, now))
 }
 
 /// The records whose Retention policy is not keep, the only ones a sweep applies a policy to.
@@ -142,17 +144,28 @@ fn repositories(declared: &[&IsolatedRecord]) -> BTreeSet<PathBuf> {
     declared.iter().map(|record| record.repository.clone()).collect()
 }
 
-/// The Retention policies a sweep applies: those of `declared` whose Worktree `worktrees` lists as removed.
-fn applied_to_removed(declared: &[&IsolatedRecord], worktrees: &Removed) -> Vec<AppliedRetention> {
+/// The Retention policies a sweep applies at `now`, since the Unix epoch on the clock: those of `declared` whose
+/// Worktree `worktrees` lists as removed and whose deletion is due. A delay that has not passed yet is not applied, the
+/// sweep only waits for it.
+fn applied_to_removed(declared: &[&IsolatedRecord], worktrees: &Removed, now: Duration) -> Vec<AppliedRetention> {
     declared
         .iter()
-        .filter(|record| removed(record, worktrees) == Some(true))
+        .filter(|record| removed(record, worktrees) == Some(true) && due(record, now))
         .map(|record| AppliedRetention {
             worktree: record.worktree.clone(),
             service: record.service.clone(),
             policy: record.retention.to_string(),
         })
         .collect()
+}
+
+/// Whether the deletion of the container of `record`, whose Worktree is removed, is due at `now`: its delay counts
+/// from the moment its Worktree was found removed, which is `now` when no sweep found it before.
+fn due(record: &IsolatedRecord, now: Duration) -> bool {
+    record.retention.delay().is_some_and(|delay| {
+        let found = record.removed_ms.map_or(now, Duration::from_millis);
+        found.saturating_add(delay) <= now
+    })
 }
 
 /// Sweeps again a moment after a sweep that could not do a deletion, on real time since what failed is Docker or the
@@ -239,7 +252,8 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Swept> {
         });
     }
     let (worktrees, skipped) = Removed::list(registry, repositories(&declared));
-    let applied = applied_to_removed(&declared, &worktrees);
+    let now = registry.retentions.clock.since_epoch();
+    let applied = applied_to_removed(&declared, &worktrees, now);
     for skipped in &skipped {
         eprintln!(
             "cannot list the Worktrees of {}, the retention policies of its Isolated containers wait: {}",
@@ -247,7 +261,6 @@ fn sweep_blocking(registry: &Registry) -> anyhow::Result<Swept> {
             skipped.error
         );
     }
-    let now = registry.retentions.clock.since_epoch();
     let mut due = BTreeSet::new();
     let mut later = Vec::new();
     for record in declared {
@@ -424,16 +437,23 @@ mod tests {
         deleted.retention = Retention::Delete;
         let mut kept = record("/src/app/.git", "/src/app-kept");
         kept.retention = Retention::Keep;
+        // Found removed 1 day and 5 seconds after the epoch, so its day has passed.
+        let mut past = record("/src/app/.git", "/src/app-past");
+        past.removed_ms = Some(5_000);
         let records = [
             deleted,
-            record("/src/app/.git", "/src/app-later"),
+            past,
             kept,
             // Listed by git, and of a Repository git cannot list.
             record("/src/app/.git", "/src/app"),
             record("/src/api/.git", "/src/api-login"),
         ];
 
-        let applied = applied_to_removed(&with_a_policy(&records), &worktrees);
+        let applied = applied_to_removed(
+            &with_a_policy(&records),
+            &worktrees,
+            Duration::from_hours(24) + Duration::from_secs(5),
+        );
 
         assert_eq!(
             applied,
@@ -444,12 +464,28 @@ mod tests {
                     policy: "delete".to_owned(),
                 },
                 AppliedRetention {
-                    worktree: PathBuf::from("/src/app-later"),
+                    worktree: PathBuf::from("/src/app-past"),
                     service: "db".to_owned(),
                     policy: "1d".to_owned(),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_sweep_applies_no_delay_that_has_not_passed_yet() {
+        let worktrees = Removed::new(
+            BTreeMap::from([(PathBuf::from("/src/app/.git"), BTreeSet::new())]),
+            BTreeSet::new(),
+        );
+        // Found removed 5 seconds after the epoch, and never found before.
+        let waiting = record("/src/app/.git", "/src/app-waiting");
+        let mut new = record("/src/app/.git", "/src/app-new");
+        new.removed_ms = None;
+        let records = [waiting, new];
+        let now = Duration::from_hours(23);
+
+        assert_eq!(applied_to_removed(&with_a_policy(&records), &worktrees, now), []);
     }
 
     #[test]

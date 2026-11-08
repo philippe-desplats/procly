@@ -78,7 +78,7 @@ body {
 
 .window {
   display: grid;
-  grid-template-columns: 220px minmax(260px, 1fr) minmax(320px, 400px);
+  grid-template-columns: 220px minmax(380px, 1fr) minmax(320px, 400px);
   height: 100%;
 }
 
@@ -265,11 +265,39 @@ body {
 
 /* A row of the center, as the mockup draws it: the glyph, the name with the word of its state, where it runs, then its
    time and its ports. The first column is the glyph, so every row starts with the shape of its state. */
+/* The name and the word of the state on one line. The word is never cut: the line is not clipped, so the least width
+   of the line, the word and the floor of the name, is the least width of its column, and the where column gives way
+   first. The name, then the detail, give way inside the line, each cut on one line with an ellipsis. The name keeps a
+   floor of 0.4em a character, which stays under the width of the name, up to 5.5em. Breaking anywhere is what lets
+   them give the line no least width past that floor: the clamp keeps them on one line. */
 .item-main {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3em;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.item-main .item-name {
+  display: -webkit-box;
+  flex: 0 1 auto;
+  min-width: min(calc(var(--name-chars, 0) * 0.4em), 5.5em);
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.item-main .caption {
+  display: -webkit-box;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .state-glyph {
@@ -278,6 +306,7 @@ body {
 
 /* The word of a state follows the name. It is grey like the text around it, except a failure and a restart. */
 .item-main .word {
+  flex: none;
   color: var(--muted);
 }
 
@@ -482,79 +511,61 @@ body {
 }
 
 /* The title of a screen and its controls on one line, a strip as tall as the one over the sidebar, under which a line
-   separates the title from the list. It bleeds to the edges of the pane, whose padding is 16px. */
+   separates the title from the list. It bleeds to the edges of the pane, whose padding is 16px. The line wraps: the
+   title keeps the width of its words, so that when everything does not fit in the column (380px at the narrowest
+   window) the actions and the controls go down to a line of their own instead of cutting the title or leaving the
+   column. A single line stays as tall as the strip. */
 .title-bar {
   position: sticky;
   top: 0;
   z-index: 1;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  height: 52px;
+  gap: 6px 8px;
+  height: auto;
+  min-height: 52px;
   margin: -16px -16px 8px;
-  padding: 0 16px 0 20px;
+  padding: 6px 16px 6px 20px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
 
-.title-bar .title {
-  flex: 1;
-  margin: 0;
-}
-
-.title-bar .caption {
-  margin: 0;
-}
-
-/* The title line of a Worktree: its folder over its path, then the buttons that open it, then the time of the answer and
-   Refresh. The folder and the path are cut with an ellipsis rather than wrapped. The line is wrapped: the title keeps a
-   width of its own, so that when the 3 do not fit in the column (260px at the narrowest window) the buttons and the
-   controls go down to a line of their own instead of squeezing the title to nothing or leaving the column. */
-.worktree-head {
-  flex-wrap: wrap;
-  height: auto;
-  min-height: 52px;
-  padding-block: 6px;
-  row-gap: 6px;
-}
-
-.worktree-title {
-  flex: 1 1 160px;
+/* The title, with what follows it on its line and the quiet line under it. It grows to push the controls to the end of
+   the line, and never shrinks below its words, only to the width of the column. */
+.title-block {
+  flex: 1 0 auto;
   min-width: 0;
+  max-width: 100%;
 }
 
-.worktree-open,
-.worktree-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.worktree-name {
+.title-line {
   display: flex;
   align-items: baseline;
   gap: 6px;
   min-width: 0;
 }
 
-.worktree-head .title {
+.title-bar .title {
   flex: 0 1 auto;
-  min-width: 56px;
+  min-width: 0;
+  margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.worktree-legend {
+.title-legend {
   flex: none;
   color: var(--faint);
   font-size: var(--size-small);
   white-space: nowrap;
 }
 
-.worktree-path {
+/* A path under the title adds nothing to the width the title asks for, it takes the width the title has and is cut. */
+.title-under {
+  width: 0;
+  min-width: 100%;
   margin: 0;
   overflow: hidden;
   color: var(--faint);
@@ -563,12 +574,22 @@ body {
   white-space: nowrap;
 }
 
-.worktree-head .button {
+.title-actions,
+.title-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.title-bar .button {
   flex: none;
 }
 
-.worktree-head .caption {
+.title-bar .caption {
   flex: none;
+  margin: 0;
   white-space: nowrap;
 }
 
@@ -945,9 +966,12 @@ body {
   color: var(--text);
 }
 
+/* Above everything the window draws, the sticky title line of a screen included, so that nothing but the sheet can be
+   clicked while it is open. */
 .overlay {
   position: fixed;
   inset: 0;
+  z-index: 10;
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -1018,7 +1042,7 @@ body {
 .item-select {
   display: grid;
   flex: 1;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  grid-template-columns: 14px minmax(auto, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -1032,8 +1056,9 @@ body {
 }
 
 /* A row that says where it runs has a column for it. */
+/* Where the row runs gives way before the name does, and the main column never goes below the least width of its line. */
 .item-select-wide {
-  grid-template-columns: 14px minmax(0, 1.3fr) minmax(0, 1fr) auto;
+  grid-template-columns: 14px minmax(auto, 2fr) minmax(0, 1fr) auto;
 }
 
 .item-select:focus-visible {

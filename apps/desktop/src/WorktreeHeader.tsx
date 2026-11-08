@@ -4,6 +4,7 @@ import { basename, worktreeTooltip } from "./labels";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { RemovedMark } from "./Rows";
 import { openWorktree } from "./settings";
+import { TitleBar } from "./TitleBar";
 import { useOpening } from "./useOpening";
 
 /**
@@ -24,37 +25,41 @@ export function WorktreeHeader({
   const { error, run } = useOpening(onNeedEditor);
   return (
     <>
-      <header className="title-bar worktree-head">
-        <div className="worktree-title" title={worktreeTooltip(worktree)}>
-          <div className="worktree-name">
-            <h2 className="title">{basename(worktree.path)}</h2>
+      <TitleBar
+        title={basename(worktree.path)}
+        tooltip={worktreeTooltip(worktree)}
+        beside={
+          <>
             <RemovedMark worktree={worktree} />
-            {worktree.main ? <span className="worktree-legend">Main worktree</span> : null}
-          </div>
-          <p className="worktree-path">{worktree.path}</p>
-        </div>
-        <div className="worktree-open">
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(openWorktree(worktree.path, "editor"));
-            }}
-          >
-            Open in Editor
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(openWorktree(worktree.path, "terminal"));
-            }}
-          >
-            Open in Terminal
-          </button>
-        </div>
-        <div className="worktree-controls">{controls}</div>
-      </header>
+            {worktree.main ? <span className="title-legend">Main worktree</span> : null}
+          </>
+        }
+        under={worktree.path}
+        actions={
+          <>
+            <button
+              type="button"
+              className="button"
+              onClick={() => {
+                run(openWorktree(worktree.path, "editor"));
+              }}
+            >
+              Open in Editor
+            </button>
+            <button
+              type="button"
+              className="button"
+              onClick={() => {
+                run(openWorktree(worktree.path, "terminal"));
+              }}
+            >
+              Open in Terminal
+            </button>
+          </>
+        }
+      >
+        {controls}
+      </TitleBar>
       {error === null ? null : (
         <p role="alert" className="error">
           {error}
