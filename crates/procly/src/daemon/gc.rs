@@ -635,6 +635,12 @@ fn remove_networks(project: &str, env: &[(String, String)]) -> Vec<String> {
                     DeleteError::Docker { reason, .. } => reason,
                     other => other.to_string(),
                 };
+                // One line: a warning ends up in a log line and in the report, whatever else Docker printed.
+                let reason = reason
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("Docker refused");
                 format!("the network {network} of compose project {project} is kept: {reason}")
             })
         })

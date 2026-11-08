@@ -932,6 +932,12 @@ fn docker_a_network_still_used_by_another_container_is_kept_and_reported_by_a_re
         )),
         "{log}"
     );
+    let logged = log
+        .lines()
+        .find(|line| line.contains("is kept: "))
+        .expect("a log line about the network");
+    assert!(logged.contains("has active endpoints"), "{log}");
+    assert!(!log.contains("exit status"), "{log}");
 }
 
 #[test]
@@ -970,6 +976,28 @@ fn docker_a_network_still_used_by_another_container_is_kept_and_reported_as_a_wa
         )),
         "{}",
         stderr(&applied)
+    );
+    // One line each, with the reason of Docker and nothing of the exit status of its command.
+    let warning = stderr(&applied)
+        .lines()
+        .find(|line| line.contains("is kept: "))
+        .map(str::to_owned)
+        .expect("a warning about the network");
+    assert!(warning.contains("has active endpoints"), "{warning}");
+    let log = fixture.procly.daemon_log();
+    let logged = log
+        .lines()
+        .find(|line| line.contains("is kept: "))
+        .expect("a log line about the network");
+    assert!(
+        logged.starts_with("gc: the network ")
+            && logged.contains("has active endpoints")
+            && logged.contains("), requested by "),
+        "{log}"
+    );
+    assert!(
+        !stderr(&applied).contains("exit status") && !log.contains("exit status"),
+        "{log}"
     );
     assert_eq!(fixture.other_project.networks(), [network], "the network was removed");
 }
