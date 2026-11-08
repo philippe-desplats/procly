@@ -265,23 +265,23 @@ body {
 
 /* A row of the center, as the mockup draws it: the glyph, the name with the word of its state, where it runs, then its
    time and its ports. The first column is the glyph, so every row starts with the shape of its state. */
-/* The name and the word of the state on one line. The word is never cut: the line is not clipped, so the least width
-   of the line, the word and the floor of the name, is the least width of its column, and the where column gives way
-   first. The name, then the detail, give way inside the line, each cut on one line with an ellipsis. The name keeps a
-   floor of 0.4em a character, which stays under the width of the name, up to 5.5em. Breaking anywhere is what lets
-   them give the line no least width past that floor: the clamp keeps them on one line. */
+/* The name and the word of the state on one line. The word is never cut: the line is neither clipped nor given a least
+   width of 0, so the least width of the line, the word and the floor of the name, is the least width of its column,
+   and the where column gives way first. The name, then the detail, give way inside the line, each cut on one line with
+   an ellipsis. The name keeps a floor of 0.4em a character, which stays under the width of the name, up to 6.5em, about
+   70 px in the monospace face. Breaking anywhere is what lets them give the line no least width past that floor: the
+   clamp keeps them on one line. */
 .item-main {
   display: flex;
   align-items: baseline;
   gap: 0.3em;
-  min-width: 0;
   white-space: nowrap;
 }
 
 .item-main .item-name {
   display: -webkit-box;
   flex: 0 1 auto;
-  min-width: min(calc(var(--name-chars, 0) * 0.4em), 5.5em);
+  min-width: min(calc(var(--name-chars, 0) * 0.4em), 6.5em);
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
