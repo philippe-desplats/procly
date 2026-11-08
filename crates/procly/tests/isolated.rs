@@ -989,10 +989,13 @@ fn docker_a_network_still_used_by_another_container_is_kept_and_reported_as_a_wa
         .lines()
         .find(|line| line.contains("is kept: "))
         .expect("a log line about the network");
+    // What Docker prints after the reason differs between platforms, so only the order is checked.
+    let reason_end = logged.find("has active endpoints");
+    let requester = logged.find(", requested by ");
     assert!(
         logged.starts_with("gc: the network ")
-            && logged.contains("has active endpoints")
-            && logged.contains("), requested by "),
+            && reason_end.is_some()
+            && requester.is_some_and(|requester| Some(requester) > reason_end),
         "{log}"
     );
     assert!(
