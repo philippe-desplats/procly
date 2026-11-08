@@ -669,6 +669,19 @@ fn launch(
     Ok(Process { child, pgid, tail })
 }
 
+/// Tells whoever follows the Service that its process is about to be restarted: one line on the Daemon's own
+/// output, one in the Service's output, and the `Restarting` state.
+fn announce_restart(service: &Service, spec: &ServiceSpec, why: &str, delay: Duration, restarts: u32) {
+    let plan = format!(
+        "{why}, restarting in {} (restart {restarts} of {})",
+        crate::duration::format(delay),
+        spec.restart.attempts
+    );
+    eprintln!("service {} of {} {plan}", spec.name, spec.worktree.display());
+    output::lock(&service.output).push(format!("procly: the service {plan}\n").as_bytes());
+    service.state.send_replace(ServiceState::Restarting);
+}
+
 /// Watches the process of the Service until it ends for good: stopped, never healthy, or crashed more often than
 /// its restart policy allows.
 ///
@@ -748,16 +761,12 @@ async fn supervise(
                 return;
             }
             let delay = spec.restart.delay_before(restarts);
-            let plan = format!(
-                "{why}, restarting in {} (restart {restarts} of {})",
-                crate::duration::format(delay),
-                spec.restart.attempts
-            );
-            eprintln!("service {} of {} {plan}", spec.name, spec.worktree.display());
-            output::lock(&service.output).push(format!("procly: the service {plan}\n").as_bytes());
-            service.state.send_replace(ServiceState::Restarting);
+            // Read before the restart is announced, so that a clock moved by whoever reads the announcement is
+            // already counted.
+            let until = clock.now().saturating_add(delay);
+            announce_restart(&service, &spec, &why, delay, restarts);
             let stopped = tokio::select! {
-                () = clock.sleep(delay) => false,
+                () = clock.sleep_until(until) => false,
                 _ = stop.wait_for(Option::is_some) => true,
             };
             if stopped {
