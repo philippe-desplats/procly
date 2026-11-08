@@ -1,4 +1,4 @@
-import { Checks } from "./CheckList";
+import { Checks, type ShowAction } from "./CheckList";
 import { CopyBox } from "./CopyBox";
 import {
   checksWithoutDaemon,
@@ -11,7 +11,8 @@ import {
   type DoctorState,
   type DoctorStore,
 } from "./doctor";
-import { formatMoment } from "./time";
+import type { Check } from "./protocol/Check";
+import { formatMinute, formatMoment } from "./time";
 
 /** How many checks failed and how many only warn, in a line. */
 function summary(document: DoctorDocument): string {
@@ -29,10 +30,32 @@ function summary(document: DoctorDocument): string {
  * The checks of the machine and the Daemon, problems first, each fix behind a Copy button, and the prompt to hand to
  * the developer's own agent. Doctor runs when the screen opens, and again on Refresh.
  */
-export function DoctorScreen({ store }: { store: DoctorStore }) {
+export function DoctorScreen({
+  store,
+  onShowOrphans,
+  onShowProcess,
+}: {
+  store: DoctorStore;
+  onShowOrphans: () => void;
+  /** Takes to the Foreign process that holds a port a Lease holds, `null` while the Status reports none. */
+  onShowProcess: (() => void) | null;
+}) {
   useDoctorOpen(store, null);
   const state = useDoctor(store, null);
   const document = state.kind === "report" || state.kind === "running" ? state.document : null;
+  // Where to look for a problem is the screen's to say: the Orphans screen lists the Orphans, the Worktree names the
+  // Foreign process. A check that passed has no problem to look for.
+  const show = (check: Check): ShowAction | null => {
+    if (check.status !== "failed") {
+      return null;
+    }
+    if (check.name === "orphans") {
+      return { label: "Show Orphans", onShow: onShowOrphans };
+    }
+    return check.name === "leased_ports" && onShowProcess !== null
+      ? { label: "Show the Process", onShow: onShowProcess }
+      : null;
+  };
   return (
     <section aria-label="Doctor">
       <h2 className="title">Doctor</h2>
@@ -44,7 +67,10 @@ export function DoctorScreen({ store }: { store: DoctorStore }) {
       {state.kind === "report" ? (
         <p className="caption">{`Checked ${formatMoment(state.at, state.at)}`}</p>
       ) : null}
-      <Checks state={state} pick={machineChecks} />
+      <Checks state={state} pick={machineChecks} fold show={show} />
+      <p className="doctor-foot">
+        The checks of a Worktree (configuration, Guard, Worktrunk hooks) are in its view.
+      </p>
       {document === null || document.prompt === null ? null : <AgentPrompt prompt={document.prompt} />}
     </section>
   );
@@ -56,7 +82,7 @@ function AgentPrompt({ prompt }: { prompt: string }) {
     <div role="group" aria-label="Prompt for your agent" className="prompt">
       <h3 className="subtitle">Hand it to your agent</h3>
       <p className="caption">Paste this prompt into your own coding agent to have it fix the problems.</p>
-      <CopyBox text={prompt} block />
+      <CopyBox text={prompt} />
     </div>
   );
 }
@@ -66,7 +92,7 @@ export function WorktreeChecks({ store, path }: { store: DoctorStore; path: stri
   useDoctorOpen(store, path);
   const state = useDoctor(store, path);
   return (
-    <section aria-label="Doctor checks">
+    <section aria-label="Doctor checks" className="worktree-checks">
       <h3 className="caption">Doctor checks</h3>
       <Checks state={state} pick={worktreeChecks} worktree={path} />
     </section>
@@ -74,8 +100,9 @@ export function WorktreeChecks({ store, path }: { store: DoctorStore; path: stri
 }
 
 /**
- * The checks that run without the Daemon, for the screen that tells it does not run. The run itself starts when the
- * app enters that state (see `App`), so this only reads what it found.
+ * The checks that run without the Daemon, for the screen that tells it does not run: only the problems, under a header
+ * that names the time they ran at. The run itself starts when the app enters that state (see `App`), so this only reads
+ * what it found.
  */
 export function ChecksWithoutDaemon({ store }: { store: DoctorStore }) {
   const state = useDoctor(store, null);
@@ -83,8 +110,12 @@ export function ChecksWithoutDaemon({ store }: { store: DoctorStore }) {
   const fresh: DoctorState = state.kind === "running" ? { kind: "running", document: null, at: null } : state;
   return (
     <section aria-label="Checks without the Daemon">
-      <h3 className="subtitle">Checks that run without the Daemon</h3>
-      <Checks state={fresh} pick={checksWithoutDaemon} />
+      <h3 className="subtitle">
+        {fresh.kind === "report"
+          ? `Checks that run without the Daemon, at ${formatMinute(fresh.at, fresh.at)}`
+          : "Checks that run without the Daemon"}
+      </h3>
+      <Checks state={fresh} pick={checksWithoutDaemon} problemsOnly />
     </section>
   );
 }

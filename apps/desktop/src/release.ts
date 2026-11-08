@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { basename } from "./labels";
 import { commandIn } from "./services";
+import type { AppliedRetention } from "./protocol/AppliedRetention";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { ReleaseReport } from "./protocol/ReleaseReport";
 import type { Response } from "./protocol/Response";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
@@ -33,7 +36,8 @@ export async function releaseWorktree(path: string): Promise<ReleaseReport> {
 
 /**
  * Whether Procly holds nothing in the Worktree: no Service or Job to stop, no Compose service to let go of, no Lease to
- * release. A Lease or a Logical resource the release keeps is not held, so it does not count. This is the test
+ * release, and no Retention policy to apply, since one may delete the data of an Isolated container. A Lease or a
+ * Logical resource the release keeps is not held, so it does not count. This is the test
  * `ReleaseReport::released_nothing` makes in Rust, written over the same fields because the window only has the JSON.
  */
 export function holdsNothing(report: ReleaseReport): boolean {
@@ -41,8 +45,28 @@ export function holdsNothing(report: ReleaseReport): boolean {
     report.services.length === 0 &&
     report.jobs.length === 0 &&
     report.compose_services.length === 0 &&
-    report.leases.length === 0
+    report.leases.length === 0 &&
+    report.retention.length === 0
   );
+}
+
+/**
+ * What a release does to the Isolated container of a Worktree already removed, worded from one entry of the report:
+ * the removed Worktree, the Service and the Retention policy that deletes the container now. The Worktree being
+ * released keeps its own container, so the line never says "its" of it.
+ */
+export function retentionLine(applied: AppliedRetention): string {
+  return `applies Retention policy ${applied.policy} of ${applied.service} to the removed Worktree ${basename(applied.worktree)}, which deletes its Isolated container and its volumes`;
+}
+
+/** What a release does to a Foreign process of the Worktree: nothing, it is left running on the ports it holds. */
+export function foreignLine(process: ForeignProcess): string {
+  const what = process.kind === "process" ? `${process.command}, pid ${String(process.pid)}` : process.name;
+  const ports =
+    process.ports.length === 0
+      ? ""
+      : `: it keeps ${process.ports.length === 1 ? "port" : "ports"} ${process.ports.join(", ")}`;
+  return `leaves ${what}, which Procly did not start${ports}`;
 }
 
 /** The ended Jobs and Services of a Worktree, which a release forgets. */

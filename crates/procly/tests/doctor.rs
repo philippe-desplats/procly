@@ -227,6 +227,80 @@ fn a_healthy_setup_passes_every_check_and_exits_0() {
     assert_eq!(document["schema_version"], json_schema_version(&setup.procly));
 }
 
+/// The keys of a `doctor --json` document, sorted.
+fn keys(document: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = document
+        .as_object()
+        .expect("the document is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+#[test]
+fn doctor_json_holds_the_version_of_the_running_daemon_and_keeps_its_schema() {
+    let setup = Setup::healthy();
+
+    let document = json_succeeded(&setup.doctor());
+
+    assert_eq!(
+        document["daemon_version"],
+        json!(env!("CARGO_PKG_VERSION")),
+        "{document}"
+    );
+    assert_eq!(document["schema_version"], json!(1));
+    // An added key, every other one as it was.
+    assert_eq!(
+        keys(&document),
+        [
+            "agent",
+            "checks",
+            "daemon_version",
+            "prompt",
+            "result",
+            "schema_version"
+        ]
+    );
+}
+
+#[test]
+fn doctor_json_holds_the_version_of_a_daemon_of_another_release() {
+    let setup = Setup::new();
+    let daemon = fake_daemon(
+        setup.procly.state_dir(),
+        json!({ "response": "doctor", "procly_version": "0.0.1", "checks": [] }),
+        None,
+    );
+
+    let document = problems(&setup.doctor());
+
+    daemon.join().expect("the fake Daemon ends");
+    assert_eq!(document["daemon_version"], json!("0.0.1"));
+}
+
+#[test]
+fn doctor_json_holds_no_daemon_version_when_no_daemon_answers() {
+    let setup = Setup::new();
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(document["daemon_version"], Value::Null, "{document}");
+    assert_eq!(document["schema_version"], json!(1));
+    assert_eq!(
+        keys(&document),
+        [
+            "agent",
+            "checks",
+            "daemon_version",
+            "prompt",
+            "result",
+            "schema_version"
+        ]
+    );
+}
+
 #[test]
 fn the_text_of_a_healthy_setup_lists_one_passed_line_per_check_and_exits_0() {
     let setup = Setup::healthy();

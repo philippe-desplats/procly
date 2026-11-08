@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type Update } from "./daemon";
+import { PortPill } from "./PortPill";
 import type { Response } from "./protocol/Response";
+import { partsOf } from "./test-rows";
 
 const AT = Date.UTC(2026, 10, 5, 19, 35, 0);
 const PATH = "/p/work/acme/web-fix";
@@ -201,6 +203,67 @@ describe("the Worktree screen", () => {
     expect(glyphOn("sleep 61")).toBe("job");
   });
 
+  it("opens every row with the glyph of its state, the word of the state following the name", async () => {
+    app();
+
+    const center = await openWorktree();
+
+    const rows = within(center).getAllByRole("listitem");
+    expect(rows.map(partsOf)).toEqual([
+      {
+        glyph: "foreign",
+        name: "node server.js",
+        word: "started outside Procly",
+        where: undefined,
+        ports: ["3000"],
+      },
+      {
+        glyph: "foreign",
+        name: "legacy-db",
+        word: "started outside Procly",
+        where: undefined,
+        ports: ["5432"],
+      },
+      { glyph: "healthy", name: "web", word: "healthy", where: undefined, ports: ["18731"] },
+      { glyph: "healthy", name: "api", word: "healthy", where: undefined, ports: ["18732"] },
+      { glyph: "ended", name: "old", word: "exited 3", where: undefined, ports: [] },
+      { glyph: "healthy", name: "dev", word: "healthy", where: undefined, ports: ["18733"] },
+      { glyph: "healthy", name: "cache", word: "running", where: undefined, ports: ["18740"] },
+      { glyph: "job", name: "sleep 61", word: "running", where: undefined, ports: [] },
+      { glyph: "ended", name: "sh -c 'exit 3'", word: "exited 3", where: undefined, ports: [] },
+    ]);
+    for (const row of rows) {
+      expect(row.querySelector(".item-select")?.firstElementChild?.textContent).toBe("");
+    }
+  });
+
+  it("draws a Job of the Worktree as its glyph, then its command, then its state", async () => {
+    app();
+    const center = await openWorktree();
+
+    for (const command of ["sleep 61", "sh -c 'exit 3'"]) {
+      expect(inOrder(within(center).getByText(command).closest("li") as HTMLElement)).toEqual([
+        "glyph",
+        "command",
+        "state",
+      ]);
+    }
+  });
+
+  it("draws a port as the same pill on a Worktree row as on an Overview row, and never as the text :port", async () => {
+    app();
+    const center = await openWorktree();
+
+    const pill = within(center)
+      .getAllByRole("listitem")
+      .flatMap((row) => Array.from(row.querySelectorAll(".port")))
+      .find((port) => port.textContent === "18731");
+    // The one shared component draws it, so the row holds exactly the markup the component draws.
+    const { container } = render(<PortPill port={18731} />);
+    expect(pill?.outerHTML).toBe(container.innerHTML);
+    expect(within(center).queryByText(/^:\d+$/)).not.toBeInTheDocument();
+  });
+
   it("picks a Foreign process for the inspector, which gives the kill command to copy and no Stop", async () => {
     app();
     const texts = written();
@@ -251,9 +314,58 @@ describe("the Worktree screen", () => {
     for (const fact of ["Worktree", "Branch", "Folder", "Slug"]) {
       expect(panel.queryByText(fact)).not.toBeInTheDocument();
     }
-    for (const name of ["Open in editor", "Open in terminal", "Reveal in Finder"]) {
+    for (const name of ["Open in Editor", "Open in Terminal", "Reveal in Finder"]) {
       expect(panel.queryByRole("button", { name })).not.toBeInTheDocument();
     }
+  });
+
+  it("words a Foreign process as the mockup does: often an agent the Guard did not steer", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    expect(
+      within(inspector()).getByText(
+        "Started outside Procly in this Worktree, often an agent the Guard did not steer. Procly never stops a process it did not start.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("draws a separator under the title block of a Foreign process, which holds the title and where it is", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    const panel = within(inspector());
+    const block = panel.getByRole("heading", { name: "node server.js" }).closest("header");
+    expect(block).not.toBeNull();
+    expect(block).toHaveClass("inspector-head");
+    expect(within(block as HTMLElement).getByText("Foreign process in web-fix")).toBeInTheDocument();
+    // The facts come after the separator, not inside the block.
+    expect(within(block as HTMLElement).queryByText("Process")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Process value of a Foreign process in one element that never wraps, and gives it whole as a tooltip", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    const value = within(inspector()).getByText("Process").nextElementSibling;
+    expect(value).toHaveTextContent("node server.js, pid 4812");
+    expect(value).toHaveClass("facts-line");
+    expect(value).toHaveAttribute("title", "node server.js, pid 4812");
+  });
+
+  it("draws no Lease in the inspector of a Foreign process, the protocol returns none", async () => {
+    app();
+
+    const center = await openWorktree();
+    fireEvent.click(within(center).getByText("node server.js").closest("button") as HTMLElement);
+
+    expect(within(inspector()).queryByText(/\blease/i)).not.toBeInTheDocument();
   });
 
   it("picks a Foreign container too, which has no pid and so no kill command", async () => {
@@ -540,7 +652,7 @@ describe("the Outside Repositories screen", () => {
     const command = await within(center).findByText("make watch");
     expect(command).toHaveClass("item-name");
     // The stylesheet cuts the directory with an ellipsis before the command loses any width.
-    expect(within(center).getByText("/p/tmp/scratch")).toHaveClass("item-where");
+    expect(within(center).getByText("/p/tmp/scratch").closest(".item-where")).not.toBeNull();
   });
 
   it("picks a Job for the inspector, which follows its output from the directory it started in", async () => {
@@ -551,17 +663,47 @@ describe("the Outside Repositories screen", () => {
     await within(center).findByText("make watch");
     expect(within(inspector()).getByText("Select a Job.")).toBeInTheDocument();
 
-    const panel = within(pick(center, "running\\s*make watch"));
+    const panel = within(pick(center, "make watch"));
 
     expect(panel.getByRole("heading", { name: "make watch" })).toBeInTheDocument();
     expect(panel.getByText("c0ffee01")).toBeInTheDocument();
     // A Job has no Stop, and a Job outside any Repository has no Worktree to open.
     expect(panel.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
-    expect(panel.queryByRole("button", { name: "Open in editor" })).not.toBeInTheDocument();
+    expect(panel.queryByRole("button", { name: "Open in Editor" })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(calls.filter((call) => call.command === "follow_logs").map((call) => call.args)).toEqual([
         expect.objectContaining({ name: "c0ffee01", cwd: "/p/tmp/scratch" }),
       ]);
+    });
+  });
+
+  it("has the refresh bar of the other screens, the title, the time of the last answer and Refresh on one line", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+
+    const center = screen.getByRole("main");
+    const title = await within(center).findByRole("heading", { name: "Outside Repositories", level: 2 });
+    const line = title.closest("header");
+    expect(line).toContainElement(within(center).getByText("Updated at 19:35:00"));
+    expect(line).toContainElement(within(center).getByRole("button", { name: "Refresh" }));
+    // Nothing sits above the line.
+    expect(center.querySelector("header.toolbar")).toBeNull();
+  });
+
+  it("asks for the same refresh as the other screens when Refresh is pressed", async () => {
+    const calls = app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByText("make watch");
+    const before = calls.length;
+
+    fireEvent.click(within(center).getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(calls.slice(before).map((call) => call.command)).toEqual(["refresh", "doctor", "list_orphans"]);
     });
   });
 
@@ -572,5 +714,165 @@ describe("the Outside Repositories screen", () => {
     fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
 
     expect(await screen.findByText("No Job started outside a Repository.")).toBeInTheDocument();
+  });
+
+  it("draws a Job as its glyph, then its command, then its state", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByText("make watch");
+
+    expect(inOrder(within(center).getByText("make watch").closest("li") as HTMLElement)).toEqual([
+      "glyph",
+      "command",
+      "state",
+    ]);
+  });
+});
+
+/**
+ * The scene with its Worktree on a branch that is not the name of its folder, so that a title cannot pass for the
+ * branch by chance, and optionally the main Worktree.
+ */
+function onBranch(branch: string, main = false): Response {
+  const status = scene as Extract<Response, { response: "status" }>;
+  return {
+    ...status,
+    repositories: status.repositories.map((repository) => ({
+      ...repository,
+      worktrees: repository.worktrees.map((worktree) => ({ ...worktree, branch, main })),
+    })),
+  };
+}
+
+/** What a row says, in the order the document draws it: its glyph, its name, then the word of its state. */
+function inOrder(row: HTMLElement): string[] {
+  const found = (name: string, selector: string): [string, Element] => {
+    const part = row.querySelector(selector);
+    if (part === null) {
+      throw new Error(`the row has no ${name}`);
+    }
+    return [name, part];
+  };
+  const parts = [found("glyph", "svg[data-glyph]"), found("command", ".item-name"), found("state", ".word")];
+  return parts
+    .toSorted(([, first], [, second]) =>
+      first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
+    )
+    .map(([name]) => name);
+}
+
+describe("the header of the Worktree screen", () => {
+  afterEach(() => {
+    cleanup();
+    clearMocks();
+  });
+
+  /** Opens the Worktree the scene holds, which the sidebar names after its branch. */
+  async function open(branch = "feature/login", main = false): Promise<HTMLElement> {
+    app({ open_worktree: () => undefined, reveal_worktree: () => undefined }, onBranch(branch, main));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: new RegExp(`^${branch.replace("/", "\\/")}`) }),
+    );
+    const center = screen.getByRole("main");
+    await within(center).findByRole("heading", { name: "Services" });
+    return center;
+  }
+
+  /** The commands the window sent to Rust to open or reveal a Worktree. */
+  function openings(calls: Call[]): Call[] {
+    return calls.filter((call) => call.command.endsWith("_worktree"));
+  }
+
+  it("names the Worktree by its folder and shows its path under the name", async () => {
+    const center = await open();
+
+    const title = within(center).getByRole("heading", { level: 2, name: "web-fix" });
+    expect(within(center).queryByRole("heading", { name: "feature/login" })).not.toBeInTheDocument();
+    expect(title.closest("header")?.querySelector(".title-under")).toHaveTextContent(PATH);
+  });
+
+  it("gives the slug and the other names of the Worktree in the tooltip of the title", async () => {
+    const center = await open();
+
+    const tooltip = within(center).getByRole("heading", { level: 2, name: "web-fix" }).closest("[title]");
+    expect(tooltip).toHaveAttribute("title", expect.stringContaining("Slug: web_fix"));
+    expect(tooltip).toHaveAttribute("title", expect.stringContaining("Branch: feature/login"));
+  });
+
+  it("says Main worktree beside the name of the main Worktree, and only of that one", async () => {
+    const center = await open("main", true);
+    const title = within(center).getByRole("heading", { level: 2, name: "web-fix" });
+
+    expect(title.closest("header")).toHaveTextContent("Main worktree");
+    expect(title).not.toHaveTextContent("Main worktree");
+    cleanup();
+    clearMocks();
+
+    const other = await open();
+    expect(
+      within(other).getByRole("heading", { level: 2, name: "web-fix" }).closest("header"),
+    ).not.toHaveTextContent("Main worktree");
+  });
+
+  it("holds Open in Editor and Open in Terminal, which open the Worktree by its path as the inspector did", async () => {
+    const calls = app({ open_worktree: () => undefined }, onBranch("feature/login"));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
+    const header = (await screen.findByRole("heading", { level: 2, name: "web-fix" })).closest("header");
+    expect(header).not.toBeNull();
+
+    fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Editor" }));
+    fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Terminal" }));
+
+    await waitFor(() => {
+      expect(openings(calls)).toEqual([
+        { command: "open_worktree", args: { path: PATH, with: "editor" } },
+        { command: "open_worktree", args: { path: PATH, with: "terminal" } },
+      ]);
+    });
+  });
+
+  it("no longer holds them in the inspector, which keeps Reveal in Finder", async () => {
+    const calls = app(
+      { open_worktree: () => undefined, reveal_worktree: () => undefined },
+      onBranch("feature/login"),
+    );
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByRole("heading", { name: "Services" });
+
+    const bare = within(inspector());
+    expect(bare.queryByRole("button", { name: /^Open in/ })).not.toBeInTheDocument();
+    fireEvent.click(bare.getByRole("button", { name: "Reveal in Finder" }));
+    await waitFor(() => {
+      expect(openings(calls)).toEqual([{ command: "reveal_worktree", args: { path: PATH } }]);
+    });
+
+    const picked = within(pick(center, "web"));
+    expect(picked.queryByRole("button", { name: /^Open in/ })).not.toBeInTheDocument();
+    expect(picked.getByRole("button", { name: "Reveal in Finder" })).toBeInTheDocument();
+  });
+
+  it("shows a failure to open under the header, once", async () => {
+    app(
+      {
+        open_worktree: () => Promise.reject({ kind: "launch", message: "cannot open /p/work/acme/web-fix" }),
+      },
+      onBranch("feature/login"),
+    );
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
+    const header = (await screen.findByRole("heading", { level: 2, name: "web-fix" })).closest("header");
+
+    fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Terminal" }));
+
+    // Found once: the inspector, which also opens a Worktree from the menu bar, does not repeat it.
+    const alert = await screen.findByText("cannot open /p/work/acme/web-fix");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert.previousElementSibling).toBe(header);
   });
 });

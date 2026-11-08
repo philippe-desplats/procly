@@ -31,12 +31,12 @@ describe("the glyph export script", () => {
 
       const written = await exportGlyphs(GLYPHS, out);
 
-      expect(written.map((path) => basename(path))).toEqual([
+      expect(written.map((path) => basename(path)).slice(0, 3)).toEqual([
         "tray-mark.png",
         "tray-mark-needs-you.png",
         "tray-outline.png",
       ]);
-      const sizes = await Promise.all(written.map(header));
+      const sizes = await Promise.all(written.slice(0, 3).map(header));
       expect(sizes.map((size) => size.png)).toEqual([true, true, true]);
       expect(sizes.map((size) => size.height)).toEqual([36, 36, 36]);
       // The mark and its outline are 12 units wide on a 3 px grid, the bite widens the mark to 13.85 units.
@@ -44,6 +44,26 @@ describe("the glyph export script", () => {
       expect(sizes[1]?.width).toBeGreaterThanOrEqual(41);
       expect(sizes[1]?.width).toBeLessThanOrEqual(42);
       expect(sizes[2]?.width).toBe(36);
+    },
+    EXPORT_TIMEOUT_MS,
+  );
+
+  it(
+    "draws the 2 state glyphs of the lines of Needs you in the menu bar menu, each 32 px square",
+    async () => {
+      const out = await mkdtemp(join(tmpdir(), "procly-glyphs-"));
+
+      const written = await exportGlyphs(GLYPHS, out);
+
+      expect(written.map((path) => basename(path)).slice(3)).toEqual([
+        "menu-failure.png",
+        "menu-foreign.png",
+      ]);
+      const sizes = await Promise.all(written.slice(3).map(header));
+      expect(sizes).toEqual([
+        { png: true, width: 32, height: 32 },
+        { png: true, width: 32, height: 32 },
+      ]);
     },
     EXPORT_TIMEOUT_MS,
   );

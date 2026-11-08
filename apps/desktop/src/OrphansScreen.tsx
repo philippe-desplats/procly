@@ -139,6 +139,7 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
     { kind: "confirm"; error: string | null } | { kind: "deleting" } | { kind: "result"; report: GcReport }
   >({ kind: "confirm", error: null });
   const label = `Delete ${orphansCount(shown.length)}`;
+  const question = `${label}?`;
 
   function collect(): void {
     setState({ kind: "deleting" });
@@ -172,7 +173,7 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
         }}
       >
         <h2 id="collect-title" className="title">
-          {label}
+          {question}
         </h2>
         <p>Each one is deleted from the Daemon and from disk:</p>
         <ul aria-label="What it deletes" className="list">
@@ -192,12 +193,12 @@ function CollectSheet({ shown, onClose }: { shown: Orphan[]; onClose: () => void
         ) : null}
         {pending ? <p className="caption">Deleting…</p> : null}
         <div className="actions">
-          {/* Cancel takes the focus, so that Enter never deletes by reflex. */}
-          <button type="button" className="button default" autoFocus disabled={pending} onClick={onClose}>
-            Cancel
-          </button>
           <button type="button" className="button" disabled={pending} onClick={collect}>
             {label}
+          </button>
+          {/* Cancel sits on the right and takes the focus, so that Enter never deletes by reflex. */}
+          <button type="button" className="button default" autoFocus disabled={pending} onClick={onClose}>
+            Cancel
           </button>
         </div>
       </div>

@@ -74,6 +74,8 @@ export interface DaemonStore {
   refresh(): Promise<void>;
   /** Marks an ended failure as Seen. The app answers with a new update, and the Daemon is not asked anything. */
   markSeen(key: FailureKey): Promise<void>;
+  /** Marks a Seen failure as Unseen, so that it needs the developer again. As for `markSeen`, the app answers with a new update. */
+  markUnseen(key: FailureKey): Promise<void>;
   /** Starts the Daemon with the `procly` the app embeds. Only the developer's click calls it. Rejects with why it failed. */
   startDaemon(): Promise<void>;
   /** Stops the Daemon of another version, then starts the embedded one. Only a confirmed sheet calls it. Rejects with why it failed. */
@@ -159,6 +161,7 @@ export function createDaemonStore(): DaemonStore {
     },
     refresh: () => invoke("refresh"),
     markSeen: (key) => invoke("mark_seen", { key }),
+    markUnseen: (key) => invoke("mark_unseen", { key }),
     startDaemon: () => invoke("start_daemon"),
     restartDaemon: () => invoke("restart_daemon"),
   };

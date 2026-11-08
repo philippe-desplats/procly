@@ -4,6 +4,7 @@ import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { StatusReport } from "./protocol/StatusReport";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
+import { repositoryLabel } from "./labels";
 
 /**
  * What the developer picked in the center: the item the inspector explains and follows. It names the item and holds
@@ -18,7 +19,7 @@ export type Selection =
 
 /** A selection read in the last answer of the Daemon. */
 export type Selected =
-  | { kind: "service"; worktree: WorktreeStatus; service: ServiceStatus }
+  | { kind: "service"; worktree: WorktreeStatus; service: ServiceStatus; repository: string }
   | { kind: "job"; worktree: WorktreeStatus | null; job: JobStatus }
   | { kind: "compose"; worktree: WorktreeStatus; container: ContainerStatus }
   | { kind: "foreign"; worktree: WorktreeStatus; process: ForeignProcess };
@@ -32,6 +33,23 @@ export type Followed = Exclude<Selected, { kind: "foreign" }>;
  */
 export function foreignId(process: ForeignProcess): string {
   return process.kind === "process" ? `pid:${String(process.pid)}` : `container:${process.name}`;
+}
+
+/**
+ * The Foreign process the Doctor takes the developer to from a failed `leased_ports` check, chosen from the Status
+ * alone: the first, in Status order, that holds a port a Service of its own Worktree has, and `null` when none does.
+ * The message of the check is text for a person and is never parsed (ADR 0009).
+ */
+export function foreignToShow(report: StatusReport): Selection | null {
+  for (const worktree of report.repositories.flatMap((repository) => repository.worktrees)) {
+    const chosen = (worktree.foreign ?? []).find((process) =>
+      process.ports.some((port) => worktree.services.some((service) => service.port === port)),
+    );
+    if (chosen !== undefined) {
+      return { kind: "foreign", worktree: worktree.path, process: foreignId(chosen) };
+    }
+  }
+  return null;
 }
 
 /** Whether `selection` is the item `other` names. */
@@ -73,9 +91,14 @@ export function resolve(selection: Selection | null, report: StatusReport): Sele
   const worktrees = report.repositories.flatMap((repository) => repository.worktrees);
   switch (selection.kind) {
     case "service": {
-      const worktree = worktrees.find((candidate) => candidate.path === selection.worktree);
+      const repository = report.repositories.find((candidate) =>
+        candidate.worktrees.some((worktree) => worktree.path === selection.worktree),
+      );
+      const worktree = repository?.worktrees.find((candidate) => candidate.path === selection.worktree);
       const service = worktree?.services.find((candidate) => candidate.service === selection.service);
-      return worktree === undefined || service === undefined ? null : { kind: "service", worktree, service };
+      return repository === undefined || worktree === undefined || service === undefined
+        ? null
+        : { kind: "service", worktree, service, repository: repositoryLabel(repository.git_common_dir) };
     }
     case "compose": {
       const worktree = worktrees.find((candidate) => candidate.path === selection.worktree);

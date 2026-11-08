@@ -9,8 +9,8 @@ use serde::{Serialize, Serializer};
 
 use crate::doctor::Report;
 use crate::protocol::{
-    Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport, Released, Removed,
-    ServiceEnd, StartOutcome, Stopped, UpService,
+    AppliedRetention, Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport,
+    Released, Removed, ServiceEnd, StartOutcome, Stopped, UpService,
 };
 
 /// The version of the `--json` schema of every command, bumped on any incompatible change, independently of the
@@ -163,6 +163,8 @@ pub(crate) struct WorktreeRelease<'a> {
     kept: ReleaseKept<'a>,
     /// What went wrong without failing the release, such as a Portless alias that could not be removed.
     warnings: &'a [String],
+    /// The Retention policies it applied to the Isolated containers of the Worktrees already removed.
+    retention: &'a [AppliedRetention],
 }
 
 /// The Services and Jobs a Worktree release stopped.
@@ -203,6 +205,7 @@ impl<'a> WorktreeRelease<'a> {
                 logical_resources: &report.logical_resources,
             },
             warnings: &report.warnings,
+            retention: &report.retention,
         }
     }
 }
@@ -217,6 +220,8 @@ pub(crate) struct Doctor<'a> {
     prompt: Option<&'a str>,
     /// The coding agent CLI the prompt was handed to.
     agent: Option<&'a str>,
+    /// The version of procly the running Daemon runs, `None` when no Daemon answered.
+    daemon_version: Option<&'a str>,
 }
 
 impl<'a> Doctor<'a> {
@@ -226,6 +231,7 @@ impl<'a> Doctor<'a> {
             checks: &report.checks,
             prompt,
             agent,
+            daemon_version: report.daemon_version.as_deref(),
         }
     }
 }

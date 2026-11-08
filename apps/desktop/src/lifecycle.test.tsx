@@ -4,11 +4,13 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "./App";
+import { APP_VERSION } from "./app-version";
 import { createDaemonStore, type Failure, type Update } from "./daemon";
 import machine from "./fixtures/doctor.json";
 import gc from "./fixtures/gc.json";
 import recorded from "./fixtures/status.json";
 import type { Response } from "./protocol/Response";
+import { daemonLine } from "./test-rows";
 
 const status: Response = recorded as Response;
 
@@ -116,12 +118,14 @@ describe("a Daemon that does not answer well", () => {
     rust(answered(), { doctor: () => machine, list_orphans: () => gc });
     render(<App store={createDaemonStore()} />);
     const sidebar = await screen.findByRole("navigation", { name: "Worktrees" });
-    await within(sidebar).findByText("Daemon 0.5.0, updated at 19:35:00");
+    await within(sidebar).findByText(daemonLine("Daemon 0.5.0, updated at 19:35:00"));
 
     await tick({ ...failed(UNREADABLE), at_ms: AT + 60_000 });
 
-    const line = await screen.findByText("Daemon 0.5.0, updated at 19:35:00");
-    expect(within(screen.getByRole("main")).getByText("Daemon 0.5.0, updated at 19:35:00")).toBe(line);
+    const line = await screen.findByText(daemonLine("Daemon 0.5.0, updated at 19:35:00"));
+    expect(within(screen.getByRole("main")).getByText(daemonLine("Daemon 0.5.0, updated at 19:35:00"))).toBe(
+      line,
+    );
     // The quiet glyph says the Daemon answers, which it no longer does.
     expect(line.parentElement?.querySelector("[data-glyph]")).toBeNull();
   });
@@ -152,6 +156,20 @@ describe("a Daemon that does not run", () => {
     expect(screen.getByText("procly unit install")).toBeInTheDocument();
     // Doctor ran on entering the state, which starts nothing.
     expect(commands).toEqual(["last_update", "doctor"]);
+  });
+
+  it("explains what starting the Daemon does and that the window follows, as the mockup words it", async () => {
+    rust(failed(NOT_RUNNING));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon is not running" });
+    expect(
+      screen.getByText(
+        "Procly shows nothing until it runs. Starting it takes back the Services a previous Daemon left running. This window updates by itself once the Daemon runs, also when you start it from a terminal.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("To start it with your session instead")).toBeInTheDocument();
   });
 
   it("takes the whole window, with the brand mark and the title, and no sidebar, toolbar or inspector", async () => {
@@ -235,8 +253,55 @@ describe("a Daemon of another protocol version", () => {
     expect(
       await screen.findByRole("heading", { name: "The Daemon runs an older version" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("The Daemon speaks protocol 21, this app speaks 22.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Restart the Daemon" })).toBeEnabled();
+    expect(screen.getByText(/^It speaks protocol 21, this app is /)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restart the Daemon…" })).toBeEnabled();
+  });
+
+  it("explains an older Daemon, what a restart costs and what comes back, as the mockup words it", async () => {
+    rust(failed(mismatch(21)));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon runs an older version" });
+    expect(
+      screen.getByText(
+        `It speaks protocol 21, this app is ${APP_VERSION} and speaks 22. They speak different protocol versions, so the app cannot read anything from it.`,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Restarting it stops every Service and Job of every Repository."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `They come back once your agents or you run procly up again. The new Daemon runs ${APP_VERSION}, the release this app ships.`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Or stop it yourself from a terminal")).toBeInTheDocument();
+  });
+
+  it("names the release the new Daemon runs inside the box of an older Daemon", async () => {
+    rust(failed(mismatch(21)));
+
+    render(<App store={createDaemonStore()} />);
+
+    const warning = (
+      await screen.findByText("Restarting it stops every Service and Job of every Repository.")
+    ).closest(".state-warning");
+    expect(warning).toHaveTextContent(`The new Daemon runs ${APP_VERSION}`);
+  });
+
+  it("explains a newer Daemon, why the app offers no restart and how to update it, as the mockup words it", async () => {
+    rust(failed(mismatch(23)));
+
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon runs a newer version" });
+    expect(
+      screen.getByText(
+        `It speaks protocol 23, this app is ${APP_VERSION} and speaks 22. They speak different protocol versions, so the app cannot read anything from it. Restarting the Daemon from here would replace it with an older one, so the app does not offer it.`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Update the app to match")).toBeInTheDocument();
   });
 
   it("takes the whole window on an older Daemon, with the brand mark and the title", async () => {
@@ -327,18 +392,39 @@ describe("a Daemon of another protocol version", () => {
     expect(
       await screen.findByRole("heading", { name: "The Daemon runs a newer version" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("The Daemon speaks protocol 23, this app speaks 22.")).toBeInTheDocument();
-    expect(screen.getByText(/update Procly/i)).toBeInTheDocument();
+    expect(screen.getByText(/It speaks protocol 23, this app is/)).toBeInTheDocument();
+    expect(screen.getByText("Update the app to match")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();
+  });
+
+  it("opens the sheet from a button that ends with an ellipsis", async () => {
+    rust(failed(mismatch(21)));
+    render(<App store={createDaemonStore()} />);
+
+    const opener = await screen.findByRole("button", { name: "Restart the Daemon…" });
+
+    expect(opener).toHaveTextContent("Restart the Daemon…");
+  });
+
+  it("puts Cancel on the right, last and focused, and the button that restarts on its left", async () => {
+    rust(failed(mismatch(21)));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Restart the Daemon?" });
+    const buttons = Array.from(sheet.querySelectorAll(".actions button"), (button) => button.textContent);
+    expect(buttons).toEqual(["Restart the Daemon", "Cancel"]);
+    expect(within(sheet).getByRole("button", { name: "Cancel" })).toHaveFocus();
   });
 
   it("warns that every running Service will stop behind a sheet where Cancel is the default", async () => {
     const commands = rust(failed(mismatch(21)));
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
 
-    const sheet = await screen.findByRole("dialog", { name: "Restart the Daemon" });
+    const sheet = await screen.findByRole("dialog", { name: "Restart the Daemon?" });
     expect(within(sheet).getByText(/every running Service will stop/i)).toBeInTheDocument();
     expect(within(sheet).getByText("procly daemon stop")).toBeInTheDocument();
     const cancel = within(sheet).getByRole("button", { name: "Cancel" });
@@ -352,9 +438,9 @@ describe("a Daemon of another protocol version", () => {
     rust(failed(mismatch(21)));
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
 
-    const sheet = within(await screen.findByRole("dialog", { name: "Restart the Daemon" }));
+    const sheet = within(await screen.findByRole("dialog", { name: "Restart the Daemon?" }));
     expect(sheet.getByText("Every running Service will stop, in every Worktree.")).toHaveClass("loss");
     expect(sheet.getByText("This stops the Daemon, then starts the one this app embeds.")).not.toHaveClass(
       "loss",
@@ -365,11 +451,11 @@ describe("a Daemon of another protocol version", () => {
     const commands = rust(failed(mismatch(21)));
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restart the Daemon…" }));
     fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(commands).toEqual(["last_update"]);
@@ -378,7 +464,7 @@ describe("a Daemon of another protocol version", () => {
   it("restarts the Daemon once confirmed, and recovers on the answer that follows", async () => {
     const commands = rust(failed(mismatch(21)), { restart_daemon: () => undefined });
     render(<App store={createDaemonStore()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
     const sheet = await screen.findByRole("dialog");
 
     fireEvent.click(within(sheet).getByRole("button", { name: "Restart the Daemon" }));
@@ -401,7 +487,7 @@ describe("a Daemon of another protocol version", () => {
         }),
     });
     render(<App store={createDaemonStore()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart the Daemon…" }));
     const sheet = await screen.findByRole("dialog");
 
     fireEvent.click(within(sheet).getByRole("button", { name: "Restart the Daemon" }));

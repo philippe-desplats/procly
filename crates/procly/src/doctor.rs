@@ -32,6 +32,8 @@ const CONFIGURATION: &str = "configuration";
 #[derive(Debug)]
 pub(crate) struct Report {
     pub(crate) checks: Vec<Check>,
+    /// The version of procly the running Daemon runs, `None` when no Daemon answered the checks.
+    pub(crate) daemon_version: Option<String>,
 }
 
 impl Report {
@@ -54,6 +56,10 @@ pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
     let placement = place(cwd);
     let worktree = placement.worktree.as_deref();
     let answer = client::send_if_running(state, &Request::Doctor);
+    let daemon_version = match &answer {
+        Ok(Response::Doctor(DaemonChecks { procly_version, .. })) => Some(procly_version.clone()),
+        _ => None,
+    };
     let (daemon_check, daemon_checks) = daemon_checks(state, answer);
     let mut checks = vec![
         docker_compose(),
@@ -66,7 +72,7 @@ pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
         daemon::doctor::worktrunk_hooks(state, worktree, &placement.unplaced),
     ];
     checks.extend(daemon_checks);
-    Report { checks }
+    Report { checks, daemon_version }
 }
 
 fn place(cwd: &Path) -> Placement {
@@ -394,38 +400,11 @@ mod tests {
         }
     }
 
-    /// The `daemon` check for a Daemon that answers with `version`, as the desktop app reads it.
-    fn daemon_check_of_a_daemon_running(version: &str) -> Check {
-        let answer = Response::Doctor(DaemonChecks {
-            procly_version: version.to_owned(),
-            checks: Vec::new(),
-        });
-        daemon_checks(&StateDir::at("/p/state/procly"), Ok(answer)).0
-    }
-
-    /// The desktop app reads the version the Daemon runs from this message, with `daemonVersion` in
-    /// `apps/desktop/src/doctor.ts`, because the document of `doctor --json` has no field for it. Rewording either
-    /// message must fail here, and the parser must follow.
-    #[test]
-    fn the_daemon_check_words_the_version_the_desktop_app_parses_in_both_of_its_messages() {
-        let own = env!("CARGO_PKG_VERSION");
-
-        let healthy = daemon_check_of_a_daemon_running(own);
-        assert_eq!(healthy.status, CheckStatus::Passed);
-        assert_eq!(healthy.message, format!("the Daemon answers and runs procly {own}"));
-
-        let drifted = daemon_check_of_a_daemon_running("0.0.1");
-        assert_eq!(drifted.status, CheckStatus::Failed);
-        assert_eq!(
-            drifted.message,
-            format!("the Daemon runs procly 0.0.1, this is procly {own}, restart it to run this one")
-        );
-    }
-
     #[test]
     fn a_report_with_a_failed_check_has_failed_and_one_with_only_skipped_or_warning_ones_has_not() {
         let report = |statuses: &[CheckStatus]| Report {
             checks: statuses.iter().map(|&status| check(status, "m", None)).collect(),
+            daemon_version: None,
         };
         assert!(!report(&[CheckStatus::Passed, CheckStatus::Skipped, CheckStatus::Warning]).failed());
         assert!(report(&[CheckStatus::Passed, CheckStatus::Failed]).failed());
@@ -439,6 +418,7 @@ mod tests {
                 check(CheckStatus::Failed, "one\ntwo", Some("kill 1\nkill 2")),
                 check(CheckStatus::Warning, "missing", Some("install it")),
             ],
+            daemon_version: None,
         };
         assert_eq!(
             text(&report),
@@ -457,6 +437,7 @@ mod tests {
                 check(CheckStatus::Failed, "one\ntwo", Some("kill 1\nkill 2")),
                 check(CheckStatus::Failed, "no way out", None),
             ],
+            daemon_version: None,
         };
         let prompt = prompt(&report).expect("two checks failed");
         assert!(prompt.contains("found 2 problems"), "{prompt}");
@@ -479,6 +460,7 @@ mod tests {
                 check(CheckStatus::Skipped, "n/a", None),
                 check(CheckStatus::Warning, "missing", Some("install it")),
             ],
+            daemon_version: None,
         };
         assert_eq!(prompt(&report), None);
     }

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 
+import { APP_VERSION } from "./app-version";
 import { BrandMark } from "./BrandMark";
 import { CopyBox } from "./CopyBox";
 import { failureMessage, type DaemonSnapshot, type DaemonStore } from "./daemon";
@@ -140,7 +141,10 @@ function DaemonNotRunning({ store, doctor }: { store: DaemonStore; doctor: Docto
   const start = useAction(() => store.startDaemon());
   return (
     <StateScreen title="The Daemon is not running" below={<ChecksWithoutDaemon store={doctor} />}>
-      <p className="muted">No Daemon answers on its socket, and this app does not start one on its own.</p>
+      <p className="muted">
+        Procly shows nothing until it runs. Starting it takes back the Services a previous Daemon left
+        running. This window updates by itself once the Daemon runs, also when you start it from a terminal.
+      </p>
       <p>
         <button type="button" className="button brand" disabled={start.pending} onClick={start.start}>
           Start the Daemon
@@ -151,10 +155,18 @@ function DaemonNotRunning({ store, doctor }: { store: DaemonStore; doctor: Docto
           {start.error}
         </p>
       )}
-      <p className="caption">To have the Daemon start with every session, run in a terminal:</p>
+      <p className="caption">To start it with your session instead</p>
       <CopyBox text={INSTALL_UNIT} />
     </StateScreen>
   );
+}
+
+/**
+ * Why the app reads nothing from the Daemon. The release of a Daemon that speaks another protocol is unknown, since it
+ * refuses Status and doctor leaves `daemon_version` empty, so the 2 protocols are what is named beside the app's.
+ */
+function differentProtocols(daemon: number, app: number): string {
+  return `It speaks protocol ${daemon}, this app is ${APP_VERSION} and speaks ${app}. They speak different protocol versions, so the app cannot read anything from it.`;
 }
 
 /**
@@ -167,17 +179,16 @@ function DaemonOfAnotherVersion({ daemon, app, store }: { daemon: number; app: n
     <StateScreen
       title={daemon < app ? "The Daemon runs an older version" : "The Daemon runs a newer version"}
     >
-      <p>{`The Daemon speaks protocol ${daemon}, this app speaks ${app}.`}</p>
       {daemon < app ? (
         <>
-          <p className="muted">
-            A Daemon left by an earlier release still runs. Restart it to run the one this app embeds.
-          </p>
+          <p className="muted">{differentProtocols(daemon, app)}</p>
           <div className="state-warning">
             <p>
               <b>Restarting it stops every Service and Job of every Repository.</b>
             </p>
-            <p className="muted">They come back once your agents or you run procly up again.</p>
+            <p className="muted">
+              {`They come back once your agents or you run procly up again. The new Daemon runs ${APP_VERSION}, the release this app ships.`}
+            </p>
           </div>
           <p>
             <button
@@ -187,10 +198,10 @@ function DaemonOfAnotherVersion({ daemon, app, store }: { daemon: number; app: n
                 setConfirming(true);
               }}
             >
-              Restart the Daemon
+              Restart the Daemon…
             </button>
           </p>
-          <p className="caption">Or stop it yourself from a terminal:</p>
+          <p className="caption">Or stop it yourself from a terminal</p>
           <CopyBox text={STOP_DAEMON} />
           {confirming ? (
             <RestartSheet
@@ -203,8 +214,10 @@ function DaemonOfAnotherVersion({ daemon, app, store }: { daemon: number; app: n
         </>
       ) : (
         <>
-          <p className="muted">{`Update Procly to a release that speaks protocol ${daemon}. This app does not replace a newer Daemon.`}</p>
-          <p className="caption">Update the app to match:</p>
+          <p className="muted">
+            {`${differentProtocols(daemon, app)} Restarting the Daemon from here would replace it with an older one, so the app does not offer it.`}
+          </p>
+          <p className="caption">Update the app to match</p>
           <CopyBox text={UPDATE_APP} />
         </>
       )}
@@ -229,7 +242,7 @@ function RestartSheet({ store, onCancel }: { store: DaemonStore; onCancel: () =>
         }}
       >
         <h2 id="restart-title" className="title">
-          Restart the Daemon
+          Restart the Daemon?
         </h2>
         <p>This stops the Daemon, then starts the one this app embeds.</p>
         <p className="loss">Every running Service will stop, in every Worktree.</p>
@@ -242,7 +255,10 @@ function RestartSheet({ store, onCancel }: { store: DaemonStore; onCancel: () =>
         )}
         {restart.pending ? <p className="caption">Restarting…</p> : null}
         <div className="actions">
-          {/* Cancel takes the focus, so that Enter never restarts by reflex. */}
+          <button type="button" className="button" disabled={restart.pending} onClick={restart.start}>
+            Restart the Daemon
+          </button>
+          {/* Cancel sits on the right and takes the focus, so that Enter never restarts by reflex. */}
           <button
             type="button"
             className="button default"
@@ -251,9 +267,6 @@ function RestartSheet({ store, onCancel }: { store: DaemonStore; onCancel: () =>
             onClick={onCancel}
           >
             Cancel
-          </button>
-          <button type="button" className="button" disabled={restart.pending} onClick={restart.start}>
-            Restart the Daemon
           </button>
         </div>
       </div>

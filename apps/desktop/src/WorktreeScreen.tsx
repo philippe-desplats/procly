@@ -1,35 +1,31 @@
+import type { ReactNode } from "react";
+
 import type { FailureKey } from "./daemon";
 import type { DoctorStore } from "./doctor";
 import { WorktreeChecks } from "./DoctorScreen";
-import { worktreeLabel, worktreeTooltip } from "./labels";
 import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { ContainerRow, JobRow, RemovedMark, SeenMark, ServiceRow } from "./Rows";
-import { SelectableRow } from "./selectable";
+import { ItemRow } from "./ItemRow";
+import { ContainerRow, JobRow, SeenMark, ServiceRow } from "./Rows";
+import { TitleBar } from "./TitleBar";
 import { foreignId } from "./selection";
 import { foreignWord, jobWord } from "./state";
-import { State } from "./StateMark";
+import { WorktreeHeader } from "./WorktreeHeader";
 
 /** A Foreign process of the Worktree. A row picks it for the inspector, which gives the command to stop it by hand. */
 function ForeignRow({ process, worktreePath }: { process: ForeignProcess; worktreePath: string }) {
   return (
-    <SelectableRow
+    <ItemRow
       target={{ kind: "foreign", worktree: worktreePath, process: foreignId(process) }}
       seen={false}
-    >
-      <State {...foreignWord()} />
-      <span className="item-name mono">{process.kind === "process" ? process.command : process.name}</span>
-      {process.kind === "process" ? (
-        <span className="caption">{`pid ${process.pid}`}</span>
-      ) : (
-        <span className="caption">{`${process.project} / ${process.service}`}</span>
-      )}
-      {process.ports.length === 0 ? null : (
-        <span className="caption">{process.ports.map((port) => `:${port}`).join(" ")}</span>
-      )}
-    </SelectableRow>
+      state={foreignWord()}
+      name={process.kind === "process" ? process.command : process.name}
+      mono
+      detail={process.kind === "process" ? `pid ${process.pid}` : `${process.project} / ${process.service}`}
+      ports={process.ports}
+    />
   );
 }
 
@@ -43,17 +39,26 @@ export function WorktreeScreen({
   at,
   seen,
   doctor,
+  controls,
+  banner,
   onRelease,
+  onNeedEditor,
 }: {
   worktree: WorktreeStatus;
   at: number;
   seen: FailureKey[];
   doctor: DoctorStore;
+  /** The end of the title line: when the answer was read, and Refresh. */
+  controls: ReactNode;
+  /** The notice the screen draws under its title line, nothing when there is none. */
+  banner: ReactNode;
   /**
    * Opens the release sheet. The app holds the sheet, not this screen: a release can leave the Daemon with nothing to
    * report for the Worktree, and the screen is gone by then while the sheet still shows the result.
    */
   onRelease: (worktree: WorktreeStatus) => void;
+  /** Open in Editor found no editor set: the app sends the developer to the field that names one. */
+  onNeedEditor: () => void;
 }) {
   const foreign = worktree.foreign ?? [];
   const containers = worktree.containers ?? [];
@@ -64,11 +69,14 @@ export function WorktreeScreen({
     containers.length === 0;
   return (
     <section>
-      <h2 className="title">
-        <span title={worktreeTooltip(worktree)}>{worktreeLabel(worktree)}</span>{" "}
-        <RemovedMark worktree={worktree} />
-      </h2>
-      <div className="actions-row">
+      <WorktreeHeader
+        key={worktree.path}
+        worktree={worktree}
+        controls={controls}
+        onNeedEditor={onNeedEditor}
+      />
+      {banner}
+      <div className="actions-row release-row">
         <button
           type="button"
           className="button"
@@ -140,13 +148,17 @@ function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
   const marked = isSeen(seen, key);
   const failed = useFailed(key);
   return (
-    <SelectableRow target={{ kind: "job", id: job.id }} seen={marked}>
-      <State {...jobWord(job, failed)} />
-      <span className="item-name mono">{job.command}</span>
+    <ItemRow
+      target={{ kind: "job", id: job.id }}
+      seen={marked}
+      state={jobWord(job, failed)}
+      name={job.command}
+      mono
+      where={<span className="mono">{job.cwd}</span>}
+    >
       <span className="caption mono">{job.id}</span>
-      <span className="caption mono item-where">{job.cwd}</span>
       <SeenMark seen={marked} />
-    </SelectableRow>
+    </ItemRow>
   );
 }
 
@@ -154,10 +166,19 @@ function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
  * The Jobs started in a directory outside any Repository. They have no Worktree, so nothing here stops them, and a row
  * picks the Job for the inspector.
  */
-export function OutsideRepositoriesScreen({ jobs, seen }: { jobs: JobStatus[]; seen: FailureKey[] }) {
+export function OutsideRepositoriesScreen({
+  jobs,
+  seen,
+  controls,
+}: {
+  jobs: JobStatus[];
+  seen: FailureKey[];
+  /** The time of the last answer and the button that asks for another, which every screen carries on its title line. */
+  controls: ReactNode;
+}) {
   return (
     <section aria-label="Outside Repositories">
-      <h2 className="title">Outside Repositories</h2>
+      <TitleBar title="Outside Repositories">{controls}</TitleBar>
       {jobs.length === 0 ? <p className="muted">No Job started outside a Repository.</p> : null}
       <ul className="list">
         {jobs.map((job) => (

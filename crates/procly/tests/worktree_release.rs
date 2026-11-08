@@ -4,9 +4,12 @@ mod common;
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use common::{
-    Procly, assert_success, free_port, git, git_repository, git_worktree_add, json_succeeded, stdout, test_server,
+    Procly, assert_success, free_port, git, git_repository, git_worktree_add, json_succeeded, require_docker, stdout,
+    test_server,
 };
 
 /// Writes `content` to `name` at the root of the Worktree `dir`.
@@ -275,6 +278,7 @@ fn worktree_release_json_reports_what_was_stopped_released_and_kept() {
                 ],
             },
             "warnings": [],
+            "retention": [],
         })
     );
     assert_eq!(kept["released"]["leases"], serde_json::json!([]));
@@ -508,4 +512,232 @@ fn a_dry_run_leaves_the_ended_jobs_and_services_in_place_and_the_release_after_i
         Some(125),
         "the release kept the Job"
     );
+}
+
+#[test]
+fn a_worktree_with_no_isolated_container_to_sweep_reports_no_retention_policy() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    port_of(&procly.procly_in(&other, &["up", "web"]));
+
+    let text = procly.procly_in(&other, &["worktree", "release", "--dry-run"]);
+    let planned = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--dry-run", "--json"]));
+
+    assert_success(&text);
+    assert!(!stdout(&text).contains("Retention policy"), "{}", stdout(&text));
+    assert_eq!(planned["retention"], serde_json::json!([]), "{planned}");
+    assert_eq!(planned["schema_version"], serde_json::json!(1));
+    let released = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--json"]));
+    assert_eq!(released["retention"], serde_json::json!([]), "{released}");
+}
+
+/// A compose project of a Docker test, whose containers, network and volumes are removed when the test ends.
+struct Project(String);
+
+impl Project {
+    fn docker(&self, args: &[&str]) -> std::process::Output {
+        // A project is found by its name alone, and its Worktree may be removed.
+        Command::new("docker")
+            .args(["compose", "-p", &self.0])
+            .args(args)
+            .current_dir(std::env::temp_dir())
+            .env("DB_PORT", "1")
+            .output()
+            .expect("docker runs")
+    }
+
+    /// The id of the container of service `db`, running or not, empty when there is none.
+    fn container(&self) -> String {
+        stdout(&self.docker(&["ps", "-a", "-q", "db"])).trim().to_owned()
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = self.docker(&["down", "--volumes", "--remove-orphans"]);
+    }
+}
+
+/// A Repository whose service `db` runs one container per Worktree, with a second Worktree that declares the
+/// Retention policy `retention`, whose container is left behind stopped when the Worktree is removed.
+struct Removed {
+    // First, so that the containers are removed while the scratch directory still exists.
+    main_project: Project,
+    other_project: Project,
+    procly: Procly,
+    main: PathBuf,
+    other: PathBuf,
+}
+
+fn removed_with_retention(retention: &str) -> Removed {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let procly = Procly::new();
+    procly.narrow_range();
+    let name = format!(
+        "pcl-rel-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let main = git_repository(procly.scratch(), "app");
+    let compose = format!(
+        "name: {name}\nservices:\n  db:\n    image: alpine\n    init: true\n    command: [\"nc\", \"-lk\", \"-p\", \
+         \"80\", \"-e\", \"/bin/cat\"]\n    ports:\n      - \"${{DB_PORT:-1}}:80\"\n    volumes:\n      - \
+         data:/data\nvolumes:\n  data:\n"
+    );
+    let config = format!(
+        "[services.db]\ncompose = \"db\"\nisolation = \"isolated\"\nports = {{ db = {} }}\n\
+         env = {{ DB_PORT = \"{{services.db.ports.db}}\" }}\n",
+        free_port()
+    );
+    write(&main, "compose.yaml", &compose);
+    write(&main, "procly.toml", &config);
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "--quiet", "--message", "compose"]);
+    let other = git_worktree_add(&main, "app-feature");
+    write(&other, "procly.toml", &format!("{config}retention = \"{retention}\"\n"));
+    let removed = Removed {
+        main_project: Project(name.clone()),
+        other_project: Project(format!("{name}-app_feature")),
+        procly,
+        main,
+        other,
+    };
+    assert_success(&removed.procly.procly_in(&removed.main, &["up", "db"]));
+    assert_success(&removed.procly.procly_in(&removed.other, &["up", "db"]));
+    assert_success(&removed.procly.procly_in(&removed.other, &["down", "db"]));
+    git(
+        &removed.main,
+        &["worktree", "remove", "--force", &removed.other.to_string_lossy()],
+    );
+    removed
+}
+
+#[test]
+fn docker_a_dry_run_reports_the_retention_policy_it_would_apply_and_deletes_nothing() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let removed = removed_with_retention("delete");
+    let other = removed.other.display();
+
+    let text = removed
+        .procly
+        .procly_in(&removed.main, &["worktree", "release", "--dry-run"]);
+    let planned = json_succeeded(
+        &removed
+            .procly
+            .procly_in(&removed.main, &["worktree", "release", "--dry-run", "--json"]),
+    );
+
+    assert_success(&text);
+    assert!(
+        stdout(&text).contains(&format!(
+            "Retention policy delete of db would apply to the Isolated container of the removed Worktree {other}\n"
+        )),
+        "{}",
+        stdout(&text)
+    );
+    assert_eq!(
+        planned["retention"],
+        serde_json::json!([{"worktree": removed.other, "service": "db", "policy": "delete"}]),
+        "{planned}"
+    );
+    assert_eq!(planned["schema_version"], serde_json::json!(1));
+    assert!(
+        !removed.other_project.container().is_empty(),
+        "a dry run deleted the container"
+    );
+    assert_ne!(
+        removed.main_project.container(),
+        "",
+        "a dry run deleted the container of the Main worktree"
+    );
+}
+
+#[test]
+fn docker_a_dry_run_then_a_real_release_give_the_same_report_retention_policy_included() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let removed = removed_with_retention("delete");
+    let release = |args: &[&str]| removed.procly.procly_in(&removed.main, args);
+
+    let planned_text = stdout(&release(&["worktree", "release", "--dry-run"]));
+    let planned = json_succeeded(&release(&["worktree", "release", "--dry-run", "--json"]));
+    let released = json_succeeded(&release(&["worktree", "release", "--json"]));
+
+    assert_eq!(released, planned);
+    assert_eq!(released["retention"].as_array().map(Vec::len), Some(1), "{released}");
+    assert!(
+        removed.other_project.container().is_empty(),
+        "the release kept the container"
+    );
+    // The text says the same, in the past.
+    let line = format!(
+        "Retention policy delete of db applied to the Isolated container of the removed Worktree {}",
+        removed.other.display()
+    );
+    assert!(
+        planned_text.contains(&line.replace("applied to", "would apply to")),
+        "{planned_text}"
+    );
+    // Deleted, the container has no policy left to apply.
+    let again = json_succeeded(&release(&["worktree", "release", "--dry-run", "--json"]));
+    assert_eq!(again["retention"], serde_json::json!([]), "{again}");
+}
+
+#[test]
+fn docker_a_retention_policy_whose_delay_has_not_passed_is_neither_reported_nor_applied() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let removed = removed_with_retention("7d");
+    // A Worktree Procly holds nothing in, whose release only finds the removed one waiting for its delay.
+    let idle = git_worktree_add(&removed.main, "app-idle");
+    let release = |args: &[&str]| removed.procly.procly_in(&idle, args);
+
+    let planned_text = release(&["worktree", "release", "--dry-run"]);
+    let planned = json_succeeded(&release(&["worktree", "release", "--dry-run", "--json"]));
+    let released_text = release(&["worktree", "release"]);
+    let released = json_succeeded(&release(&["worktree", "release", "--json"]));
+
+    assert_success(&planned_text);
+    assert_eq!(stdout(&planned_text), "nothing to release\n");
+    assert_success(&released_text);
+    assert_eq!(stdout(&released_text), "nothing to release\n");
+    assert_eq!(planned["retention"], serde_json::json!([]), "{planned}");
+    assert_eq!(released["retention"], serde_json::json!([]), "{released}");
+    assert!(
+        !removed.other_project.container().is_empty(),
+        "the container is deleted before its delay"
+    );
+}
+
+#[test]
+fn docker_a_release_that_only_applies_a_retention_policy_does_not_say_it_has_nothing_to_release() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let removed = removed_with_retention("delete");
+    // A Worktree Procly holds nothing in, whose release only applies the policy of the removed one.
+    let idle = git_worktree_add(&removed.main, "app-idle");
+    let line = format!(
+        "Retention policy delete of db applied to the Isolated container of the removed Worktree {}\n",
+        removed.other.display()
+    );
+
+    let planned = removed.procly.procly_in(&idle, &["worktree", "release", "--dry-run"]);
+    let released = removed.procly.procly_in(&idle, &["worktree", "release"]);
+
+    assert_success(&planned);
+    assert_eq!(stdout(&planned), line.replace("applied to", "would apply to"));
+    assert_success(&released);
+    assert_eq!(stdout(&released), line);
+    assert_eq!(removed.other_project.container(), "", "the release kept the container");
+    // Once the policy is applied, there is nothing left to do.
+    let again = removed.procly.procly_in(&idle, &["worktree", "release"]);
+    assert_eq!(stdout(&again), "nothing to release\n");
 }

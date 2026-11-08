@@ -113,6 +113,7 @@ function rust(): Call[] {
         case "set_menu_context":
         case "mark_seen":
         case "open_worktree":
+        case "reveal_worktree":
           return undefined;
         default:
           return Promise.reject(new Error(`unexpected command ${command}`));
@@ -181,6 +182,11 @@ describe("the menu bar", () => {
         stop: false,
         mark_seen: false,
         worktree: PATH,
+        slug: "web_fix",
+        port: null,
+        stop_command: null,
+        text_selected: false,
+        find: false,
       });
     });
 
@@ -192,6 +198,11 @@ describe("the menu bar", () => {
         stop: true,
         mark_seen: false,
         worktree: PATH,
+        slug: "web_fix",
+        port: 18731,
+        stop_command: null,
+        text_selected: false,
+        find: true,
       });
     });
 
@@ -215,7 +226,8 @@ describe("the menu bar", () => {
       });
     });
 
-    // Procly neither follows nor stops a Foreign process, so the menu offers it nothing but the Worktree.
+    // Procly neither follows nor stops a Foreign process, so the menu offers it the Worktree, its port and the command
+    // that stops it, which the developer runs, and no Find.
     pick(center, /node server\.js/);
     await waitFor(() => {
       expect(lastContext(calls)).toEqual({
@@ -224,6 +236,11 @@ describe("the menu bar", () => {
         stop: false,
         mark_seen: false,
         worktree: PATH,
+        slug: "web_fix",
+        port: 3000,
+        stop_command: "kill 4812",
+        text_selected: false,
+        find: false,
       });
     });
 
@@ -235,6 +252,11 @@ describe("the menu bar", () => {
         stop: false,
         mark_seen: true,
         worktree: PATH,
+        slug: "web_fix",
+        port: null,
+        stop_command: null,
+        text_selected: false,
+        find: true,
       });
     });
   });
@@ -297,6 +319,57 @@ describe("the menu bar", () => {
     await choose("release");
     await waitFor(() => {
       expect(calls).toContainEqual({ command: "preview_release", args: { path: PATH } });
+    });
+  });
+
+  it("reveals the Worktree in the Finder from the Worktree menu", async () => {
+    const calls = rust();
+    await openWorktree();
+
+    await choose("reveal-in-finder");
+
+    await waitFor(() => {
+      expect(calls).toContainEqual({ command: "reveal_worktree", args: { path: PATH } });
+    });
+  });
+
+  it("opens the Find of the output of the selected Service and focuses it, and again once it is open", async () => {
+    rust();
+    pick(await openWorktree(), "web");
+    const output = await screen.findByRole("region", { name: "Output" });
+    expect(within(output).queryByRole("searchbox", { name: "Find in output" })).toBeNull();
+
+    await choose("find-in-output");
+
+    const field = await within(output).findByRole("searchbox", { name: "Find in output" });
+    await waitFor(() => {
+      expect(field).toHaveFocus();
+    });
+    field.blur();
+    await choose("find-in-output");
+    await waitFor(() => {
+      expect(field).toHaveFocus();
+    });
+  });
+
+  it("tells the menu bar while text is selected, so that ⌘C copies the text and not the port", async () => {
+    const calls = rust();
+    pick(await openWorktree(), "web");
+    await choose("find-in-output");
+    const field = await screen.findByRole<HTMLInputElement>("searchbox", { name: "Find in output" });
+
+    fireEvent.change(field, { target: { value: "ready" } });
+    field.setSelectionRange(0, 5);
+    fireEvent(document, new Event("selectionchange"));
+
+    await waitFor(() => {
+      expect(lastContext(calls)).toMatchObject({ port: 18731, text_selected: true });
+    });
+
+    field.setSelectionRange(5, 5);
+    fireEvent(document, new Event("selectionchange"));
+    await waitFor(() => {
+      expect(lastContext(calls)).toMatchObject({ port: 18731, text_selected: false });
     });
   });
 

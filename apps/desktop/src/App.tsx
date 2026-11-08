@@ -1,6 +1,17 @@
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 
+import { BrandMark } from "./BrandMark";
+import { rowMenu, useContextMenu, worktreeMenu } from "./context-menu";
+import { CopyBox } from "./CopyBox";
 import { DaemonStateScreen, isBlocking, type BlockingSnapshot } from "./DaemonScreens";
 import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
 import {
@@ -13,32 +24,44 @@ import {
 } from "./doctor";
 import { DoctorScreen, ReleaseBanner } from "./DoctorScreen";
 import { GlyphMark } from "./Glyph";
-import { repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
-import { MENU_CHOICE, menuContext, useMenuContext } from "./menu";
-import { failureKey, FailuresContext, failuresOf, reasonOf, type Reason } from "./needs-you";
+import { ItemRow } from "./ItemRow";
+import { basename, repositoryLabel, worktreeLabel, worktreeTooltip } from "./labels";
+import { MENU_CHOICE, menuContext, useMenuContext, useTextSelected } from "./menu";
+import {
+  failureKey,
+  FailuresContext,
+  failuresOf,
+  isSeen,
+  reasonOf,
+  sameFailure,
+  type Reason,
+} from "./needs-you";
 import { createOrphanScanStore, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import { OrphansScreen } from "./OrphansScreen";
 import { endedIn, type Ended } from "./release";
 import { ReleaseSheet } from "./ReleaseSheet";
-import { SelectableRow, SelectionContext } from "./selectable";
-import { foreignId, resolve, selectedKey, type Selected, type Selection } from "./selection";
+import { SelectionContext } from "./selectable";
+import { foreignId, foreignToShow, resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
 import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
-import { failureOf, OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
-import { State } from "./StateMark";
+import { OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { MenuChoice } from "./protocol/MenuChoice";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
+import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { ContainerRow, RemovedMark, ServiceRow } from "./Rows";
+import { ContainerRow, RemovedMark, ServiceRow, worktreeWhere } from "./Rows";
 import { foreignWord, jobEndWord, serviceEndWord } from "./state";
+import { TitleBar } from "./TitleBar";
 import { formatMoment } from "./time";
+import { useOpening } from "./useOpening";
 import { OutsideRepositoriesScreen, WorktreeScreen } from "./WorktreeScreen";
 
 /**
  * What the center shows: the Overview of every Service, one Worktree, the Jobs outside any Repository, the Orphans,
  * Doctor, or Settings. The Orphans and Settings hide the inspector. `focusEditor`
- * sends the developer to the editor field, because "Open in editor" found none set.
+ * sends the developer to the editor field, because "Open in Editor" found none set.
  */
 type View =
   | { kind: "overview" }
@@ -69,7 +92,18 @@ export function App({
     setCurrentView(next);
     setSelection(null);
   }, []);
-  const control = useMemo(() => ({ selection, select: setSelection }), [selection]);
+  // The context menu of a row reads the newest answer, which a callback made once would not see.
+  const rowMenuOf = useRef<(target: Selection) => void>(() => undefined);
+  const control = useMemo(
+    () => ({
+      selection,
+      select: setSelection,
+      showMenu: (target: Selection) => {
+        rowMenuOf.current(target);
+      },
+    }),
+    [selection],
+  );
   // Which ends are failures is Rust's to say, the rows and the inspector draw them from this.
   const failures = useMemo(
     () => (snapshot.kind === "status" ? failuresOf(snapshot.needsYou, snapshot.seen) : []),
@@ -84,6 +118,7 @@ export function App({
     label: string;
     listed: boolean;
     ended: Ended;
+    foreign: ForeignProcess[];
   } | null>(null);
 
   // The poller of the app keeps the snapshot current, the window only follows it.
@@ -180,12 +215,14 @@ export function App({
   // The Worktree the inspector offers to open, which the Worktree menu acts on.
   const inspected = selected === null ? current : selected.worktree;
   const failure = selected === null ? null : failureKeyOf(selected);
+  const textSelected = useTextSelected();
   useMenuContext(
     menuContext(
       selected,
       current,
       failure,
       snapshot.kind === "status" ? snapshot.needsYou.flatMap((line) => failureKey(line) ?? []) : [],
+      textSelected,
     ),
   );
   const release = (worktree: WorktreeStatus): void => {
@@ -194,12 +231,68 @@ export function App({
       label: worktreeLabel(worktree),
       listed: worktree.listed,
       ended: endedIn(worktree),
+      foreign: worktree.foreign ?? [],
     });
   };
 
   const onMarkSeen = (key: FailureKey): void => {
     // Rust answers with a new update, so a mark that could not be saved still shows.
     store.markSeen(key).catch(() => undefined);
+  };
+  const onMarkUnseen = (key: FailureKey): void => {
+    store.markUnseen(key).catch(() => undefined);
+  };
+
+  const showMenu = useContextMenu();
+  // A failure to open from the context menu of a Worktree, which the inspector shows.
+  const { error: openingError, run: runOpening } = useOpening(() => {
+    setView({ kind: "settings", focusEditor: true });
+  });
+  const showRowMenu = (target: Selection): void => {
+    const picked = snapshot.kind === "status" ? resolve(target, snapshot.report) : null;
+    if (picked === null || snapshot.kind !== "status") {
+      return;
+    }
+    const key = failureKeyOf(picked);
+    // A Seen failure is still a failure, the marks are offered on failures only.
+    const failed = key !== null && failures.some((known) => sameFailure(known, key));
+    showMenu(
+      rowMenu(
+        picked,
+        key === null || !failed
+          ? null
+          : {
+              seen: isSeen(snapshot.seen, key),
+              markSeen: () => {
+                onMarkSeen(key);
+              },
+              markUnseen: () => {
+                onMarkUnseen(key);
+              },
+            },
+      ),
+    );
+  };
+  useEffect(() => {
+    rowMenuOf.current = showRowMenu;
+  });
+  const showWorktreeMenu = (worktree: WorktreeStatus): void => {
+    showMenu(
+      worktreeMenu(worktree, {
+        openInEditor: () => {
+          runOpening(openWorktree(worktree.path, "editor"));
+        },
+        openInTerminal: () => {
+          runOpening(openWorktree(worktree.path, "terminal"));
+        },
+        reveal: () => {
+          runOpening(revealWorktree(worktree.path));
+        },
+        release: () => {
+          release(worktree);
+        },
+      }),
+    );
   };
 
   // Restart, Stop and the opening of the Worktree are carried out by the inspector, which shows how they went.
@@ -228,12 +321,17 @@ export function App({
       case "stop":
       case "open-in-editor":
       case "open-in-terminal":
+      case "reveal-in-finder":
+      case "find-in-output":
         break;
       // Rust carries these out without the window, so it never sends them.
       case "settings":
       case "refresh":
       case "copy-logs-command":
       case "copy-path":
+      case "copy-slug":
+      case "copy-main-value":
+      case "help":
         break;
       default: {
         const unhandled: never = choice;
@@ -246,13 +344,53 @@ export function App({
   const checking = view.kind === "doctor";
   const orphans = view.kind === "orphans";
   const outside = view.kind === "outside";
-  // Settings and the Orphans show nothing the inspector explains. The Jobs outside any Repository are picked for it.
-  const wide = settings || orphans;
+  // Settings, the Orphans and the checks show nothing the inspector explains. The Jobs outside any Repository are picked
+  // for it.
+  const wide = settings || orphans || checking;
+  // A failure to open from the context menu of a Worktree shows in the inspector, or above the center when a wide
+  // screen hides the inspector.
+  const openingAlert =
+    openingError === null ? null : (
+      <p role="alert" className="error">
+        {openingError}
+      </p>
+    );
+  // The Overview and a Worktree draw their own title line, with the controls of the toolbar at its end, so the toolbar
+  // is left out.
+  const titled = snapshot.kind === "status" && !checking;
+  // The notice of a Procly release that drifted, which any screen but those two shows above its content and they show
+  // under their title line.
+  const banner =
+    snapshot.kind === "status" ? (
+      <ReleaseBanner
+        store={doctor}
+        onOpenDoctor={() => {
+          setView({ kind: "doctor" });
+        }}
+      />
+    ) : null;
   const doctorRun = useDoctor(doctor, null);
+  // Where the Doctor takes the developer from a failed check: the Orphans, and, when the `leased_ports` check fails, a
+  // Foreign process the Status reports on a port of a Service of its own Worktree.
+  const leasedPortsFailed =
+    (doctorRun.kind === "report" || doctorRun.kind === "running") &&
+    doctorRun.document?.checks.some((check) => check.name === "leased_ports" && check.status === "failed") ===
+      true;
+  const processToShow =
+    snapshot.kind === "status" && leasedPortsFailed ? foreignToShow(snapshot.report) : null;
+  const showProcess = (): void => {
+    if (processToShow?.kind === "foreign") {
+      setView({ kind: "worktree", path: processToShow.worktree });
+      setSelection(processToShow);
+    }
+  };
   const orphanDryRun = useOrphanScan(orphanScan);
   const refresh = (): void => {
     // The poller answers with the effect, and a refresh asks for that answer now.
     store.refresh().catch(() => undefined);
+  };
+  const needEditor = (): void => {
+    setView({ kind: "settings", focusEditor: true });
   };
 
   // Without a Daemon to read there is nothing for a sidebar or an inspector to hold, so the window is one screen.
@@ -282,6 +420,7 @@ export function App({
               onSelect={(path) => {
                 setView({ kind: "worktree", path });
               }}
+              onWorktreeMenu={showWorktreeMenu}
               onOverview={() => {
                 setView({ kind: "overview" });
               }}
@@ -300,6 +439,7 @@ export function App({
             />
           </nav>
           <main className="pane center">
+            {wide ? openingAlert : null}
             {view.kind === "settings" ? (
               <SettingsScreen focusEditor={view.focusEditor} />
             ) : view.kind === "orphans" && snapshot.kind === "status" ? (
@@ -308,39 +448,57 @@ export function App({
               <OutsideRepositoriesScreen
                 jobs={snapshot.report.jobs_outside_repositories}
                 seen={snapshot.seen}
+                controls={
+                  <RefreshControls snapshot={snapshot} store={store} doctor={doctor} orphans={orphanScan} />
+                }
               />
             ) : (
               <>
-                <Toolbar snapshot={snapshot} store={store} doctor={doctor} orphans={orphanScan} />
-                {snapshot.kind === "status" ? (
-                  <ReleaseBanner
-                    store={doctor}
-                    onOpenDoctor={() => {
-                      setView({ kind: "doctor" });
-                    }}
-                  />
-                ) : null}
+                {titled ? null : (
+                  <Toolbar snapshot={snapshot} store={store} doctor={doctor} orphans={orphanScan} />
+                )}
+                {titled ? null : banner}
                 {view.kind === "doctor" ? (
-                  <DoctorScreen store={doctor} />
+                  <DoctorScreen
+                    store={doctor}
+                    onShowOrphans={() => {
+                      setView({ kind: "orphans" });
+                    }}
+                    onShowProcess={processToShow === null ? null : showProcess}
+                  />
                 ) : (
-                  <Center snapshot={snapshot} current={current} doctor={doctor} onRelease={release} />
+                  <Center
+                    snapshot={snapshot}
+                    current={current}
+                    doctor={doctor}
+                    banner={banner}
+                    controls={
+                      <RefreshControls
+                        snapshot={snapshot}
+                        store={store}
+                        doctor={doctor}
+                        orphans={orphanScan}
+                      />
+                    }
+                    onRelease={release}
+                    onNeedEditor={needEditor}
+                  />
                 )}
               </>
             )}
           </main>
           {wide ? null : (
             <aside className="pane inspector" aria-label="Inspector">
+              {openingAlert}
               <Inspector
                 current={current}
                 selected={selected}
-                hint={outside ? "Select a Job." : "Select a Worktree."}
+                hint={outside ? "Select a Job." : "Select a Service or a Job to see its output."}
                 at={snapshot.kind === "loading" ? 0 : snapshot.at}
                 seen={snapshot.kind === "status" ? snapshot.seen : []}
                 onMarkSeen={onMarkSeen}
                 onChanged={refresh}
-                onNeedEditor={() => {
-                  setView({ kind: "settings", focusEditor: true });
-                }}
+                onNeedEditor={needEditor}
               />
             </aside>
           )}
@@ -351,6 +509,7 @@ export function App({
             label={releasing.label}
             listed={releasing.listed}
             ended={releasing.ended}
+            foreign={releasing.foreign}
             onClose={() => {
               setReleasing(null);
             }}
@@ -362,21 +521,19 @@ export function App({
   );
 }
 
-function Toolbar({
-  snapshot,
-  store,
-  doctor,
-  orphans,
-}: {
+interface RefreshProps {
   snapshot: DaemonSnapshot;
   store: DaemonStore;
   doctor: DoctorStore;
   orphans: OrphanScanStore;
-}) {
+}
+
+/** When the poller last read a Status, and the button that asks it for another. */
+function RefreshControls({ snapshot, store, doctor, orphans }: RefreshProps) {
   return (
-    <header className="toolbar">
+    <>
       {snapshot.kind === "loading" ? null : (
-        <span className="caption">{`Updated ${formatMoment(snapshot.at, snapshot.at)}`}</span>
+        <span className="caption">{`Updated at ${formatMoment(snapshot.at, snapshot.at)}`}</span>
       )}
       <button
         type="button"
@@ -392,6 +549,15 @@ function Toolbar({
       >
         Refresh
       </button>
+    </>
+  );
+}
+
+/** The controls above a screen that has no title line of its own yet. */
+function Toolbar(props: RefreshProps) {
+  return (
+    <header className="toolbar">
+      <RefreshControls {...props} />
     </header>
   );
 }
@@ -399,6 +565,11 @@ function Toolbar({
 /** "3 need you", "1 needs you": the size of Needs you, said on the Overview entry. */
 function needsYouCount(count: number): string {
   return `${count} ${count === 1 ? "needs" : "need"} you`;
+}
+
+/** "1 Job", "2 Jobs": what the Outside Repositories entry holds. */
+function jobsOutside(count: number): string {
+  return `${count} ${count === 1 ? "Job" : "Jobs"}`;
 }
 
 function Sidebar({
@@ -415,6 +586,7 @@ function Sidebar({
   orphanScan,
   needsYou,
   onSelect,
+  onWorktreeMenu,
   onOverview,
   onOrphans,
   onOutside,
@@ -439,6 +611,8 @@ function Sidebar({
   /** The items of Needs you, the same list the Overview pins on top. */
   needsYou: NeedsYou[];
   onSelect: (path: string) => void;
+  /** Shows the context menu of a Worktree, which a right-click on its entry asks for. */
+  onWorktreeMenu: (worktree: WorktreeStatus) => void;
   onOverview: () => void;
   onOrphans: () => void;
   onOutside: () => void;
@@ -462,10 +636,18 @@ function Sidebar({
         current={current}
         needsYou={needsYou}
         onSelect={onSelect}
+        onMenu={onWorktreeMenu}
       />
-      <button type="button" className="row" aria-current={outside ? "true" : undefined} onClick={onOutside}>
-        <span className="row-name">Outside Repositories</span>
-        {outsideJobs === 0 ? null : <span className="caption">{outsideJobs}</span>}
+      <button
+        type="button"
+        className="row row-worktree"
+        aria-current={outside ? "true" : undefined}
+        onClick={onOutside}
+      >
+        <span className="row-line">
+          <span className="row-name">Outside Repositories</span>
+        </span>
+        {outsideJobs === 0 ? null : <span className="row-detail">{jobsOutside(outsideJobs)}</span>}
       </button>
       <SidebarFooter
         updatedAt={updatedAt}
@@ -488,12 +670,14 @@ function SidebarWorktrees({
   current,
   needsYou,
   onSelect,
+  onMenu,
 }: {
   snapshot: DaemonSnapshot;
   repositories: RepositoryStatus[];
   current: WorktreeStatus | null;
   needsYou: NeedsYou[];
   onSelect: (path: string) => void;
+  onMenu: (worktree: WorktreeStatus) => void;
 }) {
   if (snapshot.kind === "loading") {
     return <p className="caption">Reading the Daemon…</p>;
@@ -514,6 +698,7 @@ function SidebarWorktrees({
                   current={worktree.path === current?.path}
                   reason={reasonOf(needsYou, worktree.path)}
                   onSelect={onSelect}
+                  onMenu={onMenu}
                 />
               </li>
             ))}
@@ -530,12 +715,14 @@ function WorktreeEntry({
   current,
   reason,
   onSelect,
+  onMenu,
 }: {
   worktree: WorktreeStatus;
   /** Whether this Worktree is the one open in the center. */
   current: boolean;
   reason: Reason | null;
   onSelect: (path: string) => void;
+  onMenu: (worktree: WorktreeStatus) => void;
 }) {
   return (
     <button
@@ -546,11 +733,16 @@ function WorktreeEntry({
       onClick={() => {
         onSelect(worktree.path);
       }}
+      onContextMenu={(event) => {
+        // The native menu of the Worktree replaces the one of the webview. The center stays where it is.
+        event.preventDefault();
+        onMenu(worktree);
+      }}
     >
       <span className="row-line">
         <span className="row-name">{worktreeLabel(worktree)}</span>
         <RemovedMark worktree={worktree} />
-        {worktree.main ? <span className="caption">main</span> : null}
+        {worktree.main ? <span className="caption row-legend">Main worktree</span> : null}
       </span>
       {reason === null ? null : (
         <span className={`row-reason tone-${reason.tone}`}>
@@ -566,12 +758,20 @@ function Center({
   snapshot,
   current,
   doctor,
+  controls,
+  banner,
   onRelease,
+  onNeedEditor,
 }: {
   snapshot: Exclude<DaemonSnapshot, BlockingSnapshot>;
   current: WorktreeStatus | null;
   doctor: DoctorStore;
+  /** The end of the title line of the Overview or of a Worktree: when the answer was read, and Refresh. */
+  controls: ReactNode;
+  /** The notice the Overview or a Worktree draws under its title line, nothing when there is none. */
+  banner: ReactNode;
   onRelease: (worktree: WorktreeStatus) => void;
+  onNeedEditor: () => void;
 }) {
   switch (snapshot.kind) {
     case "loading":
@@ -583,6 +783,8 @@ function Center({
           at={snapshot.at}
           needsYou={snapshot.needsYou}
           seen={snapshot.seen}
+          controls={controls}
+          banner={banner}
         />
       ) : (
         <WorktreeScreen
@@ -590,7 +792,10 @@ function Center({
           at={snapshot.at}
           seen={snapshot.seen}
           doctor={doctor}
+          controls={controls}
+          banner={banner}
           onRelease={onRelease}
+          onNeedEditor={onNeedEditor}
         />
       );
     default: {
@@ -600,66 +805,100 @@ function Center({
   }
 }
 
+/** Whether a line of Needs you is this very Service, which is then listed there and not again among the Services. */
+function pinnedIn(needsYou: NeedsYou[], worktree: WorktreeStatus, service: ServiceStatus): boolean {
+  return needsYou.some(
+    (line) =>
+      line.kind === "service" &&
+      line.worktree === worktree.path &&
+      line.service === service.service &&
+      line.started_at === service.started_at,
+  );
+}
+
 /**
- * "Needs you" pinned on top, then every Service of every Worktree, grouped under the Worktree, with its port: its
- * Process services and Groups, then its Isolated Compose services. `at` is when the answer was read, the day the times
- * are compared with.
+ * The title line with when the answer was read, then "Needs you" pinned on top, then the Services of every Worktree in
+ * one list, each with the Worktree it runs in and its port, except those Needs you already holds: its Process services
+ * and Groups, then its Isolated Compose services. `at` is when the answer was read, the day the times are compared
+ * with. When nothing runs and nothing needs the developer, the Overview says how to have the agents start something.
  */
 function Overview({
   repositories,
   at,
   needsYou,
   seen,
+  controls,
+  banner,
 }: {
   repositories: RepositoryStatus[];
   at: number;
   needsYou: NeedsYou[];
   seen: FailureKey[];
+  controls: ReactNode;
+  banner: ReactNode;
 }) {
-  const groups = repositories
-    .map((repository) => ({
-      repository,
-      worktrees: repository.worktrees.filter(
-        (worktree) => worktree.services.length > 0 || (worktree.containers ?? []).length > 0,
-      ),
-    }))
-    .filter((group) => group.worktrees.length > 0);
+  const worktrees = repositories.flatMap((repository) => repository.worktrees);
+  const rows = worktrees.flatMap((worktree) => [
+    ...worktree.services
+      .filter((service) => !pinnedIn(needsYou, worktree, service))
+      .map((service) => (
+        <ServiceRow
+          key={`${worktree.path}:${service.service}`}
+          service={service}
+          worktreePath={worktree.path}
+          worktree={worktree}
+          at={at}
+          seen={seen}
+        />
+      )),
+    ...(worktree.containers ?? []).map((container) => (
+      <ContainerRow
+        key={`${worktree.path}:${container.service}`}
+        container={container}
+        worktreePath={worktree.path}
+        worktree={worktree}
+      />
+    )),
+  ]);
+  const nothingRuns =
+    needsYou.length === 0 &&
+    worktrees.every((worktree) => worktree.services.length === 0 && (worktree.containers ?? []).length === 0);
   return (
     <section aria-label="Overview">
-      <h2 className="title">Overview</h2>
-      <NeedsYouSection
-        lines={needsYou}
-        worktrees={repositories.flatMap((repository) => repository.worktrees)}
-      />
-      {groups.length === 0 ? <p className="muted">No Service is known.</p> : null}
-      {groups.map(({ repository, worktrees }) => (
-        <div key={repository.git_common_dir} className="group">
-          <p className="caption">{repositoryLabel(repository.git_common_dir)}</p>
-          {worktrees.map((worktree) => (
-            <div key={worktree.path}>
-              <h3 className="subtitle" title={worktreeTooltip(worktree)}>
-                <span className="row-name">{worktreeLabel(worktree)}</span>
-                <RemovedMark worktree={worktree} />
+      <TitleBar title="Overview">{controls}</TitleBar>
+      {banner}
+      {nothingRuns ? (
+        <NothingRunsYet />
+      ) : (
+        <>
+          <NeedsYouSection lines={needsYou} worktrees={worktrees} />
+          {rows.length === 0 ? null : (
+            <div className="services">
+              <h3 className="subtitle">
+                <span className="row-name">Services</span>{" "}
+                <span className="caption">every Worktree, without those above</span>
               </h3>
-              <ul className="list">
-                {worktree.services.map((service) => (
-                  <ServiceRow
-                    key={service.service}
-                    service={service}
-                    worktreePath={worktree.path}
-                    at={at}
-                    seen={seen}
-                  />
-                ))}
-                {(worktree.containers ?? []).map((container) => (
-                  <ContainerRow key={container.service} container={container} worktreePath={worktree.path} />
-                ))}
-              </ul>
+              <ul className="list">{rows}</ul>
             </div>
-          ))}
-        </div>
-      ))}
+          )}
+        </>
+      )}
     </section>
+  );
+}
+
+/** The Overview of a Daemon that knows no Service: what appears here, and the command that steers the agents to Procly. */
+function NothingRunsYet() {
+  return (
+    <div className="state-column overview-empty">
+      <BrandMark />
+      <h3 className="title">Nothing is running yet</h3>
+      <p className="muted">
+        Your coding agents start Services and Jobs through Procly, and they appear here. To steer them to
+        Procly, install the Guard and the Rules block in a Repository.
+      </p>
+      <CopyBox text="procly agent install" />
+    </div>
   );
 }
 
@@ -668,10 +907,6 @@ function NeedsYouSection({ lines, worktrees }: { lines: NeedsYou[]; worktrees: W
   if (lines.length === 0) {
     return null;
   }
-  const labelOf = (path: string): string => {
-    const worktree = worktrees.find((candidate) => candidate.path === path);
-    return worktree === undefined ? path : worktreeLabel(worktree);
-  };
   return (
     <section aria-label="Needs you" className="needs-you">
       <h3 className="subtitle">
@@ -679,7 +914,7 @@ function NeedsYouSection({ lines, worktrees }: { lines: NeedsYou[]; worktrees: W
       </h3>
       <ul className="list">
         {lines.map((line) => (
-          <NeedsYouLine key={lineKey(line)} line={line} labelOf={labelOf} />
+          <NeedsYouLine key={lineKey(line)} line={line} worktrees={worktrees} />
         ))}
       </ul>
     </section>
@@ -721,46 +956,52 @@ function targetOfLine(line: NeedsYou): Selection {
  * A failure is picked like any row, and its inspector holds Mark as Seen. A Foreign process is picked too, and its
  * inspector gives the command to stop it. A line that is Seen leaves Needs you, so a line here is never dimmed.
  */
-function NeedsYouLine({ line, labelOf }: { line: NeedsYou; labelOf: (path: string) => string }) {
-  return (
-    <SelectableRow target={targetOfLine(line)} seen={false}>
-      <NeedsYouWhat line={line} labelOf={labelOf} />
-    </SelectableRow>
-  );
-}
-
-function NeedsYouWhat({ line, labelOf }: { line: NeedsYou; labelOf: (path: string) => string }) {
+function NeedsYouLine({ line, worktrees }: { line: NeedsYou; worktrees: WorktreeStatus[] }) {
+  const target = targetOfLine(line);
+  const whereOf = (path: string): { where: ReactNode; whereTitle: string } => {
+    const worktree = worktrees.find((candidate) => candidate.path === path);
+    return worktree === undefined ? { where: basename(path), whereTitle: path } : worktreeWhere(worktree);
+  };
   switch (line.kind) {
-    case "service":
+    case "service": {
+      const worktree = worktrees.find((candidate) => candidate.path === line.worktree);
+      const port = worktree?.services.find((service) => service.service === line.service)?.port ?? null;
       return (
-        <>
-          <span className="item-name">{line.service}</span>
-          {/* A line of "Needs you" that is not a Foreign process is a failure: Rust put it there. */}
-          <State {...serviceEndWord(line.end, true)} />
-          <span className="caption">{labelOf(line.worktree)}</span>
-        </>
+        <ItemRow
+          target={target}
+          seen={false}
+          // A line of "Needs you" that is not a Foreign process is a failure: Rust put it there.
+          state={serviceEndWord(line.end, true)}
+          name={line.service}
+          {...whereOf(line.worktree)}
+          ports={port === null ? [] : [port]}
+        />
       );
+    }
     case "job":
       return (
-        <>
-          <span className="item-name mono">{line.command}</span>
-          <State {...jobEndWord(line.end, true)} />
+        <ItemRow
+          target={target}
+          seen={false}
+          state={jobEndWord(line.end, true)}
+          name={line.command}
+          mono
+          {...(line.worktree === null ? { where: "outside Repositories" } : whereOf(line.worktree))}
+        >
           <span className="caption mono">{line.id}</span>
-          {line.worktree === null ? null : <span className="caption">{labelOf(line.worktree)}</span>}
-        </>
+        </ItemRow>
       );
     case "foreign":
       return (
-        <>
-          <State {...foreignWord()} />
-          <span className="item-name mono">
-            {line.process.kind === "process" ? line.process.command : line.process.name}
-          </span>
-          {line.process.ports.length === 0 ? null : (
-            <span className="caption">{line.process.ports.map((port) => `:${port}`).join(" ")}</span>
-          )}
-          <span className="caption">{labelOf(line.worktree)}</span>
-        </>
+        <ItemRow
+          target={target}
+          seen={false}
+          state={foreignWord()}
+          name={line.process.kind === "process" ? line.process.command : line.process.name}
+          mono
+          {...whereOf(line.worktree)}
+          ports={line.process.ports}
+        />
       );
     default: {
       const unhandled: never = line;
@@ -804,7 +1045,7 @@ function Inspector({
           <WorktreeActions
             key={selected.worktree.path}
             path={selected.worktree.path}
-            // The inspector of a Foreign process draws none of them, the Worktree menu still opens its Worktree.
+            // The inspector of a Foreign process draws no Reveal in Finder, the Worktree menu still opens its Worktree.
             buttons={selected.kind !== "foreign"}
             onNeedEditor={onNeedEditor}
           />
@@ -813,7 +1054,7 @@ function Inspector({
     );
   }
   if (current === null) {
-    return <p className="caption">{hint}</p>;
+    return <p className="hint">{hint}</p>;
   }
   return (
     <>
@@ -824,8 +1065,9 @@ function Inspector({
 }
 
 /**
- * Opens the Worktree in the editor or the terminal the settings name, or reveals it in the Finder. Open in Editor and
- * Open in Terminal of the menu bar open it here, so that a failure shows under the buttons.
+ * Reveals the Worktree in the Finder, and opens it in the editor or the terminal the settings name when Open in Editor,
+ * Open in Terminal or Reveal in Finder of the menu bar ask for it, so that a failure shows here. The buttons that open it live in the
+ * title line of the Worktree.
  */
 function WorktreeActions({
   path,
@@ -833,64 +1075,34 @@ function WorktreeActions({
   onNeedEditor,
 }: {
   path: string;
-  /** Whether the buttons are drawn. Without them the menu bar still opens the Worktree, and a failure still shows. */
+  /** Whether the button is drawn. Without it the menu bar still opens the Worktree, and a failure still shows. */
   buttons?: boolean;
   onNeedEditor: () => void;
 }) {
-  const [error, setError] = useState<string | null>(null);
-
-  function run(action: Promise<void>): void {
-    setError(null);
-    action.catch((reason: unknown) => {
-      const failure = failureOf(reason);
-      if (failure.kind === "no_editor") {
-        onNeedEditor();
-      } else {
-        setError(failure.message);
-      }
-    });
-  }
+  const { error, run } = useOpening(onNeedEditor);
 
   useTauriEvent<MenuChoice>(MENU_CHOICE, (choice) => {
     if (choice === "open-in-editor") {
       run(openWorktree(path, "editor"));
     } else if (choice === "open-in-terminal") {
       run(openWorktree(path, "terminal"));
+    } else if (choice === "reveal-in-finder") {
+      run(revealWorktree(path));
     }
   });
 
   return (
     <div className="worktree-actions">
       {buttons ? (
-        <>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(openWorktree(path, "editor"));
-            }}
-          >
-            Open in editor
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(openWorktree(path, "terminal"));
-            }}
-          >
-            Open in terminal
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              run(revealWorktree(path));
-            }}
-          >
-            Reveal in Finder
-          </button>
-        </>
+        <button
+          type="button"
+          className="button"
+          onClick={() => {
+            run(revealWorktree(path));
+          }}
+        >
+          Reveal in Finder
+        </button>
       ) : null}
       {error === null ? null : (
         <p role="alert" className="error">

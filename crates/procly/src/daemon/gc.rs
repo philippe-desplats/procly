@@ -275,6 +275,16 @@ impl Removed {
         registry: &Registry,
         repositories: impl IntoIterator<Item = PathBuf>,
     ) -> (Self, Vec<SkippedRepository>) {
+        Self::list_while(registry, repositories, registry.running())
+    }
+
+    /// Lists the Worktrees of `repositories` as [`Removed::list`] does, as if what runs were `running`, the Service
+    /// names by Worktree. Blocking, it runs git.
+    pub(super) fn list_while(
+        registry: &Registry,
+        repositories: impl IntoIterator<Item = PathBuf>,
+        running: BTreeSet<(PathBuf, String)>,
+    ) -> (Self, Vec<SkippedRepository>) {
         let mut listed = BTreeMap::new();
         let mut skipped = Vec::new();
         for repository in repositories {
@@ -288,7 +298,7 @@ impl Removed {
                 }),
             }
         }
-        let in_use = in_use(registry);
+        let in_use = in_use(registry, running);
         (Self { listed, in_use }, skipped)
     }
 
@@ -416,9 +426,10 @@ fn held(
 }
 
 /// The root of every Worktree where a Service runs, or where `worktree init` runs a setup command: nothing of it is
-/// an Orphan while it is in use, even once git no longer lists it.
-fn in_use(registry: &Registry) -> BTreeSet<PathBuf> {
-    let mut in_use: BTreeSet<PathBuf> = registry.running().into_iter().map(|(worktree, _)| worktree).collect();
+/// an Orphan while it is in use, even once git no longer lists it. What runs is `running`, the Service names by
+/// Worktree.
+fn in_use(registry: &Registry, running: BTreeSet<(PathBuf, String)>) -> BTreeSet<PathBuf> {
+    let mut in_use: BTreeSet<PathBuf> = running.into_iter().map(|(worktree, _)| worktree).collect();
     let initializing = registry
         .initializing
         .lock()
@@ -749,7 +760,7 @@ fn still_orphan(registry: &Registry, key: &ResourceKey, name: &str, index: Optio
         return Ok(false);
     };
     let roots = topology::listed_roots(&key.repository)?;
-    if roots.contains(&key.worktree) || in_use(registry).contains(&key.worktree) {
+    if roots.contains(&key.worktree) || in_use(registry, registry.running()).contains(&key.worktree) {
         return Ok(false);
     }
     let config = main_config(&key.repository);

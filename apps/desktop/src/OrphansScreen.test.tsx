@@ -200,6 +200,29 @@ describe("the Orphans screen", () => {
     expect(sheet.getByText("procly gc --apply")).toBeInTheDocument();
   });
 
+  it("puts Cancel on the right, last and focused, and the button that deletes on its left", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    await openOrphans();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Delete 6 Orphans/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    const buttons = Array.from(dialog.querySelectorAll(".actions button"), (button) => button.textContent);
+    expect(buttons).toEqual(["Delete 6 Orphans", "Cancel"]);
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+  });
+
+  it("asks a question as its title, with the word of its buttons", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    await openOrphans();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Delete 6 Orphans/ }));
+
+    expect(await screen.findByRole("dialog", { name: "Delete 6 Orphans?" })).toBeInTheDocument();
+  });
+
   it("names in the sheet itself how many Orphans of each kind it deletes and the data they drop", async () => {
     app();
     render(<App store={createDaemonStore()} />);

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { daemonVersion, fixCommands, problemCount, type DoctorDocument } from "./doctor";
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
+import reworded from "./fixtures/doctor-daemon-reworded.json";
 import drift from "./fixtures/doctor-release-drift.json";
 import repairs from "./fixtures/doctor-worktree-repairs.json";
 
@@ -39,8 +40,21 @@ describe("the problems of a doctor run", () => {
 });
 
 describe("the release the Daemon runs", () => {
-  it("is read from the check of the Daemon when it answers", () => {
+  it("is read from the daemon_version field when the Daemon answers", () => {
     expect(daemonVersion(machine as DoctorDocument)).toBe("0.5.0");
+  });
+
+  it("is read from the field alone, whatever the message of the daemon check says", () => {
+    const daemon = (reworded.checks as DoctorDocument["checks"]).find((check) => check.name === "daemon");
+    expect(daemon?.message).not.toMatch(/\d/);
+
+    expect(daemonVersion(reworded as DoctorDocument)).toBe("0.5.0");
+  });
+
+  it("is not read from the message of the daemon check when the field says nothing", () => {
+    const silent = { ...(machine as DoctorDocument), daemon_version: null };
+
+    expect(daemonVersion(silent)).toBeNull();
   });
 
   it("is the one of the Daemon, not of this app, when they differ", () => {

@@ -5,16 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { createDaemonStore, type Failure, type Update } from "./daemon";
-import { REFRESH_REQUESTED, type DoctorDocument } from "./doctor";
+import { REFRESH_REQUESTED, checksWithoutDaemon, type DoctorDocument } from "./doctor";
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import drift from "./fixtures/doctor-release-drift.json";
 import repairs from "./fixtures/doctor-worktree-repairs.json";
 import ofWorktree from "./fixtures/doctor-worktree.json";
+import recordedGc from "./fixtures/gc.json";
 import recorded from "./fixtures/status.json";
 import type { Response } from "./protocol/Response";
 
 const status: Response = recorded as Response;
+const gc: Response = recordedGc as Response;
 const AT = Date.UTC(2026, 10, 5, 19, 35, 0);
 
 const MACHINE: DoctorDocument = machine as DoctorDocument;
@@ -31,9 +33,46 @@ const NOT_RUNNING: Failure = {
   message: "the daemon did not answer on /p/state/procly.sock",
 };
 
-function answered(at = AT): Update {
-  return { at_ms: at, response: status, needs_you: [], seen: [] };
+function answered(at = AT, response: Response = status): Update {
+  return { at_ms: at, response, needs_you: [], seen: [] };
 }
+
+/**
+ * The recorded answer, with a Foreign process in the Worktree the `leased_ports` check names. It holds `port`, which the
+ * Service `web` of that Worktree has when `leased` is true.
+ */
+function withForeignProcess(port: number, leased: boolean): Response {
+  return {
+    ...recorded,
+    repositories: recorded.repositories.map((repository) => ({
+      ...repository,
+      worktrees: repository.worktrees.map((worktree) =>
+        worktree.path === "/p/work/acme/web-fix"
+          ? {
+              ...worktree,
+              services: leased
+                ? [
+                    {
+                      service: "web",
+                      port: 24081,
+                      reattached: false,
+                      started_at: AT,
+                      restartable: false,
+                      state: "ended",
+                      end: { kind: "port_mismatch", leased: 24081, actual: 10189 },
+                    },
+                  ]
+                : [],
+              foreign: [{ kind: "process", pid: 4812, command: "node server.js", ports: [port] }],
+            }
+          : worktree,
+      ),
+    })),
+  } as Response;
+}
+
+/** A Foreign process on the port the Lease of a Service holds, which the check names. */
+const WITH_FOREIGN_PROCESS: Response = withForeignProcess(24081, true);
 
 function failed(failure: Failure): Update {
   return { at_ms: AT, failure, needs_you: [], seen: [] };
@@ -58,6 +97,9 @@ function rust(last: Update, documents: (cwd: string | null) => DoctorDocument | 
       }
       if (command === "refresh") {
         return undefined;
+      }
+      if (command === "list_orphans") {
+        return gc;
       }
       if (command === "doctor") {
         const answer = documents((args as { cwd: string | null }).cwd);
@@ -114,6 +156,11 @@ function listed(list: HTMLElement): string[] {
     .map((item) => item.dataset.check ?? "");
 }
 
+/** Opens the fold the passed and skipped checks sit behind. */
+function showTheFolded(list: HTMLElement): void {
+  fireEvent.click(within(list).getByRole("button", { name: "Show" }));
+}
+
 async function openDoctor(): Promise<HTMLElement> {
   fireEvent.click(await screen.findByRole("button", { name: /^Doctor/ }));
   return screen.findByRole("region", { name: "Doctor" });
@@ -138,6 +185,7 @@ describe("the Doctor screen", () => {
 
     // Failed first, then the warning, then what passed, then what was skipped: the order of the document within each.
     expect(await within(doctor).findByText("leased_ports")).toBeInTheDocument();
+    showTheFolded(doctor);
     expect(listed(doctor)).toEqual([
       "leased_ports",
       "orphans",
@@ -158,6 +206,7 @@ describe("the Doctor screen", () => {
     const doctor = await openDoctor();
 
     await within(doctor).findByText("leased_ports");
+    showTheFolded(doctor);
     expect(glyphsByStatus(doctor)).toEqual({ failed: ["failure"], warning: ["warning"], passed: ["passed"] });
   });
 
@@ -227,7 +276,7 @@ describe("the Doctor screen", () => {
 
     const doctor = await openDoctor();
 
-    expect(await within(doctor).findByText("docker_compose")).toBeInTheDocument();
+    expect(await within(doctor).findByText("3 checks passed")).toBeInTheDocument();
     expect(within(doctor).queryByRole("group", { name: "Prompt for your agent" })).not.toBeInTheDocument();
   });
 
@@ -247,6 +296,267 @@ describe("the Doctor screen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(await within(doctor).findByText("orphans")).toBeInTheDocument();
     expect(doctorCalls(calls)).toHaveLength(3);
+  });
+});
+
+/** Whether `first` comes before `second` in the document. */
+function before(first: HTMLElement, second: HTMLElement): boolean {
+  return (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
+/** The row of the check called `name`, which carries its name in `data-check`. */
+function rowOf(list: HTMLElement, name: string): HTMLElement {
+  const row = list.querySelector<HTMLElement>(`[data-check="${name}"]`);
+  if (row === null) {
+    throw new Error(`no row for the check ${name}`);
+  }
+  return row;
+}
+
+describe("the row of a check", () => {
+  it("writes the message as the main line and the name of the check as a caption below it", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("orphans");
+
+    const row = within(rowOf(doctor, "orphans"));
+    const message = row.getByText("3 Orphans left by removed Worktrees");
+    const caption = row.getByText("orphans");
+
+    expect(before(message, caption)).toBe(true);
+    expect(caption.tagName).toBe("CODE");
+    // The glyph is decorative, so the state stays in the text for a screen reader.
+    expect(row.getByText("failed")).toBeInTheDocument();
+  });
+
+  it("writes a check of a Worktree in the same order, message first and the name as a caption", async () => {
+    rust(answered(), (cwd) => (cwd === WORKTREE_PATH ? WORKTREE : MACHINE));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /web_fix|web-fix/ }));
+    const checks = await screen.findByRole("region", { name: "Doctor checks" });
+    await within(checks).findByText("configuration");
+
+    const row = within(rowOf(checks, "configuration"));
+    const message = row.getByText(/unknown key `servcies`/);
+    const caption = row.getByText("configuration");
+
+    expect(before(message, caption)).toBe(true);
+    expect(caption.tagName).toBe("CODE");
+  });
+
+  it("puts the fix beside the message, after the caption", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("orphans");
+
+    const row = within(rowOf(doctor, "orphans"));
+
+    expect(before(row.getByText("orphans"), row.getByText("procly gc"))).toBe(true);
+  });
+});
+
+describe("the passed checks of the Doctor screen", () => {
+  const FOLDING: DoctorDocument = {
+    ...MACHINE,
+    checks: MACHINE.checks.map((check) => {
+      if (check.name === "orphans" || check.name === "portless_aliases") {
+        return { ...check, status: "passed", fix: null };
+      }
+      return check.name === "session_unit" ? { ...check, status: "skipped", fix: null } : check;
+    }),
+  };
+
+  it("folds what passed and what was skipped into one line behind Show, and keeps the problems in view", async () => {
+    rust(answered(), () => FOLDING);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+
+    expect(await within(doctor).findByText("5 checks passed, 1 skipped")).toBeInTheDocument();
+
+    // Only the failed check is on show.
+    expect(listed(doctor)).toEqual(["leased_ports"]);
+    expect(within(doctor).getByRole("button", { name: "Show" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("unfolds them on Show, and the button then reads Hide", async () => {
+    rust(answered(), () => FOLDING);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("5 checks passed, 1 skipped");
+
+    showTheFolded(doctor);
+
+    expect(listed(doctor)).toEqual([
+      "leased_ports",
+      "docker_compose",
+      "daemon",
+      "state_documents",
+      "orphans",
+      "portless_aliases",
+      "session_unit",
+    ]);
+    expect(within(doctor).queryByRole("button", { name: "Show" })).not.toBeInTheDocument();
+    fireEvent.click(within(doctor).getByRole("button", { name: "Hide" }));
+    expect(listed(doctor)).toEqual(["leased_ports"]);
+    expect(within(doctor).getByRole("button", { name: "Show" })).toBeInTheDocument();
+  });
+
+  it("puts Show right beside the text of the line, not at the far end of the row", async () => {
+    rust(answered(), () => FOLDING);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+
+    const text = await within(doctor).findByText("5 checks passed, 1 skipped");
+
+    // Both sit in one line of their own, which the row does not stretch, instead of in 2 columns of the row.
+    const button = within(doctor).getByRole("button", { name: "Show" });
+    expect(text.parentElement).toBe(button.parentElement);
+    expect(text.parentElement?.tagName).toBe("DIV");
+    expect(text.nextElementSibling).toBe(button);
+  });
+
+  it("keeps the failed and the warning checks in view, failed first", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("3 checks passed");
+
+    expect(listed(doctor)).toEqual(["leased_ports", "orphans", "portless_aliases", "session_unit"]);
+  });
+
+  it("counts a single check in the singular and names no skipped check when none was skipped", async () => {
+    const one: DoctorDocument = {
+      ...MACHINE,
+      checks: MACHINE.checks.filter((check) => check.name === "daemon" || check.name === "orphans"),
+    };
+    rust(answered(), () => one);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+
+    expect(await within(doctor).findByText("1 check passed")).toBeInTheDocument();
+  });
+
+  it("does not fold the checks of a Worktree, which the Worktree screen lists every one of", async () => {
+    rust(answered(), (cwd) => (cwd === WORKTREE_PATH ? WORKTREE : MACHINE));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /web_fix|web-fix/ }));
+    const checks = await screen.findByRole("region", { name: "Doctor checks" });
+
+    await within(checks).findByText("configuration");
+    expect(within(checks).queryByText("1 check passed, 2 skipped")).toBeNull();
+    expect(checks.querySelector(".check-fold")).toBeNull();
+    expect(listed(checks)).toEqual(["configuration", "worktrunk_hooks", "guard", "portless"]);
+  });
+});
+
+describe("the actions that show where a problem is", () => {
+  it("offers Show Orphans on the orphans check, and it opens the Orphans screen", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("orphans");
+
+    fireEvent.click(within(rowOf(doctor, "orphans")).getByRole("button", { name: "Show Orphans" }));
+
+    expect(await screen.findByRole("region", { name: "Orphans" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Doctor" })).not.toBeInTheDocument();
+  });
+
+  it("offers Show Orphans on no other check", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("orphans");
+
+    expect(within(doctor).getAllByRole("button", { name: "Show Orphans" })).toHaveLength(1);
+  });
+
+  it("offers Show the Process on a failed leased ports check, and it selects the Foreign process", async () => {
+    rust(answered(AT, WITH_FOREIGN_PROCESS), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("leased_ports");
+
+    fireEvent.click(within(rowOf(doctor, "leased_ports")).getByRole("button", { name: "Show the Process" }));
+
+    const inspector = await screen.findByRole("complementary", { name: "Inspector" });
+    expect(within(inspector).getByRole("heading", { name: "node server.js" })).toBeInTheDocument();
+    expect(within(inspector).getByText("Foreign process in web-fix")).toBeInTheDocument();
+    // The Worktree screen of the process is on show, with the row of the process pressed.
+    expect(screen.getByRole("button", { name: /node server\.js/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("offers no Show the Process when the Status reports no Foreign process to show", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("leased_ports");
+
+    expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
+  });
+
+  it("offers no Show the Process for a Foreign process that holds no port a Service of its Worktree has", async () => {
+    // The process runs in the Worktree but holds no Lease, so the check does not name it.
+    rust(answered(AT, withForeignProcess(3000, true)), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("leased_ports");
+
+    expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
+  });
+
+  it("offers no Show the Process when the Worktree has no Service on the port the process holds", async () => {
+    rust(answered(AT, withForeignProcess(24081, false)), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("leased_ports");
+
+    expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
+  });
+
+  it("offers no Show the Process on a leased ports check that did not fail", async () => {
+    const passing: DoctorDocument = {
+      ...MACHINE,
+      checks: MACHINE.checks.map((check) =>
+        check.name === "leased_ports"
+          ? { ...check, status: "passed", message: "every leased port is free", fix: null }
+          : check,
+      ),
+    };
+    rust(answered(AT, WITH_FOREIGN_PROCESS), () => passing);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    await within(doctor).findByText("4 checks passed");
+    showTheFolded(doctor);
+
+    expect(within(doctor).queryByRole("button", { name: "Show the Process" })).not.toBeInTheDocument();
+  });
+});
+
+describe("the foot of the Doctor screen", () => {
+  it("says where the checks of a Worktree are, under the checks", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    const doctor = await openDoctor();
+    const foot = await within(doctor).findByText(
+      "The checks of a Worktree (configuration, Guard, Worktrunk hooks) are in its view.",
+    );
+
+    expect(before(rowOf(doctor, "session_unit"), foot)).toBe(true);
+  });
+});
+
+describe("the inspector on the Doctor screen", () => {
+  it("shows none, and gives the width to the checks, where the Overview has one", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+    expect(await screen.findByRole("complementary", { name: "Inspector" })).toBeInTheDocument();
+
+    await openDoctor();
+
+    expect(screen.queryByRole("complementary", { name: "Inspector" })).not.toBeInTheDocument();
   });
 });
 
@@ -436,28 +746,84 @@ describe("the Worktree screen", () => {
 });
 
 describe("Daemon not running", () => {
-  it("shows the checks that run without the Daemon once doctor ran on entering the state", async () => {
+  it("lists only the 2 problems of the 8 checks that run without the Daemon", async () => {
     rust(failed(NOT_RUNNING), () => NO_DAEMON);
     render(<App store={createDaemonStore()} />);
 
     const checks = await screen.findByRole("region", { name: "Checks without the Daemon" });
 
     expect(await within(checks).findByText("session_unit")).toBeInTheDocument();
-    expect(listed(checks)).toEqual([
-      "daemon",
-      "session_unit",
-      "docker_compose",
-      "state_documents",
-      "configuration",
-      "guard",
-      "portless",
-      "worktrunk_hooks",
-    ]);
-    // The 3 checks that need the Daemon were skipped for want of one: they say nothing the screen does not.
-    for (const name of ["leased_ports", "orphans", "portless_aliases"]) {
-      expect(within(checks).queryByText(name)).not.toBeInTheDocument();
-    }
+    // 8 checks run without the Daemon and 2 of them are problems, the passed and the skipped ones are not listed.
+    expect(listed(checks)).toEqual(["daemon", "session_unit"]);
+    expect(checks.querySelectorAll("li")).toHaveLength(2);
+    expect(within(checks).queryByRole("button", { name: "Show" })).not.toBeInTheDocument();
+    expect(within(checks).queryByText(/checks? passed/)).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
+  });
+
+  // jsdom lays nothing out, so `scrollHeight` cannot be read: the screen stayed 1025 px tall at 820 because it stacked 8
+  // checks, and what makes it short is that it stacks 2, with no fold row, beside 3 copy boxes.
+  it("stacks little enough to hold in a 1280 by 820 window with the scene of 8 checks, 2 of them problems", async () => {
+    rust(failed(NOT_RUNNING), () => NO_DAEMON);
+    render(<App store={createDaemonStore()} />);
+
+    await screen.findByRole("heading", { name: "The Daemon is not running" });
+    const screenOfTheDaemon = screen.getByRole("main");
+    await within(screenOfTheDaemon).findByText("session_unit");
+
+    expect(checksWithoutDaemon(NO_DAEMON.checks)).toHaveLength(8);
+    expect(screenOfTheDaemon.querySelectorAll("li")).toHaveLength(2);
+    expect(screenOfTheDaemon.querySelectorAll(".copybox")).toHaveLength(3);
+    expect(screenOfTheDaemon.querySelector(".check-fold")).toBeNull();
+  });
+
+  it("says in a line that nothing is wrong when every check that runs without the Daemon passed", async () => {
+    const quiet: DoctorDocument = {
+      ...NO_DAEMON,
+      checks: NO_DAEMON.checks.map((check) => ({ ...check, status: "passed" as const })),
+    };
+    rust(failed(NOT_RUNNING), () => quiet);
+    render(<App store={createDaemonStore()} />);
+
+    const checks = await screen.findByRole("region", { name: "Checks without the Daemon" });
+
+    expect(await within(checks).findByText("No problem found.")).toBeInTheDocument();
+    expect(checks.querySelectorAll("li")).toHaveLength(0);
+  });
+
+  it("heads the checks with the time they ran at, once they ran", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 10, 5, 14, 1, 30));
+    let answer: (document: DoctorDocument) => void = () => undefined;
+    mockIPC(
+      (command) => {
+        if (command === "last_update") {
+          return failed(NOT_RUNNING);
+        }
+        if (command === "doctor") {
+          return new Promise<DoctorDocument>((resolve) => {
+            answer = resolve;
+          });
+        }
+        return Promise.reject(new Error(`unexpected command ${command}`));
+      },
+      { shouldMockEvents: true },
+    );
+    render(<App store={createDaemonStore()} />);
+
+    const checks = await screen.findByRole("region", { name: "Checks without the Daemon" });
+    // Nothing ran yet, so there is no time to name.
+    expect(within(checks).getByRole("heading")).toHaveTextContent(/^Checks that run without the Daemon$/);
+    expect(within(checks).getByText("Checking…")).toBeInTheDocument();
+
+    await act(async () => {
+      answer(NO_DAEMON);
+      await Promise.resolve();
+    });
+
+    expect(await within(checks).findByRole("heading")).toHaveTextContent(
+      /^Checks that run without the Daemon, at 14:01$/,
+    );
   });
 
   it("runs doctor on entering the state, and copies the fix of a check", async () => {
@@ -537,6 +903,18 @@ describe("a Daemon of another release", () => {
     expect(screen.getByRole("region", { name: "Overview" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("draws the banner under the title line of the Overview, not above it", async () => {
+    rust(answered(), () => DRIFT);
+    render(<App store={createDaemonStore()} />);
+
+    const banner = await screen.findByRole("status");
+
+    const title = screen.getByRole("heading", { name: "Overview", level: 2 });
+    const position = title.parentElement?.compareDocumentPosition(banner) ?? 0;
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Overview" })).toContainElement(banner);
   });
 
   it("sends the developer to the Doctor screen from the banner", async () => {

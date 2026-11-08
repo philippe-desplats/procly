@@ -7,7 +7,9 @@ import { App } from "./App";
 import { createDaemonStore, type FailureKey, type Failure, type NeedsYou, type Update } from "./daemon";
 import recorded from "./fixtures/status.json";
 import overview from "./fixtures/status-overview.json";
+import { PortPill } from "./PortPill";
 import type { Response } from "./protocol/Response";
+import { partsOf } from "./test-rows";
 
 /** A `Status { all: true }` answer recorded from a running Daemon, its paths replaced by neutral ones. */
 const status: Response = recorded as Response;
@@ -82,7 +84,9 @@ describe("the window", () => {
     render(<App store={createDaemonStore()} />);
 
     const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
-    expect(await within(sidebar).findByRole("button", { name: /^main\s*main$/ })).toBeInTheDocument();
+    expect(
+      await within(sidebar).findByRole("button", { name: /^main\s*Main worktree$/ }),
+    ).toBeInTheDocument();
     expect(within(sidebar).getByRole("button", { name: "web-fix" })).toBeInTheDocument();
     expect(within(sidebar).getByRole("heading", { name: "web" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toBeInTheDocument();
@@ -120,7 +124,7 @@ describe("the window", () => {
 
     const center = screen.getByRole("main");
     expect(await within(center).findByText("exited 3")).toBeInTheDocument();
-    expect(screen.getByText("/p/work/acme/web-fix")).toBeInTheDocument();
+    expect(within(center).getByText("/p/work/acme/web-fix")).toBeInTheDocument();
   });
 
   it("says that no Daemon runs, and sends nothing but the request for the last answer and doctor", async () => {
@@ -129,7 +133,7 @@ describe("the window", () => {
     render(<App store={createDaemonStore()} />);
 
     expect(await screen.findByRole("heading", { name: "The Daemon is not running" })).toBeInTheDocument();
-    expect(screen.getByText(/does not start one/)).toBeInTheDocument();
+    expect(screen.getByText(/^Procly shows nothing until it runs\./)).toBeInTheDocument();
     // Doctor runs when the app enters that state, and it never starts a Daemon.
     expect(commands).toEqual(["last_update", "doctor"]);
   });
@@ -147,7 +151,8 @@ describe("the window", () => {
     const commands = poller(answered(status));
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+    await screen.findByRole("region", { name: "Overview" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
     await act(async () => {
       await Promise.resolve();
@@ -162,22 +167,42 @@ describe("the Overview", () => {
     clearMocks();
   });
 
-  it("is what the window opens on, and lists every Service of every Worktree with its port", async () => {
+  it("is what the window opens on, and lists every Service of every Worktree once, flat, with its port as a pill", async () => {
     poller(answered(many));
 
     render(<App store={createDaemonStore()} />);
 
     const overviewPane = await screen.findByRole("region", { name: "Overview" });
     const rows = within(overviewPane).getAllByRole("listitem");
-    expect(rows.map((row) => row.textContent)).toEqual([
-      "apihealthy:1873119:31:22",
-      "workerrestarting19:31:22",
-      "apiexited 1:187422026-11-04 19:31:22",
-      "sitestarting:1875519:31:40",
-      "sitestopped:1876019:30:00",
+    expect(rows.map(partsOf)).toEqual([
+      { glyph: "healthy", name: "api", word: "healthy", where: "web", ports: ["18731"] },
+      { glyph: "busy", name: "worker", word: "restarting", where: "web", ports: [] },
+      { glyph: "ended", name: "api", word: "exited 1", where: "web-login", ports: ["18742"] },
+      { glyph: "busy", name: "site", word: "starting", where: "docs-preview", ports: ["18755"] },
+      { glyph: "ended", name: "site", word: "stopped", where: "docs-oldRemoved", ports: ["18760"] },
     ]);
-    // A Service without a port shows none instead of a placeholder.
-    expect(rows[1]?.textContent).not.toMatch(/:\d{4,5}/);
+    // A port is a pill, never the text ":18731", and it is the pill the shared component draws.
+    expect(within(overviewPane).queryByText(/^:\d+$/)).not.toBeInTheDocument();
+    const pill = overviewPane.querySelector(".port");
+    const { container } = render(<PortPill port={18731} />);
+    expect(pill?.outerHTML).toBe(container.innerHTML);
+    // The Services are one list across the Worktrees, not a list under the heading of each Worktree.
+    expect(within(overviewPane).getAllByRole("list")).toHaveLength(1);
+  });
+
+  it("starts every row with the state glyph, the word of the state following the name", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    for (const row of within(overviewPane).getAllByRole("listitem")) {
+      const select = row.querySelector(".item-select");
+      expect(select?.firstElementChild?.querySelector("svg")).toHaveAttribute("data-glyph");
+      const main = select?.querySelector(".item-main");
+      expect(main?.firstElementChild).toHaveClass("item-name");
+      expect(main?.lastElementChild).toHaveClass("word");
+    }
   });
 
   it("lists the Isolated Compose services of each Worktree with their port, a Worktree with nothing else included", async () => {
@@ -201,35 +226,30 @@ describe("the Overview", () => {
     render(<App store={createDaemonStore()} />);
 
     const overviewPane = await screen.findByRole("region", { name: "Overview" });
-    const rows = within(overviewPane)
-      .getAllByRole("listitem")
-      .map((row) => row.textContent);
+    const rows = within(overviewPane).getAllByRole("listitem").map(partsOf);
     expect(rows).toEqual([
-      "apihealthy:1873119:31:22",
-      "workerrestarting19:31:22",
-      "dbrunning:24050",
-      "apiexited 1:187422026-11-04 19:31:22",
-      "sitestarting:1875519:31:40",
-      "sitestopped:1876019:30:00",
-      "cacherunning",
+      { glyph: "healthy", name: "api", word: "healthy", where: "web", ports: ["18731"] },
+      { glyph: "busy", name: "worker", word: "restarting", where: "web", ports: [] },
+      { glyph: "healthy", name: "db", word: "running", where: "web", ports: ["24050"] },
+      { glyph: "ended", name: "api", word: "exited 1", where: "web-login", ports: ["18742"] },
+      { glyph: "busy", name: "site", word: "starting", where: "docs-preview", ports: ["18755"] },
+      { glyph: "ended", name: "site", word: "stopped", where: "docs-oldRemoved", ports: ["18760"] },
+      { glyph: "healthy", name: "cache", word: "running", where: "infra", ports: [] },
     ]);
   });
 
-  it("groups the Services under the label of their Worktree", async () => {
+  it("names the Worktree of a row by its folder, and gives its branch, folder and slug in a tooltip", async () => {
     poller(answered(many));
 
     render(<App store={createDaemonStore()} />);
 
     const overviewPane = await screen.findByRole("region", { name: "Overview" });
-    const headings = within(overviewPane)
-      .getAllByRole("heading", { level: 3 })
-      .map((heading) => heading.textContent);
-    expect(headings).toEqual([
-      "main",
-      "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
-      "docs-preview",
-      "docs-oldRemoved",
-    ]);
+    const where = overviewPane.querySelectorAll(".item-where");
+    expect(where[2]).toHaveTextContent("web-login");
+    expect(where[2]).toHaveAttribute(
+      "title",
+      "Branch: feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end\nFolder: web-login\nSlug: web_login",
+    );
   });
 
   it("shows when each Service started as an absolute time, never as an age, and when the answer was read", async () => {
@@ -240,17 +260,65 @@ describe("the Overview", () => {
     const overviewPane = await screen.findByRole("region", { name: "Overview" });
     expect(within(overviewPane).queryByText(/\bago\b/)).not.toBeInTheDocument();
     expect(within(overviewPane).getByText("2026-11-04 19:31:22")).toBeInTheDocument();
-    expect(screen.getByText("Updated 19:35:00")).toBeInTheDocument();
+    expect(screen.getByText("Updated at 19:35:00")).toBeInTheDocument();
   });
 
-  it("says so when no Service runs anywhere", async () => {
+  it("puts the title and the time of the last answer on the same line, with Refresh", async () => {
+    poller(answered(many));
+
+    render(<App store={createDaemonStore()} />);
+
+    const title = await screen.findByRole("heading", { name: "Overview", level: 2 });
+    const line = title.closest("header");
+    expect(line).not.toBeNull();
+    expect(line).toContainElement(screen.getByText("Updated at 19:35:00"));
+    expect(line).toContainElement(screen.getByRole("button", { name: "Refresh" }));
+    // Nothing sits above the line.
+    expect(screen.getByRole("main").querySelector("header.toolbar")).toBeNull();
+  });
+
+  it("says that nothing runs yet when no Service is known, with the command that steers the agents to Procly", async () => {
     poller(answered(status));
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("region", { name: "Overview" });
 
     await tick(answered({ response: "status", repositories: [], jobs_outside_repositories: [] }));
 
-    expect(await screen.findByText("No Service is known.")).toBeInTheDocument();
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    expect(within(overviewPane).getByRole("img", { name: "Procly" })).toBeInTheDocument();
+    expect(within(overviewPane).getByRole("heading", { name: "Nothing is running yet" })).toBeInTheDocument();
+    expect(
+      within(overviewPane).getByText(
+        "Your coding agents start Services and Jobs through Procly, and they appear here. To steer them to Procly, install the Guard and the Rules block in a Repository.",
+      ),
+    ).toBeInTheDocument();
+    const box = overviewPane.querySelector(".copybox");
+    expect(box).toHaveTextContent("procly agent install");
+    expect(within(box as HTMLElement).getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    expect(screen.queryByText("No Service is known.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the title line and Refresh when nothing runs, so that the window can still be asked for a tick", async () => {
+    poller(answered({ response: "status", repositories: [], jobs_outside_repositories: [] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const title = await screen.findByRole("heading", { name: "Overview", level: 2 });
+    expect(title.closest("header")).toContainElement(screen.getByRole("button", { name: "Refresh" }));
+  });
+
+  it("is not the empty Overview when a Foreign process needs the developer, whatever runs", async () => {
+    poller(
+      answered(
+        { response: "status", repositories: [], jobs_outside_repositories: [] },
+        { needsYou: [FOREIGN] },
+      ),
+    );
+
+    render(<App store={createDaemonStore()} />);
+
+    expect(await screen.findByRole("region", { name: "Needs you" })).toBeInTheDocument();
+    expect(screen.queryByText("Nothing is running yet")).not.toBeInTheDocument();
   });
 
   it("comes back with ⌘0 from a Worktree, which the Overview item of the View menu carries", async () => {
@@ -288,7 +356,8 @@ describe("the inspector of a Worktree", () => {
     render(<App store={createDaemonStore()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
-    await screen.findByRole("heading", { name: BRANCH, level: 2 });
+    // The title names the folder, the branch is one of the names the inspector gives.
+    await screen.findByRole("heading", { name: "web-login", level: 2 });
 
     expect(facts()).toEqual(
       expect.arrayContaining([`Branch: ${BRANCH}`, "Folder: web-login", "Slug: web_login"]),
@@ -363,18 +432,18 @@ describe("the sidebar", () => {
       .filter(
         (text) =>
           text !== "Overview" &&
-          text !== "Outside Repositories" &&
+          !text?.startsWith("Outside Repositories") &&
           text !== "Orphans" &&
           text !== "Doctor" &&
           text !== "Settings⌘,",
       );
     expect(labels).toEqual([
-      "mainmain",
+      "mainMain worktree",
       "feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
-      "mainmain",
+      "mainMain worktree",
       "docs-preview",
       "docs-oldRemoved",
-      "mainmain",
+      "mainMain worktree",
     ]);
     expect(within(sidebar).queryByText(/detached/i)).not.toBeInTheDocument();
     expect(within(sidebar).getAllByText("Removed")).toHaveLength(1);
@@ -407,6 +476,64 @@ describe("the sidebar", () => {
     expect(within(long).getByText(/^feature\//)).toHaveClass("row-name");
     const detached = within(sidebar).getByRole("button", { name: "docs-preview" });
     expect(detached).toHaveAttribute("title", "Branch: none\nFolder: docs-preview\nSlug: docs_preview");
+  });
+
+  it("captions the Main worktree beside its label, and the label alone is the name of the row", async () => {
+    poller(answered(status));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    const main = await within(sidebar).findByRole("button", { name: /^main\s*Main worktree$/ });
+    expect(within(main).getByText("Main worktree")).toBeInTheDocument();
+    expect(main.querySelector(".row-name")).toHaveTextContent(/^main$/);
+    // The legend sits beside the label, outside the element that carries it, and "main" is not said twice.
+    expect(main.querySelector(".row-name")).not.toContainElement(within(main).getByText("Main worktree"));
+    expect(within(main).getAllByText(/main/i)).toHaveLength(2);
+    expect(within(main).queryByText("main", { selector: ".caption" })).toBeNull();
+  });
+
+  it("gives a Worktree that is not the Main worktree no legend", async () => {
+    poller(answered(status));
+
+    render(<App store={createDaemonStore()} />);
+
+    const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+    const fix = await within(sidebar).findByRole("button", { name: "web-fix" });
+    expect(within(fix).queryByText("Main worktree")).toBeNull();
+  });
+
+  describe("the Outside Repositories entry", () => {
+    const OUTSIDE_JOB = { id: "c0ffee01", command: "make watch", cwd: "/p/tmp/scratch", state: "running" };
+
+    function outsideEntry(jobs: object[]) {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: jobs } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      return within(sidebar).findByRole("button", { name: /^Outside Repositories/ });
+    }
+
+    it("says how many Jobs started outside a Repository, in the singular for 1", async () => {
+      const entry = await outsideEntry([OUTSIDE_JOB]);
+
+      expect(entry).toHaveTextContent(/^Outside Repositories\s*1 Job$/);
+      expect(within(entry).getByText("1 Job")).toBeInTheDocument();
+    });
+
+    it("says it in the plural for 2", async () => {
+      const entry = await outsideEntry([OUTSIDE_JOB, { ...OUTSIDE_JOB, id: "c0ffee02" }]);
+
+      expect(entry).toHaveTextContent(/^Outside Repositories\s*2 Jobs$/);
+      expect(within(entry).getByText("2 Jobs")).toBeInTheDocument();
+    });
+
+    it("keeps the entry and draws no count when no Job started outside a Repository", async () => {
+      const entry = await outsideEntry([]);
+
+      expect(entry).toHaveAccessibleName("Outside Repositories");
+      expect(within(entry).queryByText(/Job/)).toBeNull();
+    });
   });
 });
 
@@ -455,6 +582,14 @@ describe("Needs you", () => {
       .filter((row) => needs === null || !needs.contains(row));
   }
 
+  /** The row of the ended `api` of `web-login`, wherever the Overview draws it. */
+  function apiRow(): HTMLElement | undefined {
+    const overviewPane = screen.getByRole("region", { name: "Overview" });
+    return within(overviewPane)
+      .getAllByRole("listitem")
+      .find((row) => partsOf(row).name === "api" && partsOf(row).where === "web-login");
+  }
+
   it("is pinned on top of the Overview, with the failures and the Foreign processes it was given", async () => {
     poller(answered(many, { needsYou: [API_FAILURE, FOREIGN] }));
 
@@ -463,19 +598,17 @@ describe("Needs you", () => {
     const overviewPane = await screen.findByRole("region", { name: "Overview" });
     const needs = within(overviewPane).getByRole("region", { name: "Needs you" });
     expect(within(needs).getByRole("heading", { name: /^Needs you\s*2$/ })).toBeInTheDocument();
-    const lines = within(needs)
-      .getAllByRole("listitem")
-      .map((line) => line.textContent);
-    expect(lines).toEqual([
-      "apiexited 1feature/a-very-long-branch-name-that-the-sidebar-has-to-cut-at-its-end",
-      "started outside Proclynode server.js:3000main",
+    // The same glyph as everywhere else, first in the row: a cross for the failure, a diamond for the Foreign process.
+    expect(within(needs).getAllByRole("listitem").map(partsOf)).toEqual([
+      { glyph: "failure", name: "api", word: "exited 1", where: "web-login", ports: ["18742"] },
+      {
+        glyph: "foreign",
+        name: "node server.js",
+        word: "started outside Procly",
+        where: "web",
+        ports: ["3000"],
+      },
     ]);
-    // The same glyph as everywhere else: a cross for the failure, a diamond for the Foreign process.
-    expect(
-      within(needs)
-        .getAllByRole("listitem")
-        .map((line) => line.querySelector("svg")?.getAttribute("data-glyph")),
-    ).toEqual(["failure", "foreign"]);
     const firstService = within(overviewPane).getAllByText("healthy")[0];
     expect(
       needs.compareDocumentPosition(firstService as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -484,12 +617,84 @@ describe("Needs you", () => {
     expect(screen.queryByRole("button", { name: "Mark as Seen" })).not.toBeInTheDocument();
   });
 
+  it("lists a failed Service once: in Needs you, and not again among the Services", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    const needs = within(overviewPane).getByRole("region", { name: "Needs you" });
+    const failed = (row: HTMLElement): boolean =>
+      partsOf(row).name === "api" && partsOf(row).where === "web-login";
+    expect(within(needs).getAllByRole("listitem").filter(failed)).toHaveLength(1);
+    expect(serviceRows().filter(failed)).toHaveLength(0);
+    expect(within(overviewPane).getAllByRole("listitem").filter(failed)).toHaveLength(1);
+  });
+
+  it("lists every Service of every Worktree among the Services, without those that Needs you holds", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE, FOREIGN] }));
+    render(<App store={createDaemonStore()} />);
+    await screen.findByRole("region", { name: "Needs you" });
+
+    expect(serviceRows().map(partsOf)).toEqual([
+      { glyph: "healthy", name: "api", word: "healthy", where: "web", ports: ["18731"] },
+      { glyph: "busy", name: "worker", word: "restarting", where: "web", ports: [] },
+      { glyph: "busy", name: "site", word: "starting", where: "docs-preview", ports: ["18755"] },
+      { glyph: "ended", name: "site", word: "stopped", where: "docs-oldRemoved", ports: ["18760"] },
+    ]);
+  });
+
+  it("opens each section with a heading, the Services saying which ones it lists", async () => {
+    poller(answered(many, { needsYou: [API_FAILURE] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const overviewPane = await screen.findByRole("region", { name: "Overview" });
+    expect(
+      within(overviewPane)
+        .getAllByRole("heading", { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual(["Needs you 1", "Services every Worktree, without those above"]);
+  });
+
+  it("puts the glyph first in a row of Needs you for a Service, a Job and a Foreign process", async () => {
+    const job: NeedsYou = {
+      kind: "job",
+      worktree: "/p/work/acme/web",
+      id: "ea79fa81",
+      command: "bun test",
+      end: { kind: "exited", code: 2 },
+    };
+    poller(answered(many, { needsYou: [API_FAILURE, job, FOREIGN] }));
+
+    render(<App store={createDaemonStore()} />);
+
+    const needs = await screen.findByRole("region", { name: "Needs you" });
+    const rows = within(needs).getAllByRole("listitem");
+    expect(rows.map(partsOf)).toEqual([
+      { glyph: "failure", name: "api", word: "exited 1", where: "web-login", ports: ["18742"] },
+      { glyph: "failure", name: "bun test", word: "exited 2", where: "web", ports: [] },
+      {
+        glyph: "foreign",
+        name: "node server.js",
+        word: "started outside Procly",
+        where: "web",
+        ports: ["3000"],
+      },
+    ]);
+    for (const row of rows) {
+      const first = row.querySelector(".item-select")?.firstElementChild;
+      expect(first?.querySelector("svg")).not.toBeNull();
+      expect(first?.textContent).toBe("");
+    }
+  });
+
   it("selects a failed Service of Needs you into the inspector, which offers Mark as Seen", async () => {
     poller(answered(many, { needsYou: [API_FAILURE, FOREIGN] }));
     render(<App store={createDaemonStore()} />);
     const needs = await screen.findByRole("region", { name: "Needs you" });
     const inspector = screen.getByRole("complementary", { name: "Inspector" });
-    expect(within(inspector).getByText("Select a Worktree.")).toBeInTheDocument();
+    expect(within(inspector).getByText("Select a Service or a Job to see its output.")).toBeInTheDocument();
 
     fireEvent.click(within(needs).getByRole("button", { name: /^api/ }));
 
@@ -520,9 +725,7 @@ describe("Needs you", () => {
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("region", { name: "Overview" });
 
-    const seenRow = (): HTMLElement | undefined =>
-      screen.getAllByRole("listitem").find((row) => row.textContent?.startsWith("apiexited 1"));
-    fireEvent.click(within(seenRow() as HTMLElement).getByRole("button"));
+    fireEvent.click(within(apiRow() as HTMLElement).getByRole("button"));
 
     const panel = await screen.findByRole("region", { name: "Selection" });
     expect(within(panel).getByRole("heading", { name: "api" })).toBeInTheDocument();
@@ -564,9 +767,8 @@ describe("Needs you", () => {
   it("draws an ended row as a failure when Rust lists it, unseen or Seen, and as routine otherwise", async () => {
     /** The tone of the state of the ended `api` row of the Overview. */
     const toneOfApi = (): string | undefined =>
-      serviceRows()
-        .find((row) => row.textContent?.startsWith("apiexited 1"))
-        ?.querySelector(".state")
+      apiRow()
+        ?.querySelector(".word")
         ?.className.split(" ")
         .find((name) => name.startsWith("tone-"));
 
@@ -611,8 +813,9 @@ describe("Needs you", () => {
     const left = screen.getByRole("region", { name: "Needs you" });
     expect(within(left).getByRole("heading", { name: /^Needs you\s*1$/ })).toBeInTheDocument();
     expect(within(left).queryByText("exited 1")).not.toBeInTheDocument();
-    const row = serviceRows().find((candidate) => candidate.textContent?.startsWith("apiexited 1"));
+    const row = apiRow();
     expect(row).toBeDefined();
+    expect(serviceRows()).toContain(row);
     expect(row).toHaveAttribute("data-seen", "true");
     expect(row).toHaveTextContent("Seen");
     // The healthy Service of the same answer is not dimmed.
@@ -755,7 +958,7 @@ describe("Needs you", () => {
     await waitFor(() => {
       expect(screen.queryByRole("region", { name: "Needs you" })).not.toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole("button", { name: /^main\s*main$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^main\s*Main worktree$/ }));
 
     expect(marked).toEqual([{ kind: "job", id: "j-7" }]);
     const row = (await screen.findByText("make test")).closest("li");
@@ -859,7 +1062,7 @@ describe("the reason line of a Worktree in the sidebar", () => {
     expect(reasons()).toHaveLength(1);
     const quiet = await entryOf("docs");
     expect(quiet.querySelector(".row-reason")).toBeNull();
-    expect(quiet).toHaveTextContent(/^mainmain$/);
+    expect(quiet).toHaveTextContent(/^mainMain worktree$/);
   });
 
   it("draws no reason line at all while nothing needs the developer", async () => {
