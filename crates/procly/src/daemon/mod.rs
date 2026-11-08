@@ -25,6 +25,7 @@ mod listeners;
 mod managed;
 mod off;
 mod output_file;
+mod pinned_executable;
 mod portless;
 #[cfg(unix)]
 mod process_group;
@@ -175,18 +176,22 @@ pub(crate) fn run(state: &StateDir) -> anyhow::Result<()> {
         }
     }
 
+    // Before the runtime and the socket: nothing forks while the copy is written, and no request is served from an
+    // executable that is not pinned yet.
+    let executable = pinned_executable::pin(state)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("cannot start the async runtime")?;
-    let result = runtime.block_on(serve(state));
+    let result = runtime.block_on(serve(state, executable));
     // Output readers of Jobs whose escaped descendants still hold their terminal never return, do not wait for them.
     runtime.shutdown_background();
     drop(lock);
     result
 }
 
-async fn serve(state: &StateDir) -> anyhow::Result<()> {
+/// Serves requests until told to stop, starting its helpers from `executable`, the pinned executable of the Daemon.
+async fn serve(state: &StateDir, executable: PathBuf) -> anyhow::Result<()> {
     let socket = state.socket();
     // Holding the lock makes any socket left here stale, from a Daemon that crashed.
     remove_if_present(&socket)?;
@@ -205,7 +210,7 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
         services: Services::new(
             clock.clone(),
             ServiceRecords::new(state.services()),
-            OutputFiles::new(state.outputs()),
+            OutputFiles::new(state.outputs(), executable.clone()),
         ),
         composes: Composes::new(
             clock.clone(),
@@ -243,6 +248,8 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     });
     let mut terminate = signal(SignalKind::terminate()).context("cannot handle SIGTERM")?;
     let mut interrupt = signal(SignalKind::interrupt()).context("cannot handle SIGINT")?;
+    // The first run of a new file takes a while on macOS, which the first Service would otherwise wait for.
+    pinned_executable::warm(executable.clone()).await?;
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -268,6 +275,8 @@ async fn serve(state: &StateDir) -> anyhow::Result<()> {
     // counts and Grace periods.
     remove_if_present(&socket)?;
     remove_if_present(&state.pid())?;
+    // A helper still running from it keeps its file, the next Daemon pins a new one.
+    remove_if_present(&executable)?;
     Ok(())
 }
 

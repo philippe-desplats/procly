@@ -8,7 +8,9 @@
 //! The Service writes into a pipe read by a writer of its own, `procly output-file`, which appends to the file and
 //! never belongs to the Daemon, so that the file stays bounded while no Daemon runs to empty it. The writer empties
 //! the file itself once it reaches [`WRITER_LIMIT`], keeping its last buffer in the previous file as the Daemon does.
-//! When the writer cannot be started, the Service appends to the file directly, as it did before the writer existed.
+//! The writer runs from the pinned executable of the Daemon, see [`super::pinned_executable`], so that it matches the
+//! Daemon whatever an upgrade does to the executable the Daemon was started from. When the writer cannot be started,
+//! the Service appends to the file directly, as it did before the writer existed.
 
 use std::fs::{self, File, OpenOptions};
 use std::hash::BuildHasher as _;
@@ -40,10 +42,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// How much the Daemon reads from an output file at once.
 const CHUNK: usize = 64 * 1024;
 
-/// The directory of the state directory holding the output file of every running Service.
+/// The directory of the state directory holding the output file of every running Service, and the executable the
+/// writers of those files run from.
 #[derive(Debug, Clone)]
 pub(crate) struct OutputFiles {
     dir: PathBuf,
+    /// The pinned executable of the Daemon, see [`super::pinned_executable`].
+    executable: PathBuf,
 }
 
 /// An output file just created, before the process writing to it is started.
@@ -58,8 +63,8 @@ pub(crate) struct NewOutput {
 }
 
 impl OutputFiles {
-    pub(crate) fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    pub(crate) fn new(dir: PathBuf, executable: PathBuf) -> Self {
+        Self { dir, executable }
     }
 
     pub(crate) fn dir(&self) -> &Path {
@@ -92,6 +97,35 @@ impl OutputFiles {
                 Err(error)
             }
         }
+    }
+
+    /// Starts the writer of the output file at `path`, `procly output-file`, from the pinned executable of the
+    /// Daemon, see [`super::pinned_executable`]. It leads a process group of its own and ends once every end of its
+    /// pipe is closed, whether a Daemon still runs or not.
+    pub(crate) fn start_writer(&self, path: &Path) -> Result<Writer, WriterError> {
+        let (reader, stdout) = io::pipe()?;
+        let stderr = stdout.try_clone()?;
+        let mut command = tokio::process::Command::new(&self.executable);
+        command
+            .arg("output-file")
+            .arg(path)
+            .env_clear()
+            .stdin(reader)
+            .stdout(Stdio::null())
+            // Into the log of the Daemon that started it, which it keeps after the Daemon is gone.
+            .stderr(Stdio::inherit());
+        process_group::detach(&mut command);
+        let process = command.spawn().map_err(|source| WriterError::Spawn {
+            executable: self.executable.clone(),
+            source,
+        })?;
+        // The read end this Daemon held is closed with the command, so that the writer ends with the Service.
+        drop(command);
+        Ok(Writer {
+            stdout,
+            stderr,
+            process,
+        })
     }
 
     /// Removes every output file but the `kept` ones and their previous files, which belong to the Services
@@ -140,29 +174,21 @@ pub(crate) struct Writer {
     pub(crate) process: tokio::process::Child,
 }
 
-/// Starts the writer of the output file at `path`, `procly output-file`. It leads a process group of its own and ends
-/// once every end of its pipe is closed, whether a Daemon still runs or not.
-pub(crate) fn start_writer(path: &Path) -> io::Result<Writer> {
-    let (reader, stdout) = io::pipe()?;
-    let stderr = stdout.try_clone()?;
-    let mut command = tokio::process::Command::new(std::env::current_exe()?);
-    command
-        .arg("output-file")
-        .arg(path)
-        .env_clear()
-        .stdin(reader)
-        .stdout(Stdio::null())
-        // Into the log of the Daemon that started it, which it keeps after the Daemon is gone.
-        .stderr(Stdio::inherit());
-    process_group::detach(&mut command);
-    let process = command.spawn()?;
-    // The read end this Daemon held is closed with the command, so that the writer ends with the Service.
-    drop(command);
-    Ok(Writer {
-        stdout,
-        stderr,
-        process,
-    })
+/// Why the writer of an output file could not be started.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WriterError {
+    #[error("cannot open the pipe of the writer: {0}")]
+    Pipe(#[from] io::Error),
+    #[error(
+        "cannot run {}, the executable this daemon runs its helpers from: {source}. Restart the daemon with `procly \
+         daemon stop`",
+        executable.display()
+    )]
+    Spawn {
+        executable: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 /// Appends what `input` carries to the output file at `path` until `input` ends, emptying the file once it reaches
@@ -369,7 +395,7 @@ mod tests {
     #[test]
     fn reads_what_was_appended_since_the_last_read() {
         let dir = tempfile::tempdir().unwrap();
-        let mut new = OutputFiles::new(dir.path().join("output"))
+        let mut new = OutputFiles::new(dir.path().join("output"), PathBuf::new())
             .create(&topology("/src/app"))
             .unwrap();
         let (output, mut chunk) = (buffer(), vec![0; CHUNK]);
@@ -385,7 +411,7 @@ mod tests {
     #[test]
     fn empties_the_file_at_the_limit_and_keeps_reading_what_is_appended_after() {
         let dir = tempfile::tempdir().unwrap();
-        let mut new = OutputFiles::new(dir.path().join("output"))
+        let mut new = OutputFiles::new(dir.path().join("output"), PathBuf::new())
             .create(&topology("/src/app"))
             .unwrap();
         let (output, mut chunk) = (buffer(), vec![0; CHUNK]);
@@ -406,7 +432,7 @@ mod tests {
     #[test]
     fn a_new_daemon_gets_back_what_was_read_before_the_file_was_emptied_then_what_followed() {
         let dir = tempfile::tempdir().unwrap();
-        let mut new = OutputFiles::new(dir.path().join("output"))
+        let mut new = OutputFiles::new(dir.path().join("output"), PathBuf::new())
             .create(&topology("/src/app"))
             .unwrap();
         let mut chunk = vec![0; CHUNK];
@@ -433,7 +459,7 @@ mod tests {
     #[test]
     fn the_writer_empties_the_file_at_its_own_limit_and_keeps_the_last_buffer() {
         let dir = tempfile::tempdir().unwrap();
-        let new = OutputFiles::new(dir.path().join("output"))
+        let new = OutputFiles::new(dir.path().join("output"), PathBuf::new())
             .create(&topology("/src/app"))
             .unwrap();
         let line = [b'x'; 1023].iter().chain(b"\n").copied().collect::<Vec<u8>>();
@@ -449,6 +475,23 @@ mod tests {
         assert!(fs::read_to_string(&new.path).unwrap().ends_with("x\nlast\n"));
     }
 
+    #[tokio::test]
+    async fn a_writer_that_cannot_be_run_names_the_executable_and_the_restart_to_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("daemon-executable");
+        let files = OutputFiles::new(dir.path().join("output"), executable.clone());
+
+        let error = files.start_writer(&dir.path().join("out.log")).unwrap_err();
+
+        assert!(matches!(&error, WriterError::Spawn { executable: named, .. } if *named == executable));
+        let message = error.to_string();
+        assert!(message.contains(&executable.display().to_string()), "{message}");
+        assert!(
+            message.contains("Restart the daemon with `procly daemon stop`"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn a_writer_that_cannot_write_its_file_still_reads_its_input_to_the_end() {
         let dir = tempfile::tempdir().unwrap();
@@ -462,7 +505,7 @@ mod tests {
     #[test]
     fn sweeping_removes_every_output_file_but_the_kept_ones() {
         let dir = tempfile::tempdir().unwrap();
-        let files = OutputFiles::new(dir.path().join("output"));
+        let files = OutputFiles::new(dir.path().join("output"), PathBuf::new());
         let kept = files.create(&topology("/src/app")).unwrap().path;
         let gone = files.create(&topology("/src/app-other")).unwrap().path;
         let older = dir.path().join("output").join("0123456789abcdef.log");
