@@ -1061,21 +1061,22 @@ fn docker_a_retention_duration_deletes_that_long_after_the_worktree_was_found_re
 
     fixture.procly.advance_clock(Duration::from_mins(1));
 
+    // Docker reports the volume gone before the Daemon has written that it deleted it, so the line is waited for too.
+    let deleted = format!(
+        "retention policy 1h of service db deleted isolated volume {}_data (compose project {}) of {}",
+        fixture.other_project.name,
+        fixture.other_project.name,
+        fixture.other.display()
+    );
     common::eventually_within(
         common::DOCKER_DEADLINE,
-        "the container and volume are deleted",
-        || fixture.other_project.container().is_empty() && !fixture.other_project.volume_exists(),
+        "the container and volume are deleted and the deletion is logged",
+        || {
+            fixture.other_project.container().is_empty()
+                && !fixture.other_project.volume_exists()
+                && fixture.procly.daemon_log().contains(&deleted)
+        },
         || fixture.procly.daemon_log(),
-    );
-    let log = fixture.procly.daemon_log();
-    assert!(
-        log.contains(&format!(
-            "retention policy 1h of service db deleted isolated volume {}_data (compose project {}) of {}",
-            fixture.other_project.name,
-            fixture.other_project.name,
-            fixture.other.display()
-        )),
-        "{log}"
     );
 }
 
