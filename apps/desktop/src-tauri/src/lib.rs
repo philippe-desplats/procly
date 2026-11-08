@@ -424,6 +424,9 @@ pub fn run() {
 }
 
 #[cfg(test)]
+mod stand_in;
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 

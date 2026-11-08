@@ -89,13 +89,12 @@ pub(crate) async fn doctor(cwd: Option<PathBuf>, client: State<'_, DaemonClient>
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
-    use std::process::Command;
 
     use procly_client::state_dir::StateDir;
 
     use crate::daemon::{CommandError, DaemonClient};
+    use crate::stand_in;
 
     /// A temporary directory holding the state directory, a Worktree and the stand-in for the embedded `procly`.
     struct Scene {
@@ -135,14 +134,7 @@ mod tests {
                  printf '%s' '{stdout}'\nprintf '%s' '{stderr}' >&2\nexit {code}\n",
                 calls = self.calls().display(),
             );
-            // Written by this process, the stand-in could still be open for writing in a child that another test forks
-            // at that moment, and running it would fail with "Text file busy" until that child execs. `cp` writes it
-            // in a process of its own, which no test forks from.
-            let source = self.dir.path().join("procly.sh");
-            fs::write(&source, script).expect("the source of the stand-in can be written");
-            let copied = Command::new("cp").arg(&source).arg(&path).status().expect("cp can run");
-            assert!(copied.success(), "cp writes the stand-in: {copied}");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("the stand-in can be made executable");
+            stand_in::write(&path, &script);
             path
         }
 
