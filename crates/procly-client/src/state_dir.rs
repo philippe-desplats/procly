@@ -151,7 +151,7 @@ impl StateDir {
     }
 
     /// The copy of its own executable that the Daemon makes when it starts and runs its helpers from, so that an
-    /// upgrade replacing or removing the executable it was started from never changes what its helpers run.
+    /// upgrade replacing or removing the executable it was started from after that copy changes nothing for its helpers.
     #[must_use]
     pub fn executable(&self) -> PathBuf {
         self.path.join("daemon-executable")

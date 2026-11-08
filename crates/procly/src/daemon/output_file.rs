@@ -9,7 +9,7 @@
 //! never belongs to the Daemon, so that the file stays bounded while no Daemon runs to empty it. The writer empties
 //! the file itself once it reaches [`WRITER_LIMIT`], keeping its last buffer in the previous file as the Daemon does.
 //! The writer runs from the pinned executable of the Daemon, see [`super::pinned_executable`], so that it matches the
-//! Daemon whatever an upgrade does to the executable the Daemon was started from. When the writer cannot be started,
+//! Daemon when an upgrade replaces or removes the executable the Daemon was started from after its start. When the writer cannot be started,
 //! the Service appends to the file directly, as it did before the writer existed.
 
 use std::fs::{self, File, OpenOptions};

@@ -4,8 +4,11 @@
 //! was started from, so a Daemon that outlives an upgrade, one that puts a new file at that path as a cask does or
 //! removes the directory as `brew upgrade` does for the formula, would run the new executable as its helper, or none.
 //! Its helpers must match the Daemon that starts them, so the Daemon copies its executable into its state directory
-//! once, before it serves anything, and starts every helper from the copy. The copy is a new file for each Daemon,
-//! never written once it is there, so that a helper still running from the copy of a previous Daemon is left alone.
+//! once, before it serves anything, and starts every helper from the copy. The copy is taken a few milliseconds after
+//! the launch, from the file then at the path the Daemon was started from, and not from the image it started from. An
+//! upgrade replacing the file after the copy changes nothing, one replacing it inside that window is the only case
+//! left, and a restart of the Daemon fixes it. The copy is a new file for each Daemon, never written once it is there,
+//! so that a helper still running from the copy of a previous Daemon is left alone.
 //!
 //! A link would be cheaper but is not safe: on macOS, running a file while another name of it is linked or unlinked
 //! kills the process with `SIGKILL`, measured at 11 runs in 3202. The first run of a new file takes about half a second

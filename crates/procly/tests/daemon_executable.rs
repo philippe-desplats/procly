@@ -1,5 +1,5 @@
-//! The Daemon runs its helpers from the executable it was started from, whatever happens to the file at its path
-//! afterwards, as a cask upgrade or a formula upgrade does.
+//! The Daemon runs its helpers from the copy of its executable it made at start, whatever happens to the file at its
+//! path afterwards, as a cask upgrade or a formula upgrade does.
 
 mod common;
 
