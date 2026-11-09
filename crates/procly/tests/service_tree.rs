@@ -122,3 +122,80 @@ fn a_service_whose_leader_ends_on_its_own_leaves_no_task_of_its_tree_behind() {
     // Today the group of the leader is killed and the task, which is in no such group, keeps running.
     wait_until_gone(task);
 }
+
+#[test]
+fn a_task_started_late_whose_parent_ends_at_once_is_still_stopped_with_the_service() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let dir = procly.scratch();
+    write_cleaning_task(dir);
+    // The task starts 0.2 s in, in a group of its own, and its parent is gone 0.3 s in, long before any periodic look
+    // at the processes of the Service could have seen the task.
+    let config = format!(
+        "[services.web]\nrun = '''sleep 0.2; perl -e 'setpgrp(0,0); exec @ARGV' sh {} & sleep 0.3'''\n",
+        dir.join("task.sh").display()
+    );
+    write(&main, "procly.toml", &config);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let task = read_pid(&dir.join("task.pid"));
+
+    // The leader ended on its own, nothing of its tree may outlive it.
+    wait_until_gone(task);
+}
+
+#[test]
+fn down_asks_the_tasks_a_leader_does_not_forward_to_for_a_clean_stop_without_waiting_for_the_stop_timeout() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let dir = procly.scratch();
+    write_cleaning_task(dir);
+    // The leader ends on `SIGTERM` and forwards it to nobody: the task, which has a group of its own, only hears of the
+    // stop from the Daemon.
+    let config = format!(
+        "[services.web]\nrun = '''perl -e 'setpgrp(0,0); exec @ARGV' sh {} & exec sleep 600'''\n",
+        dir.join("task.sh").display()
+    );
+    write(&main, "procly.toml", &config);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let task = read_pid(&dir.join("task.pid"));
+
+    let started = std::time::Instant::now();
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    assert!(
+        dir.join("cleaned").exists(),
+        "the task was killed without being asked to stop"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "down waited for the stop timeout: {:?}",
+        started.elapsed()
+    );
+    wait_until_gone(task);
+}
+
+#[test]
+fn a_process_that_leaves_the_session_of_the_service_is_not_part_of_it_and_survives_down() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let dir = procly.scratch();
+    write_cleaning_task(dir);
+    // A shared daemon that a Service starts, such as a build server, detaches into a session of its own.
+    let config = format!(
+        "[services.web]\nrun = '''perl -e 'use POSIX; POSIX::setsid(); exec @ARGV' sh {} & exec sleep 600'''\n",
+        dir.join("task.sh").display()
+    );
+    write(&main, "procly.toml", &config);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let task = read_pid(&dir.join("task.pid"));
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    assert!(
+        common::is_alive(task),
+        "a process of another session was stopped with the service"
+    );
+    // The test stops it itself.
+    nix::sys::signal::kill(task, nix::sys::signal::Signal::SIGTERM).expect("stop the detached process");
+    wait_until_gone(task);
+}

@@ -4,7 +4,8 @@ use super::process_group::Pid;
 use std::collections::BTreeSet;
 use std::io;
 use std::process::Command;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// CPU time as `ps` reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,14 +17,29 @@ pub(super) struct CpuTime {
     pub(super) step: Duration,
 }
 
-/// The CPU time all the live members of the process groups `groups` have used so far. A member that ended takes
-/// its share with it, so this can go down.
-pub(super) fn groups_cpu(groups: &BTreeSet<Pid>) -> io::Result<CpuTime> {
-    let output = Command::new("ps").args(["-A", "-o", "pgid=,time="]).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!("ps exited with {}", output.status)));
-    }
-    sum_of_groups(&String::from_utf8_lossy(&output.stdout), groups)
+/// The CPU time all the live members of the process groups `groups` have used so far, from a reading of `ps` that is
+/// at most `age` old: the Services that look within the same moment share one. A member that ended takes its share with
+/// it, so this can go down. Blocking.
+pub(super) fn groups_cpu(groups: &BTreeSet<Pid>, age: Duration) -> io::Result<CpuTime> {
+    static LAST: Mutex<Option<(Instant, Arc<String>)>> = Mutex::new(None);
+    // Held while `ps` runs, so that a Service asking while another reads waits for that reading.
+    let mut last = LAST
+        .lock()
+        .expect("the CPU listing mutex is never poisoned, no code panics while holding it");
+    let listing = match last.as_ref() {
+        Some((taken, listing)) if taken.elapsed() < age => Arc::clone(listing),
+        _ => {
+            let output = Command::new("ps").args(["-A", "-o", "pgid=,time="]).output()?;
+            if !output.status.success() {
+                return Err(io::Error::other(format!("ps exited with {}", output.status)));
+            }
+            let listing = Arc::new(String::from_utf8_lossy(&output.stdout).into_owned());
+            *last = Some((Instant::now(), Arc::clone(&listing)));
+            listing
+        }
+    };
+    drop(last);
+    sum_of_groups(&listing, groups)
         .ok_or_else(|| io::Error::other("cannot read the CPU time of a member of the group in the ps listing"))
 }
 

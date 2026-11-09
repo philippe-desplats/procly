@@ -74,9 +74,13 @@ async fn judge(record: &ServiceRecord) -> Verdict {
         Some(leader) if is_recorded(record, &leader) => {
             // Nothing to probe, a Service without a port is healthy as long as it runs. A Group is probed on the port
             // of each Service it covers, which its tasks may serve from process groups of their own.
-            let tree = tokio::task::spawn_blocking(move || Tree::of(pgid))
-                .await
-                .expect("reading the process list never panics");
+            let (tree, started) = (Tree::default(), record.started.clone());
+            let tree = tokio::task::spawn_blocking(move || {
+                tree.begin_recorded(pgid, started.as_deref());
+                tree
+            })
+            .await
+            .expect("reading the process list never panics");
             let mut silent = None;
             for port in record.port.iter().chain(&record.covered_ports) {
                 if !listens_on_lease(&tree, *port, &record.lease_ports).await {
@@ -123,7 +127,9 @@ async fn judge(record: &ServiceRecord) -> Verdict {
     }
 }
 
-/// Whether the live process `leader` is the leader the record names, and not one that got its pid since.
+/// Whether the live process `leader` is the leader the record names, and not one that got its pid since. A record
+/// written before the start was read with one space between the words may still hold 2 for a day under 10.
 fn is_recorded(record: &ServiceRecord, leader: &Identity) -> bool {
-    leader.pgid.as_raw() == record.pgid && record.started.as_ref() == Some(&leader.started)
+    leader.pgid.as_raw() == record.pgid
+        && record.started.as_deref().map(process_group::normalized).as_ref() == Some(&leader.started)
 }
