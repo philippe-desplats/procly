@@ -41,6 +41,8 @@ Each tool takes the arguments of its CLI verb, named like them, plus an optional
 
 `gc` only lists the Orphans unless it is called with `apply`, which deletes them as `procly gc --apply` does. When some Orphan cannot be deleted the tool is an error with `exit_code` 6, and `stdout` holds the report. `doctor` has no `agent` argument, a call carrying one is refused, so the hand-off of the problems to a coding agent stays a command the person runs. It changes nothing and runs nothing, and a check that found a problem is an error with `exit_code` 7 and the document in `stdout`.
 
+`up` returns the document of `procly up --json`, whose `warnings` hold what the Daemon could not tell or could not do for a Service without failing `up`, such as a Service kept after a restart of the Daemon that it cannot tell is what answers on its Lease. A successful call returns no stderr, so `warnings` is where an agent reads them. See [`up`](json.md#up).
+
 `wait` and `logs` return in one response, when the Job has ended for `wait`. A client with a request timeout shorter than the Job should call `wait` on Jobs it expects to be short, or poll `logs`.
 
 A client that cancels a call, with a `notifications/cancelled` for its request, stops the `procly` command that call started, and the server sends no answer for it. Only the client side stops. The Job a `wait` was about keeps running, and a Service an `up` had started keeps running too.

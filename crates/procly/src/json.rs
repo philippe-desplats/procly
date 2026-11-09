@@ -119,6 +119,9 @@ pub(crate) struct Reached<'a> {
     urls: &'a BTreeMap<String, String>,
     /// The Service that needs this one, when `up` was asked for that one instead.
     needed_by: Option<&'a str>,
+    /// What went wrong without failing `up`, or what it cannot tell, for this Service: a Portless alias that could not
+    /// be made, or a Service kept after a restart of the Daemon whose Lease the Daemon cannot tell the owner of.
+    warnings: &'a [String],
 }
 
 impl<'a> Reached<'a> {
@@ -133,6 +136,7 @@ impl<'a> Reached<'a> {
             ports: &up.ports,
             urls: &up.urls,
             needed_by,
+            warnings: &up.warnings,
         }
     }
 }
