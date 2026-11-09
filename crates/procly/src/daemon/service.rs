@@ -33,6 +33,9 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(10);
 const IDLE_SHARED: Duration = Duration::from_secs(1);
 /// How often the Daemon looks whether the process of a re-attached Service, which is not its child, still runs.
 const LIVENESS_INTERVAL: Duration = Duration::from_millis(100);
+/// How many looks at the leader of a re-attached Service pass between 2 tries to judge it again, when it was kept
+/// because the processes could not be listed: once a second.
+const PROVE_EVERY: u32 = 10;
 /// How long a restarted Service must stay healthy for the next crash to count as a first one again, instead of
 /// one more in a row.
 const STABLE_RUN: Duration = Duration::from_mins(1);
@@ -129,6 +132,33 @@ pub(crate) struct Service {
     stop: watch::Sender<Option<ServiceEnd>>,
     /// The processes of the current run: the leader and everything it started, in whatever process group.
     tree: Tree,
+    /// What a Service kept without a process list still has to show once the processes can be listed. `None` for a
+    /// Service that needs no more proof, and once it was given.
+    unproven: tokio::sync::Mutex<Option<Unproven>>,
+}
+
+/// A Service found running by a Daemon that could not list the processes, with something answering on its Lease: kept
+/// as it was, though nothing showed that its tree is what answers.
+#[derive(Debug)]
+struct Unproven {
+    /// Names the Service in the Daemon log.
+    label: String,
+    /// The port that was in doubt.
+    port: u16,
+    /// The ports its tree must listen on: its own and those of the Services it covers.
+    ports: Vec<u16>,
+    lease_ports: Vec<u16>,
+}
+
+/// What judging a Service again, once its processes can be listed, came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Proof {
+    /// There is nothing left to prove: the tree listens on the Lease, or the Service was never in doubt.
+    Done,
+    /// The tree no longer listens on the Lease, and the Service is being stopped as a re-attach does when it finds so.
+    Gone,
+    /// The processes still cannot be listed, so the Service is only kept as it was, and the port is in doubt.
+    Unreadable(u16),
 }
 
 /// The outcome of a start request.
@@ -398,7 +428,10 @@ impl Services {
     /// Lease: it is healthy, and supervised through its process group, as it is no child of this Daemon. Its output
     /// file is followed from its start, so its output from before the restart is kept. Must run inside the Tokio
     /// runtime.
-    pub(crate) fn reattach(&self, record: ServiceRecord) {
+    ///
+    /// `tree` is the one the reconciliation just built from the record. `doubt` is the port that answered while the
+    /// Daemon could not tell what listens on it: the Service is judged again as soon as the processes can be listed.
+    pub(crate) fn reattach(&self, record: ServiceRecord, tree: Tree, doubt: Option<u16>) {
         let output = Arc::new(Mutex::new(OutputBuffer::dated(output::CAPACITY, self.clock.clone())));
         // A Service recorded before output files existed wrote to a pipe, its output is lost.
         let tail = record.output.as_ref().and_then(|path| match output_file::open(path) {
@@ -418,7 +451,13 @@ impl Services {
             output,
             state: watch::Sender::new(ServiceState::Healthy),
             stop: watch::Sender::new(None),
-            tree: Tree::default(),
+            tree,
+            unproven: tokio::sync::Mutex::new(doubt.map(|port| Unproven {
+                label: format!("service {} of {}", record.service, record.worktree.path.display()),
+                port,
+                ports: record.port.iter().chain(&record.covered_ports).copied().collect(),
+                lease_ports: record.lease_ports.clone(),
+            })),
         });
         self.table().insert(
             (record.worktree.path.clone(), record.service.clone()),
@@ -446,6 +485,7 @@ impl Services {
             state: watch::Sender::new(ServiceState::Ended(end)),
             stop: watch::Sender::new(None),
             tree: Tree::default(),
+            unproven: tokio::sync::Mutex::default(),
         });
         self.table()
             .insert((record.worktree.path.clone(), record.service.clone()), service);
@@ -524,6 +564,43 @@ impl Service {
         output::lock(&self.output).text()
     }
 
+    /// Judges a Service that was kept without a process list, if it still is one, as soon as the processes can be listed:
+    /// the same judgement a re-attach makes, from a tree that is now known. A tree that listens on its Lease stays and is
+    /// a Service like any other. One that does not is stopped, which signals nothing but its own processes, so that a
+    /// Foreign process holding the port is left alone and shown as Foreign.
+    pub(crate) async fn prove(&self) -> Proof {
+        let mut unproven = self.unproven.lock().await;
+        let Some(pending) = unproven.as_ref() else {
+            // A judgement made just before, by the task watching the Service, may have found it gone.
+            return if self.is_stopping() { Proof::Gone } else { Proof::Done };
+        };
+        let tree = self.tree.clone();
+        if !tokio::task::spawn_blocking(move || tree.refresh())
+            .await
+            .unwrap_or(false)
+        {
+            return Proof::Unreadable(pending.port);
+        }
+        for port in &pending.ports {
+            if listens_on_lease(&self.tree, *port, &pending.lease_ports).await == LeaseHeld::No {
+                eprintln!(
+                    "{} no longer listened on its Lease, port {port}, when the Daemon could list the processes again, \
+                     its tree was stopped",
+                    pending.label
+                );
+                self.request_stop(ServiceEnd::NotListening { port: *port });
+                *unproven = None;
+                return Proof::Gone;
+            }
+        }
+        eprintln!(
+            "{} listens on its Lease, port {}: the Daemon can list the processes again, it is re-attached",
+            pending.label, pending.port
+        );
+        *unproven = None;
+        Proof::Done
+    }
+
     fn is_running(&self) -> bool {
         !matches!(*self.state.borrow(), ServiceState::Ended(_))
     }
@@ -574,6 +651,7 @@ fn spawn(
         state: watch::Sender::new(ServiceState::Starting),
         stop: watch::Sender::new(None),
         tree,
+        unproven: tokio::sync::Mutex::default(),
     });
     tokio::spawn(supervise(Arc::clone(&service), spec, clock, records, outputs, process));
     Ok(service)
@@ -860,11 +938,6 @@ async fn supervise_reattached(
 ) {
     let pgid = Pid::from_raw(record.pgid);
     let label = format!("service {} of {}", record.service, record.worktree.path.display());
-    // The tree is read again from the leader, as long as it still is the process the record names.
-    {
-        let (tree, started) = (service.tree.clone(), record.started.clone());
-        let _ = tokio::task::spawn_blocking(move || tree.begin_recorded(pgid, started.as_deref())).await;
-    }
     let idle = record.idle_ms.map(|idle_ms| {
         let (service, label, clock) = (Arc::clone(&service), label.clone(), clock.clone());
         let started = clock.now();
@@ -873,12 +946,22 @@ async fn supervise_reattached(
         })
     });
     let mut stop = service.stop.subscribe();
+    let mut looks = 0_u32;
     let stopped = loop {
-        tokio::select! {
-            _ = stop.wait_for(Option::is_some) => break true,
-            () = tokio::time::sleep(LIVENESS_INTERVAL) => if !process_group::is_alive(pgid) {
-                break false;
-            },
+        let asked = tokio::select! {
+            _ = stop.wait_for(Option::is_some) => true,
+            () = tokio::time::sleep(LIVENESS_INTERVAL) => false,
+        };
+        if asked {
+            break true;
+        }
+        if !process_group::is_alive(pgid) {
+            break false;
+        }
+        looks = looks.wrapping_add(1);
+        // A Service kept without a process list is judged as soon as one can be read, and a stop is asked if it is gone.
+        if looks.is_multiple_of(PROVE_EVERY) {
+            service.prove().await;
         }
     };
     if let Some(idle) = idle {

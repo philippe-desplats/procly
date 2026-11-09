@@ -17,9 +17,14 @@ use super::store::StoreError;
 use crate::protocol::ServiceEnd;
 
 /// What becomes of one recorded Service.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum Verdict {
-    Reattach,
+    /// The Service stays, with the tree read from its record. `doubt` is the port that answered while the processes
+    /// could not be listed to tell what listens on it, so that the Service is judged again once they can.
+    Reattach {
+        tree: Tree,
+        doubt: Option<u16>,
+    },
     Ended(ServiceEnd),
 }
 
@@ -34,23 +39,26 @@ pub(super) async fn run(services: &Services) -> Result<(), StoreError> {
     let mut ended = Vec::new();
     for record in found {
         match judge(&record).await {
-            Verdict::Reattach => kept.push(record),
+            Verdict::Reattach { tree, doubt } => kept.push((record, tree, doubt)),
             Verdict::Ended(end) => ended.push((record, end)),
         }
     }
-    let (records, recorded) = (services.records(), kept.clone());
+    let (records, recorded) = (
+        services.records(),
+        kept.iter().map(|(record, ..)| record.clone()).collect::<Vec<_>>(),
+    );
     // Before any of them is supervised, so that one ending at once is not recorded again.
     let _ = tokio::task::spawn_blocking(move || records.replace(recorded)).await;
     // The output file of a Service that ended while no Daemon ran is no one's, and no Service starts before this.
     let (outputs, followed) = (
         services.outputs().clone(),
         kept.iter()
-            .filter_map(|record| record.output.clone())
+            .filter_map(|(record, ..)| record.output.clone())
             .collect::<Vec<_>>(),
     );
     let _ = tokio::task::spawn_blocking(move || outputs.sweep(&followed)).await;
-    for record in kept {
-        services.reattach(record);
+    for (record, tree, doubt) in kept {
+        services.reattach(record, tree, doubt);
     }
     for (record, end) in ended {
         services.forget(&record, end);
@@ -94,14 +102,15 @@ async fn judge(record: &ServiceRecord) -> Verdict {
             }
             let Some(port) = silent else {
                 match unknown {
-                    // Nothing proves the Service is not what listens, so it is neither signalled nor dropped.
+                    // Nothing proves the Service is not what listens, so it is neither signalled nor dropped, and it is
+                    // judged again as soon as the processes can be listed.
                     Some(port) => eprintln!(
                         "{label} still runs after a restart of the Daemon, but the Daemon could not list the \
                          processes to tell what listens on its Lease, port {port}: it kept the Service as it was"
                     ),
                     None => eprintln!("{label} still runs after a restart of the Daemon, it is re-attached"),
                 }
-                return Verdict::Reattach;
+                return Verdict::Reattach { tree, doubt: unknown };
             };
             process_group::stop_detached(&tree).await;
             eprintln!(

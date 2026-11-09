@@ -238,6 +238,11 @@ mod without_the_process_list {
                 .count()
         }
 
+        /// Lets the Daemon list the processes again.
+        fn restore(&self) {
+            std::fs::remove_file(self.dir.join("refuse")).expect("remove the flag");
+        }
+
         fn empty_the_log(&self) {
             std::fs::write(self.dir.join("calls"), "").expect("empty the log");
         }
@@ -260,6 +265,81 @@ mod without_the_process_list {
     impl Drop for ReapGroup {
         fn drop(&mut self) {
             let _ = killpg(self.0, Signal::SIGKILL);
+        }
+    }
+
+    /// A process that has nothing to do with the Service and listens on `port`, ended when dropped.
+    struct Stranger(std::process::Child);
+
+    impl Stranger {
+        fn listen(port: u16) -> Self {
+            let child = std::process::Command::new(test_server())
+                .args(["--port", &port.to_string()])
+                .spawn()
+                .expect("the test server starts");
+            let stranger = Self(child);
+            common::eventually("the stranger to listen", || {
+                std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+            });
+            stranger
+        }
+
+        fn pid(&self) -> Pid {
+            Pid::from_raw(i32::try_from(self.0.id()).expect("a pid fits in an i32"))
+        }
+    }
+
+    impl Drop for Stranger {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A Service of the form of `turbo run dev` that is up: its leader only sleeps and its listener is a task in a group
+    /// of its own. Both are reaped when the test ends.
+    struct Kept {
+        main: PathBuf,
+        port: u16,
+        starts: PathBuf,
+        leader: Pid,
+        listener: Pid,
+        _reap: [ReapGroup; 2],
+    }
+
+    impl Kept {
+        fn up(procly: &Procly, listing: &Listing) -> Self {
+            let main = git_repository(procly.scratch(), "app");
+            let port = free_port();
+            let dir = procly.scratch();
+            let (starts, leader, listener) = (dir.join("starts"), dir.join("leader"), dir.join("pid"));
+            let config = format!(
+                "[services.web]\nrun = '''echo start >> {starts}; echo $$ > {leader}; \
+                 perl -e 'setpgrp(0,0); exec @ARGV' {server} --port {port} & echo $! > {pid}; exec sleep 600'''\n\
+                 ports = {{ http = {port} }}\nhealth = {{ timeout = '5s' }}\n",
+                starts = starts.display(),
+                leader = leader.display(),
+                pid = listener.display(),
+                server = test_server().display()
+            );
+            write(&main, "procly.toml", &config);
+            assert_success(&listing.procly_in(procly, &main, &["up", "web"]));
+            let (leader, listener) = (read_pid(&leader), read_pid(&listener));
+            Self {
+                main,
+                port,
+                starts,
+                leader,
+                listener,
+                _reap: [ReapGroup(leader), ReapGroup(listener)],
+            }
+        }
+
+        fn starts(&self) -> usize {
+            std::fs::read_to_string(&self.starts)
+                .unwrap_or_default()
+                .lines()
+                .count()
         }
     }
 
@@ -360,6 +440,12 @@ mod without_the_process_list {
             "the Daemon did not say why it kept the service: {log}"
         );
         assert!(common::is_alive(listener), "the listener was stopped");
+        // It cannot say that what answers is the service, and says so rather than claiming it is healthy.
+        assert!(
+            common::stderr(&output).contains("cannot tell that web is what listens on port"),
+            "up did not say it could not tell: {}",
+            common::stderr(&output)
+        );
     }
 
     #[test]
@@ -430,5 +516,135 @@ mod without_the_process_list {
         // 5 s at 1 listing every 20 ms were 250 listings, 1 in 20 s was never needed to tell the tree was not gone.
         let listings = listing.count();
         assert!(listings <= 30, "the stop read the process list {listings} times");
+    }
+
+    /// The Daemon that found the Service of `kept` cannot list the processes and keeps it as it was, because something
+    /// answers on its Lease. Whatever answers is `stranger` when it is given, which took the port once the listener ended.
+    fn restart_unable_to_list(procly: &Procly, listing: &Listing, kept: &Kept, stranger: bool) -> Option<Stranger> {
+        procly.kill_daemon();
+        let held = stranger.then(|| {
+            // The listener ends while no Daemon runs, a process that has nothing to do with the Service takes its port.
+            killpg(kept.listener, Signal::SIGKILL).expect("end the listener");
+            // Its parent, the sleeping leader, never reaps it: it is a zombie that holds nothing.
+            common::eventually("the port of the listener to be free", || {
+                std::net::TcpStream::connect(("127.0.0.1", kept.port)).is_err()
+            });
+            Stranger::listen(kept.port)
+        });
+        listing.refuse();
+        assert_success(&listing.procly_in(procly, &kept.main, &["status"]));
+        assert!(
+            procly.daemon_log().contains("it kept the Service as it was"),
+            "the Daemon did not keep the service as it was: {}",
+            procly.daemon_log()
+        );
+        held
+    }
+
+    fn a_stranger_holds_the_port_of_a_kept_service(wait_for_the_judgement: bool) {
+        let procly = Procly::new();
+        let listing = Listing::new(procly.scratch());
+        let kept = Kept::up(&procly, &listing);
+        let stranger = restart_unable_to_list(&procly, &listing, &kept, true).expect("a stranger");
+
+        listing.restore();
+        if wait_for_the_judgement {
+            // Nobody asks for the service, the Daemon judges it by itself as soon as it can list the processes.
+            common::eventually("the Daemon to judge the kept service", || {
+                procly.daemon_log().contains("no longer listened on its Lease")
+            });
+        }
+        let output = listing.procly_in(&procly, &kept.main, &["up", "web"]);
+
+        assert!(
+            !common::stdout(&output).contains("reused"),
+            "up answered that the service of another process was reused: {}",
+            common::failure_message(&output)
+        );
+        assert!(
+            !output.status.success(),
+            "up found a service healthy on a port a stranger holds: {}",
+            common::failure_message(&output)
+        );
+        assert!(
+            common::is_alive(stranger.pid()),
+            "a process outside the tree was signalled"
+        );
+        wait_until_gone(kept.leader);
+        let status = common::stdout(&listing.procly_in(&procly, &kept.main, &["status"]));
+        assert!(
+            !status.contains("service web healthy"),
+            "status shows a service healthy next to the stranger holding its port: {status}"
+        );
+        assert!(
+            procly.daemon_log().contains("no longer listened on its Lease"),
+            "the Daemon did not say it judged the service gone: {}",
+            procly.daemon_log()
+        );
+    }
+
+    #[test]
+    fn a_kept_service_whose_listener_ended_while_a_stranger_took_its_port_is_judged_gone_by_the_daemon_itself() {
+        a_stranger_holds_the_port_of_a_kept_service(true);
+    }
+
+    #[test]
+    fn up_does_not_answer_reused_for_a_kept_service_while_a_stranger_holds_its_port() {
+        a_stranger_holds_the_port_of_a_kept_service(false);
+    }
+
+    #[test]
+    fn a_kept_service_whose_listener_still_runs_is_judged_again_once_the_process_list_can_be_read_and_stays() {
+        let procly = Procly::new();
+        let listing = Listing::new(procly.scratch());
+        let kept = Kept::up(&procly, &listing);
+        restart_unable_to_list(&procly, &listing, &kept, false);
+
+        listing.restore();
+        common::eventually("the Daemon to judge the kept service", || {
+            procly.daemon_log().contains("can list the processes again")
+        });
+        let output = listing.procly_in(&procly, &kept.main, &["up", "web"]);
+
+        assert_success(&output);
+        common::assert_declared_port(
+            kept.port,
+            &common::stdout(&output),
+            &format!("web reused http://localhost:{port} port {port}\n", port = kept.port),
+        );
+        assert!(
+            !common::stderr(&output).contains("could not list"),
+            "up still doubted a service that was judged: {}",
+            common::stderr(&output)
+        );
+        assert_eq!(kept.starts(), 1, "the service was started a second time");
+        assert!(!procly.daemon_log().contains("was stopped"), "{}", procly.daemon_log());
+
+        // The listener is part of its tree now, down stops it with the leader.
+        assert_success(&listing.procly_in(&procly, &kept.main, &["down", "web"]));
+        wait_until_gone(kept.listener);
+        wait_until_gone(kept.leader);
+    }
+
+    #[test]
+    fn a_kept_service_whose_leader_ends_before_any_listing_leaves_no_listener_behind_once_the_process_list_can_be_read()
+    {
+        let procly = Procly::new();
+        let listing = Listing::new(procly.scratch());
+        let kept = Kept::up(&procly, &listing);
+        restart_unable_to_list(&procly, &listing, &kept, false);
+
+        listing.restore();
+        killpg(kept.leader, Signal::SIGKILL).expect("end the leader");
+
+        wait_until_gone(kept.listener);
+        let output = listing.procly_in(&procly, &kept.main, &["up", "web"]);
+        assert_success(&output);
+        assert_eq!(
+            kept.starts(),
+            2,
+            "the service was not started again: {}",
+            procly.daemon_log()
+        );
     }
 }

@@ -76,6 +76,8 @@ struct Known {
     leader_started: Option<String>,
     /// The process groups of the processes seen alive in the last listing.
     groups: BTreeSet<Pid>,
+    /// Whether a listing has been read since the tree began.
+    listed: bool,
 }
 
 impl Known {
@@ -87,6 +89,7 @@ impl Known {
             scope: Some(Scope::Undecided(leader)),
             leader_started: started.map(normalized),
             groups: BTreeSet::from([leader]),
+            listed: false,
         };
         if let Some(listing) = listing {
             known.absorb(listing, daemon_group);
@@ -97,22 +100,39 @@ impl Known {
     /// Takes a listing of the system in: the groups of the processes of the tree, now.
     fn absorb(&mut self, listing: &[Member], daemon_group: Pid) {
         let Some(mut scope) = self.scope else { return };
+        self.listed = true;
         let row = listing
             .iter()
             .find(|member| member.pid == scope.leader() && !member.zombie);
-        // A leader that does not lead its own session was started before Services did.
-        if let (Scope::Undecided(leader), Some(row)) = (scope, row)
-            && self
-                .leader_started
-                .as_ref()
-                .is_none_or(|started| *started == row.started)
-        {
-            scope = if row.sid == leader {
-                Scope::Session(leader)
-            } else {
-                Scope::Group(leader)
+        if let Scope::Undecided(leader) = scope {
+            let decided = match row {
+                // A leader that does not lead its own session was started before Services did.
+                Some(row)
+                    if self
+                        .leader_started
+                        .as_ref()
+                        .is_none_or(|started| *started == row.started) =>
+                {
+                    Some(row.sid == leader)
+                }
+                // Some other process has its pid now, and the groups of the tree are cleared below.
+                Some(_) => None,
+                // A leader that ended keeps its id reserved while any process of its session lives, so a session of that
+                // id is its own, and when there is none the tree is its group.
+                None => Some(
+                    listing
+                        .iter()
+                        .any(|member| !member.zombie && member.sid == leader && member.pgid != daemon_group),
+                ),
             };
-            self.scope = Some(scope);
+            if let Some(session) = decided {
+                scope = if session {
+                    Scope::Session(leader)
+                } else {
+                    Scope::Group(leader)
+                };
+                self.scope = Some(scope);
+            }
         }
         let leader = row.filter(|row| scope.holds(row));
         match (leader, &self.leader_started) {
@@ -148,6 +168,7 @@ impl Tree {
             scope: Some(Scope::Session(leader)),
             leader_started: None,
             groups: BTreeSet::from([leader]),
+            listed: false,
         };
     }
 
@@ -193,10 +214,11 @@ impl Tree {
         self.known().groups.clone()
     }
 
-    /// Whether no listing of the processes has been read since the tree began, so that it is only known to be the process
-    /// group of its leader.
+    /// Whether the tree of a leader a previous Daemon recorded is still only its process group, because no listing of the
+    /// processes has been read since.
     pub(in crate::daemon) fn is_unlisted(&self) -> bool {
-        matches!(self.known().scope, Some(Scope::Undecided(_)))
+        let known = self.known();
+        matches!(known.scope, Some(Scope::Undecided(_))) && !known.listed
     }
 
     /// Whether no process of the tree was seen alive in the last listing.
@@ -704,6 +726,57 @@ mod tests {
 
         assert_eq!(session.groups, groups(&[100, 102]));
         assert_eq!(older.groups, groups(&[100]));
+    }
+
+    #[test]
+    fn a_recorded_leader_that_ended_before_any_listing_leaves_its_session_to_the_tree() {
+        let mut known = Known::recorded(Pid::from_raw(100), Some("t0"), None, Pid::from_raw(7));
+
+        // 100 is gone. Its session lives on in 102, a task in a group of its own, and 900 is none of its business.
+        known.absorb(
+            &[
+                member(102, 102, 100, "t2"),
+                member(103, 102, 100, "t3"),
+                member(900, 900, 900, "t9"),
+            ],
+            Pid::from_raw(7),
+        );
+
+        assert_eq!(known.scope, Some(Scope::Session(Pid::from_raw(100))));
+        assert_eq!(known.groups, groups(&[102]));
+    }
+
+    #[test]
+    fn a_recorded_leader_that_ended_without_a_session_left_is_known_by_its_group() {
+        let mut known = Known::recorded(Pid::from_raw(100), Some("t0"), None, Pid::from_raw(7));
+
+        // A member of the group of 100, which an older Daemon started, and a task that is none of its group nor session.
+        known.absorb(
+            &[member(101, 100, 7, "t1"), member(102, 102, 7, "t2")],
+            Pid::from_raw(7),
+        );
+
+        assert_eq!(known.scope, Some(Scope::Group(Pid::from_raw(100))));
+        assert_eq!(known.groups, groups(&[100]));
+    }
+
+    #[test]
+    fn a_recorded_tree_is_unlisted_until_a_listing_is_read_even_when_that_listing_does_not_find_the_leader() {
+        let recorded = |listing: Option<&[Member]>| Tree {
+            known: Arc::new(Mutex::new(Known::recorded(
+                Pid::from_raw(100),
+                Some("t0"),
+                listing,
+                Pid::from_raw(7),
+            ))),
+        };
+        let stranger = [member(100, 100, 100, "stranger")];
+
+        assert!(recorded(None).is_unlisted());
+        assert!(!recorded(Some(&[member(100, 100, 100, "t0")])).is_unlisted());
+        // A stranger holds the pid, nothing in the listing is the Service's, and it is no longer a doubt.
+        assert!(!recorded(Some(&stranger)).is_unlisted());
+        assert!(!recorded(Some(&[])).is_unlisted());
     }
 
     #[test]
