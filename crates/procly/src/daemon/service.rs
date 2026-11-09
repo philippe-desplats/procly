@@ -563,7 +563,7 @@ fn spawn(
     let tree = Tree::default();
     let process = launch(&spec, &output, &outputs, &tree)?;
     // Recorded before anyone hears of the Service, so that a crash of the Daemon from now on leaves a trace of it.
-    record_run(&records, record_of(&spec, process.tail.path()), process.pgid);
+    record_run(&records, record_of(&spec, process.tail.path()), process.pgid, &tree);
     let service = Arc::new(Service {
         port: spec.health.port,
         topology: spec.topology.clone(),
@@ -598,18 +598,25 @@ fn record_of(spec: &ServiceSpec, output: &Path) -> ServiceRecord {
     }
 }
 
-/// Records the run of the process group `pgid` in `record`. Blocking: it reads when the leader started with `ps`
-/// and writes the document.
-fn record_run(records: &ServiceRecords, mut record: ServiceRecord, pgid: Pid) {
+/// Records the run of the process group `pgid` in `record`, and tells `tree` when its leader started, so that the tree
+/// never has to wait for a listing to know which process its leader is. Blocking: it reads when the leader started with
+/// `ps` and writes the document.
+fn record_run(records: &ServiceRecords, mut record: ServiceRecord, pgid: Pid, tree: &Tree) {
     record.pgid = pgid.as_raw();
     record.started = process_group::identity(pgid).map(|identity| identity.started);
+    tree.note_start(record.started.clone());
     records.put(record);
 }
 
 /// Records the run `process` of a restarted Service, on a blocking thread as writing the document syncs it to disk.
-async fn record_restart(records: &Arc<ServiceRecords>, spec: &ServiceSpec, process: &Process) {
-    let (records, record, pgid) = (Arc::clone(records), record_of(spec, process.tail.path()), process.pgid);
-    let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid)).await;
+async fn record_restart(records: &Arc<ServiceRecords>, spec: &ServiceSpec, process: &Process, tree: &Tree) {
+    let (records, record, pgid, tree) = (
+        Arc::clone(records),
+        record_of(spec, process.tail.path()),
+        process.pgid,
+        tree.clone(),
+    );
+    let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid, &tree)).await;
 }
 
 /// Ends the Service with `end`, once it is no longer recorded, so that a Daemon starting right after never finds a
@@ -800,7 +807,7 @@ async fn supervise(
             }
             match launch(&spec, &service.output, &outputs, &service.tree) {
                 Ok(process) => {
-                    record_restart(&records, &spec, &process).await;
+                    record_restart(&records, &spec, &process, &service.tree).await;
                     break process;
                 }
                 Err(error) => {

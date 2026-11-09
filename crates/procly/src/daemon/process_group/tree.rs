@@ -15,11 +15,18 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::Signal;
 use process_wrap::tokio::ChildWrapper;
 
-use super::{GONE_POLL, KILL_ATTEMPTS, Pid, STOP_TIMEOUT, is_alive, kill_group, normalized, own_group, signal_group};
+use super::{
+    GONE_POLL, KILL_ATTEMPTS, Pid, STOP_TIMEOUT, group_exists, is_alive, kill_group, normalized, own_group,
+    signal_group,
+};
 
 /// How long a listing of the processes is shared by the Services that ask for one, so that N Services looking at
 /// their tree within the same few milliseconds cost one listing.
 const SHARED_FOR: Duration = Duration::from_millis(40);
+
+/// How often a stopping tree is listed again to find the groups that appeared since, while the groups known are
+/// probed every [`GONE_POLL`]. A listing costs a `ps` of the whole system, the probe of a group costs one system call.
+const RELIST: Duration = Duration::from_millis(500);
 
 /// One process as the system lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,19 +48,23 @@ enum Scope {
     Session(Pid),
     /// The processes of the process group that the leader `Pid` leads, for a Service an older Daemon started.
     Group(Pid),
+    /// Either of the 2 above, not known yet: the leader `Pid` was found running but the processes could not be listed to
+    /// tell whether it leads a session. Until a listing shows it, the tree is its process group, which is all that is
+    /// certain of it.
+    Undecided(Pid),
 }
 
 impl Scope {
     fn leader(self) -> Pid {
         match self {
-            Self::Session(leader) | Self::Group(leader) => leader,
+            Self::Session(leader) | Self::Group(leader) | Self::Undecided(leader) => leader,
         }
     }
 
     fn holds(self, member: &Member) -> bool {
         match self {
             Self::Session(leader) => member.sid == leader,
-            Self::Group(leader) => member.pgid == leader,
+            Self::Group(leader) | Self::Undecided(leader) => member.pgid == leader,
         }
     }
 }
@@ -68,12 +79,42 @@ struct Known {
 }
 
 impl Known {
+    /// The tree of the leader `leader` that a previous Daemon recorded, with the start `started` if the record holds
+    /// one, seen in `listing` if the processes could be listed. A leader found running whose processes cannot be listed
+    /// is still the Service, which keeps its process group until a listing says more: never dropped on a failed reading.
+    fn recorded(leader: Pid, started: Option<&str>, listing: Option<&[Member]>, daemon_group: Pid) -> Self {
+        let mut known = Self {
+            scope: Some(Scope::Undecided(leader)),
+            leader_started: started.map(normalized),
+            groups: BTreeSet::from([leader]),
+        };
+        if let Some(listing) = listing {
+            known.absorb(listing, daemon_group);
+        }
+        known
+    }
+
     /// Takes a listing of the system in: the groups of the processes of the tree, now.
     fn absorb(&mut self, listing: &[Member], daemon_group: Pid) {
-        let Some(scope) = self.scope else { return };
-        let leader = listing
+        let Some(mut scope) = self.scope else { return };
+        let row = listing
             .iter()
-            .find(|member| member.pid == scope.leader() && !member.zombie && scope.holds(member));
+            .find(|member| member.pid == scope.leader() && !member.zombie);
+        // A leader that does not lead its own session was started before Services did.
+        if let (Scope::Undecided(leader), Some(row)) = (scope, row)
+            && self
+                .leader_started
+                .as_ref()
+                .is_none_or(|started| *started == row.started)
+        {
+            scope = if row.sid == leader {
+                Scope::Session(leader)
+            } else {
+                Scope::Group(leader)
+            };
+            self.scope = Some(scope);
+        }
+        let leader = row.filter(|row| scope.holds(row));
         match (leader, &self.leader_started) {
             (Some(leader), None) => self.leader_started = Some(leader.started.clone()),
             // The pid of the leader leads a session or a group again, some other process got it: whatever else holds
@@ -110,32 +151,20 @@ impl Tree {
         };
     }
 
+    /// Records the start of the leader of the run the Daemon just spawned, read right after the spawn, so that the tree
+    /// never depends on a first listing that may come after the leader was reaped and its pid given to another process.
+    pub(in crate::daemon) fn note_start(&self, started: Option<String>) {
+        if let Some(started) = started {
+            self.known().leader_started.get_or_insert(started);
+        }
+    }
+
     /// Starts the tree over with the leader `leader` that a previous Daemon started and recorded with the start
-    /// `started`, if it is still the process that leader was. An empty tree otherwise. Blocking.
+    /// `started`, which is the process that leader was when the caller read it. The tree is empty if the pid now belongs
+    /// to another process. Blocking.
     pub(in crate::daemon) fn begin_recorded(&self, leader: Pid, started: Option<&str>) {
-        let started = started.map(normalized);
-        let known = listing(Duration::ZERO)
-            .and_then(|listing| {
-                let row = listing.iter().find(|member| member.pid == leader && !member.zombie)?;
-                if started.as_ref().is_some_and(|started| *started != row.started) {
-                    return None;
-                }
-                // A leader that does not lead its own session was started before Services did.
-                let scope = if row.sid == leader {
-                    Scope::Session(leader)
-                } else {
-                    Scope::Group(leader)
-                };
-                let mut known = Known {
-                    scope: Some(scope),
-                    leader_started: Some(row.started.clone()),
-                    groups: BTreeSet::new(),
-                };
-                known.absorb(&listing, own_group());
-                Some(known)
-            })
-            .unwrap_or_default();
-        *self.known() = known;
+        let listing = listing(Duration::ZERO);
+        *self.known() = Known::recorded(leader, started, listing.as_deref().map(Vec::as_slice), own_group());
     }
 
     /// Reads the processes of the system, or reuses a reading a few milliseconds old that another Service took, and
@@ -173,13 +202,55 @@ impl Tree {
         self.known().scope.map(Scope::leader)
     }
 
-    /// Sends `signal` to the group of the leader, if a listing taken now shows a process in it. Blocking.
+    /// Sends `signal` to the group of the leader, if a listing taken now shows a process in it. When the processes cannot
+    /// be listed, to the group of a leader that is still the process the tree began with. Blocking.
     fn signal_leader_group(&self, signal: Signal) {
-        if let Some(leader) = self.leader()
-            && self.refresh_now()
-            && self.groups().contains(&leader)
-        {
+        let Some(leader) = self.leader() else { return };
+        let signalled = if self.refresh_now() {
+            self.groups().contains(&leader)
+        } else {
+            self.leader_is_ours()
+        };
+        if signalled {
             signal_group(leader, signal);
+        }
+    }
+
+    /// Whether the group of the leader holds the processes the tree began with, when the processes cannot be listed.
+    ///
+    /// A leader that runs is the one the tree began with if it still has the start it was seen with. A leader that
+    /// ended leaves its group with its id reserved while any member lives, so whatever is in that group is the tree's.
+    /// A leader that runs and cannot be identified proves nothing. Blocking.
+    fn leader_is_ours(&self) -> bool {
+        let Some(leader) = self.leader() else {
+            return false;
+        };
+        match super::identity(leader) {
+            Some(identity) => {
+                identity.pgid == leader
+                    && self
+                        .known()
+                        .leader_started
+                        .as_ref()
+                        .is_none_or(|started| *started == identity.started)
+            }
+            None => !is_alive(leader),
+        }
+    }
+
+    /// Whether every process group of the tree in the last listing is empty, or the group of the leader is when no
+    /// listing could be taken. A reading of the system is taken to tell it, when the groups known are all empty or
+    /// `since` is older than [`RELIST`], and then dated again. Blocking.
+    fn is_gone(&self, since: &mut Instant) -> bool {
+        let known = self.groups();
+        if known.iter().any(|group| group_exists(*group)) && since.elapsed() < RELIST {
+            return false;
+        }
+        *since = Instant::now();
+        if self.refresh_now() {
+            self.is_empty()
+        } else {
+            self.leader().is_none_or(|leader| !group_exists(leader))
         }
     }
 
@@ -206,7 +277,9 @@ impl Tree {
         for _ in 0..KILL_ATTEMPTS {
             if !self.refresh_now() {
                 eprintln!("cannot read the process list, only the process group of the leader is killed");
-                if let Some(leader) = self.leader() {
+                if let Some(leader) = self.leader()
+                    && self.leader_is_ours()
+                {
                     kill_group(leader);
                 }
                 return;
@@ -236,12 +309,20 @@ pub(in crate::daemon) async fn kill_tree(tree: &Tree) {
     let _ = tokio::task::spawn_blocking(move || tree.kill()).await;
 }
 
-/// Returns once no process of `tree` runs.
+/// Returns once no process of `tree` runs. Between 2 readings of the system, which cost a full listing of the processes,
+/// the groups of the tree known are probed one by one.
 async fn gone(tree: &Tree) {
+    let mut since = Instant::now();
     loop {
         let looked = tree.clone();
-        let _ = tokio::task::spawn_blocking(move || looked.refresh_now()).await;
-        if tree.is_empty() {
+        let (done, taken) = tokio::task::spawn_blocking(move || {
+            let done = looked.is_gone(&mut since);
+            (done, since)
+        })
+        .await
+        .expect("looking at the tree never panics");
+        since = taken;
+        if done {
             return;
         }
         tokio::time::sleep(GONE_POLL).await;
@@ -334,9 +415,12 @@ fn read_listing() -> Option<Vec<Member>> {
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(parse_member)
-            // A process that ended since `ps` read it has no session any more.
+            // A process that ended since `ps` read it has no session any more. The group is read with the session, from
+            // the same process, so that a pid given to another process since `ps` read it never pairs a group with a
+            // session that are not its own.
             .filter_map(|mut member| {
                 member.sid = nix::unistd::getsid(Some(member.pid)).ok()?;
+                member.pgid = nix::unistd::getpgid(Some(member.pid)).ok()?;
                 Some(member)
             })
             .collect(),
@@ -558,6 +642,68 @@ mod tests {
         );
 
         assert_eq!(known.groups, BTreeSet::new());
+    }
+
+    #[test]
+    fn a_recorded_leader_found_running_while_the_processes_cannot_be_listed_keeps_its_process_group() {
+        let known = Known::recorded(Pid::from_raw(100), Some("t0"), None, Pid::from_raw(7));
+
+        assert_eq!(known.groups, groups(&[100]));
+        assert_eq!(known.leader_started.as_deref(), Some("t0"));
+    }
+
+    #[test]
+    fn a_listing_that_comes_later_tells_a_recorded_leader_that_leads_a_session_from_one_that_does_not() {
+        let mut session = Known::recorded(Pid::from_raw(100), Some("t0"), None, Pid::from_raw(7));
+        let mut older = Known::recorded(Pid::from_raw(100), Some("t0"), None, Pid::from_raw(7));
+
+        session.absorb(
+            &[member(100, 100, 100, "t0"), member(102, 102, 100, "t2")],
+            Pid::from_raw(7),
+        );
+        older.absorb(
+            &[member(100, 100, 7, "t0"), member(102, 102, 7, "t2")],
+            Pid::from_raw(7),
+        );
+
+        assert_eq!(session.groups, groups(&[100, 102]));
+        assert_eq!(older.groups, groups(&[100]));
+    }
+
+    #[test]
+    fn a_recorded_leader_whose_pid_a_stranger_holds_is_not_adopted_whether_or_not_the_processes_were_listed() {
+        let stranger = [member(100, 100, 100, "stranger"), member(101, 100, 100, "its child")];
+
+        let known = Known::recorded(Pid::from_raw(100), Some("t0"), Some(&stranger), Pid::from_raw(7));
+
+        assert_eq!(known.groups, BTreeSet::new());
+    }
+
+    #[test]
+    fn a_leader_start_given_at_launch_keeps_a_stranger_that_got_its_pid_before_the_first_listing_out_of_the_tree() {
+        let tree = Tree::default();
+        tree.begin(Pid::from_raw(100));
+        tree.note_start(Some("t0".to_owned()));
+
+        // The leader was reaped and a stranger that leads a session got its pid, before anything listed the processes.
+        tree.known().absorb(
+            &[member(100, 100, 100, "other"), member(110, 100, 100, "other2")],
+            Pid::from_raw(7),
+        );
+
+        assert_eq!(tree.groups(), BTreeSet::new());
+    }
+
+    #[test]
+    fn the_start_of_a_leader_is_noted_once() {
+        let tree = Tree::default();
+        tree.begin(Pid::from_raw(100));
+
+        tree.note_start(Some("t0".to_owned()));
+        tree.note_start(Some("later".to_owned()));
+        tree.note_start(None);
+
+        assert_eq!(tree.known().leader_started.as_deref(), Some("t0"));
     }
 
     #[test]
