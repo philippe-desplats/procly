@@ -121,7 +121,7 @@ run = "turbo dev"
 covers = ["web", "api"]
 ```
 
-`procly up dev` starts `turbo dev` in a process group of its own, with the environment of the caller and then, for every covered Service:
+`procly up dev` starts `turbo dev` in a session and a process group of their own, with the environment of the caller and then, for every covered Service:
 
 - Its Leases, as `PORT_<SERVICE>_<NAME>`, such as `PORT_WEB_HTTP` and `PORT_API_HTTP`. The plain `PORT` and `PORT_<NAME>` of a Service would collide between 2 covered Services, so a Group gets none of them. A Service name is written in upper case, every character that is not a letter or a digit becoming an underscore.
 - Its Derived variables, such as `WEB_URL`.
@@ -478,7 +478,7 @@ The Service receives its Leases in its environment, after the environment of the
 
 Procly also sets `PROCLY=1` and `PROCLY_SERVICE`, the name of the Service, so that a script can tell it is supervised and by which entry. Both are set last, after the Derived variables.
 
-Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process tree of the Service listens on, the process group of its leader and those of the tasks it started in groups of their own. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
+Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process tree of the Service listens on, that is every process of its session: the process group of its leader and those of the tasks it started in groups of their own. A process that left the session with `setsid` is not part of the Service. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
 
 ### What `procly up` prints
 

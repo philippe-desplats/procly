@@ -4,7 +4,7 @@ The first `procly` command that needs the Daemon starts it on demand, which `pro
 
 ## After a crash
 
-Every Service runs in a process group of its own, so it outlives a Daemon killed by a crash or by `SIGKILL`. The Daemon follows the tree of its leader, not only its group, through the parent of each process: a task that moved to a group of its own, as those of `turbo run dev` do, is part of the Service. The Daemon records each running Service in `services.json`, in its state directory, with the process group and the start time of its leader. The next Daemon compares these records with the processes it finds before it answers any `up`, `down` or `status`, so that no Service ever runs twice:
+Every Service runs in a session of its own, with a process group of the same id, so it outlives a Daemon killed by a crash or by `SIGKILL`. Everything the Service starts belongs to that session, whatever process group a tool puts it in and whoever adopts it once its parent ended: a task that moved to a group of its own, as those of `turbo run dev` do, is part of the Service. A process that calls `setsid` leaves the session and the Service, as a daemon meant to outlive it does, and is left running when the Service stops. A Service that a Daemon of an older version started leads a process group only, and is followed by that group. The Daemon records each running Service in `services.json`, in its state directory, with the process group and the start time of its leader. The next Daemon compares these records with the processes it finds before it answers any `up`, `down` or `status`, so that no Service ever runs twice:
 
 | Found | What the new Daemon does | `procly status` |
 | --- | --- | --- |

@@ -49,11 +49,14 @@ How Procly starts, watches and stops the processes it supervises. The API refere
     }
     ```
 
-- **ALWAYS** treat a Service as the tree of its leader and not as its process group: stop it by waiting until the whole tree is gone, and read its listeners and its CPU time from every group of the tree.
+- **ALWAYS** start the leader of a Service in a session of its own (`ProcessSession`, through `process_group::lead_session`), and treat the Service as every process of that session, not as its process group: stop it by waiting until the whole tree is gone, and read its listeners and its CPU time from every group of the tree.
   - A tool such as turbo runs each task in a process group of its own, and ends its own leader (`bun run dev`) a few milliseconds after `SIGTERM`, long before the tasks are stopped. A `SIGKILL` to the group at the leader's end kills the tool half way and orphans the tasks, and `lsof -g <leader group>` never sees their listeners.
-  - `process_group::Tree` finds the tree through the parent of each process and remembers what it saw, so a task whose parent ended stays in it. `stop_tree` sends `SIGTERM` to the leader's group, waits for the leader and then for the tree, and sends `SIGKILL` to every group of the tree only at the stop timeout.
-  - Never signal a pid that a listing taken just before did not show with the start it was seen with, and never a process of the Daemon's own group: a pid some unrelated process got since is not the one that was seen. A group is signalled only while a process seen in it is alive.
-  - Example: `tree.kill()` sends `SIGKILL` to the groups of the processes seen alive in a fresh listing, and repeats until none is left.
+  - The session is what survives: it is inherited by every descendant, whatever its process group, and it stays when the parent ends and init adopts the process, so the tree is found without following parents and without a periodic look that a task started and orphaned in between could slip through. `process_group::Tree` reads it from `/proc/<pid>/stat` on Linux and with `getsid` on macOS, whose `ps` has no session column.
+  - A process that calls `setsid` leaves the session, and so the tree: a daemon meant to outlive the Service, such as a shared build server, is not stopped with it. This is the one documented way out.
+  - `stop_tree` sends `SIGTERM` to the leader's group, waits for the leader, sends `SIGTERM` to the other groups of the tree, waits for the whole tree, and sends `SIGKILL` to every group of the tree only at the stop timeout. A Service that an older Daemon started leads no session, and a Daemon that re-attaches it knows it by its process group only.
+  - Never signal a group that a listing taken just before did not show with a process of the tree in it, never trust the pid of a leader whose start differs from the one recorded, and never touch the Daemon's own group. When the processes cannot be listed, only the group of the leader is killed, which keeps its id reserved while any of its members lives.
+  - Share the listing: the Services of a Daemon that look at their tree within the same few milliseconds, or at their idleness within the same second, read the processes once. Nothing polls a tree that nobody asks about.
+  - Example: `tree.kill()` sends `SIGKILL` to the groups of the processes of the session seen alive in a fresh listing, and repeats until none is left.
 
 - **ALWAYS** kill the whole tree of a Job that reaches its timeout, and report exit code 124.
   - Issue #1, user story 12, asks for it. 124 is the code `timeout(1)` uses, so agents already know it, and a runaway build must never outlive its Job.
