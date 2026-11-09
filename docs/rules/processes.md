@@ -49,6 +49,12 @@ How Procly starts, watches and stops the processes it supervises. The API refere
     }
     ```
 
+- **ALWAYS** treat a Service as the tree of its leader and not as its process group: stop it by waiting until the whole tree is gone, and read its listeners and its CPU time from every group of the tree.
+  - A tool such as turbo runs each task in a process group of its own, and ends its own leader (`bun run dev`) a few milliseconds after `SIGTERM`, long before the tasks are stopped. A `SIGKILL` to the group at the leader's end kills the tool half way and orphans the tasks, and `lsof -g <leader group>` never sees their listeners.
+  - `process_group::Tree` finds the tree through the parent of each process and remembers what it saw, so a task whose parent ended stays in it. `stop_tree` sends `SIGTERM` to the leader's group, waits for the leader and then for the tree, and sends `SIGKILL` to every group of the tree only at the stop timeout.
+  - Never signal a pid that a listing taken just before did not show with the start it was seen with, and never a process of the Daemon's own group: a pid some unrelated process got since is not the one that was seen. A group is signalled only while a process seen in it is alive.
+  - Example: `tree.kill()` sends `SIGKILL` to the groups of the processes seen alive in a fresh listing, and repeats until none is left.
+
 - **ALWAYS** kill the whole tree of a Job that reaches its timeout, and report exit code 124.
   - Issue #1, user story 12, asks for it. 124 is the code `timeout(1)` uses, so agents already know it, and a runaway build must never outlive its Job.
   - Example: `procly wait <job>` exits 124 after the Job's tree was killed on timeout.

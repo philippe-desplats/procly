@@ -478,7 +478,7 @@ The Service receives its Leases in its environment, after the environment of the
 
 Procly also sets `PROCLY=1` and `PROCLY_SERVICE`, the name of the Service, so that a script can tell it is supervised and by which entry. Both are set last, after the Derived variables.
 
-Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process group of the Service listens on. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
+Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process tree of the Service listens on, the process group of its leader and those of the tasks it started in groups of their own. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
 
 ### What `procly up` prints
 
