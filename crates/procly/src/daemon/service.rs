@@ -26,6 +26,11 @@ use crate::topology::Topology;
 
 /// How long the health check waits between 2 probes.
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
+/// How long the health check waits after a probe was answered while the tree of the Service does not listen on the Lease
+/// yet, which is what a Foreign process holding the Lease looks like for as long as the health timeout lasts. Reading
+/// the tree costs a listing of the processes of the system and an `lsof`, which at [`HEALTH_INTERVAL`] would run 20
+/// times a second for a minute.
+const OWNERSHIP_RETRY: Duration = Duration::from_millis(250);
 /// How often the Daemon looks at a Service to tell whether it is idle.
 const IDLE_INTERVAL: Duration = Duration::from_secs(10);
 /// How old a reading of the processes may be for a look at idleness, which tells 10 seconds apart: the Services that
@@ -1058,6 +1063,7 @@ async fn check_health(
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        let mut wait = HEALTH_INTERVAL;
         if *state.borrow_and_update() != ServiceState::Starting {
             return None;
         }
@@ -1081,7 +1087,7 @@ async fn check_health(
                     service.request_stop(mismatch);
                     return None;
                 }
-                Ownership::Pending => {}
+                Ownership::Pending => wait = OWNERSHIP_RETRY,
             }
         }
         if tokio::time::Instant::now() >= deadline {
@@ -1096,7 +1102,7 @@ async fn check_health(
             return None;
         }
         tokio::select! {
-            () = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + HEALTH_INTERVAL)) => {}
+            () = tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + wait)) => {}
             _ = state.changed() => {}
         }
     }

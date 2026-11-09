@@ -8,7 +8,7 @@
 //!
 //! A Service that an older Daemon started leads a process group only, and is known by that group.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -69,6 +69,26 @@ impl Scope {
     }
 }
 
+/// Where the tree stands with its leader.
+///
+/// The id of a session or of a group is the pid of its leader, which the system does not hand to another process while
+/// any process still has that id as its session or group. That holds only while some process had it without a break:
+/// once the session or the group has been empty, an unrelated process can get the pid, lead a session of its own and
+/// start children, and everything in that session is then its own. The tree therefore takes a session or a group in
+/// through the id of the leader only while the leader itself shows in the listing with the start it was recorded with.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// A leader that a previous Daemon recorded and that no listing has shown yet.
+    #[default]
+    Unseen,
+    /// The listing shows the leader with its recorded start, a zombie not yet reaped included: its pid is still its own.
+    /// `grace` is for a leader the Daemon itself started and that it reaps: it is the only one that can tell that it
+    /// ended a moment ago, so the first listing taken after that takes its session in, whatever was listed before.
+    Leading { grace: bool },
+    /// The leader ended or another process got its pid, and the tree is made of the processes it knew, by pid and start.
+    Orphaned,
+}
+
 #[derive(Debug, Default)]
 struct Known {
     scope: Option<Scope>,
@@ -78,9 +98,23 @@ struct Known {
     groups: BTreeSet<Pid>,
     /// Whether a listing has been read since the tree began.
     listed: bool,
+    standing: Standing,
+    /// The processes of the tree in the last listing that held them, by pid and start: what lets the tree tell the
+    /// processes it knew from an unrelated one that got the id of its session once the leader was gone.
+    members: BTreeMap<Pid, String>,
 }
 
 impl Known {
+    /// The tree of the leader `leader` that the Daemon just started in a session of its own and will reap.
+    fn spawned(leader: Pid) -> Self {
+        Self {
+            scope: Some(Scope::Session(leader)),
+            groups: BTreeSet::from([leader]),
+            standing: Standing::Leading { grace: true },
+            ..Self::default()
+        }
+    }
+
     /// The tree of the leader `leader` that a previous Daemon recorded, with the start `started` if the record holds
     /// one, seen in `listing` if the processes could be listed. A leader found running whose processes cannot be listed
     /// is still the Service, which keeps its process group until a listing says more: never dropped on a failed reading.
@@ -89,7 +123,7 @@ impl Known {
             scope: Some(Scope::Undecided(leader)),
             leader_started: started.map(normalized),
             groups: BTreeSet::from([leader]),
-            listed: false,
+            ..Self::default()
         };
         if let Some(listing) = listing {
             known.absorb(listing, daemon_group);
@@ -101,55 +135,84 @@ impl Known {
     fn absorb(&mut self, listing: &[Member], daemon_group: Pid) {
         let Some(mut scope) = self.scope else { return };
         self.listed = true;
-        let row = listing
-            .iter()
-            .find(|member| member.pid == scope.leader() && !member.zombie);
-        if let Scope::Undecided(leader) = scope {
-            let decided = match row {
-                // A leader that does not lead its own session was started before Services did.
-                Some(row)
-                    if self
-                        .leader_started
-                        .as_ref()
-                        .is_none_or(|started| *started == row.started) =>
-                {
-                    Some(row.sid == leader)
-                }
-                // Some other process has its pid now, and the groups of the tree are cleared below.
-                Some(_) => None,
-                // A leader that ended keeps its id reserved while any process of its session lives, so a session of that
-                // id is its own, and when there is none the tree is its group.
-                None => Some(
-                    listing
-                        .iter()
-                        .any(|member| !member.zombie && member.sid == leader && member.pgid != daemon_group),
-                ),
-            };
-            if let Some(session) = decided {
-                scope = if session {
+        let leader = scope.leader();
+        // A zombie counts: the pid of a leader that is not reaped yet is still reserved, and so is the id of its session.
+        let row = listing.iter().find(|member| member.pid == leader);
+        let seen = row.filter(|row| {
+            self.leader_started
+                .as_ref()
+                .is_none_or(|started| *started == row.started)
+        });
+        if let Some(row) = seen {
+            // A leader that does not lead its own session was started before Services did.
+            if matches!(scope, Scope::Undecided(_)) {
+                scope = if row.sid == leader {
                     Scope::Session(leader)
                 } else {
                     Scope::Group(leader)
                 };
                 self.scope = Some(scope);
             }
-        }
-        let leader = row.filter(|row| scope.holds(row));
-        match (leader, &self.leader_started) {
-            (Some(leader), None) => self.leader_started = Some(leader.started.clone()),
-            // The pid of the leader leads a session or a group again, some other process got it: whatever else holds
-            // that id is that process's, not the Service's.
-            (Some(leader), Some(started)) if leader.started != *started => {
-                self.groups.clear();
+            if scope.holds(row) {
+                self.leader_started.get_or_insert_with(|| row.started.clone());
+                let grace = matches!(self.standing, Standing::Leading { grace: true });
+                self.standing = Standing::Leading { grace };
+                self.keep(
+                    listing
+                        .iter()
+                        .filter(|member| Self::in_tree(scope, member, daemon_group)),
+                );
                 return;
             }
-            _ => {}
         }
-        self.groups = listing
+        // The leader is not in the listing with its start: it ended, or some other process got its pid. Whatever holds
+        // its id now is that process's, unless a process the tree already knew has held it all along.
+        let candidates: Vec<&Member> = listing
             .iter()
-            .filter(|member| !member.zombie && scope.holds(member) && member.pgid != daemon_group)
-            .map(|member| member.pgid)
+            .filter(|member| Self::in_tree(scope, member, daemon_group))
             .collect();
+        let known_before = candidates
+            .iter()
+            .any(|member| self.members.get(&member.pid) == Some(&member.started));
+        let adopted = match self.standing {
+            Standing::Leading { grace: true } if row.is_none() => true,
+            Standing::Unseen => {
+                eprintln!(
+                    "the leader {leader} of a recorded tree was not seen running with the start of the record, so \
+                     nothing in its session or process group is taken for the tree or signalled"
+                );
+                false
+            }
+            Standing::Leading { .. } | Standing::Orphaned => {
+                // Said once, when the tree loses the last process it knew, and not at every listing of a stop.
+                let said = self.standing == Standing::Orphaned && self.members.is_empty();
+                if !known_before && !candidates.is_empty() && !said {
+                    eprintln!(
+                        "the leader {leader} of a tree ended and none of the processes the tree knew is left, so \
+                         what holds its session or process group now is taken for another tree's and left alone"
+                    );
+                }
+                known_before
+            }
+        };
+        self.standing = Standing::Orphaned;
+        if adopted {
+            self.keep(candidates.into_iter());
+        } else {
+            self.groups.clear();
+            self.members.clear();
+        }
+    }
+
+    /// Whether `member` is in the tree of `scope`, a process of the Daemon's own group never being.
+    fn in_tree(scope: Scope, member: &Member, daemon_group: Pid) -> bool {
+        !member.zombie && scope.holds(member) && member.pgid != daemon_group
+    }
+
+    /// Makes the tree the processes `members`, which the last listing showed in it.
+    fn keep<'a>(&mut self, members: impl Iterator<Item = &'a Member> + Clone) {
+        self.groups = members.clone().map(|member| member.pgid).collect();
+        self.members = members.map(|member| (member.pid, member.started.clone())).collect();
     }
 }
 
@@ -164,12 +227,7 @@ impl Tree {
     /// Starts the tree over with the leader `leader` of a run the Daemon just spawned in a session of its own. Until
     /// the next listing, the tree is the group of the leader.
     pub(in crate::daemon) fn begin(&self, leader: Pid) {
-        *self.known() = Known {
-            scope: Some(Scope::Session(leader)),
-            leader_started: None,
-            groups: BTreeSet::from([leader]),
-            listed: false,
-        };
+        *self.known() = Known::spawned(leader);
     }
 
     /// Records the start of the leader of the run the Daemon just spawned, read right after the spawn, so that the tree
@@ -247,9 +305,9 @@ impl Tree {
     /// Whether the group of the leader holds the processes the tree began with, when the processes cannot be listed.
     ///
     /// A leader that runs is the one the tree began with if it leads its group and still has the start it was seen with,
-    /// and a leader whose start was never seen proves nothing. A leader that ended leaves its group with its id reserved
-    /// while any member lives, so whatever is in that group is the tree's. A leader that runs and cannot be identified
-    /// proves nothing either. Blocking.
+    /// and a leader whose start was never seen proves nothing. A leader that ended proves nothing either, since its group
+    /// may have been empty since and its id given to another process, except for one the Daemon started and reaped itself,
+    /// a moment ago. Blocking.
     fn leader_is_ours(&self) -> bool {
         let Some(leader) = self.leader() else {
             return false;
@@ -263,7 +321,7 @@ impl Tree {
                         .as_ref()
                         .is_some_and(|started| *started == identity.started)
             }
-            None => !is_alive(leader),
+            None => matches!(self.known().standing, Standing::Leading { grace: true }) && !is_alive(leader),
         }
     }
 
@@ -301,7 +359,7 @@ impl Tree {
     /// first signal was in flight goes too. Blocking.
     ///
     /// When the processes cannot be listed, nothing proves that a group of the tree is still the one that was seen,
-    /// except the group of the leader: it keeps its id reserved while any of its members lives.
+    /// except the group of a leader that still runs with the start it was seen with.
     pub(in crate::daemon) fn kill(&self) {
         for _ in 0..KILL_ATTEMPTS {
             if !self.refresh_now() {
@@ -552,14 +610,21 @@ mod tests {
         }
     }
 
-    /// The tree of the session led by 100, whose Daemon runs in the group 7, seen in `listing`.
+    /// The tree of the session led by 100, which the Daemon started and whose Daemon runs in the group 7, seen in
+    /// `listing`.
     fn session_100(listing: &[Member]) -> Known {
-        let mut known = Known {
-            scope: Some(Scope::Session(Pid::from_raw(100))),
-            ..Known::default()
-        };
+        let mut known = Known::spawned(Pid::from_raw(100));
         known.absorb(listing, Pid::from_raw(7));
         known
+    }
+
+    /// The tree of the leader 100 that a previous Daemon recorded with the start `t0`, seen in `listing`.
+    fn recorded_100(listing: Option<&[Member]>) -> Known {
+        Known::recorded(Pid::from_raw(100), Some("t0"), listing, Pid::from_raw(7))
+    }
+
+    fn absorb(known: &mut Known, listing: &[Member]) {
+        known.absorb(listing, Pid::from_raw(7));
     }
 
     fn groups(pgids: &[i32]) -> BTreeSet<Pid> {
@@ -729,35 +794,109 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_leader_that_ended_before_any_listing_leaves_its_session_to_the_tree() {
-        let mut known = Known::recorded(Pid::from_raw(100), Some("t0"), None, Pid::from_raw(7));
+    fn a_recorded_leader_never_seen_running_takes_nothing_of_its_session_or_group_into_the_tree() {
+        let mut known = recorded_100(None);
 
-        // 100 is gone. Its session lives on in 102, a task in a group of its own, and 900 is none of its business.
-        known.absorb(
+        // 100 is gone before any listing. A process leads a session of its own that has the id 100 and a task, and
+        // another sits in the group 100: nothing shows that either has been there since the Service, so both are left alone.
+        absorb(
+            &mut known,
             &[
-                member(102, 102, 100, "t2"),
-                member(103, 102, 100, "t3"),
+                member(150, 150, 100, "t2"),
+                member(151, 100, 7, "t3"),
                 member(900, 900, 900, "t9"),
             ],
-            Pid::from_raw(7),
         );
+        assert_eq!(known.groups, BTreeSet::new());
+
+        // And whatever comes of that session later, it is not the tree's either.
+        absorb(&mut known, &[member(150, 150, 100, "t2"), member(152, 152, 100, "t4")]);
+        assert_eq!(known.groups, BTreeSet::new());
+    }
+
+    #[test]
+    fn a_session_emptied_and_taken_by_a_stranger_after_the_leader_ended_is_not_adopted() {
+        // The Service was seen running: the leader 100, the server 101 in a group of its own.
+        let mut known = recorded_100(Some(&[member(100, 100, 100, "t0"), member(101, 101, 100, "t1")]));
+        assert_eq!(known.groups, groups(&[100, 101]));
+
+        // Both ended, and a stranger got the pid 100, led a session of its own and started 150, then ended itself.
+        absorb(
+            &mut known,
+            &[member(100, 100, 100, "stranger"), member(150, 150, 100, "its child")],
+        );
+        assert_eq!(known.groups, BTreeSet::new());
+        absorb(&mut known, &[member(150, 150, 100, "its child")]);
+        assert_eq!(known.groups, BTreeSet::new());
+    }
+
+    #[test]
+    fn a_session_emptied_and_taken_by_a_stranger_between_2_listings_is_not_adopted_even_when_the_leader_is_not_listed()
+    {
+        let mut known = recorded_100(Some(&[member(100, 100, 100, "t0"), member(101, 101, 100, "t1")]));
+
+        // The listing that follows finds no leader, and in the session the child of a stranger, which was not known.
+        absorb(&mut known, &[member(150, 150, 100, "its child")]);
+
+        assert_eq!(known.groups, BTreeSet::new());
+    }
+
+    #[test]
+    fn a_stranger_that_holds_the_group_of_a_leader_that_ended_is_not_adopted() {
+        // A Service an older Daemon started: the leader 100 and its sibling 101 in the group 100, no session of its own.
+        let mut known = recorded_100(Some(&[member(100, 100, 7, "t0"), member(101, 100, 7, "t1")]));
+        assert_eq!(known.scope, Some(Scope::Group(Pid::from_raw(100))));
+
+        absorb(&mut known, &[member(160, 100, 55, "stranger")]);
+
+        assert_eq!(known.groups, BTreeSet::new());
+    }
+
+    #[test]
+    fn what_the_tree_knew_stays_in_it_when_the_leader_ends_and_what_that_started_later_follows() {
+        let mut known = recorded_100(Some(&[member(100, 100, 100, "t0"), member(101, 101, 100, "t1")]));
+
+        // The leader ended, 101 lives on and has started 102 since the last listing: the session never emptied.
+        absorb(&mut known, &[member(101, 101, 100, "t1"), member(102, 102, 100, "t2")]);
+        assert_eq!(known.groups, groups(&[101, 102]));
+
+        // 101 ends, 102 was in the last listing and is still the tree's.
+        absorb(&mut known, &[member(102, 102, 100, "t2"), member(103, 103, 100, "t3")]);
+        assert_eq!(known.groups, groups(&[102, 103]));
+
+        // Everything known ended: the session is no one's to adopt any more, whatever it holds.
+        absorb(
+            &mut known,
+            &[member(103, 103, 100, "t3-reused"), member(104, 104, 100, "t4")],
+        );
+        assert_eq!(known.groups, BTreeSet::new());
+        absorb(&mut known, &[member(104, 104, 100, "t4")]);
+        assert_eq!(known.groups, BTreeSet::new());
+    }
+
+    #[test]
+    fn a_zombie_leader_not_reaped_yet_still_holds_its_session_for_the_tree() {
+        let mut leader = member(100, 100, 100, "t0");
+        leader.zombie = true;
+        let mut known = recorded_100(None);
+
+        absorb(&mut known, &[leader, member(102, 102, 100, "t2")]);
 
         assert_eq!(known.scope, Some(Scope::Session(Pid::from_raw(100))));
         assert_eq!(known.groups, groups(&[102]));
     }
 
     #[test]
-    fn a_recorded_leader_that_ended_without_a_session_left_is_known_by_its_group() {
-        let mut known = Known::recorded(Pid::from_raw(100), Some("t0"), None, Pid::from_raw(7));
+    fn a_leader_the_daemon_reaped_hands_its_session_to_the_first_listing_only() {
+        let mut known = Known::spawned(Pid::from_raw(100));
 
-        // A member of the group of 100, which an older Daemon started, and a task that is none of its group nor session.
-        known.absorb(
-            &[member(101, 100, 7, "t1"), member(102, 102, 7, "t2")],
-            Pid::from_raw(7),
-        );
+        // The Daemon reaped the leader: 102 is a task it started in a group of its own, not seen before.
+        absorb(&mut known, &[member(102, 102, 100, "t2")]);
+        assert_eq!(known.groups, groups(&[102]));
 
-        assert_eq!(known.scope, Some(Scope::Group(Pid::from_raw(100))));
-        assert_eq!(known.groups, groups(&[100]));
+        // Later, 102 is gone and another process leads a session with the same id: not the tree's.
+        absorb(&mut known, &[member(150, 150, 100, "stranger's child")]);
+        assert_eq!(known.groups, BTreeSet::new());
     }
 
     #[test]

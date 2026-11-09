@@ -341,6 +341,18 @@ mod without_the_process_list {
                 .lines()
                 .count()
         }
+
+        /// Shortens the health timeout of the Service, for a test whose next `up` cannot turn healthy and would
+        /// otherwise read the processes of the system for the whole 5 s, while the other tests are starting theirs.
+        fn bound_the_health_wait(&self) {
+            let path = self.main.join("procly.toml");
+            let config = std::fs::read_to_string(&path).expect("read the configuration");
+            write(
+                &self.main,
+                "procly.toml",
+                &config.replace("timeout = '5s'", "timeout = '2s'"),
+            );
+        }
     }
 
     #[test]
@@ -554,8 +566,17 @@ mod without_the_process_list {
                 procly.daemon_log().contains("no longer listened on its Lease")
             });
         }
+        // What `up` starts instead cannot bind the port and never turns healthy: bound the wait, and the readings of
+        // the processes it makes meanwhile.
+        kept.bound_the_health_wait();
+        listing.empty_the_log();
         let output = listing.procly_in(&procly, &kept.main, &["up", "web"]);
 
+        let listings = listing.count();
+        assert!(
+            listings < 20,
+            "up read the processes {listings} times while a stranger held the port for 2 s"
+        );
         assert!(
             !common::stdout(&output).contains("reused"),
             "up answered that the service of another process was reused: {}",
@@ -600,6 +621,23 @@ mod without_the_process_list {
         let kept = Kept::up(&procly, &listing);
         restart_unable_to_list(&procly, &listing, &kept, false);
 
+        // While the Daemon cannot list the processes, the document of `up` tells what it cannot tell, and stderr stays
+        // empty.
+        let doubted = common::json_succeeded(&listing.procly_in(&procly, &kept.main, &["up", "--json", "web"]));
+        assert_eq!(
+            doubted["services"][0]["outcome"],
+            serde_json::json!("reused"),
+            "{doubted}"
+        );
+        let warnings = doubted["services"][0]["warnings"].as_array().expect("a warnings array");
+        assert_eq!(warnings.len(), 1, "{doubted}");
+        assert!(
+            warnings[0]
+                .as_str()
+                .is_some_and(|text| text.contains("cannot tell that web is what listens on port")),
+            "{doubted}"
+        );
+
         listing.restore();
         common::eventually("the Daemon to judge the kept service", || {
             procly.daemon_log().contains("can list the processes again")
@@ -612,10 +650,10 @@ mod without_the_process_list {
             &common::stdout(&output),
             &format!("web reused http://localhost:{port} port {port}\n", port = kept.port),
         );
-        assert!(
-            !common::stderr(&output).contains("could not list"),
-            "up still doubted a service that was judged: {}",
-            common::stderr(&output)
+        assert_eq!(
+            common::stderr(&output),
+            "",
+            "up still doubted a service that was judged"
         );
         assert_eq!(kept.starts(), 1, "the service was started a second time");
         assert!(!procly.daemon_log().contains("was stopped"), "{}", procly.daemon_log());
@@ -627,24 +665,31 @@ mod without_the_process_list {
     }
 
     #[test]
-    fn a_kept_service_whose_leader_ends_before_any_listing_leaves_no_listener_behind_once_the_process_list_can_be_read()
+    fn a_kept_service_whose_leader_ends_before_any_listing_leaves_its_listener_alone_when_the_process_list_can_be_read()
     {
         let procly = Procly::new();
         let listing = Listing::new(procly.scratch());
         let kept = Kept::up(&procly, &listing);
         restart_unable_to_list(&procly, &listing, &kept, false);
 
-        listing.restore();
         killpg(kept.leader, Signal::SIGKILL).expect("end the leader");
+        common::eventually("the Daemon to see the leader end", || {
+            procly.daemon_log().contains("its exit code is unknown")
+        });
+        listing.restore();
 
-        wait_until_gone(kept.listener);
-        let output = listing.procly_in(&procly, &kept.main, &["up", "web"]);
-        assert_success(&output);
-        assert_eq!(
-            kept.starts(),
-            2,
-            "the service was not started again: {}",
+        // Nothing proves the listener was in the session of the leader all along, so the Daemon takes the session id of
+        // a leader it never saw run for nobody's, and signals nothing: the listener keeps its port.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            common::is_alive(kept.listener),
+            "a process of a session nobody could prove was the service's was signalled: {}",
             procly.daemon_log()
+        );
+        let status = common::stdout(&listing.procly_in(&procly, &kept.main, &["status"]));
+        assert!(
+            !status.contains("service web healthy"),
+            "status shows a service that ended: {status}"
         );
     }
 }
