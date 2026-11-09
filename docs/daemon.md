@@ -8,8 +8,9 @@ Every Service runs in a session of its own, with a process group of the same id,
 
 | Found | What the new Daemon does | `procly status` |
 | --- | --- | --- |
-| The leader still runs, with the recorded start time, and its group listens on its Lease | Re-attaches it: `up` answers `reused` and `down` stops it | `service web healthy port 24000, re-attached after a restart of the Daemon` |
-| The leader still runs but its group no longer listens on its Lease | Stops its process group | `service web ended: no longer listened on its Lease, port 24000, when the Daemon restarted, its process group was stopped` |
+| The leader still runs, with the recorded start time, and its tree listens on its Lease | Re-attaches it: `up` answers `reused` and `down` stops it | `service web healthy port 24000, re-attached after a restart of the Daemon` |
+| The leader still runs, with the recorded start time, something answers on its Lease, and the Daemon cannot list the processes to tell what | Keeps the Service as it was and signals nothing, the Daemon log says it could not list the processes. A listener in a group of its own may show as a Foreign process until the processes can be listed | `service web healthy port 24000, re-attached after a restart of the Daemon` |
+| The leader still runs but its tree no longer listens on its Lease | Stops its tree | `service web ended: no longer listened on its Lease, port 24000, when the Daemon restarted, its process group was stopped` |
 | The leader ended, but members of its group remain, such as a dev process forked by a shell | Stops them, they are orphans that would keep holding the Lease | `service web ended: its leader ended while no Daemon ran, the rest of process group 4242 held port 24000 of its Lease and was stopped` |
 | Nothing of the group remains, or its pid now belongs to another process | Leaves the other process alone and forgets the Service | `service web ended: exit code unknown, a previous Daemon started it` |
 
