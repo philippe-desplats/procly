@@ -614,7 +614,7 @@ fn launch(
     })?;
     let path = file.path;
     // Never a pipe of the Daemon, which would die with it and take the Service down at its next write.
-    let (stdout, stderr, writer) = match output_file::start_writer(&path) {
+    let (stdout, stderr, writer) = match outputs.start_writer(&path) {
         Ok(writer) => (
             Stdio::from(writer.stdout),
             Stdio::from(writer.stderr),
