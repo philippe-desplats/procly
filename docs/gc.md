@@ -65,6 +65,8 @@ $ echo $?
 
 `gc --apply` then exits with 6, see [exit codes](exit-codes.md). The Orphans that failed stay Orphans, and the next `gc --apply` tries them again. A volume still in use by another container, or an engine that does not answer, fails this way, and the volume stays an Orphan once its container is removed. A container or a volume already removed by hand counts as deleted.
 
+Removing the last container of a compose project also removes the networks compose created for it, such as `app-app_login_default`, which are not listed as Orphans. A network another container is still attached to is kept, and `gc --apply` reports it in the `warnings` of the report instead of failing, so that it exits with 0.
+
 A Logical resource is dropped in the container its Worktrees shared, which must run: `gc` never starts a container. When the container does not run, the resource is reported as not deleted, and `procly up <service>` in the Main worktree starts it for the next `gc --apply`. The Driver is read from the Main worktree, and each of its commands may run for `settings.driver_timeout` of the Main worktree. When the Driver has a `ready` command, `gc` runs it first, then `check`: a resource `check` no longer finds counts as dropped, and is only forgotten. When `drop` fails, the error carries what it printed and the command to drop the resource by hand:
 
 ```console

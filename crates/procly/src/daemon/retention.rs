@@ -352,9 +352,12 @@ fn delete(registry: &Registry, found: &[Found]) -> bool {
             cause.record.retention, cause.record.service
         );
         match gc::delete_blocking(registry, found, orphan) {
-            Ok(()) => {
+            Ok(kept) => {
                 orphan.deleted = true;
                 eprintln!("{policy} deleted {}", orphan.describe());
+                for warning in kept {
+                    eprintln!("{policy}: {warning}");
+                }
             }
             Err(error) => {
                 let error = format!("{:#}", anyhow::Error::from(error));
