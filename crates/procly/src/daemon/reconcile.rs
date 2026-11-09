@@ -7,8 +7,10 @@
 //! id reserved, so its members are orphans of the Service and are stopped. A pid now held by another process is
 //! never signalled.
 
+use std::collections::BTreeSet;
+
 use super::listeners::listening_ports;
-use super::process_group::{self, Identity, Pid};
+use super::process_group::{self, Identity, Pid, Tree};
 use super::record::ServiceRecord;
 use super::service::{Services, listens_on_lease};
 use super::store::StoreError;
@@ -71,10 +73,13 @@ async fn judge(record: &ServiceRecord) -> Verdict {
     match leader {
         Some(leader) if is_recorded(record, &leader) => {
             // Nothing to probe, a Service without a port is healthy as long as it runs. A Group is probed on the port
-            // of each Service it covers.
+            // of each Service it covers, which its tasks may serve from process groups of their own.
+            let tree = tokio::task::spawn_blocking(move || Tree::of(pgid))
+                .await
+                .expect("reading the process list never panics");
             let mut silent = None;
             for port in record.port.iter().chain(&record.covered_ports) {
-                if !listens_on_lease(pgid, *port, &record.lease_ports).await {
+                if !listens_on_lease(&tree, *port, &record.lease_ports).await {
                     silent = Some(*port);
                     break;
                 }
@@ -83,7 +88,7 @@ async fn judge(record: &ServiceRecord) -> Verdict {
                 eprintln!("{label} still runs after a restart of the Daemon, it is re-attached");
                 return Verdict::Reattach;
             };
-            process_group::stop_group(pgid).await;
+            process_group::stop_detached(&tree).await;
             eprintln!(
                 "{label} still ran after a restart of the Daemon but no longer listened on its Lease, port {port}, its \
                  process group was stopped"
@@ -96,7 +101,7 @@ async fn judge(record: &ServiceRecord) -> Verdict {
         }
         None if process_group::group_exists(pgid) => {
             let lease_ports = record.lease_ports.clone();
-            let held = tokio::task::spawn_blocking(move || listening_ports(pgid))
+            let held = tokio::task::spawn_blocking(move || listening_ports(&BTreeSet::from([pgid])))
                 .await
                 .ok()
                 .flatten()

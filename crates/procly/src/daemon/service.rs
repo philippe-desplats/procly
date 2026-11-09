@@ -12,12 +12,12 @@ use process_wrap::tokio::{ChildWrapper, CommandWrap};
 use tokio::sync::watch;
 
 use super::clock::Clock;
-use super::cpu::group_cpu;
+use super::cpu::groups_cpu;
 use super::health::HealthCheck;
 use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
 use super::output_file::{self, OutputFiles, Tail};
-use super::process_group::{self, Pid, kill_group, stop_tree};
+use super::process_group::{self, Pid, Tree, kill_tree, refresh, stop_detached, stop_tree};
 use super::record::{ServiceRecord, ServiceRecords};
 use crate::config::RestartPolicy;
 use crate::output::{self, Follow, OutputBuffer};
@@ -28,6 +28,9 @@ use crate::topology::Topology;
 const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
 /// How often the Daemon looks at a Service to tell whether it is idle.
 const IDLE_INTERVAL: Duration = Duration::from_secs(10);
+/// How often the Daemon looks for the processes a running Service started, so that a task its leader started and
+/// that outlives it is still known once the leader is gone.
+const TREE_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the Daemon looks whether the process of a re-attached Service, which is not its child, still runs.
 const LIVENESS_INTERVAL: Duration = Duration::from_millis(100);
 /// How long a restarted Service must stay healthy for the next crash to count as a first one again, instead of
@@ -124,6 +127,8 @@ pub(crate) struct Service {
     state: watch::Sender<ServiceState>,
     /// Set once to ask the task watching the process to stop its tree, with the end to report once it is gone.
     stop: watch::Sender<Option<ServiceEnd>>,
+    /// The processes of the current run: the leader and everything it started, in whatever process group.
+    tree: Tree,
 }
 
 /// The outcome of a start request.
@@ -362,9 +367,18 @@ impl Services {
         }
     }
 
-    /// The process group of every running Service.
+    /// The process group of every running Service, and those of the tasks they started in groups of their own.
     pub(crate) fn process_groups(&self) -> Vec<i32> {
-        self.records.process_groups()
+        let mut groups = self.records.process_groups();
+        let table = self.table();
+        groups.extend(
+            table
+                .values()
+                .filter(|service| service.is_running())
+                .flat_map(|service| service.tree.groups())
+                .map(Pid::as_raw),
+        );
+        groups
     }
 
     /// The records of the running Services, which a new Daemon reconciles before it starts any.
@@ -401,6 +415,7 @@ impl Services {
             output,
             state: watch::Sender::new(ServiceState::Healthy),
             stop: watch::Sender::new(None),
+            tree: Tree::default(),
         });
         self.table().insert(
             (record.worktree.path.clone(), record.service.clone()),
@@ -427,6 +442,7 @@ impl Services {
             output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
             state: watch::Sender::new(ServiceState::Ended(end)),
             stop: watch::Sender::new(None),
+            tree: Tree::default(),
         });
         self.table()
             .insert((record.worktree.path.clone(), record.service.clone()), service);
@@ -541,9 +557,10 @@ fn spawn(
     outputs: OutputFiles,
 ) -> Result<Arc<Service>, ServiceError> {
     let output = Arc::new(Mutex::new(OutputBuffer::dated(output::CAPACITY, clock.clone())));
-    let process = launch(&spec, &output, &outputs)?;
+    let tree = Tree::default();
+    let process = launch(&spec, &output, &outputs, &tree)?;
     // Recorded before anyone hears of the Service, so that a crash of the Daemon from now on leaves a trace of it.
-    record_run(&records, record_of(&spec, process.tail.path()), process.pgid);
+    record_run(&records, record_of(&spec, process.tail.path()), process.pgid, &tree);
     let service = Arc::new(Service {
         port: spec.health.port,
         topology: spec.topology.clone(),
@@ -553,6 +570,7 @@ fn spawn(
         output,
         state: watch::Sender::new(ServiceState::Starting),
         stop: watch::Sender::new(None),
+        tree,
     });
     tokio::spawn(supervise(Arc::clone(&service), spec, clock, records, outputs, process));
     Ok(service)
@@ -577,18 +595,20 @@ fn record_of(spec: &ServiceSpec, output: &Path) -> ServiceRecord {
     }
 }
 
-/// Records the run of the process group `pgid` in `record`. Blocking: it reads when the leader started with `ps`
-/// and writes the document.
-fn record_run(records: &ServiceRecords, mut record: ServiceRecord, pgid: Pid) {
+/// Records the run of the process group `pgid` in `record`, and reads the processes of `tree` for the first time.
+/// Blocking: it reads when the leader started with `ps` and writes the document.
+fn record_run(records: &ServiceRecords, mut record: ServiceRecord, pgid: Pid, tree: &Tree) {
     record.pgid = pgid.as_raw();
     record.started = process_group::identity(pgid).map(|identity| identity.started);
     records.put(record);
+    tree.refresh();
 }
 
 /// Records the run `process` of a restarted Service, on a blocking thread as writing the document syncs it to disk.
-async fn record_restart(records: &Arc<ServiceRecords>, spec: &ServiceSpec, process: &Process) {
+async fn record_restart(records: &Arc<ServiceRecords>, spec: &ServiceSpec, process: &Process, tree: &Tree) {
     let (records, record, pgid) = (Arc::clone(records), record_of(spec, process.tail.path()), process.pgid);
-    let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid)).await;
+    let tree = tree.clone();
+    let _ = tokio::task::spawn_blocking(move || record_run(&records, record, pgid, &tree)).await;
 }
 
 /// Ends the Service with `end`, once it is no longer recorded, so that a Daemon starting right after never finds a
@@ -606,6 +626,7 @@ fn launch(
     spec: &ServiceSpec,
     output: &Arc<Mutex<OutputBuffer>>,
     outputs: &OutputFiles,
+    tree: &Tree,
 ) -> Result<Process, ServiceError> {
     let file = outputs.create(&spec.topology).map_err(|source| ServiceError::Output {
         service: spec.name.clone(),
@@ -665,6 +686,7 @@ fn launch(
             service: spec.name.clone(),
         });
     };
+    tree.begin(pgid);
     let tail = Tail::follow(path, file.reader, Arc::clone(output), writer);
     Ok(Process { child, pgid, tail })
 }
@@ -711,13 +733,21 @@ async fn supervise(
                 health_timeout: spec.health_timeout,
                 lease_ports: spec.lease_ports.clone(),
                 idle: spec.idle,
-                pgid: process.pgid,
             },
             clock.clone(),
         ));
-        let exited = tokio::select! {
-            status = process.child.wait() => Some(status),
-            _ = stop.wait_for(Option::is_some) => None,
+        let exited = {
+            let wait = process.child.wait();
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    status = &mut wait => break Some(status),
+                    () = async { let _ = stop.wait_for(Option::is_some).await; } => break None,
+                    // A task the leader starts may outlive it, and once its parent is gone nothing links it to the
+                    // Service any more, so it must have been seen before.
+                    () = tokio::time::sleep(TREE_INTERVAL) => refresh(&service.tree).await,
+                }
+            }
         };
         monitor.abort();
         let healthy = *service.state.borrow() == ServiceState::Healthy;
@@ -726,13 +756,12 @@ async fn supervise(
         let ended = if let Some(status) = exited {
             process_group::service_end(status.expect("waiting fails only when the daemon lost track of its own child"))
         } else {
-            stop_tree(process.child.as_mut()).await;
+            stop_tree(process.child.as_mut(), &service.tree).await;
             stop.borrow()
                 .expect("the tree is stopped only once a stop was requested")
         };
-        // Members of the group still running once the leader has ended would keep holding the port.
-        let pgid = process.pgid;
-        let _ = tokio::task::spawn_blocking(move || kill_group(pgid)).await;
+        // Processes of the tree still running once the leader has ended would keep holding the port.
+        kill_tree(&service.tree).await;
         // The last lines tell why a Service died, they must be read before anyone is told it ended.
         process.tail.finish().await;
 
@@ -777,9 +806,9 @@ async fn supervise(
                 finish(&service, &records, &spec.topology, &spec.name, end).await;
                 return;
             }
-            match launch(&spec, &service.output, &outputs) {
+            match launch(&spec, &service.output, &outputs, &service.tree) {
                 Ok(process) => {
-                    record_restart(&records, &spec, &process).await;
+                    record_restart(&records, &spec, &process, &service.tree).await;
                     break process;
                 }
                 Err(error) => {
@@ -832,32 +861,44 @@ async fn supervise_reattached(
 ) {
     let pgid = Pid::from_raw(record.pgid);
     let label = format!("service {} of {}", record.service, record.worktree.path.display());
+    // The leader was read before, its tasks are found again through it. One that its parent left before this Daemon
+    // started is not found, only the group the record names is known of it.
+    service.tree.begin(pgid);
+    refresh(&service.tree).await;
     let idle = record.idle_ms.map(|idle_ms| {
         let (service, label, clock) = (Arc::clone(&service), label.clone(), clock.clone());
         let started = clock.now();
         tokio::spawn(async move {
-            stop_when_idle(&service, &label, pgid, Duration::from_millis(idle_ms), &clock, started).await;
+            stop_when_idle(&service, &label, Duration::from_millis(idle_ms), &clock, started).await;
         })
     });
     let mut stop = service.stop.subscribe();
+    let mut since_refresh = Duration::ZERO;
     let stopped = loop {
         tokio::select! {
-            _ = stop.wait_for(Option::is_some) => break true,
-            () = tokio::time::sleep(LIVENESS_INTERVAL) => if !process_group::is_alive(pgid) {
-                break false;
-            },
+            () = async { let _ = stop.wait_for(Option::is_some).await; } => break true,
+            () = tokio::time::sleep(LIVENESS_INTERVAL) => {
+                if !process_group::is_alive(pgid) {
+                    break false;
+                }
+                since_refresh += LIVENESS_INTERVAL;
+                if since_refresh >= TREE_INTERVAL {
+                    since_refresh = Duration::ZERO;
+                    refresh(&service.tree).await;
+                }
+            }
         }
     };
     if let Some(idle) = idle {
         idle.abort();
     }
     let end = if stopped {
-        process_group::stop_group(pgid).await;
+        stop_detached(&service.tree).await;
         stop.borrow()
-            .expect("the group is stopped only once a stop was requested")
+            .expect("the tree is stopped only once a stop was requested")
     } else {
-        // Members of the group still running once the leader has ended would keep holding the port.
-        let _ = tokio::task::spawn_blocking(move || kill_group(pgid)).await;
+        // Processes of the tree still running once the leader has ended would keep holding the port.
+        kill_tree(&service.tree).await;
         eprintln!("{label} ended, its exit code is unknown, a previous Daemon started it");
         ServiceEnd::Lost
     };
@@ -867,15 +908,15 @@ async fn supervise_reattached(
     finish(&service, &records, &record.topology(), &record.service, end).await;
 }
 
-/// Whether the process group `pgid` accepts connections on its Lease `port` and is what listens there, rather than
-/// a Foreign process, so that a Service found running after a restart of the Daemon can be re-attached.
-pub(super) async fn listens_on_lease(pgid: Pid, port: u16, lease_ports: &[u16]) -> bool {
+/// Whether the tree accepts connections on its Lease `port` and is what listens there, rather than a Foreign
+/// process, so that a Service found running after a restart of the Daemon can be re-attached.
+pub(super) async fn listens_on_lease(tree: &Tree, port: u16, lease_ports: &[u16]) -> bool {
     let check = HealthCheck {
         port: Some(port),
         http: None,
         covered: Vec::new(),
     };
-    check.passes().await && ownership(pgid, Some(port), lease_ports).await == Ownership::Listening
+    check.passes().await && ownership(tree, Some(port), lease_ports).await == Ownership::Listening
 }
 
 /// What the task watching a run of the process needs to know about it.
@@ -887,7 +928,6 @@ struct Watch {
     /// The port of every Lease of the Service.
     lease_ports: Vec<u16>,
     idle: Option<Duration>,
-    pgid: Pid,
 }
 
 /// Watches one run of the process: its health first, then its idleness.
@@ -896,7 +936,7 @@ async fn monitor(service: Arc<Service>, watch: Watch, clock: Clock) {
         &service,
         &watch.health,
         &watch.lease_ports,
-        watch.pgid,
+        &service.tree,
         watch.health_timeout,
         &clock,
     )
@@ -905,18 +945,18 @@ async fn monitor(service: Arc<Service>, watch: Watch, clock: Clock) {
         return;
     };
     if let Some(timeout) = watch.idle {
-        stop_when_idle(&service, &watch.label, watch.pgid, timeout, &clock, healthy_at).await;
+        stop_when_idle(&service, &watch.label, timeout, &clock, healthy_at).await;
     }
 }
 
-/// Marks the Service healthy once its health check passes and its process group listens on the Lease the check
+/// Marks the Service healthy once its health check passes and its process tree listens on the Lease the check
 /// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. Returns the reading of
 /// `clock` taken as the Service turned healthy, before anyone could hear of it, or `None` when it did not.
 async fn check_health(
     service: &Service,
     check: &HealthCheck,
     lease_ports: &[u16],
-    pgid: Pid,
+    tree: &Tree,
     timeout: Duration,
     clock: &Clock,
 ) -> Option<Duration> {
@@ -929,7 +969,7 @@ async fn check_health(
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
-            match ownership_all(pgid, check, lease_ports).await {
+            match ownership_all(tree, check, lease_ports).await {
                 Ownership::Listening => {
                     let healthy_at = clock.now();
                     // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
@@ -951,7 +991,7 @@ async fn check_health(
         }
         if tokio::time::Instant::now() >= deadline {
             // Only now when nothing answers, a Service may open another port, such as a debugger, long before its Lease.
-            let end = match ownership_all(pgid, check, lease_ports).await {
+            let end = match ownership_all(tree, check, lease_ports).await {
                 Ownership::Elsewhere(mismatch) => mismatch,
                 Ownership::Listening | Ownership::Pending => ServiceEnd::HealthTimeout {
                     timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
@@ -970,20 +1010,13 @@ async fn check_health(
 /// Stops the Service once it has printed nothing and used almost no CPU for `timeout`, counted from the reading
 /// `started` of `clock`. Each look is dated when it begins, and the next one is due [`IDLE_INTERVAL`] later on the
 /// clock, so that a clock that moves while `ps` answers brings the next look at once rather than putting it off.
-async fn stop_when_idle(
-    service: &Service,
-    label: &str,
-    pgid: Pid,
-    timeout: Duration,
-    clock: &Clock,
-    started: Duration,
-) {
+async fn stop_when_idle(service: &Service, label: &str, timeout: Duration, clock: &Clock, started: Duration) {
     let origin = std::time::Instant::now();
     let mut tracker = None;
     let mut failed = false;
     loop {
         let now = clock.now();
-        match look(service, pgid, now, origin).await {
+        match look(service, now, origin).await {
             Ok(sample) => {
                 let tracker = tracker.get_or_insert_with(|| IdleTracker::new(timeout, started, sample));
                 // The first look too, which may come once the clock has passed the whole timeout.
@@ -1010,11 +1043,15 @@ async fn stop_when_idle(
 }
 
 /// One look at the Service, begun at the reading `now` of the clock: when it last printed and the CPU time of its
-/// tree.
-async fn look(service: &Service, pgid: Pid, now: Duration, origin: std::time::Instant) -> io::Result<Sample> {
-    let cpu = tokio::task::spawn_blocking(move || group_cpu(pgid))
-        .await
-        .map_err(io::Error::other)??;
+/// whole tree, the tasks it started in groups of their own included.
+async fn look(service: &Service, now: Duration, origin: std::time::Instant) -> io::Result<Sample> {
+    let tree = service.tree.clone();
+    let cpu = tokio::task::spawn_blocking(move || {
+        tree.refresh();
+        groups_cpu(&tree.groups())
+    })
+    .await
+    .map_err(io::Error::other)??;
     Ok(Sample {
         now,
         real: origin.elapsed(),
@@ -1023,7 +1060,7 @@ async fn look(service: &Service, pgid: Pid, now: Duration, origin: std::time::In
     })
 }
 
-/// Whether the process group of a Service listens on the Lease its health check probes.
+/// Whether the tree of a Service listens on the Lease its health check probes.
 #[derive(Debug, PartialEq, Eq)]
 enum Ownership {
     /// It listens on that Lease, or there is no Lease to probe, or its listeners cannot be read.
@@ -1036,9 +1073,9 @@ enum Ownership {
 
 /// The verdict on every port the check probes, the first that is not `Listening` deciding: a Group listens on the
 /// Lease of each Service it covers.
-async fn ownership_all(pgid: Pid, check: &HealthCheck, lease_ports: &[u16]) -> Ownership {
+async fn ownership_all(tree: &Tree, check: &HealthCheck, lease_ports: &[u16]) -> Ownership {
     for port in check.ports() {
-        match ownership(pgid, Some(port), lease_ports).await {
+        match ownership(tree, Some(port), lease_ports).await {
             Ownership::Listening => {}
             other => return other,
         }
@@ -1046,14 +1083,19 @@ async fn ownership_all(pgid: Pid, check: &HealthCheck, lease_ports: &[u16]) -> O
     Ownership::Listening
 }
 
-async fn ownership(pgid: Pid, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {
+async fn ownership(tree: &Tree, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {
     let Some(leased) = leased else {
         return Ownership::Listening;
     };
-    let listening = tokio::task::spawn_blocking(move || listening_ports(pgid))
-        .await
-        .ok()
-        .flatten();
+    // The tasks of a tool such as turbo listen from groups of their own, found through their parents.
+    let tree = tree.clone();
+    let listening = tokio::task::spawn_blocking(move || {
+        tree.refresh();
+        listening_ports(&tree.groups())
+    })
+    .await
+    .ok()
+    .flatten();
     // Without `lsof`, the answer on the Lease is all there is to go by.
     listening.map_or(Ownership::Listening, |listening| {
         ownership_of(leased, lease_ports, &listening)

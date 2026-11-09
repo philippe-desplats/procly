@@ -1,6 +1,7 @@
-//! The CPU time used by a process group, read with `ps` which macOS and Linux both ship.
+//! The CPU time used by the process groups of a Service, read with `ps` which macOS and Linux both ship.
 
 use super::process_group::Pid;
+use std::collections::BTreeSet;
 use std::io;
 use std::process::Command;
 use std::time::Duration;
@@ -15,21 +16,21 @@ pub(super) struct CpuTime {
     pub(super) step: Duration,
 }
 
-/// The CPU time all the live members of the process group `pgid` have used so far. A member that ended takes
+/// The CPU time all the live members of the process groups `groups` have used so far. A member that ended takes
 /// its share with it, so this can go down.
-pub(super) fn group_cpu(pgid: Pid) -> io::Result<CpuTime> {
+pub(super) fn groups_cpu(groups: &BTreeSet<Pid>) -> io::Result<CpuTime> {
     let output = Command::new("ps").args(["-A", "-o", "pgid=,time="]).output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!("ps exited with {}", output.status)));
     }
-    sum_of_group(&String::from_utf8_lossy(&output.stdout), pgid)
+    sum_of_groups(&String::from_utf8_lossy(&output.stdout), groups)
         .ok_or_else(|| io::Error::other("cannot read the CPU time of a member of the group in the ps listing"))
 }
 
-/// Adds up the CPU time of the lines of a `ps -o pgid=,time=` listing that belong to `pgid`, with the coarsest step
+/// Adds up the CPU time of the lines of a `ps -o pgid=,time=` listing that belong to `groups`, with the coarsest step
 /// among them. `None` when one of those lines has a time that cannot be read, as a sum that skips it would read low
 /// and look idle.
-fn sum_of_group(listing: &str, pgid: Pid) -> Option<CpuTime> {
+fn sum_of_groups(listing: &str, groups: &BTreeSet<Pid>) -> Option<CpuTime> {
     let mut total = CpuTime {
         used: Duration::ZERO,
         step: Duration::ZERO,
@@ -38,7 +39,10 @@ fn sum_of_group(listing: &str, pgid: Pid) -> Option<CpuTime> {
         let Some((group, time)) = line.trim().split_once(char::is_whitespace) else {
             continue;
         };
-        if group.parse::<i32>().ok() == Some(pgid.as_raw()) {
+        if group
+            .parse::<i32>()
+            .is_ok_and(|group| groups.contains(&Pid::from_raw(group)))
+        {
             let time = parse_time(time.trim())?;
             total.used += time.used;
             total.step = total.step.max(time.step);
@@ -113,14 +117,21 @@ mod tests {
     }
 
     #[test]
-    fn adds_up_the_lines_of_the_group_only() {
-        let listing = "    1 239:36.13\n  500   0:01.50\n  500   0:00.25\n 5000   9:00.00\n\ngarbage\n";
+    fn adds_up_the_lines_of_the_groups_only() {
+        let listing =
+            "    1 239:36.13\n  500   0:01.50\n  500   0:00.25\n 5000   9:00.00\n  700   0:02.00\n\ngarbage\n";
+        let groups = |pgids: &[i32]| pgids.iter().copied().map(Pid::from_raw).collect::<BTreeSet<_>>();
         assert_eq!(
-            sum_of_group(listing, Pid::from_raw(500)),
+            sum_of_groups(listing, &groups(&[500])),
             Some(time(Duration::from_millis(1750), HUNDREDTH))
         );
+        // The tasks of a tool such as turbo run in groups of their own, their time is the Service's too.
         assert_eq!(
-            sum_of_group(listing, Pid::from_raw(42)),
+            sum_of_groups(listing, &groups(&[500, 700])),
+            Some(time(Duration::from_millis(3750), HUNDREDTH))
+        );
+        assert_eq!(
+            sum_of_groups(listing, &groups(&[42])),
             Some(time(Duration::ZERO, Duration::ZERO))
         );
     }
@@ -128,6 +139,6 @@ mod tests {
     #[test]
     fn gives_no_sum_when_a_member_of_the_group_has_an_unreadable_time() {
         let listing = "  500 0:01.50\n  500 not-a-time\n";
-        assert_eq!(sum_of_group(listing, Pid::from_raw(500)), None);
+        assert_eq!(sum_of_groups(listing, &BTreeSet::from([Pid::from_raw(500)])), None);
     }
 }
