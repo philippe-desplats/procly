@@ -97,6 +97,11 @@ pub(crate) enum Relation<'a> {
 /// A Service runs at most once per Worktree: it is keyed by the root of its Worktree and its name.
 type ServiceKey = (PathBuf, String);
 
+/// The Service stored under `key` when it has not ended, the one a start request must find rather than replace.
+fn running_at(table: &HashMap<ServiceKey, Arc<Service>>, key: &ServiceKey) -> Option<Arc<Service>> {
+    table.get(key).filter(|service| service.is_running()).map(Arc::clone)
+}
+
 /// Every Service the Daemon started, running or ended.
 #[derive(Debug)]
 pub(crate) struct Services {
@@ -179,16 +184,18 @@ impl Services {
             .lock()
             .expect("the start mutex is never poisoned, no code panics while holding it");
         let key = (worktree.to_owned(), name.to_owned());
-        let (owner, via) = match relation {
-            Relation::Covered { by } => (by, Some(by.to_owned())),
-            Relation::Alone | Relation::Group { .. } => (name, None),
+        // A Service covered by a Group runs either on its own, under its own name, or through the Group.
+        let running = {
+            let table = self.table();
+            let own = running_at(&table, &key).map(|service| (service, None));
+            match relation {
+                Relation::Covered { by } => own.or_else(|| {
+                    running_at(&table, &(worktree.to_owned(), by.to_owned())).map(|group| (group, Some(by.to_owned())))
+                }),
+                Relation::Alone | Relation::Group { .. } => own,
+            }
         };
-        let running = self
-            .table()
-            .get(&(worktree.to_owned(), owner.to_owned()))
-            .filter(|service| service.is_running())
-            .map(Arc::clone);
-        if let Some(service) = running {
+        if let Some((service, via)) = running {
             return Ok(if service.is_stopping() {
                 Start::Stopping(service)
             } else {
@@ -217,6 +224,24 @@ impl Services {
                 }
                 .into());
             }
+        }
+        // Every relation looked the Service up under its own key above, so an entry still running there is a bug in
+        // that lookup. Starting over it would replace the entry, and the Daemon would lose the instance that runs:
+        // `down` and `daemon stop` walk the table, and the supervisor of the instance would restart it unseen.
+        if let Some(service) = running_at(&self.table(), &key) {
+            eprintln!(
+                "service {name} of {} already runs and a start request found no Reuse for it, this is a bug: the running one is kept and nothing is started",
+                worktree.display()
+            );
+            return Ok(if service.is_stopping() {
+                Start::Stopping(service)
+            } else {
+                Start::Ready {
+                    service,
+                    outcome: StartOutcome::Reused,
+                    via: None,
+                }
+            });
         }
         let service = spawn(
             spec()?,
@@ -1075,6 +1100,45 @@ fn ownership_of(leased: u16, lease_ports: &[u16], listening: &[u16]) -> Ownershi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Worktree;
+
+    /// A Service of the Worktree `/p/repo` in `state`, with no process behind it.
+    fn service_in(state: ServiceState) -> Arc<Service> {
+        Arc::new(Service {
+            port: None,
+            topology: Topology {
+                git_common_dir: PathBuf::from("/p/repo/.git"),
+                worktree: Worktree {
+                    path: PathBuf::from("/p/repo"),
+                    slug: "main".to_owned(),
+                    main: true,
+                },
+            },
+            covers: Vec::new(),
+            reattached: false,
+            started_at: AtomicU64::new(0),
+            output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
+            state: watch::Sender::new(state),
+            stop: watch::Sender::new(None),
+        })
+    }
+
+    #[test]
+    fn a_start_request_finds_the_service_under_its_key_while_it_runs_and_never_once_it_ended() {
+        let key = |name: &str| (PathBuf::from("/p/repo"), name.to_owned());
+        let running = service_in(ServiceState::Healthy);
+        let table = HashMap::from([
+            (key("web"), Arc::clone(&running)),
+            (key("api"), service_in(ServiceState::Ended(ServiceEnd::Stopped))),
+        ]);
+
+        assert!(running_at(&table, &key("web")).is_some_and(|found| Arc::ptr_eq(&found, &running)));
+        assert!(
+            running_at(&table, &key("api")).is_none(),
+            "an ended Service is replaced by a start"
+        );
+        assert!(running_at(&table, &key("db")).is_none());
+    }
 
     #[test]
     fn listening_on_the_lease_is_owning_it_whatever_else_is_open() {
