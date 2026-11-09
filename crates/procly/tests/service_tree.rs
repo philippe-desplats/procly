@@ -200,11 +200,10 @@ fn a_process_that_leaves_the_session_of_the_service_is_not_part_of_it_and_surviv
     wait_until_gone(task);
 }
 
-/// The cases where the Daemon cannot list the processes of the system. `ps` is what lists them on macOS, so a `ps` that
-/// refuses the listing stands for it. Linux reads `/proc`, which a test cannot make fail.
-#[cfg(target_os = "macos")]
+/// The cases where the Daemon cannot list the processes of the system. The Daemon is told to refuse the listing through
+/// `PROCLY_TEST_LISTING`, on every platform, while it still reads the identity of one process, as it does when the
+/// system refuses a full listing but answers for a pid.
 mod without_the_process_list {
-    use std::os::unix::fs::PermissionsExt as _;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -215,59 +214,40 @@ mod without_the_process_list {
         Path, Procly, assert_success, common, free_port, git_repository, read_pid, test_server, wait_until_gone, write,
     };
 
-    /// The arguments of the `ps` that lists every process of the system for the Daemon.
-    const LISTING: &str = "-axo pid=,pgid=,stat=,lstart=";
-
-    /// A `ps` that logs each call, and refuses the listing of the processes while a flag file exists.
-    struct Shim {
-        bin: PathBuf,
-        log: PathBuf,
-        refuse: PathBuf,
+    /// The directory the Daemon logs its listings in and is refused them through.
+    struct Listing {
+        dir: PathBuf,
     }
 
-    impl Shim {
-        fn new(dir: &Path) -> Self {
-            let bin = dir.join("shim");
-            std::fs::create_dir(&bin).expect("create the shim directory");
-            let (log, refuse) = (dir.join("ps-calls"), dir.join("ps-refuses-the-listing"));
-            let script = format!(
-                "#!/bin/sh\n\
-                 echo \"$*\" >> {log}\n\
-                 if [ \"$*\" = \"{LISTING}\" ] && [ -e {refuse} ]; then exit 1; fi\n\
-                 exec /bin/ps \"$@\"\n",
-                log = log.display(),
-                refuse = refuse.display(),
-            );
-            let ps = bin.join("ps");
-            std::fs::write(&ps, script).expect("write the shim");
-            std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o755)).expect("make the shim run");
-            Self { bin, log, refuse }
+    impl Listing {
+        fn new(scratch: &Path) -> Self {
+            let dir = scratch.join("listing");
+            std::fs::create_dir(&dir).expect("create the listing directory");
+            Self { dir }
         }
 
-        fn refuse_the_listing(&self) {
-            std::fs::write(&self.refuse, "").expect("write the flag");
+        fn refuse(&self) {
+            std::fs::write(self.dir.join("refuse"), "").expect("write the flag");
         }
 
-        /// How many times the Daemon asked `ps` for the listing since the log was last emptied.
-        fn listings(&self) -> usize {
-            std::fs::read_to_string(&self.log)
+        /// How many times the Daemon listed the processes since the log was last emptied.
+        fn count(&self) -> usize {
+            std::fs::read_to_string(self.dir.join("calls"))
                 .unwrap_or_default()
                 .lines()
-                .filter(|line| *line == LISTING)
                 .count()
         }
 
         fn empty_the_log(&self) {
-            std::fs::write(&self.log, "").expect("empty the log");
+            std::fs::write(self.dir.join("calls"), "").expect("empty the log");
         }
 
-        /// Runs `procly` from `dir` with the shim first in the `PATH`, which the Daemon it starts keeps.
+        /// Runs `procly` from `dir` with the hook set, which the Daemon it starts keeps.
         fn procly_in(&self, procly: &Procly, dir: &Path, args: &[&str]) -> std::process::Output {
-            let path = format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default());
             procly
                 .command()
                 .current_dir(dir)
-                .env("PATH", path)
+                .env("PROCLY_TEST_LISTING", &self.dir)
                 .args(args)
                 .output()
                 .expect("the procly binary runs")
@@ -296,15 +276,15 @@ mod without_the_process_list {
             server = test_server().display()
         );
         write(&main, "procly.toml", &config);
-        let shim = Shim::new(procly.scratch());
-        assert_success(&procly.procly_in(&main, &["up", "web"]));
+        let listing = Listing::new(procly.scratch());
+        assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
         let server = read_pid(&pid);
         let _reap = ReapGroup(server);
         procly.kill_daemon();
 
         // The next Daemon cannot list the processes, though it reads the start of the leader it finds.
-        shim.refuse_the_listing();
-        let output = shim.procly_in(&procly, &main, &["up", "web"]);
+        listing.refuse();
+        let output = listing.procly_in(&procly, &main, &["up", "web"]);
 
         assert_success(&output);
         common::assert_declared_port(
@@ -324,13 +304,62 @@ mod without_the_process_list {
         );
 
         let stopping = Instant::now();
-        assert_success(&shim.procly_in(&procly, &main, &["down", "web"]));
+        assert_success(&listing.procly_in(&procly, &main, &["down", "web"]));
         wait_until_gone(server);
         assert!(
             stopping.elapsed() < Duration::from_secs(3),
             "down waited for the stop timeout: {:?}",
             stopping.elapsed()
         );
+    }
+
+    #[test]
+    fn a_service_whose_listener_runs_in_a_group_of_its_own_is_kept_and_left_alone_when_the_process_list_cannot_be_read()
+    {
+        let procly = Procly::new();
+        let main = git_repository(procly.scratch(), "app");
+        let port = free_port();
+        let (starts, pid) = (procly.scratch().join("starts"), procly.scratch().join("pid"));
+        // The leader only sleeps, the listener is a task in a group of its own: the form of `turbo run dev`.
+        let config = format!(
+            "[services.web]\nrun = '''echo start >> {starts}; perl -e 'setpgrp(0,0); exec @ARGV' {server} --port {port} & \
+             echo $! > {pid}; exec sleep 600'''\nports = {{ http = {port} }}\nhealth = {{ timeout = '5s' }}\n",
+            starts = starts.display(),
+            pid = pid.display(),
+            server = test_server().display()
+        );
+        write(&main, "procly.toml", &config);
+        let listing = Listing::new(procly.scratch());
+        assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
+        let listener = read_pid(&pid);
+        let _reap = ReapGroup(listener);
+        procly.kill_daemon();
+
+        // Nothing listens on the group of the leader, and the Daemon cannot list the processes to find who does.
+        listing.refuse();
+        let output = listing.procly_in(&procly, &main, &["up", "web"]);
+
+        assert_success(&output);
+        common::assert_declared_port(
+            port,
+            &common::stdout(&output),
+            &format!("web reused http://localhost:{port} port {port}\n"),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&starts).unwrap_or_default().lines().count(),
+            1,
+            "the service was started a second time"
+        );
+        let log = procly.daemon_log();
+        assert!(
+            !log.contains("was stopped"),
+            "the Daemon stopped a service that runs: {log}"
+        );
+        assert!(
+            log.contains("could not list the processes"),
+            "the Daemon did not say why it kept the service: {log}"
+        );
+        assert!(common::is_alive(listener), "the listener was stopped");
     }
 
     #[test]
@@ -344,20 +373,27 @@ mod without_the_process_list {
             dir.join("task.sh").display()
         );
         write(&main, "procly.toml", &config);
-        let shim = Shim::new(dir);
-        assert_success(&shim.procly_in(&procly, &main, &["up", "web"]));
+        let listing = Listing::new(dir);
+        assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
         let task = read_pid(&dir.join("task.pid"));
         // The task is in a group the Daemon cannot find without the listing, it is left to its own devices.
         let _reap = ReapGroup(task);
 
-        shim.refuse_the_listing();
+        listing.refuse();
         let stopping = Instant::now();
-        assert_success(&shim.procly_in(&procly, &main, &["down", "web"]));
+        assert_success(&listing.procly_in(&procly, &main, &["down", "web"]));
 
         assert!(
             stopping.elapsed() < Duration::from_secs(3),
             "down waited for the stop timeout: {:?}",
             stopping.elapsed()
+        );
+        assert!(
+            !procly
+                .daemon_log()
+                .contains("only the process group of the leader is killed"),
+            "the Daemon said it killed a group that was already empty: {}",
+            procly.daemon_log()
         );
     }
 
@@ -383,16 +419,16 @@ mod without_the_process_list {
             dir.join("stubborn.sh").display()
         );
         write(&main, "procly.toml", &config);
-        let shim = Shim::new(dir);
-        assert_success(&shim.procly_in(&procly, &main, &["up", "web"]));
+        let listing = Listing::new(dir);
+        assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
         let task = read_pid(&dir.join("task.pid"));
 
-        shim.empty_the_log();
-        assert_success(&shim.procly_in(&procly, &main, &["down", "web"]));
+        listing.empty_the_log();
+        assert_success(&listing.procly_in(&procly, &main, &["down", "web"]));
 
         wait_until_gone(task);
         // 5 s at 1 listing every 20 ms were 250 listings, 1 in 20 s was never needed to tell the tree was not gone.
-        let listings = shim.listings();
+        let listings = listing.count();
         assert!(listings <= 30, "the stop read the process list {listings} times");
     }
 }

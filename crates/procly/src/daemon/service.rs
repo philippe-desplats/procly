@@ -900,15 +900,35 @@ async fn supervise_reattached(
     finish(&service, &records, &record.topology(), &record.service, end).await;
 }
 
+/// What a Service found running after a restart of the Daemon does about its Lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LeaseHeld {
+    /// Its tree accepts connections on the Lease and is what listens there.
+    Yes,
+    /// Nothing answers on the Lease, or what listens there is a Foreign process.
+    No,
+    /// Something answers on the Lease and the processes could not be listed to tell whether the tree is what listens:
+    /// the listener may be a task in a group of its own, which only a listing finds.
+    Unknown,
+}
+
 /// Whether the tree accepts connections on its Lease `port` and is what listens there, rather than a Foreign
 /// process, so that a Service found running after a restart of the Daemon can be re-attached.
-pub(super) async fn listens_on_lease(tree: &Tree, port: u16, lease_ports: &[u16]) -> bool {
+pub(super) async fn listens_on_lease(tree: &Tree, port: u16, lease_ports: &[u16]) -> LeaseHeld {
     let check = HealthCheck {
         port: Some(port),
         http: None,
         covered: Vec::new(),
     };
-    check.passes().await && ownership(tree, Some(port), lease_ports).await == Ownership::Listening
+    if !check.passes().await {
+        return LeaseHeld::No;
+    }
+    match ownership(tree, Some(port), lease_ports).await {
+        Ownership::Listening => LeaseHeld::Yes,
+        // The reading just taken decided what the tree is, unless the processes cannot be listed.
+        _ if tree.is_unlisted() => LeaseHeld::Unknown,
+        _ => LeaseHeld::No,
+    }
 }
 
 /// What the task watching a run of the process needs to know about it.

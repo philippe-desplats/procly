@@ -193,6 +193,12 @@ impl Tree {
         self.known().groups.clone()
     }
 
+    /// Whether no listing of the processes has been read since the tree began, so that it is only known to be the process
+    /// group of its leader.
+    pub(in crate::daemon) fn is_unlisted(&self) -> bool {
+        matches!(self.known().scope, Some(Scope::Undecided(_)))
+    }
+
     /// Whether no process of the tree was seen alive in the last listing.
     fn is_empty(&self) -> bool {
         self.known().groups.is_empty()
@@ -218,9 +224,10 @@ impl Tree {
 
     /// Whether the group of the leader holds the processes the tree began with, when the processes cannot be listed.
     ///
-    /// A leader that runs is the one the tree began with if it still has the start it was seen with. A leader that
-    /// ended leaves its group with its id reserved while any member lives, so whatever is in that group is the tree's.
-    /// A leader that runs and cannot be identified proves nothing. Blocking.
+    /// A leader that runs is the one the tree began with if it leads its group and still has the start it was seen with,
+    /// and a leader whose start was never seen proves nothing. A leader that ended leaves its group with its id reserved
+    /// while any member lives, so whatever is in that group is the tree's. A leader that runs and cannot be identified
+    /// proves nothing either. Blocking.
     fn leader_is_ours(&self) -> bool {
         let Some(leader) = self.leader() else {
             return false;
@@ -232,7 +239,7 @@ impl Tree {
                         .known()
                         .leader_started
                         .as_ref()
-                        .is_none_or(|started| *started == identity.started)
+                        .is_some_and(|started| *started == identity.started)
             }
             None => !is_alive(leader),
         }
@@ -276,11 +283,16 @@ impl Tree {
     pub(in crate::daemon) fn kill(&self) {
         for _ in 0..KILL_ATTEMPTS {
             if !self.refresh_now() {
-                eprintln!("cannot read the process list, only the process group of the leader is killed");
+                // After a normal stop the group of the leader is empty already, and nothing is killed or said.
                 if let Some(leader) = self.leader()
-                    && self.leader_is_ours()
+                    && group_exists(leader)
                 {
-                    kill_group(leader);
+                    if self.leader_is_ours() {
+                        eprintln!("cannot read the process list, only the process group of the leader is killed");
+                        kill_group(leader);
+                    } else {
+                        eprintln!("cannot read the process list nor tell that the leader is still the process it was");
+                    }
                 }
                 return;
             }
@@ -315,12 +327,13 @@ async fn gone(tree: &Tree) {
     let mut since = Instant::now();
     loop {
         let looked = tree.clone();
-        let (done, taken) = tokio::task::spawn_blocking(move || {
+        let looked = tokio::task::spawn_blocking(move || {
             let done = looked.is_gone(&mut since);
             (done, since)
         })
-        .await
-        .expect("looking at the tree never panics");
+        .await;
+        // The runtime is shutting down, there is nobody left to wait for the tree.
+        let Ok((done, taken)) = looked else { return };
         since = taken;
         if done {
             return;
@@ -396,9 +409,32 @@ fn listing(age: Duration) -> Option<Arc<Vec<Member>>> {
     {
         return Some(Arc::clone(listing));
     }
-    let listing = Arc::new(read_listing()?);
+    let listing = Arc::new(read_listing_or_refuse()?);
     *last = Some((Instant::now(), Arc::clone(&listing)));
     Some(listing)
+}
+
+/// Names a directory where tests watch and steer the listing of the processes, on every platform: a line is appended to
+/// its file `calls` for each reading, and while its file `refuse` exists the reading fails, as it does when the system
+/// refuses it. Only tests set it.
+const TEST_LISTING_ENV: &str = "PROCLY_TEST_LISTING";
+
+/// Reads every process of the system, unless a test refuses it, see [`TEST_LISTING_ENV`].
+fn read_listing_or_refuse() -> Option<Vec<Member>> {
+    if let Some(dir) = std::env::var_os(TEST_LISTING_ENV).map(std::path::PathBuf::from) {
+        use std::io::Write as _;
+        if let Ok(mut calls) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("calls"))
+        {
+            let _ = writeln!(calls, "listing");
+        }
+        if dir.join("refuse").exists() {
+            return None;
+        }
+    }
+    read_listing()
 }
 
 /// Reads every process of the system. macOS has no session column in `ps`, which prints 0, so `getsid` asks each.
@@ -692,6 +728,38 @@ mod tests {
         );
 
         assert_eq!(tree.groups(), BTreeSet::new());
+    }
+
+    #[test]
+    fn a_leader_is_ours_without_a_listing_only_if_it_has_the_start_the_tree_saw_or_has_ended() {
+        use std::os::unix::process::CommandExt as _;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("start a process that leads a group");
+        let leader = Pid::from_raw(i32::try_from(child.id()).expect("a pid fits in an i32"));
+        let started = super::super::identity(leader).expect("the process runs").started;
+        let tree = Tree::default();
+        tree.begin(leader);
+
+        // Nothing says which process this is: whoever leads the group could be a stranger that got the pid.
+        let unknown = tree.leader_is_ours();
+        tree.note_start(Some("another start".to_owned()));
+        let another = tree.leader_is_ours();
+        let tree_of_the_process = Tree::default();
+        tree_of_the_process.begin(leader);
+        tree_of_the_process.note_start(Some(started));
+        let same = tree_of_the_process.leader_is_ours();
+        child.kill().expect("stop the process");
+        child.wait().expect("reap the process");
+
+        assert!(!unknown, "a leader whose start was never seen was taken for the tree's");
+        assert!(!another, "a leader with another start was taken for the tree's");
+        assert!(same, "the leader of the tree was not recognized");
+        // Gone, and its group empty: nothing left to signal, and nobody else's to spare.
+        assert!(tree_of_the_process.leader_is_ours());
     }
 
     #[test]

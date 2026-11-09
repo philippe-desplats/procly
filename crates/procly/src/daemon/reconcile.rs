@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use super::listeners::listening_ports;
 use super::process_group::{self, Identity, Pid, Tree};
 use super::record::ServiceRecord;
-use super::service::{Services, listens_on_lease};
+use super::service::{LeaseHeld, Services, listens_on_lease};
 use super::store::StoreError;
 use crate::protocol::ServiceEnd;
 
@@ -81,15 +81,26 @@ async fn judge(record: &ServiceRecord) -> Verdict {
             })
             .await
             .expect("reading the process list never panics");
-            let mut silent = None;
+            let (mut silent, mut unknown) = (None, None);
             for port in record.port.iter().chain(&record.covered_ports) {
-                if !listens_on_lease(&tree, *port, &record.lease_ports).await {
-                    silent = Some(*port);
-                    break;
+                match listens_on_lease(&tree, *port, &record.lease_ports).await {
+                    LeaseHeld::Yes => {}
+                    LeaseHeld::Unknown => unknown = unknown.or(Some(*port)),
+                    LeaseHeld::No => {
+                        silent = Some(*port);
+                        break;
+                    }
                 }
             }
             let Some(port) = silent else {
-                eprintln!("{label} still runs after a restart of the Daemon, it is re-attached");
+                match unknown {
+                    // Nothing proves the Service is not what listens, so it is neither signalled nor dropped.
+                    Some(port) => eprintln!(
+                        "{label} still runs after a restart of the Daemon, but the Daemon could not list the \
+                         processes to tell what listens on its Lease, port {port}: it kept the Service as it was"
+                    ),
+                    None => eprintln!("{label} still runs after a restart of the Daemon, it is re-attached"),
+                }
                 return Verdict::Reattach;
             };
             process_group::stop_detached(&tree).await;
