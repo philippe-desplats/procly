@@ -14,8 +14,8 @@ use tokio::net::TcpSocket;
 use super::clock::Clock;
 use super::compose::shell_word;
 use super::doctor::occupant_text;
+use super::foreign;
 use super::store::{self, StoreError};
-use super::{foreign, listeners};
 use crate::config::PortConfig;
 use crate::ports::Range;
 use crate::protocol::{KeptBecause, KeptLease, LeaseHeld, Occupant, StaleLease};
@@ -142,10 +142,14 @@ impl Holder {
             },
             Self::Process(Some((_, Some(stop)))) => format!("{release}, or stop it with `{stop}`"),
             Self::Process(Some((Occupant::Unknown { find }, None))) => format!("{release}, or find it with `{find}`"),
-            Self::Process(_) => format!(
-                "nothing answers on it, as when a connection closed a moment ago, which frees the port by itself \
-                 within a minute, so run this command again shortly. If it stays held, {release}, or find what holds \
-                 it with `lsof -nP -iTCP:{port}`"
+            // A process found on the port listens there, it never frees the port by itself.
+            Self::Process(Some((_, None))) => {
+                format!("{release}, or find it with `lsof -nP -iTCP:{port} -sTCP:LISTEN`")
+            }
+            Self::Process(None) => format!(
+                "a port a Service released a moment ago frees itself within a minute, and `procly up` can be run \
+                 again then. Otherwise something holds it without answering: {release}, or find it with \
+                 `lsof -nP -iTCP:{port}`"
             ),
         }
     }
@@ -340,7 +344,7 @@ impl Leases {
         // Granted on a copy, so that a Lease the document failed to store is not handed out.
         let mut granted_table = table.clone();
         expire(&mut granted_table, request, now);
-        let (granted, yielded) = grant_in(&mut granted_table, request, now, is_free, only_time_wait)?;
+        let (granted, yielded) = grant_in(&mut granted_table, request, now, is_free)?;
         if granted_table != *table {
             self.write(&granted_table)?;
             *table = granted_table;
@@ -657,7 +661,7 @@ impl Rehearsal {
         expire(&mut self.table, request, self.now);
         let freed = &self.freed;
         let free = |port: u16| freed.contains(&port) || is_free(port);
-        name_holder(grant_in(&mut self.table, request, self.now, free, only_time_wait).map(|(granted, _)| granted))
+        name_holder(grant_in(&mut self.table, request, self.now, free).map(|(granted, _)| granted))
     }
 }
 
@@ -746,8 +750,7 @@ fn declaration_changed(previous: Option<Granted>, declared: u16) -> bool {
 }
 
 /// Grants the Leases of `request` in `table`, dated `now`, where `is_free` tells whether nothing outside Procly
-/// holds a port and `only_time_wait` whether a held preferred port is held only by connections in `TIME_WAIT`, and
-/// returns them with the Leases that yielded their port.
+/// holds a port, and returns them with the Leases that yielded their port.
 ///
 /// A Lease already granted is kept as it is, so the port stays the same across restarts. The preferred port, the
 /// explicit port of a Pinned branch or else the declared port in the Main worktree, is taken whenever no other
@@ -765,7 +768,6 @@ fn grant_in(
     request: &LeaseRequest<'_>,
     now: Duration,
     is_free: impl Fn(u16) -> bool,
-    only_time_wait: impl Fn(u16) -> bool,
 ) -> Result<(BTreeMap<String, u16>, Vec<Yielded>), LeaseError> {
     let scope = match request.pinned {
         Some(pinned) => Scope::Branch(pinned.name.to_owned()),
@@ -795,14 +797,8 @@ fn grant_in(
         let available = |port: u16| holder(port).is_none() && is_free(port);
         // Only the preferred port is taken from a Lease that yields it, the Pool and the Range skip every Lease.
         let yielding = |port: u16| holder(port).is_none_or(|(other, granted)| yields(request, &key, &other, &granted));
-        // A server binds over the connections a dev server left in `TIME_WAIT`, so they do not keep the declared port
-        // of the Main worktree. The explicit port of a Pinned branch keeps the strict probe.
-        let preferable = |port: u16| {
-            yielding(port)
-                && (is_free(port)
-                    || (follows_declaration && only_time_wait(port))
-                    || request.claimed.is_some_and(|claimed| (claimed.0)(port)))
-        };
+        let preferable =
+            |port: u16| yielding(port) && (is_free(port) || request.claimed.is_some_and(|claimed| (claimed.0)(port)));
         let explicit = request
             .pinned
             .and_then(|pinned| pinned.ports)
@@ -883,28 +879,13 @@ fn is_free(port: u16) -> bool {
     match TcpSocket::new_v6().and_then(|socket| socket.bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))) {
         Ok(()) => true,
         // A host without IPv6 has nothing listening on it.
-        Err(error) => no_ipv6(&error),
+        Err(error) => {
+            matches!(
+                error.raw_os_error(),
+                Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
+            ) || error.kind() == io::ErrorKind::Unsupported
+        }
     }
-}
-
-/// Whether a bind failed for the host having no IPv6, which leaves nothing listening on it.
-fn no_ipv6(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
-    ) || error.kind() == io::ErrorKind::Unsupported
-}
-
-/// Whether `port`, which [`is_free`] finds held, is held only by sockets that do not listen, such as the connections in
-/// `TIME_WAIT` a dev server leaves on the port it answered a request on a moment ago, which a server binding with
-/// `SO_REUSEADDR`, as Node, Next and most dev servers do, binds over.
-///
-/// The socket table of the kernel is read for a socket in the `LISTEN` state on the port, at any address, IPv4 or
-/// IPv6, a network or link-local address included, whoever owns it. A port whose table cannot be read stays held.
-/// Asked about the declared port of the Main worktree only: the Pool, the Range and the explicit port of a Pinned
-/// branch keep the strict probe.
-fn only_time_wait(port: u16) -> bool {
-    listeners::listens_anywhere(port) == Some(false)
 }
 
 #[cfg(test)]
@@ -941,7 +922,7 @@ mod tests {
         now: Duration,
         is_free: impl Fn(u16) -> bool,
     ) -> Result<BTreeMap<String, u16>, LeaseError> {
-        super::grant_in(table, request, now, is_free, |_| false).map(|(granted, _)| granted)
+        super::grant_in(table, request, now, is_free).map(|(granted, _)| granted)
     }
 
     /// A request of `web` in `topology`, for the declared ports `ports`, expiring after 30 days.
@@ -1119,13 +1100,13 @@ mod tests {
         for (service, port) in [("api", 3000), ("admin", 3001)] {
             let ports = port_configs(&[("http", port)]);
             let request = main_request(service, &ports, &declared, &first, &no_one, &main);
-            super::grant_in(&mut table, &request, Duration::ZERO, |_| true, |_| false).unwrap();
+            super::grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap();
         }
 
         let swapped = declaring(&[("api", 3001), ("admin", 3000)]);
         let ports = port_configs(&[("http", 3000)]);
         let request = main_request("admin", &ports, &declared, &swapped, &no_one, &main);
-        let (granted, yielded) = super::grant_in(&mut table, &request, Duration::ZERO, |_| true, |_| false).unwrap();
+        let (granted, yielded) = super::grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap();
 
         assert_eq!(granted["http"], 3000);
         let key = |service: &str| LeaseKey {
@@ -1179,7 +1160,7 @@ mod tests {
             for (service, port) in [("api", 3000), ("admin", 3001)] {
                 let ports = port_configs(&[("http", port)]);
                 let request = main_request(service, &ports, &declared, &first, &no_one, &main);
-                super::grant_in(table, &request, Duration::ZERO, |_| true, |_| false).unwrap();
+                super::grant_in(table, &request, Duration::ZERO, |_| true).unwrap();
             }
         };
         let ports = port_configs(&[("http", 3000)]);
@@ -1321,68 +1302,37 @@ mod tests {
         );
     }
 
-    /// A free port of the loopback, as the system hands it out.
-    fn ephemeral_port() -> u16 {
-        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|listener| listener.local_addr())
-            .map(|address| address.port())
-            .unwrap()
-    }
-
     #[test]
-    fn a_live_listener_on_an_ipv6_or_an_interface_address_is_never_only_time_wait() {
-        // The address of the interface the host routes through, when it has one. A UDP connect sends nothing.
-        let interface = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-            .and_then(|socket| socket.connect(("192.0.2.1", 9)).map(|()| socket))
-            .and_then(|socket| socket.local_addr())
-            .map(|address| address.ip())
-            .ok()
-            .filter(|address| !address.is_loopback() && !address.is_unspecified());
-        let mut addresses = vec![
-            std::net::IpAddr::from(Ipv6Addr::UNSPECIFIED),
-            std::net::IpAddr::from(Ipv6Addr::LOCALHOST),
+    fn only_a_holder_that_does_not_answer_is_said_to_free_the_port_by_itself() {
+        let worktree = Path::new("/src/app");
+        let silent = Holder::Process(None).free(3000, worktree);
+        let frees = silent
+            .find("a port a Service released a moment ago frees itself within a minute, and `procly up` can be run")
+            .expect(&silent);
+        let find = silent
+            .find("Otherwise something holds it without answering: release the Leases of the Main worktree")
+            .expect(&silent);
+        assert!(frees < find, "{silent}");
+        assert!(silent.ends_with("or find it with `lsof -nP -iTCP:3000`"), "{silent}");
+
+        let process = Occupant::Process {
+            pid: 42,
+            command: "node".to_owned(),
+        };
+        let live = [
+            Holder::Process(Some((process.clone(), Some("kill 42".to_owned())))),
+            Holder::Process(Some((process, None))),
+            Holder::Process(Some((
+                Occupant::Unknown {
+                    find: "lsof -nP -iTCP:3000 -sTCP:LISTEN".to_owned(),
+                },
+                None,
+            ))),
         ];
-        addresses.extend(interface);
-        for address in addresses {
-            let port = ephemeral_port();
-            let Ok(listener) = std::net::TcpListener::bind((address, port)) else {
-                continue;
-            };
-            assert!(!is_free(port), "a listener on {address}");
-            assert!(!only_time_wait(port), "a listener on {address} is not TIME_WAIT");
-            drop(listener);
-        }
-    }
-
-    #[test]
-    fn a_port_left_in_time_wait_is_only_time_wait_while_a_live_listener_on_any_address_is_not() {
-        use std::io::Read as _;
-
-        for address in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST] {
-            let port = ephemeral_port();
-            let listener = std::net::TcpListener::bind((address, port)).unwrap();
-            assert!(!is_free(port) && !only_time_wait(port), "a listener on {address}");
-
-            // The side that closes first keeps the port in TIME_WAIT once the listener is gone.
-            let mut client = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-            let client_address = client.local_addr().unwrap();
-            // A probe that answered connected first, so the connection of the client is found among the queued ones.
-            let served = loop {
-                let (served, peer) = listener.accept().unwrap();
-                if peer == client_address {
-                    break served;
-                }
-            };
-            drop(served);
-            client.read_to_end(&mut Vec::new()).unwrap();
-            drop(client);
-            drop(listener);
-
-            assert!(
-                !is_free(port),
-                "TIME_WAIT keeps the strict probe of {address} from binding"
-            );
-            assert!(only_time_wait(port), "TIME_WAIT alone after a listener on {address}");
+        for holder in live {
+            let free = holder.free(3000, worktree);
+            assert!(!free.contains("frees itself"), "{free}");
+            assert!(free.starts_with("release the Leases of the Main worktree"), "{free}");
         }
     }
 

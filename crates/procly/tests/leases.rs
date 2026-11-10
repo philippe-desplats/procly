@@ -562,6 +562,8 @@ fn a_new_declared_port_held_by_a_process_fails_up_naming_it_and_keeps_the_lease_
         .find("procly worktree release")
         .unwrap_or_else(|| panic!("the release of the Main worktree: {message}"));
     assert!(release < stop, "{message}");
+    // A process listening on the port never frees it by itself.
+    assert!(!message.contains("frees itself"), "{message}");
     assert!(message.contains(&format!("port {old}")), "{message}");
     // The refusal survives a restart of the Daemon, the declaration it was granted under is stored with the Lease.
     procly.stop_daemon();
@@ -720,9 +722,7 @@ fn restart_of_a_service_whose_2_port_names_were_swapped_while_it_ran_moves_both_
 }
 
 #[test]
-fn a_declared_port_held_only_by_time_wait_is_free_while_a_live_listener_keeps_it_held() {
-    use std::io::Read as _;
-
+fn a_new_declared_port_left_in_time_wait_fails_up_saying_a_released_port_frees_itself_within_a_minute() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
     let (old, new) = (free_port(), free_port());
@@ -730,27 +730,22 @@ fn a_declared_port_held_only_by_time_wait_is_free_while_a_live_listener_keeps_it
     assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
     assert_success(&procly.procly_in(&main, &["down", "web"]));
     write(&main, "procly.toml", &web_declaring(new));
-    // A live listener on the loopback keeps the new declared port held.
-    let live = std::net::TcpListener::bind(("127.0.0.1", new)).expect("listen on the new declared port");
-    assert_eq!(procly.procly_in(&main, &["up", "web"]).status.code(), Some(125));
-    // The side that closes first leaves the port in TIME_WAIT once the listener is gone, as a dev server does after
-    // answering a request.
-    let mut client = std::net::TcpStream::connect(("127.0.0.1", new)).expect("connect to it");
-    let client_address = client.local_addr().expect("read the client address");
-    // The refusal connected to name what holds the port, so the connection of the client is not the first queued.
-    let served = loop {
-        let (served, peer) = live.accept().expect("accept a connection");
-        if peer == client_address {
-            break served;
-        }
-    };
-    drop(served);
-    let mut rest = Vec::new();
-    client.read_to_end(&mut rest).expect("read until the server closes");
-    drop(client);
-    drop(live);
+    // Nothing listens on it any more, the port is held by a socket that does not answer.
+    leave_in_time_wait(new);
 
-    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), new);
+    let refused = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
+    let message = common::stderr(&refused);
+    assert!(message.contains(&format!("declared port {new}")), "{message}");
+    let frees = message
+        .find("a port a Service released a moment ago frees itself within a minute, and `procly up` can be run again")
+        .unwrap_or_else(|| panic!("the port frees itself: {message}"));
+    let find = message
+        .find("Otherwise something holds it without answering: release the Leases of the Main worktree")
+        .unwrap_or_else(|| panic!("how to find a live holder: {message}"));
+    assert!(frees < find, "{message}");
+    assert!(message.contains(&format!("`lsof -nP -iTCP:{new}`")), "{message}");
 }
 
 /// The address of the network interface the host routes to the outside through, when it has one. Connecting a UDP
@@ -840,7 +835,7 @@ fn a_declared_port_a_process_listens_on_at_any_address_is_held_at_the_first_gran
 #[test]
 fn the_explicit_port_of_a_pinned_branch_is_held_by_a_listener_at_any_address_and_by_time_wait() {
     let mut cases: Vec<Option<std::net::SocketAddr>> = listening_addresses(0).into_iter().map(Some).collect();
-    // `None` stands for a port left in TIME_WAIT, which the strict probe of a Pinned branch counts as held.
+    // `None` stands for a port left in TIME_WAIT, which the strict probe counts as held.
     cases.push(None);
     for case in cases {
         let procly = Procly::new();
