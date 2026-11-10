@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Registry, foreign};
-use crate::protocol::{JobStatus, RepositoryStatus, ServiceStatus, StatusReport, WorktreeStatus};
+use super::{Registry, environment, foreign};
+use crate::protocol::{
+    JobStatus, RepositoryStatus, ServiceState, ServiceStatus, StaleLease, StatusReport, WorktreeStatus,
+};
 use crate::topology::{self, Topology, Worktree};
 
 /// The Worktree holding `cwd`, or with `all` every Worktree of every Repository the Daemon ran a Service or a Job
@@ -29,6 +31,7 @@ pub(super) fn report(registry: &Registry, cwd: &Path, all: bool) -> anyhow::Resu
     let mut services = services.statuses();
     for (topology, status) in &mut services {
         status.restartable = held.holds(&topology.worktree.path, &status.service);
+        status.stale_leases = stale_leases(registry, topology, status);
     }
     let containers = composes.isolated();
     // Every Worktree the Daemon ran something in.
@@ -140,6 +143,28 @@ fn worktrees(git_common_dir: &Path, known: &[&Topology]) -> Vec<Placed> {
         }
     }
     worktrees
+}
+
+/// The Leases of the Service `status` of the Main worktree of `topology`, or of the Services it covers when it is a
+/// Group, that differ from their declared port while it runs. Empty for an ended Service, outside the Main worktree,
+/// and when the configuration or the Leases cannot be read, which the other checks report. Blocking: it reads the
+/// configuration.
+pub(super) fn stale_leases(registry: &Registry, topology: &Topology, status: &ServiceStatus) -> Vec<StaleLease> {
+    if !topology.worktree.main || matches!(status.state, ServiceState::Ended { .. }) {
+        return Vec::new();
+    }
+    let Ok(config) = super::read_config(&topology.worktree.path) else {
+        return Vec::new();
+    };
+    let services = config
+        .services
+        .get(&status.service)
+        .and_then(|declared| declared.covers.clone())
+        .unwrap_or_else(|| vec![status.service.clone()]);
+    registry
+        .leases
+        .stale(topology, &services, &environment::declarations(&config))
+        .unwrap_or_default()
 }
 
 fn services_of(services: &[(Topology, ServiceStatus)], worktree: &Path) -> Vec<ServiceStatus> {

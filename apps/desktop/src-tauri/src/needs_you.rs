@@ -426,6 +426,7 @@ mod tests {
             reattached: false,
             started_at,
             restartable: false,
+            stale_leases: Vec::new(),
             state: ServiceState::Ended { end },
         }
     }
@@ -529,6 +530,7 @@ mod tests {
                 reattached: false,
                 started_at: 1,
                 restartable: false,
+                stale_leases: Vec::new(),
                 state,
             });
         }

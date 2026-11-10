@@ -519,7 +519,7 @@ fn grant(
 }
 
 /// The declared port of each Service and Port name of `config`.
-fn declarations(config: &Config) -> BTreeMap<(String, String), u16> {
+pub(super) fn declarations(config: &Config) -> BTreeMap<(String, String), u16> {
     config
         .services
         .iter()

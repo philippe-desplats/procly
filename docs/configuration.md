@@ -129,6 +129,8 @@ covers = ["web", "api"]
 
 The Group is healthy once every covered Service answers its health check on its Lease, as it would on its own. If one never does, `up` stops the tree of the Group and exits with 124. A Port mismatch on any Lease is reported as for a Service. `procly env dev` prints the same variables without starting anything.
 
+A limit of Groups: Procly cannot tell which covered Service listens on which Lease. The Group runs one command, and a covered Service declares no command, directory or process of its own, so the processes of the tree that listen cannot be attributed to a covered Service. If 2 covered Services listen each on the Lease of the other, for instance because each app reads its port from its own `.env` file where the ports are swapped, the Group is healthy, since every Lease is listened on by its tree, and `up` reports for each covered Service the Lease it was granted, not the port it listens on. Have each app read its port from `PORT_<SERVICE>_<NAME>`, which the Group injects, rather than from a file of its own, and check the URLs `procly up` prints when the declared ports change.
+
 A Group and the Services it covers never run side by side in one Worktree:
 
 - `procly up web` while `dev` runs starts nothing and answers `web reused (via dev) http://localhost:3000 port 3000`, with the Lease of `web`.
@@ -468,6 +470,23 @@ A Lease that no Service used for `settings.lease_expiry` is dropped, and its por
 One exception, recorded in ADR 0006: the Main worktree takes its declared port back as soon as it is free, even after a fallback to the Range, so a Lease of the Main worktree can change on its next start, toward its declared port only. Editing the declared port moves it the same way, and a Pinned branch does the same toward its explicit port. Every other Lease stays the same across restarts.
 
 A declared port already taken when its first Lease is granted is not an error, by design. The Main worktree moves to the Pool or the Range as above, `procly up` prints the port it got in its URL and `port`, and `procly env` and the Env file carry it, so the Service and everything reading its Derived variables agree on it. Failing instead would keep the Main worktree from working whenever another stack holds a common port such as 5432, while the move costs nothing once the declared port is free again, the next start takes it back. A conflict, exit 5, is for a Compose service whose Lease is held at the moment its container starts, see [Compose services](#compose-services), not for a declared port that never was its Lease.
+
+### When the declared port changes
+
+In the Main worktree, a Lease follows the declared port of `procly.toml`. Each Lease stores the declared port it was granted under, so Procly tells a declaration you edited from a declared port that was taken at the first grant, also across restarts of the Daemon:
+
+- While the Service does not run, the next `procly up`, and also `procly env`, moves its Lease to the newly declared port.
+- The Lease of a stopped Service of the Main worktree that is no longer on its own declared port gives that port up to the Service that declares it now. 2 Services whose declared ports were swapped therefore each end on their own, whichever you start first. The Daemon logs each yield, such as `lease api.http of /home/me/app yielded its port 3000 to admin.http, which declares it, as its service is stopped and no longer declares that port`, and the Service that gave the port up gets its own declared port at its next start.
+- When the newly declared port is held otherwise, `procly up` does not keep the old port silently. It fails with 125, naming the declared port, what holds it and the command that frees it, and the Lease stays on its old port until then, which `procly env` and the Env file show meanwhile, so that rendering the Derived variables of every Service never fails for one of them:
+
+  ```
+  procly: the declared port 3000 of Port name http of service admin is held by process 4812 node, so its Lease stays on port 3001: stop it with `kill 4812`, then run this command again
+  ```
+
+  The holder is a process or a container, a running Service of the Main worktree, freed with `procly down <service>`, a Lease of another Worktree or Repository, freed by `procly worktree release` in that Worktree, or a Lease of a Pinned branch, which is never released, so declare another port. 2 Services that declare the same port are named too.
+- A running Service keeps its Lease until it stops, as it listens on it. `procly status` prints `Lease web.http port 3001 differs from its declared port 3000, it moves there once web stops` under it, the document carries the Lease under `stale_leases`, and `procly doctor` fails its `leased_ports` check with `cd <worktree> && procly down web && procly up web` as the fix. For a Group, the Leases of the Services it covers are reported under the Group.
+
+A declared port that was taken at the first grant under the same declaration is still a fallback as above, not an error. A Lease stored by procly 0.5.0 or older carries no declared port, so it counts as one whose declaration changed as soon as it differs from the declared port. Other Worktrees, the Pools, the Range and Pinned branches keep the behaviour described above.
 
 The Service receives its Leases in its environment, after the environment of the `procly up` that started it, so they win over the caller's:
 

@@ -683,8 +683,25 @@ pub struct ServiceStatus {
     /// Whether the Daemon holds the environment of the last `up` of the Service, which a `Restart` replays. The
     /// environment itself is never part of the status.
     pub restartable: bool,
+    /// The Leases of the running Service, or of the Services a Group covers, that differ from their declared port in
+    /// the Main worktree. A running Service keeps its Lease, which moves to the declared port once it stops. Left out
+    /// when empty, so that the status of a Service on its declared ports reads as it did before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_leases: Vec<StaleLease>,
     #[serde(flatten)]
     pub state: ServiceState,
+}
+
+/// A Lease of the Main worktree that differs from the declared port of its Port name, kept while its Service runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct StaleLease {
+    pub service: String,
+    pub port_name: String,
+    /// The port of the Lease.
+    pub port: u16,
+    /// The port `procly.toml` declares for the Port name.
+    pub declared: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1238,6 +1255,7 @@ mod tests {
                 reattached: false,
                 started_at: 1_793_900_000_123,
                 restartable: true,
+                stale_leases: Vec::new(),
                 state: ServiceState::Healthy,
             }],
             jobs: Vec::new(),

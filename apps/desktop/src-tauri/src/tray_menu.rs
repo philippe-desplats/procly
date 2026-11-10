@@ -428,6 +428,7 @@ mod tests {
             reattached: false,
             started_at: 1,
             restartable: true,
+            stale_leases: Vec::new(),
             state,
         }
     }

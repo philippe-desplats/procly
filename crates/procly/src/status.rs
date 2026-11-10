@@ -77,6 +77,13 @@ fn service_line(text: &mut String, service: &ServiceStatus) {
         ""
     };
     let _ = writeln!(text, "    service {} {state}{reattached}", service.service);
+    for stale in &service.stale_leases {
+        let _ = writeln!(
+            text,
+            "      Lease {}.{} port {} differs from its declared port {}, it moves there once {} stops",
+            stale.service, stale.port_name, stale.port, stale.declared, service.service
+        );
+    }
 }
 
 /// An Isolated container of the Worktree, with the Lease its health check probes.

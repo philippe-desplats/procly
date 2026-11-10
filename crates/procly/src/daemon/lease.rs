@@ -18,7 +18,7 @@ use super::foreign;
 use super::store::{self, StoreError};
 use crate::config::PortConfig;
 use crate::ports::Range;
-use crate::protocol::{KeptBecause, KeptLease, LeaseHeld, Occupant};
+use crate::protocol::{KeptBecause, KeptLease, LeaseHeld, Occupant, StaleLease};
 use crate::topology::Topology;
 
 /// The version of the format of the Lease document, bumped when a field changes meaning or disappears.
@@ -49,7 +49,7 @@ pub(crate) enum LeaseError {
         port_name: String,
         declared: u16,
         current: u16,
-        holder: Holder,
+        holder: Box<Holder>,
     },
 }
 
@@ -75,16 +75,30 @@ impl Holder {
     /// What holds the port, as the error names it.
     fn what(&self) -> String {
         match self {
-            Self::Lease { key, here: true, declares: true, .. } => {
+            Self::Lease {
+                key,
+                here: true,
+                declares: true,
+                ..
+            } => {
                 format!("the Lease of service {}, which declares it too", key.service)
             }
-            Self::Lease { key, here: true, running: true, .. } => {
+            Self::Lease {
+                key,
+                here: true,
+                running: true,
+                ..
+            } => {
                 format!("the Lease of service {}, which runs on it", key.service)
             }
             Self::Lease { key, here: true, .. } => format!("the Lease of service {}", key.service),
             Self::Lease { key, .. } => match &key.scope {
                 Scope::Worktree(worktree) => {
-                    format!("the Lease of service {} of the Worktree {}", key.service, worktree.display())
+                    format!(
+                        "the Lease of service {} of the Worktree {}",
+                        key.service,
+                        worktree.display()
+                    )
                 }
                 Scope::Branch(branch) => format!("the Lease of service {} of the Pinned branch {branch}", key.service),
             },
@@ -96,9 +110,11 @@ impl Holder {
     /// How to free the port, as the error tells it.
     fn free(&self, port: u16) -> String {
         match self {
-            Self::Lease { here: true, declares: true, .. } => {
-                "declare another port for one of the 2 services in procly.toml".to_owned()
-            }
+            Self::Lease {
+                here: true,
+                declares: true,
+                ..
+            } => "declare another port for one of the 2 services in procly.toml".to_owned(),
             Self::Lease { key, here: true, .. } => format!("stop it with `procly down {}`", shell_word(&key.service)),
             Self::Lease { key, .. } => match &key.scope {
                 Scope::Worktree(worktree) => format!(
@@ -264,26 +280,17 @@ impl Leases {
     ///
     /// A Lease of the Main worktree whose Service does not run follows its declared port, and the Lease of a stopped
     /// Service that is no longer on its own declared port yields that port to it, which the Daemon logs. When the
-    /// declaration changed and its port is held otherwise, the grant fails naming what holds it, rather than keep the
-    /// old port.
+    /// declaration changed and its port is held otherwise, a grant for a start fails naming what holds it, rather
+    /// than keep the old port.
     pub(crate) fn grant(&self, request: &LeaseRequest<'_>) -> Result<BTreeMap<String, u16>, LeaseError> {
-        match self.grant_unnamed(request) {
-            // Named once the table is let go of, since asking Docker and `lsof` takes a while.
-            Err(LeaseError::DeclaredPortHeld {
-                service,
-                port_name,
-                declared,
-                current,
-                holder: Holder::Process(None),
-            }) => Err(LeaseError::DeclaredPortHeld {
-                service,
-                port_name,
-                declared,
-                current,
-                holder: Holder::Process(foreign::occupant(declared, None)),
-            }),
-            granted => granted,
+        let mut granted = self.grant_unnamed(request);
+        // Named once the table is let go of, since asking Docker and `lsof` takes a while.
+        if let Err(LeaseError::DeclaredPortHeld { declared, holder, .. }) = &mut granted
+            && matches!(**holder, Holder::Process(None))
+        {
+            **holder = Holder::Process(foreign::occupant(*declared, None));
         }
+        granted
     }
 
     /// [`Leases::grant`], a process holding a declared port left unnamed.
@@ -384,6 +391,35 @@ impl Leases {
     /// Whether the Lease `key` is granted `port` right now. Blocking: it reads the document on the first request.
     pub(super) fn holds(&self, key: &LeaseKey, port: u16) -> Result<bool, StoreError> {
         self.with_table(|table| table.get(key).map(|granted| granted.port) == Some(port))
+    }
+
+    /// The Leases of `services` in the Main worktree of `topology` whose port differs from the declared port
+    /// `declarations` gives their Port name, in the order of the document. Blocking: it reads the document on the first
+    /// request.
+    pub(crate) fn stale(
+        &self,
+        topology: &Topology,
+        services: &[String],
+        declarations: &BTreeMap<(String, String), u16>,
+    ) -> Result<Vec<StaleLease>, StoreError> {
+        let scope = Scope::Worktree(topology.worktree.path.clone());
+        self.with_table(|table| {
+            table
+                .iter()
+                .filter(|(key, _)| {
+                    key.repository == topology.git_common_dir && key.scope == scope && services.contains(&key.service)
+                })
+                .filter_map(|(key, granted)| {
+                    let declared = *declarations.get(&(key.service.clone(), key.port_name.clone()))?;
+                    (declared != granted.port).then(|| StaleLease {
+                        service: key.service.clone(),
+                        port_name: key.port_name.clone(),
+                        port: granted.port,
+                        declared,
+                    })
+                })
+                .collect()
+        })
     }
 
     /// Runs `read` on the Leases, reading the document first if no request did.
@@ -588,6 +624,51 @@ fn scope_text(scope: &Scope) -> String {
     }
 }
 
+/// Whether the Lease `other`, granted `granted`, yields its port to the Lease `key` of `request`: in the Main worktree,
+/// the Lease of a stopped Service of the same Worktree that its own declaration no longer gives that port.
+fn yields(request: &LeaseRequest<'_>, key: &LeaseKey, other: &LeaseKey, granted: &Granted) -> bool {
+    request.pinned.is_none()
+        && request.topology.worktree.main
+        && other.repository == key.repository
+        && other.scope == key.scope
+        && !request
+            .running
+            .contains(&(request.topology.worktree.path.clone(), other.service.clone()))
+        && request
+            .declarations
+            .get(&(other.service.clone(), other.port_name.clone()))
+            != Some(&granted.port)
+}
+
+/// What holds the declared port the Lease `key` of `request` cannot move to: `holder`, the other Lease on it, or else
+/// a process, named later.
+fn holder_of(request: &LeaseRequest<'_>, key: &LeaseKey, holder: Option<(LeaseKey, Granted)>) -> Holder {
+    let Some((other, granted)) = holder else {
+        return Holder::Process(None);
+    };
+    Holder::Lease {
+        here: other.repository == key.repository && other.scope == key.scope,
+        running: matches!(&other.scope, Scope::Worktree(path)
+            if request.running.contains(&(path.clone(), other.service.clone()))),
+        declares: request
+            .declarations
+            .get(&(other.service.clone(), other.port_name.clone()))
+            == Some(&granted.port),
+        key: other,
+    }
+}
+
+/// The declared port a Lease of the Main worktree granted `port` is stored with, `previous` being what it was before
+/// and `declared` its declared port now. A Lease kept as it is keeps the declaration it was granted under, so that a
+/// running Service that keeps it still moves once it stops, and a Lease stored before the declaration was learns it
+/// once it is on it.
+fn declared_then(previous: Option<Granted>, port: u16, declared: u16) -> Option<u16> {
+    match previous {
+        Some(previous) if previous.port == port => previous.declared.or((port == declared).then_some(declared)),
+        _ => Some(declared),
+    }
+}
+
 /// Grants the Leases of `request` in `table`, dated `now`, where `is_free` tells whether nothing outside Procly
 /// holds a port, and returns them with the Leases that yielded their port.
 ///
@@ -633,20 +714,11 @@ fn grant_in(
                 .find(|(other, granted)| granted.port == port && **other != key)
                 .map(|(other, granted)| (other.clone(), *granted))
         };
-        // The Lease of a stopped Service of the same Main worktree that its own declaration no longer gives that port.
-        let yields = |other: &LeaseKey, granted: &Granted| {
-            follows_declaration
-                && other.repository == key.repository
-                && other.scope == key.scope
-                && !runs(&other.service)
-                && request
-                    .declarations
-                    .get(&(other.service.clone(), other.port_name.clone()))
-                    != Some(&granted.port)
-        };
-        let unleased = |port: u16| holder(port).is_none_or(|(other, granted)| yields(&other, &granted));
-        let available = |port: u16| unleased(port) && is_free(port);
-        let claimed = |port: u16| unleased(port) && request.claimed.is_some_and(|claimed| (claimed.0)(port));
+        let available = |port: u16| holder(port).is_none() && is_free(port);
+        // Only the preferred port is taken from a Lease that yields it, the Pool and the Range skip every Lease.
+        let yielding = |port: u16| holder(port).is_none_or(|(other, granted)| yields(request, &key, &other, &granted));
+        let preferable =
+            |port: u16| yielding(port) && (is_free(port) || request.claimed.is_some_and(|claimed| (claimed.0)(port)));
         let explicit = request
             .pinned
             .and_then(|pinned| pinned.ports)
@@ -658,8 +730,7 @@ fn grant_in(
             } else {
                 request.keep
             };
-        let port = if let Some(preferred) = preferred
-            .filter(|&port| !keep && current != Some(port) && (available(port) || claimed(port)))
+        let port = if let Some(preferred) = preferred.filter(|&port| !keep && current != Some(port) && preferable(port))
         {
             if let Some((other, _)) = holder(preferred) {
                 table.remove(&other);
@@ -674,25 +745,15 @@ fn grant_in(
             let changed = previous
                 .and_then(|granted| granted.declared)
                 .is_none_or(|declared_then| declared_then != declared.port);
-            if follows_declaration && !keep && current != declared.port && changed {
-                let holder = match holder(declared.port) {
-                    Some((other, granted)) => Holder::Lease {
-                        here: other.repository == key.repository && other.scope == key.scope,
-                        running: matches!(&other.scope, Scope::Worktree(path) if request.running.contains(&(path.clone(), other.service.clone()))),
-                        declares: request
-                            .declarations
-                            .get(&(other.service.clone(), other.port_name.clone()))
-                            == Some(&granted.port),
-                        key: other,
-                    },
-                    None => Holder::Process(None),
-                };
+            // Refused on a start only: a request that only reads the Lease, such as the Env file rendering the
+            // Derived variables of every Service, shows it where it stands rather than fail for another Service.
+            if follows_declaration && !keep && !request.keep && current != declared.port && changed {
                 return Err(LeaseError::DeclaredPortHeld {
                     service: request.service.to_owned(),
                     port_name: port_name.clone(),
                     declared: declared.port,
                     current,
-                    holder,
+                    holder: Box::new(holder_of(request, &key, holder(declared.port))),
                 });
             }
             current
@@ -709,17 +770,9 @@ fn grant_in(
                     range: request.range,
                 })?
         };
-        // A Lease kept as it is keeps the declaration it was granted under, so that a running Service that keeps it
-        // still moves once it stops. A Lease stored before the declaration was learns it once it is on it.
-        let declared_then = if !follows_declaration {
-            None
-        } else if current == Some(port) {
-            previous
-                .and_then(|granted| granted.declared)
-                .or((port == declared.port).then_some(declared.port))
-        } else {
-            Some(declared.port)
-        };
+        let declared_then = follows_declaration
+            .then(|| declared_then(previous, port, declared.port))
+            .flatten();
         table.insert(
             key,
             Granted {
@@ -999,6 +1052,25 @@ mod tests {
     }
 
     #[test]
+    fn a_lease_on_the_range_never_yields_its_port_to_another_lease_drawn_from_the_range() {
+        let mut table = Table::new();
+        let main = topology("/src/app", true);
+        let (no_one, declared) = (BTreeSet::new(), BTreeSet::from([3000, 3001]));
+        let declarations = declaring(&[("web", 3000), ("api", 3001)]);
+        let taken = |port| port != 3000 && port != 3001;
+        let granted: Vec<u16> = [("web", 3000), ("api", 3001)]
+            .into_iter()
+            .map(|(service, port)| {
+                let ports = port_configs(&[("http", port)]);
+                let request = main_request(service, &ports, &declared, &declarations, &no_one, &main);
+                grant_in(&mut table, &request, Duration::ZERO, taken).unwrap()["http"]
+            })
+            .collect();
+        assert_eq!(granted, [24000, 24001]);
+        assert_eq!(table.len(), 2);
+    }
+
+    #[test]
     fn a_running_service_or_one_on_its_own_declared_port_never_yields_and_the_move_is_refused_naming_it() {
         let main = topology("/src/app", true);
         let (declared, no_one) = (BTreeSet::from([3000, 3001]), BTreeSet::new());
@@ -1019,10 +1091,18 @@ mod tests {
         let api_runs = BTreeSet::from([(PathBuf::from("/src/app"), "api".to_owned())]);
         let request = main_request("admin", &ports, &declared, &swapped, &api_runs, &main);
         let refused = grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap_err();
+        let LeaseError::DeclaredPortHeld {
+            declared: 3000,
+            current: 3001,
+            holder,
+            ..
+        } = &refused
+        else {
+            panic!("refused for another reason: {refused}");
+        };
         assert!(matches!(
-            &refused,
-            LeaseError::DeclaredPortHeld { declared: 3000, current: 3001, holder: Holder::Lease { key, here: true, running: true, declares: false }, .. }
-                if key.service == "api"
+            &**holder,
+            Holder::Lease { key, here: true, running: true, declares: false } if key.service == "api"
         ));
         assert_eq!(
             refused.to_string(),
@@ -1049,9 +1129,15 @@ mod tests {
     fn a_changed_declaration_held_by_a_process_is_refused_while_an_unchanged_one_stays_a_fallback() {
         let main = topology("/src/app", true);
         let mut table = Table::new();
-        assert_eq!(grant(&mut table, &main, &[("http", 3000)], |port| port != 3000), [24000]);
+        assert_eq!(
+            grant(&mut table, &main, &[("http", 3000)], |port| port != 3000),
+            [24000]
+        );
         // Unchanged: the declared port was already taken at the first grant, the fallback stays.
-        assert_eq!(grant(&mut table, &main, &[("http", 3000)], |port| port != 3000), [24000]);
+        assert_eq!(
+            grant(&mut table, &main, &[("http", 3000)], |port| port != 3000),
+            [24000]
+        );
 
         let ports = port_configs(&[("http", 4000)]);
         let (declared, running) = (BTreeSet::from([4000]), BTreeSet::new());
@@ -1059,10 +1145,21 @@ mod tests {
         let refused = grant_in(&mut table, &request, Duration::ZERO, |port| port != 4000).unwrap_err();
         assert!(matches!(
             refused,
-            LeaseError::DeclaredPortHeld { declared: 4000, current: 24000, holder: Holder::Process(None), .. }
+            LeaseError::DeclaredPortHeld {
+                declared: 4000,
+                current: 24000,
+                ref holder,
+                ..
+            } if matches!(**holder, Holder::Process(None))
         ));
         // Nothing was stored, the Lease stays on its old port until the new one is free.
         assert_eq!(table.values().map(|granted| granted.port).collect::<Vec<_>>(), [24000]);
+        // A request that only reads the Lease shows it where it stands.
+        let read = LeaseRequest { keep: true, ..request };
+        assert_eq!(
+            grant_in(&mut table, &read, Duration::ZERO, |port| port != 4000).unwrap()["http"],
+            24000
+        );
         assert_eq!(grant(&mut table, &main, &[("http", 4000)], |_| true), [4000]);
     }
 
@@ -1088,7 +1185,11 @@ mod tests {
         let request = request(&main, &ports, &declared, &running);
         assert!(matches!(
             grant_in(&mut table, &request, Duration::ZERO, |port| port != 3000),
-            Err(LeaseError::DeclaredPortHeld { declared: 3000, current: 3001, .. })
+            Err(LeaseError::DeclaredPortHeld {
+                declared: 3000,
+                current: 3001,
+                ..
+            })
         ));
     }
 

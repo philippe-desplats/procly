@@ -501,7 +501,8 @@ fn crossed_leases_of_stopped_services_each_follow_their_new_declaration_in_eithe
         }
         let log = procly.daemon_log();
         assert!(
-            log.contains("yielded its port") && log.contains(&format!("port {}", order_first_port(order, first, second))),
+            log.contains("yielded its port")
+                && log.contains(&format!("port {}", order_first_port(order, first, second))),
             "the Daemon logs the Lease that yielded its port: {log}"
         );
     }
@@ -549,8 +550,14 @@ fn a_new_declared_port_held_by_a_process_fails_up_naming_it_and_keeps_the_lease_
     assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
     let message = common::stderr(&refused);
     assert!(message.contains(&format!("declared port {new}")), "{message}");
-    assert!(message.contains(&format!("process {}", std::process::id())), "{message}");
-    assert!(message.contains(&format!("{} {}", "kill", std::process::id())), "{message}");
+    assert!(
+        message.contains(&format!("process {}", std::process::id())),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("{} {}", "kill", std::process::id())),
+        "{message}"
+    );
     assert!(message.contains(&format!("port {old}")), "{message}");
     // The refusal survives a restart of the Daemon, the declaration it was granted under is stored with the Lease.
     procly.stop_daemon();
@@ -594,7 +601,9 @@ fn a_running_service_keeps_its_lease_and_status_and_doctor_say_it_differs_from_t
 
     let status = stdout(&procly.procly_in(&main, &["status"]));
     assert!(
-        status.contains(&format!("Lease http port {old} differs from its declared port {new}")),
+        status.contains(&format!(
+            "Lease web.http port {old} differs from its declared port {new}"
+        )),
         "{status}"
     );
     let doctor = procly.procly_in(&main, &["doctor"]);
