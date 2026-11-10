@@ -122,6 +122,8 @@ export async function stopDaemon(): Promise<boolean> {
 export interface Scene {
   /** The Worktree, a git repository the `procly.toml` sits in. */
   path: string;
+  /** The last segment of `path`, unique to the scene, which tells its Worktree apart in the sidebar. */
+  folder: string;
   service: string;
   port: number;
 }
@@ -151,7 +153,7 @@ export async function writeScene(name: string, service: string): Promise<Scene> 
   );
   const config = `[services.${service}]\nrun = '${required(TEST_SERVER)} --port {ports.http}'\nports = { http = ${port} }\n`;
   writeFileSync(join(path, "procly.toml"), config);
-  return { path, service, port };
+  return { path, folder: name, service, port };
 }
 
 /** One Service as `procly status --json` reports it. */
