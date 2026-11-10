@@ -190,6 +190,8 @@ $ procly status --json
 
 A Worktree lists its Foreign processes under `foreign` when it has some, see [Foreign processes](daemon.md#foreign-processes).
 
+A running Service of the Main worktree carries `stale_leases` when one of its Leases, or of the Services it covers for a Group, differs from its declared port: a list of `{"service":"web","port_name":"http","port":3001,"declared":3000}`, which moves to `declared` once the Service stops, see [When the declared port changes](configuration.md#when-the-declared-port-changes). The key is left out when the list is empty, and was added without a change of the schema version.
+
 A Worktree lists the Isolated containers Procly runs for it under `containers` when it has some, each with `service`, the compose `project` of the Worktree, the `compose` service and the `port` its health check probes, see [Isolated mode](configuration.md#isolated-mode). The key was added without a change of the schema version, and is left out when the list is empty:
 
 ```json

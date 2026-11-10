@@ -21,11 +21,12 @@ struct Planned {
 }
 
 /// Restarts the Service `service` of the Worktree holding `cwd`, logging who asked: stops it if it runs, through the
-/// path of `down`, then brings it up again with the environment of its last `up` and the same Lease, the Services it
-/// needs that do not run included, and answers as `up` does for one Service. A Service a Group covers is restarted
-/// through its Group, unless it runs on its own, which its Group cannot start over. Without a held environment, nothing
-/// is stopped and the answer is an error. A Worktree
-/// release that begins once the environment is read wins: the Restart starts nothing more and answers an error.
+/// path of `down`, then brings it up again, with the Services it needs that do not run, and answers as `up` does for
+/// one Service. It starts with the environment of its last `up` and its Lease, which in the Main worktree follows the
+/// declared port as on `up` (ADR 0006), and it stops nothing when that start would be refused for a declared port. A
+/// Service a Group covers is restarted through its Group, unless it runs on its own, which its Group cannot start over.
+/// Without a held environment, nothing is stopped and the answer is an error. A Worktree release that begins once the
+/// environment is read wins: the Restart starts nothing more and answers an error.
 pub(super) async fn run(registry: &Arc<Registry>, service: String, cwd: PathBuf, peer: Option<i32>) -> Response {
     let planned = {
         let (registry, service) = (Arc::clone(registry), service.clone());
@@ -93,5 +94,16 @@ fn plan(registry: &Registry, service: &str, cwd: &Path) -> anyhow::Result<Planne
         Some(_) | None => service.to_owned(),
     };
     let order = scope.start_order(Some(&target))?;
+    // Before anything is stopped, so that a start refused for a declared port leaves the Service running on its Lease.
+    let mut stopping = vec![target.clone()];
+    stopping.extend(
+        scope
+            .config()
+            .services
+            .get(&target)
+            .and_then(|declared| declared.covers.clone())
+            .unwrap_or_default(),
+    );
+    scope.rehearse_start(registry, &order, &stopping)?;
     Ok(Planned { scope, target, order })
 }

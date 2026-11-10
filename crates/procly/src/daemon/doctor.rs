@@ -84,7 +84,18 @@ fn port_mismatch_fix(worktree: &Path, service: &str) -> String {
     )
 }
 
-/// Whether a Service ended on a Port mismatch, and whether something Procly did not start holds a port a Lease holds.
+/// The commands that stop the running Service `service` of the Main worktree `worktree` and start it again, which
+/// moves its Leases to their declared ports.
+fn stale_lease_fix(worktree: &Path, service: &str) -> String {
+    let service = shell_word(service);
+    format!(
+        "cd {} && procly down {service} && procly up {service}",
+        shell_word(&worktree.to_string_lossy())
+    )
+}
+
+/// Whether a Service ended on a Port mismatch, whether a running Service of the Main worktree holds a Lease that
+/// differs from its declared port, and whether something Procly did not start holds a port a Lease holds.
 fn leased_ports(registry: &Registry) -> Check {
     let mut problems = Vec::new();
     let mut fixes = Vec::new();
@@ -99,6 +110,19 @@ fn leased_ports(registry: &Registry) -> Check {
                 status.service
             ));
             fixes.push(port_mismatch_fix(&topology.worktree.path, &status.service));
+        }
+        for stale in super::status::stale_leases(registry, &topology, &status) {
+            problems.push(format!(
+                "lease {}.{} port {} of {} differs from its declared port {}, service {} runs on it and keeps it \
+                 until it stops",
+                stale.service,
+                stale.port_name,
+                stale.port,
+                topology.worktree.path.display(),
+                stale.declared,
+                status.service,
+            ));
+            fixes.push(stale_lease_fix(&topology.worktree.path, &status.service));
         }
     }
     let leases = match registry.leases.bound_to_worktrees() {
@@ -144,7 +168,7 @@ fn leased_ports(registry: &Registry) -> Check {
 }
 
 /// What holds a port, as the message of a check tells it.
-fn occupant_text(occupant: &Occupant) -> String {
+pub(super) fn occupant_text(occupant: &Occupant) -> String {
     match occupant {
         Occupant::Container { name, .. } => format!("container {name}"),
         Occupant::Process { pid, command } => format!("process {pid} {command}"),

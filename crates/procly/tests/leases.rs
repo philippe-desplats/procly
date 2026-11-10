@@ -464,3 +464,408 @@ fn the_main_worktree_on_a_pinned_branch_keeps_its_declared_port_on_any_branch() 
 
     assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
 }
+
+/// A `procly.toml` declaring `api` on port `api` and `admin` on port `admin`, each running the test server on its
+/// leased `http` port.
+fn api_and_admin_declaring(api: u16, admin: u16) -> String {
+    let server = test_server();
+    format!(
+        "[services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n\n\
+         [services.admin]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {admin} }}\n",
+        server = server.display()
+    )
+}
+
+#[test]
+fn crossed_leases_of_stopped_services_each_follow_their_new_declaration_in_either_order() {
+    for order in [["admin", "api"], ["api", "admin"]] {
+        let procly = Procly::new();
+        let main = git_repository(procly.scratch(), "app");
+        let (first, second) = (free_port(), free_port());
+        write(&main, "procly.toml", &api_and_admin_declaring(first, second));
+        assert_eq!(port_of(&procly.procly_in(&main, &["up", "api"])), first);
+        assert_eq!(port_of(&procly.procly_in(&main, &["up", "admin"])), second);
+        assert_success(&procly.procly_in(&main, &["down"]));
+
+        // The declared ports were swapped by mistake, and are swapped back while nothing runs.
+        write(&main, "procly.toml", &api_and_admin_declaring(second, first));
+
+        for service in order {
+            let expected = if service == "api" { second } else { first };
+            assert_eq!(
+                port_of(&procly.procly_in(&main, &["up", service])),
+                expected,
+                "{service} brought up in the order {order:?}"
+            );
+            assert_eq!(common::http_get(expected, "/"), "ok\n");
+        }
+        let log = procly.daemon_log();
+        assert!(
+            log.contains("yielded its port")
+                && log.contains(&format!("port {}", order_first_port(order, first, second))),
+            "the Daemon logs the Lease that yielded its port: {log}"
+        );
+    }
+}
+
+/// The port the Service brought up first in `order` takes from the stale Lease of the other one.
+fn order_first_port(order: [&str; 2], admin: u16, api: u16) -> u16 {
+    if order[0] == "admin" { admin } else { api }
+}
+
+#[test]
+fn procly_env_moves_the_lease_of_a_stopped_service_to_its_new_declared_port() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    write(&main, "procly.toml", &web_declaring(new));
+
+    let env = procly.procly_in(&main, &["env", "web"]);
+
+    assert_success(&env);
+    assert!(
+        stdout(&env).contains(&format!("PORT='{new}'")),
+        "env carries the new declared port: {}",
+        stdout(&env)
+    );
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), new);
+}
+
+#[test]
+fn a_new_declared_port_held_by_a_process_fails_up_naming_it_and_keeps_the_lease_until_it_is_freed() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    write(&main, "procly.toml", &web_declaring(new));
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", new)).expect("hold the new declared port");
+
+    let refused = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
+    let message = common::stderr(&refused);
+    assert!(message.contains(&format!("declared port {new}")), "{message}");
+    assert!(
+        message.contains(&format!("process {}", std::process::id())),
+        "{message}"
+    );
+    let stop = message
+        .find(&format!("{} {}", "kill", std::process::id()))
+        .unwrap_or_else(|| panic!("the command that stops the process: {message}"));
+    // Releasing the Leases of the Main worktree stops nothing outside Procly, so it comes first.
+    let release = message
+        .find("procly worktree release")
+        .unwrap_or_else(|| panic!("the release of the Main worktree: {message}"));
+    assert!(release < stop, "{message}");
+    // A process listening on the port never frees it by itself.
+    assert!(!message.contains("frees itself"), "{message}");
+    assert!(message.contains(&format!("port {old}")), "{message}");
+    // The refusal survives a restart of the Daemon, the declaration it was granted under is stored with the Lease.
+    procly.stop_daemon();
+    assert_eq!(procly.procly_in(&main, &["up", "web"]).status.code(), Some(125));
+
+    drop(foreign);
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), new);
+}
+
+#[test]
+fn a_declared_port_taken_at_the_first_grant_stays_a_fallback_across_restarts_of_the_daemon() {
+    let procly = Procly::new();
+    let (start, end) = procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let declared = free_port();
+    write(&main, "procly.toml", &web_declaring(declared));
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", declared)).expect("hold the declared port");
+    let fallback = port_of(&procly.procly_in(&main, &["up", "web"]));
+    assert!((start..=end).contains(&fallback), "{fallback} is outside {start}-{end}");
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    procly.stop_daemon();
+
+    // The declaration did not change, so the Lease is not refused, it stays where the first grant put it.
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    // Once the declared port is free, the next start takes it back.
+    drop(foreign);
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+}
+
+#[test]
+fn a_fallback_lease_written_by_0_5_0_keeps_its_port_while_the_declared_port_is_held_across_restarts() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (declared, fallback) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(declared));
+    // As procly 0.5.0 stored a Lease of the Main worktree that fell back from its declared port: no `declared`. Used
+    // a moment ago, so that it does not expire.
+    let used = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_millis();
+    let document = format!(
+        "{{\"version\": 2, \"leases\": [{{\"repository\": {:?}, \"worktree\": {:?}, \"service\": \"web\", \
+         \"port_name\": \"http\", \"port\": {fallback}, \"last_used_ms\": {used}}}]}}\n",
+        main.join(".git").canonicalize().unwrap(),
+        main.canonicalize().unwrap()
+    );
+    std::fs::write(procly.state_dir().join("leases.json"), document).unwrap();
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", declared)).expect("hold the declared port");
+
+    for _ in 0..2 {
+        assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+        assert_success(&procly.procly_in(&main, &["down", "web"]));
+    }
+    procly.stop_daemon();
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    drop(foreign);
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+}
+
+#[test]
+fn restart_refuses_a_new_declared_port_that_is_held_before_it_stops_the_service() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    write(&main, "procly.toml", &web_declaring(new));
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", new)).expect("hold the new declared port");
+
+    let refused = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
+    assert!(
+        common::stderr(&refused).contains(&format!("the declared port {new} of Port name http of service web")),
+        "{}",
+        common::stderr(&refused)
+    );
+    // Nothing was stopped, the Service still answers on its Lease.
+    assert_eq!(common::http_get(old, "/"), "ok\n");
+    let status = stdout(&procly.procly_in(&main, &["status"]));
+    assert!(status.contains(&format!("service web healthy port {old}")), "{status}");
+    drop(foreign);
+}
+
+#[test]
+fn a_running_service_keeps_its_lease_and_status_and_doctor_say_it_differs_from_the_declaration() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    write(&main, "procly.toml", &web_declaring(new));
+
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    let env = procly.procly_in(&main, &["env", "web"]);
+    assert!(stdout(&env).contains(&format!("PORT='{old}'")), "{}", stdout(&env));
+
+    let status = stdout(&procly.procly_in(&main, &["status"]));
+    assert!(
+        status.contains(&format!(
+            "Lease web.http port {old} differs from its declared port {new}"
+        )),
+        "{status}"
+    );
+    let doctor = procly.procly_in(&main, &["doctor"]);
+    let checks = stdout(&doctor);
+    assert!(
+        checks.contains(&format!(
+            "lease web.http port {old} of {} differs from its declared port {new}",
+            main.canonicalize().expect("canonical Main worktree").display()
+        )),
+        "{checks}"
+    );
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), new);
+    let status = stdout(&procly.procly_in(&main, &["status"]));
+    assert!(!status.contains("differs from its declared port"), "{status}");
+}
+
+/// A `procly.toml` declaring `web` with 2 Port names, `http` and `admin`, each listened on by a test server.
+fn web_with_2_ports(http: u16, admin: u16) -> String {
+    let server = test_server();
+    format!(
+        "[services.web]\nrun = '{server} --port {{ports.http}} & exec {server} --port {{ports.admin}}'\n\
+         ports = {{ http = {http}, admin = {admin} }}\nhealth = {{ port = 'http' }}\n",
+        server = server.display()
+    )
+}
+
+#[test]
+fn restart_of_a_service_whose_2_port_names_were_swapped_while_it_ran_moves_both_leases() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (first, second) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_with_2_ports(first, second));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    // Swapped while it runs, each port is held by its own tree.
+    write(&main, "procly.toml", &web_with_2_ports(second, first));
+
+    let restarted = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_success(&restarted);
+    assert_eq!(
+        stdout(&restarted),
+        format!("web started http://localhost:{second} port {second}, admin port {first}\n")
+    );
+}
+
+#[test]
+fn a_new_declared_port_left_in_time_wait_fails_up_saying_a_released_port_frees_itself_within_a_minute() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    write(&main, "procly.toml", &web_declaring(new));
+    // Nothing listens on it any more, the port is held by a socket that does not answer.
+    leave_in_time_wait(new);
+
+    let refused = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
+    let message = common::stderr(&refused);
+    assert!(message.contains(&format!("declared port {new}")), "{message}");
+    let frees = message
+        .find("a port a Service released a moment ago frees itself within a minute, and `procly up` can be run again")
+        .unwrap_or_else(|| panic!("the port frees itself: {message}"));
+    let find = message
+        .find("Otherwise something holds it without answering: release the Leases of the Main worktree")
+        .unwrap_or_else(|| panic!("how to find a live holder: {message}"));
+    assert!(frees < find, "{message}");
+    assert!(message.contains(&format!("`lsof -nP -iTCP:{new}`")), "{message}");
+}
+
+/// The address of the network interface the host routes to the outside through, when it has one. Connecting a UDP
+/// socket sends nothing, it only picks the route.
+fn interface_address() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("192.0.2.1", 9)).ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    (!address.is_loopback() && !address.is_unspecified()).then_some(address)
+}
+
+/// The link-local address of the loopback, `fe80::1%lo0`, which every macOS has and which never leaves the machine.
+#[cfg(target_os = "macos")]
+fn loopback_link_local(port: u16) -> Option<std::net::SocketAddr> {
+    let output = std::process::Command::new("/sbin/ifconfig").arg("lo0").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().find(|line| line.contains("fe80::1%lo0"))?;
+    let scope = line.split("scopeid 0x").nth(1)?.split_whitespace().next()?;
+    let scope = u32::from_str_radix(scope, 16).ok()?;
+    Some(std::net::SocketAddrV6::new(std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), port, 0, scope).into())
+}
+
+/// Every address a Foreign process may listen on `port` at: the wildcard and the loopback, IPv4 and IPv6, an address
+/// of a network interface, and on macOS the link-local address of the loopback. An address this host lacks is left out.
+fn listening_addresses(port: u16) -> Vec<std::net::SocketAddr> {
+    let mut addresses: Vec<std::net::SocketAddr> = vec![
+        ("0.0.0.0", port).into_socket_addr(),
+        ("127.0.0.1", port).into_socket_addr(),
+        ("::", port).into_socket_addr(),
+        ("::1", port).into_socket_addr(),
+    ];
+    addresses.extend(interface_address().map(|address| std::net::SocketAddr::new(address, port)));
+    #[cfg(target_os = "macos")]
+    addresses.extend(loopback_link_local(port));
+    addresses
+}
+
+/// Parses an address the tests name with a literal.
+trait IntoSocketAddr {
+    fn into_socket_addr(self) -> std::net::SocketAddr;
+}
+
+impl IntoSocketAddr for (&str, u16) {
+    fn into_socket_addr(self) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(self.0.parse().expect("an IP address literal"), self.1)
+    }
+}
+
+/// Leaves `port` in `TIME_WAIT` on the loopback: the side that closes first keeps it once the listener is gone.
+fn leave_in_time_wait(port: u16) {
+    use std::io::Read as _;
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("listen on the port");
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to it");
+    let (served, _) = listener.accept().expect("accept the connection");
+    drop(served);
+    client
+        .read_to_end(&mut Vec::new())
+        .expect("read until the server closes");
+}
+
+#[test]
+fn a_declared_port_a_process_listens_on_at_any_address_is_held_at_the_first_grant_of_the_main_worktree() {
+    for mut address in listening_addresses(0) {
+        let procly = Procly::new();
+        let (start, end) = procly.narrow_range();
+        let main = git_repository(procly.scratch(), "app");
+        let declared = free_port();
+        // The scope of a link-local address stays with it.
+        address.set_port(declared);
+        let Ok(foreign) = std::net::TcpListener::bind(address) else {
+            eprintln!("cannot listen on {address} here, case left out");
+            continue;
+        };
+        write(&main, "procly.toml", &web_declaring(declared));
+
+        let leased = port_of(&procly.procly_in(&main, &["up", "web"]));
+
+        assert!(
+            (start..=end).contains(&leased),
+            "a listener on {address} holds the declared port {declared}, the Lease went to {leased}"
+        );
+        drop(foreign);
+    }
+}
+
+#[test]
+fn the_explicit_port_of_a_pinned_branch_is_held_by_a_listener_at_any_address_and_by_time_wait() {
+    let mut cases: Vec<Option<std::net::SocketAddr>> = listening_addresses(0).into_iter().map(Some).collect();
+    // `None` stands for a port left in TIME_WAIT, which the strict probe counts as held.
+    cases.push(None);
+    for case in cases {
+        let procly = Procly::new();
+        let (start, end) = procly.narrow_range();
+        let main = git_repository(procly.scratch(), "app");
+        let explicit = free_port();
+        let config = format!(
+            "{}[pinned.staging.ports]\nweb = {{ http = {explicit} }}\n",
+            web_declaring(free_port())
+        );
+        let staging = worktree_on(&main, "app-staging", "staging", true);
+        write(&staging, "procly.toml", &config);
+        let mut foreign = None;
+        if let Some(mut address) = case {
+            address.set_port(explicit);
+            let Ok(listener) = std::net::TcpListener::bind(address) else {
+                eprintln!("cannot listen on {address} here, case left out");
+                continue;
+            };
+            foreign = Some(listener);
+        } else {
+            leave_in_time_wait(explicit);
+        }
+
+        let leased = port_of(&procly.procly_in(&staging, &["up", "web"]));
+
+        assert!(
+            (start..=end).contains(&leased),
+            "{case:?} holds the explicit port {explicit}, the Lease went to {leased}"
+        );
+        drop(foreign);
+    }
+}

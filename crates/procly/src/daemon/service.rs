@@ -555,6 +555,7 @@ impl Services {
                     started_at: service.started_at.load(Ordering::Relaxed),
                     // The Services know nothing of the held environments, the status report tells.
                     restartable: false,
+                    stale_leases: Vec::new(),
                     state,
                 };
                 ((worktree.clone(), name.clone()), service.topology.clone(), status)

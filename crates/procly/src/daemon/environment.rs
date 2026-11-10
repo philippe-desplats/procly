@@ -479,6 +479,78 @@ fn grant(
     ports: &BTreeMap<String, PortConfig>,
     leasing: Leasing,
 ) -> Result<BTreeMap<String, u16>, EnvironmentError> {
+    let granted = with_lease_request(
+        registry,
+        topology,
+        config,
+        branch,
+        service,
+        ports,
+        leasing,
+        &[],
+        |request| registry.leases.grant(request),
+    )??;
+    // The grant drops the Leases that expired, and their Portless aliases go with them, unless a call of `portless`
+    // is under way: the grant never waits for it, and the next removal takes what is left.
+    registry.portless.prune_if_idle(&registry.leases);
+    Ok(granted)
+}
+
+/// Checks that starting `services` in turn, in the Worktree of `topology`, would not be refused for a declared port,
+/// once the Services of `stopping` are stopped, which they still run. Nothing is granted nor stored. A Group stands
+/// for the Services it covers. Run before a Restart stops anything, and before a Group grants the Leases of the
+/// Services it covers, so that a refusal leaves everything as it was. Blocking.
+pub(super) fn rehearse_start(
+    registry: &Registry,
+    topology: &Topology,
+    config: &Config,
+    services: &[String],
+    stopping: &[String],
+) -> Result<(), EnvironmentError> {
+    let branch = pinned_branch(topology, config)?;
+    let mut rehearsal = registry.leases.rehearsal(&topology.worktree.path, stopping)?;
+    for service in services {
+        let Some(declared) = config.services.get(service) else {
+            continue;
+        };
+        let covered = declared.covers.clone().unwrap_or_else(|| vec![service.clone()]);
+        for name in &covered {
+            let Some(covered) = config.services.get(name) else {
+                continue;
+            };
+            with_lease_request(
+                registry,
+                topology,
+                config,
+                branch,
+                name,
+                &covered.ports,
+                Leasing::Starting,
+                stopping,
+                |request| rehearsal.grant(request),
+            )??;
+        }
+    }
+    Ok(())
+}
+
+/// Hands `use_request` the Lease request of the Service `service`, as [`grant`] makes it, with the Services of
+/// `stopping` counted as not running.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the facts of one Lease request, each one read where it is made"
+)]
+fn with_lease_request<T>(
+    registry: &Registry,
+    topology: &Topology,
+    config: &Config,
+    branch: Option<&str>,
+    service: &str,
+    ports: &BTreeMap<String, PortConfig>,
+    leasing: Leasing,
+    stopping: &[String],
+    use_request: impl FnOnce(&LeaseRequest<'_>) -> T,
+) -> Result<T, EnvironmentError> {
     let shared;
     let declared = config.services.get(service);
     let compose = declared.and_then(|declared| declared.compose.as_deref());
@@ -499,22 +571,37 @@ fn grant(
     let project_dir = &topology.worktree.path;
     let held_by_container =
         |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, project_dir, compose));
-    let granted = registry.leases.grant(&LeaseRequest {
+    let mut running = registry.running();
+    for name in stopping {
+        running.remove(&(topology.worktree.path.clone(), name.clone()));
+    }
+    Ok(use_request(&LeaseRequest {
         topology,
         service,
         ports,
         range: config.settings.port_range,
         declared: &config.declared_ports(),
+        declarations: &declarations(config),
         pinned,
         expiry: config.settings.lease_expiry,
-        running: &registry.running(),
+        running: &running,
         keep: leasing == Leasing::AsGranted,
         claimed: compose.map(|_| Claimed(&held_by_container)),
-    })?;
-    // The grant drops the Leases that expired, and their Portless aliases go with them, unless a call of `portless`
-    // is under way: the grant never waits for it, and the next removal takes what is left.
-    registry.portless.prune_if_idle(&registry.leases);
-    Ok(granted)
+    }))
+}
+
+/// The declared port of each Service and Port name of `config`.
+pub(super) fn declarations(config: &Config) -> BTreeMap<(String, String), u16> {
+    config
+        .services
+        .iter()
+        .flat_map(|(service, declared)| {
+            declared
+                .ports
+                .iter()
+                .map(move |(port_name, port)| ((service.clone(), port_name.clone()), port.port))
+        })
+        .collect()
 }
 
 /// Replaces the Env file in one step, readable by the user only since a Derived variable may carry a credential,

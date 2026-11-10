@@ -646,3 +646,60 @@ fn a_group_that_covers_one_service_is_reached_through_it_and_up_starts_the_other
     );
     assert!(listens(web) && listens(api));
 }
+
+/// The port of the Lease of `service` in the Lease document, read without granting anything.
+fn stored_lease(procly: &Procly, service: &str) -> u64 {
+    let text = std::fs::read_to_string(procly.state_dir().join("leases.json")).expect("read the Lease document");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("a JSON Lease document");
+    document["leases"]
+        .as_array()
+        .and_then(|leases| leases.iter().find(|lease| lease["service"] == service))
+        .and_then(|lease| lease["port"].as_u64())
+        .unwrap_or_else(|| panic!("no Lease of {service} in {text}"))
+}
+
+#[test]
+fn a_group_whose_covered_service_cannot_move_moves_no_lease_of_the_others() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    assert_success(&procly.procly_in(&main, &["down", "dev"]));
+    // web, granted first, could move, api, granted next, cannot.
+    let (new_web, new_api) = (free_port(), free_port());
+    write(&main, "procly.toml", &monorepo(new_web, new_api, &starts, &seen));
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", new_api)).expect("hold the new declared port of api");
+
+    let refused = procly.procly_in(&main, &["up", "dev"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains(&format!("the declared port {new_api} of Port name http of service api")),
+        "{}",
+        stderr(&refused)
+    );
+    assert_eq!(stored_lease(&procly, "web"), u64::from(web));
+    assert_eq!(stored_lease(&procly, "api"), u64::from(api));
+    drop(foreign);
+}
+
+#[test]
+fn restart_of_a_group_whose_declarations_were_crossed_while_it_ran_moves_each_lease_to_its_declared_port() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (first, second) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(first, second, &starts, &seen));
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    // Swapped while the Group runs, each port is held by its own tree.
+    write(&main, "procly.toml", &monorepo(second, first, &starts, &seen));
+
+    let restarted = procly.procly_in(&main, &["restart", "dev"]);
+
+    assert_success(&restarted);
+    assert_eq!(stored_lease(&procly, "web"), u64::from(second));
+    assert_eq!(stored_lease(&procly, "api"), u64::from(first));
+    assert!(listens(first) && listens(second));
+}

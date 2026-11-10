@@ -470,6 +470,7 @@ mod tests {
             reattached: false,
             started_at: 1_000,
             restartable: true,
+            stale_leases: Vec::new(),
             state: ServiceState::Ended {
                 end: ServiceEnd::Exited { code: 1 },
             },
