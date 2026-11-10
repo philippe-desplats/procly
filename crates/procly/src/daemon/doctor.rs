@@ -144,7 +144,7 @@ fn leased_ports(registry: &Registry) -> Check {
 }
 
 /// What holds a port, as the message of a check tells it.
-fn occupant_text(occupant: &Occupant) -> String {
+pub(super) fn occupant_text(occupant: &Occupant) -> String {
     match occupant {
         Occupant::Container { name, .. } => format!("container {name}"),
         Occupant::Process { pid, command } => format!("process {pid} {command}"),

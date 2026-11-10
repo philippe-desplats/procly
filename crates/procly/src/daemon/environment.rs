@@ -505,6 +505,7 @@ fn grant(
         ports,
         range: config.settings.port_range,
         declared: &config.declared_ports(),
+        declarations: &declarations(config),
         pinned,
         expiry: config.settings.lease_expiry,
         running: &registry.running(),
@@ -515,6 +516,20 @@ fn grant(
     // is under way: the grant never waits for it, and the next removal takes what is left.
     registry.portless.prune_if_idle(&registry.leases);
     Ok(granted)
+}
+
+/// The declared port of each Service and Port name of `config`.
+fn declarations(config: &Config) -> BTreeMap<(String, String), u16> {
+    config
+        .services
+        .iter()
+        .flat_map(|(service, declared)| {
+            declared
+                .ports
+                .iter()
+                .map(move |(port_name, port)| ((service.clone(), port_name.clone()), port.port))
+        })
+        .collect()
 }
 
 /// Replaces the Env file in one step, readable by the user only since a Derived variable may carry a credential,
