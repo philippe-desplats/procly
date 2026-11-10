@@ -258,6 +258,20 @@ fn the_hooks_and_settings_of_the_developer_stay_when_the_guard_goes() {
 }
 
 #[test]
+fn a_tab_indented_settings_file_comes_back_byte_for_byte_when_the_guard_goes() {
+    let procly = Procly::new();
+    let (main, _, _) = repository(&procly);
+    let own = "{\n\t\"model\": \"opus\",\n\t\"env\": {\n\t\t\"A\": \"1\"\n\t}\n}\n";
+    write(&main.join(".claude/settings.json"), own);
+    adopt_procly(&procly, &main);
+    assert!(read(&main.join(".claude/settings.json")).contains("procly guard"));
+
+    eject(&procly, &main);
+
+    assert_eq!(read(&main.join(".claude/settings.json")), own);
+}
+
+#[test]
 fn eject_with_repository_stops_the_services_of_every_worktree_of_the_repository() {
     let procly = Procly::new();
     let (main, port, _) = repository(&procly);

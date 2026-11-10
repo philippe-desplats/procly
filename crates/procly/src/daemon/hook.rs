@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::managed::{self, ManagedBlocks, ManagedError, Origin, Outcome, Removal};
@@ -103,6 +104,7 @@ pub(super) fn install(managed: &ManagedBlocks, file: &Path) -> Result<Outcome, H
             });
         }
     };
+    let layout = Layout::of(&text);
     let mut settings = parse_settings(file, &text)?;
     let shape = |what| HookError::Shape {
         path: file.to_owned(),
@@ -140,9 +142,8 @@ pub(super) fn install(managed: &ManagedBlocks, file: &Path) -> Result<Outcome, H
         Some(_) => Outcome::Edited,
     };
     if outcome == Outcome::Written {
-        let mut text = serde_json::to_string_pretty(&settings).expect("a JSON value always serializes");
-        text.push('\n');
-        managed::write_text(file, &text)?;
+        // `text` is moved into the origin when the Guard is new, so the layout is read before.
+        managed::write_text(file, &layout.render(&settings))?;
         managed.record(file, BLOCK, &compact(&group()), origin)?;
     }
     Ok(outcome)
@@ -208,9 +209,7 @@ pub(super) fn remove(managed: &ManagedBlocks, file: &Path) -> Result<Removal, Ho
     } else if let Some(original) = original {
         managed::write_text(file, original)?;
     } else {
-        let mut text = serde_json::to_string_pretty(&settings).expect("a JSON value always serializes");
-        text.push('\n');
-        managed::write_text(file, &text)?;
+        managed::write_text(file, &Layout::of(&text).render(&settings))?;
     }
     managed.forget_block(file, BLOCK)?;
     Ok(Removal::Removed { deleted })
@@ -245,6 +244,49 @@ fn parse_settings(file: &Path, text: &str) -> Result<Value, HookError> {
             path: file.to_owned(),
             source,
         })
+    }
+}
+
+/// How a settings file lays itself out: the indentation of one nesting level and whether the text ends with a newline.
+/// Writing the settings back in the layout they were read in keeps a tracked file's diff down to what Procly changed.
+struct Layout {
+    indent: String,
+    newline: bool,
+}
+
+impl Layout {
+    /// The layout of `text`: the leading whitespace of its first indented line (tabs or spaces, as many as it finds)
+    /// and whether it ends with a newline. A file with no indented line, so empty or on one line, gets two spaces and
+    /// a newline.
+    fn of(text: &str) -> Self {
+        let indent = text.lines().find_map(|line| {
+            let first = line.chars().next().filter(|first| matches!(first, ' ' | '\t'))?;
+            Some(line.chars().take_while(|&c| c == first).collect::<String>())
+        });
+        match indent {
+            Some(indent) => Self {
+                indent,
+                newline: text.ends_with('\n'),
+            },
+            None => Self {
+                indent: "  ".to_owned(),
+                newline: true,
+            },
+        }
+    }
+
+    /// `settings` as pretty JSON in this layout.
+    fn render(&self, settings: &Value) -> String {
+        let mut bytes = Vec::new();
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(self.indent.as_bytes());
+        settings
+            .serialize(&mut serde_json::Serializer::with_formatter(&mut bytes, formatter))
+            .expect("a JSON value always serializes");
+        let mut text = String::from_utf8(bytes).expect("JSON text is UTF-8");
+        if self.newline {
+            text.push('\n');
+        }
+        text
     }
 }
 
@@ -294,6 +336,100 @@ mod tests {
         assert_eq!(written["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "fmt");
         assert_eq!(written["hooks"]["PreToolUse"][0]["matcher"], "Edit");
         assert_eq!(written["hooks"]["PreToolUse"][1], group());
+    }
+
+    #[test]
+    fn a_tab_indented_settings_file_keeps_its_tabs_and_gains_only_the_hooks_key() {
+        let (_dir, blocks, file) = fixture();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            "{\n\t\"model\": \"opus\",\n\t\"env\": {\n\t\t\"A\": \"1\"\n\t}\n}\n",
+        )
+        .unwrap();
+
+        assert_eq!(install(&blocks, &file).unwrap(), Outcome::Written);
+
+        let expected = concat!(
+            "{\n",
+            "\t\"model\": \"opus\",\n",
+            "\t\"env\": {\n",
+            "\t\t\"A\": \"1\"\n",
+            "\t},\n",
+            "\t\"hooks\": {\n",
+            "\t\t\"PreToolUse\": [\n",
+            "\t\t\t{\n",
+            "\t\t\t\t\"matcher\": \"Bash\",\n",
+            "\t\t\t\t\"hooks\": [\n",
+            "\t\t\t\t\t{\n",
+            "\t\t\t\t\t\t\"type\": \"command\",\n",
+            "\t\t\t\t\t\t\"command\": \"procly guard\"\n",
+            "\t\t\t\t\t}\n",
+            "\t\t\t\t]\n",
+            "\t\t\t}\n",
+            "\t\t]\n",
+            "\t}\n",
+            "}\n",
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_four_space_settings_file_keeps_its_four_spaces() {
+        let (_dir, blocks, file) = fixture();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "{\n    \"model\": \"opus\"\n}\n").unwrap();
+
+        assert_eq!(install(&blocks, &file).unwrap(), Outcome::Written);
+
+        let expected = concat!(
+            "{\n",
+            "    \"model\": \"opus\",\n",
+            "    \"hooks\": {\n",
+            "        \"PreToolUse\": [\n",
+            "            {\n",
+            "                \"matcher\": \"Bash\",\n",
+            "                \"hooks\": [\n",
+            "                    {\n",
+            "                        \"type\": \"command\",\n",
+            "                        \"command\": \"procly guard\"\n",
+            "                    }\n",
+            "                ]\n",
+            "            }\n",
+            "        ]\n",
+            "    }\n",
+            "}\n",
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_settings_file_without_a_trailing_newline_stays_without_one() {
+        let (_dir, blocks, file) = fixture();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "{\n\t\"model\": \"opus\"\n}").unwrap();
+
+        install(&blocks, &file).unwrap();
+
+        let written = fs::read_to_string(&file).unwrap();
+        assert!(written.ends_with("\n}"), "{written:?}");
+        assert!(written.starts_with("{\n\t\"model\": \"opus\",\n"), "{written:?}");
+    }
+
+    #[test]
+    fn a_compact_settings_file_gets_two_spaces_and_a_newline() {
+        let (_dir, blocks, file) = fixture();
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, r#"{"model":"opus"}"#).unwrap();
+
+        install(&blocks, &file).unwrap();
+
+        let written = fs::read_to_string(&file).unwrap();
+        assert!(
+            written.starts_with("{\n  \"model\": \"opus\",\n  \"hooks\": {\n"),
+            "{written:?}"
+        );
+        assert!(written.ends_with("}\n"), "{written:?}");
     }
 
     #[test]
