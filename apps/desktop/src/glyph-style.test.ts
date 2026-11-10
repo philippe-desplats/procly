@@ -61,7 +61,7 @@ describe("the glyph stylesheet", () => {
     // Opacity on the row would dim the glyph too (0.55 takes the failure red under 3:1), and on the word it would take
     // the amber under 4.5:1. The dimming sits on the name, the place and the end of the row, and the word turns grey.
     expect(rule('.item[data-seen="true"]')).toBeNull();
-    for (const part of [".item-name", ".item-where", ".item-end > :not(.mark)"]) {
+    for (const part of [".item-name", ".item-where", ".item-end > *", ".item-ports"]) {
       expect(rule(`.item[data-seen="true"] ${part}`), part).toMatch(/opacity:\s*0\.55/);
     }
     const word = rule('.item[data-seen="true"] .item-main .word');

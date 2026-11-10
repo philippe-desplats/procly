@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { Checks, type ShowAction } from "./CheckList";
 import { CopyBox } from "./CopyBox";
 import {
@@ -13,6 +15,7 @@ import {
 } from "./doctor";
 import type { Check } from "./protocol/Check";
 import { formatMinute, formatMoment } from "./time";
+import { TitleBar } from "./TitleBar";
 
 /** How many checks failed and how many only warn, in a line. */
 function summary(document: DoctorDocument): string {
@@ -32,10 +35,16 @@ function summary(document: DoctorDocument): string {
  */
 export function DoctorScreen({
   store,
+  controls = null,
+  banner = null,
   onShowOrphans,
   onShowProcess,
 }: {
   store: DoctorStore;
+  /** The end of the title line: when the answer was read, and Refresh. */
+  controls?: ReactNode;
+  /** The notice the screen draws under its title line, nothing when there is none. */
+  banner?: ReactNode;
   onShowOrphans: () => void;
   /** Takes to the Foreign process that holds a port a Lease holds, `null` while the Status reports none. */
   onShowProcess: (() => void) | null;
@@ -58,15 +67,18 @@ export function DoctorScreen({
   };
   return (
     <section aria-label="Doctor">
-      <h2 className="title">Doctor</h2>
-      <p className="muted">
-        The checks of this Mac and of the Daemon. Doctor changes nothing and runs none of the commands it
-        names.
-      </p>
+      <TitleBar
+        title="Doctor"
+        under={
+          state.kind === "report"
+            ? `This Mac and the Daemon, checked at ${formatMoment(state.at, state.at)}. Doctor runs none of the fixes.`
+            : "This Mac and the Daemon. Doctor runs none of the fixes."
+        }
+      >
+        {controls}
+      </TitleBar>
+      {banner}
       {document === null ? null : <p className="caption">{summary(document)}</p>}
-      {state.kind === "report" ? (
-        <p className="caption">{`Checked ${formatMoment(state.at, state.at)}`}</p>
-      ) : null}
       <Checks state={state} pick={machineChecks} fold show={show} />
       <p className="doctor-foot">
         The checks of a Worktree (configuration, Guard, Worktrunk hooks) are in its view.
@@ -112,8 +124,8 @@ export function ChecksWithoutDaemon({ store }: { store: DoctorStore }) {
     <section aria-label="Checks without the Daemon">
       <h3 className="subtitle">
         {fresh.kind === "report"
-          ? `Checks that run without the Daemon, at ${formatMinute(fresh.at, fresh.at)}`
-          : "Checks that run without the Daemon"}
+          ? `Doctor, which runs without the Daemon, at ${formatMinute(fresh.at, fresh.at)}`
+          : "Doctor, which runs without the Daemon"}
       </h3>
       <Checks state={fresh} pick={checksWithoutDaemon} problemsOnly />
     </section>

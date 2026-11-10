@@ -22,18 +22,19 @@ describe("a Worktree released through its sheet", () => {
     expect(up.code).toBe(0);
     expect((await reportedService(scene, scene.service))?.state).toBe("healthy");
 
-    // The scene's branch is `main`, which is what the sidebar names the Worktree.
+    // The scene's branch is `main`, which is what the sidebar names the Worktree. The sheet names it by its folder, as
+    // the title line of its screen does.
     await browser.waitUntil(() => openWorktree("main"), { timeout: 60_000, interval: 500 });
     await browser.waitUntil(() => press("Release…"), { timeout: 60_000, interval: 500 });
 
     // The dry run names the Service it would stop, and the Daemon has not touched it.
-    await showingTitle("Release main?");
+    await showingTitle("Release web-release?");
     await showingText(SHEET, ["Will stop", scene.service]);
     expect((await reportedService(scene, scene.service))?.state).toBe("healthy");
 
     expect(await press("Release")).toBe(true);
 
-    await showingTitle("Released main");
+    await showingTitle("Released web-release");
     await showingText(SHEET, ["Stopped", scene.service]);
     // The real release stopped the Service and forgot it.
     await browser.waitUntil(async () => (await reportedService(scene, scene.service)) === null, {

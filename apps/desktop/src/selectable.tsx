@@ -21,18 +21,31 @@ export function SelectableRow({
   target,
   seen,
   wide = false,
+  trail,
   children,
 }: {
   target: Selection;
   seen: boolean;
   /** Whether the row has a column for where the item runs, between what it is and its time and ports. */
   wide?: boolean;
+  /** What ends the row beside the button that picks it, such as the port pills, which are buttons of their own. */
+  trail?: ReactNode;
   children: ReactNode;
 }) {
   const { selection, select, showMenu } = useContext(SelectionContext);
   const picked = sameSelection(selection, target);
   return (
-    <li className="item" data-seen={seen ? "true" : undefined} data-selected={picked ? "true" : undefined}>
+    <li
+      className="item"
+      data-seen={seen ? "true" : undefined}
+      data-selected={picked ? "true" : undefined}
+      onContextMenu={(event) => {
+        // The native menu of the row replaces the one of the webview, as in a list of the Finder.
+        event.preventDefault();
+        select(target);
+        showMenu(target);
+      }}
+    >
       <button
         type="button"
         className={wide ? "item-select item-select-wide" : "item-select"}
@@ -40,15 +53,10 @@ export function SelectableRow({
         onClick={() => {
           select(target);
         }}
-        onContextMenu={(event) => {
-          // The native menu of the row replaces the one of the webview, as in a list of the Finder.
-          event.preventDefault();
-          select(target);
-          showMenu(target);
-        }}
       >
         {children}
       </button>
+      {trail}
     </li>
   );
 }

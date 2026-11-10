@@ -1,4 +1,32 @@
+import { readFileSync } from "node:fs";
+
 import { browser } from "@wdio/globals";
+
+/** The smallest size `tauri.conf.json` gives the window, which a system resize is bound to and WebDriver is not. */
+function minimumSize(): { width: number; height: number } {
+  const config = JSON.parse(
+    readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+  ) as {
+    app: { windows: { minWidth: number; minHeight: number }[] };
+  };
+  const window = config.app.windows[0];
+  return { width: window?.minWidth ?? 0, height: window?.minHeight ?? 0 };
+}
+
+/**
+ * Sets the size of the window through WebDriver, which bypasses the `minWidth` and `minHeight` of the window: only a
+ * system resize is bound to them. A layout spec measuring a window smaller than a user can reach would prove nothing,
+ * so a size under the minimum is refused here rather than measured.
+ */
+export async function resizeWindow(width: number, height: number): Promise<void> {
+  const minimum = minimumSize();
+  if (width < minimum.width || height < minimum.height) {
+    throw new Error(
+      `a ${String(width)}x${String(height)} window cannot be reached: the minimum is ${String(minimum.width)}x${String(minimum.height)}`,
+    );
+  }
+  await browser.setWindowSize(width, height);
+}
 
 // The helpers below read and press the page through `browser.execute` rather than through `$` and `click`. The
 // embedded WebDriver server of macOS takes about 5 seconds for each new element lookup, which made one flow last 4

@@ -13,7 +13,13 @@ import { BrandMark } from "./BrandMark";
 import { rowMenu, useContextMenu, worktreeMenu } from "./context-menu";
 import { CopyBox } from "./CopyBox";
 import { DaemonStateScreen, isBlocking, type BlockingSnapshot } from "./DaemonScreens";
-import type { DaemonSnapshot, DaemonStore, FailureKey, NeedsYou } from "./daemon";
+import {
+  failureMessage,
+  type DaemonSnapshot,
+  type DaemonStore,
+  type FailureKey,
+  type NeedsYou,
+} from "./daemon";
 import {
   createDoctorStore,
   REFRESH_REQUESTED,
@@ -43,6 +49,7 @@ import { ReleaseSheet } from "./ReleaseSheet";
 import { SelectionContext } from "./selectable";
 import { foreignId, foreignToShow, resolve, selectedKey, type Selected, type Selection } from "./selection";
 import { failureKeyOf, SelectedPanel, WorktreeNames } from "./SelectedPanel";
+import { stopService } from "./services";
 import { SettingsScreen } from "./SettingsScreen";
 import { SidebarFooter } from "./SidebarFooter";
 import { OPEN_FAILURE, OPEN_SETTINGS, openWorktree, revealWorktree, type Place } from "./settings";
@@ -51,7 +58,7 @@ import type { MenuChoice } from "./protocol/MenuChoice";
 import type { RepositoryStatus } from "./protocol/RepositoryStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
-import { ContainerRow, RemovedMark, ServiceRow, worktreeWhere } from "./Rows";
+import { ContainerRow, foreignDetail, RemovedMark, ServiceRow, worktreeWhere } from "./Rows";
 import { foreignWord, jobEndWord, serviceEndWord } from "./state";
 import { TitleBar } from "./TitleBar";
 import { formatMoment } from "./time";
@@ -228,7 +235,7 @@ export function App({
   const release = (worktree: WorktreeStatus): void => {
     setReleasing({
       path: worktree.path,
-      label: worktreeLabel(worktree),
+      label: basename(worktree.path),
       listed: worktree.listed,
       ended: endedIn(worktree),
       foreign: worktree.foreign ?? [],
@@ -245,9 +252,12 @@ export function App({
 
   const showMenu = useContextMenu();
   // A failure to open from the context menu of a Worktree, which the inspector shows.
-  const { error: openingError, run: runOpening } = useOpening(() => {
+  const { error: openingFailure, run: runOpening } = useOpening(() => {
     setView({ kind: "settings", focusEditor: true });
   });
+  // Why the Stop of the context menu of a row was refused, shown in the same place.
+  const [stopError, setStopError] = useState<string | null>(null);
+  const openingError = openingFailure ?? stopError;
   const showRowMenu = (target: Selection): void => {
     const picked = snapshot.kind === "status" ? resolve(target, snapshot.report) : null;
     if (picked === null || snapshot.kind !== "status") {
@@ -256,6 +266,14 @@ export function App({
     const key = failureKeyOf(picked);
     // A Seen failure is still a failure, the marks are offered on failures only.
     const failed = key !== null && failures.some((known) => sameFailure(known, key));
+    // Stop is offered where the inspector offers it: on a Service that runs and on an Isolated Compose service.
+    const service =
+      picked.kind === "service" && picked.service.state !== "ended"
+        ? picked.service.service
+        : picked.kind === "compose"
+          ? picked.container.service
+          : null;
+    const cwd = picked.kind === "service" || picked.kind === "compose" ? picked.worktree.path : null;
     showMenu(
       rowMenu(
         picked,
@@ -269,6 +287,19 @@ export function App({
               markUnseen: () => {
                 onMarkUnseen(key);
               },
+            },
+        service === null || cwd === null
+          ? null
+          : () => {
+              setStopError(null);
+              stopService(service, cwd)
+                .catch((reason: unknown) => {
+                  setStopError(failureMessage(reason));
+                })
+                .finally(() => {
+                  // The Daemon may have changed whatever the answer says.
+                  store.refresh().catch(() => undefined);
+                });
             },
       ),
     );
@@ -287,6 +318,10 @@ export function App({
         },
         reveal: () => {
           runOpening(revealWorktree(worktree.path));
+        },
+        check: () => {
+          setView({ kind: "worktree", path: worktree.path });
+          void doctor.run(worktree.path);
         },
         release: () => {
           release(worktree);
@@ -346,7 +381,12 @@ export function App({
   const outside = view.kind === "outside";
   // Settings, the Orphans and the checks show nothing the inspector explains. The Jobs outside any Repository are picked
   // for it.
-  const wide = settings || orphans || checking;
+  // The Overview of a Daemon that knows nothing has no item for an inspector to explain either, as the mockup draws it.
+  const emptyOverview =
+    snapshot.kind === "status" &&
+    (view.kind === "overview" || (view.kind === "worktree" && current === null)) &&
+    overviewIsEmpty(snapshot.needsYou, worktrees);
+  const wide = settings || orphans || checking || emptyOverview;
   // A failure to open from the context menu of a Worktree shows in the inspector, or above the center when a wide
   // screen hides the inspector.
   const openingAlert =
@@ -357,7 +397,7 @@ export function App({
     );
   // The Overview and a Worktree draw their own title line, with the controls of the toolbar at its end, so the toolbar
   // is left out.
-  const titled = snapshot.kind === "status" && !checking;
+  const titled = snapshot.kind === "status";
   // The notice of a Procly release that drifted, which any screen but those two shows above its content and they show
   // under their title line.
   const banner =
@@ -461,6 +501,15 @@ export function App({
                 {view.kind === "doctor" ? (
                   <DoctorScreen
                     store={doctor}
+                    controls={
+                      <RefreshControls
+                        snapshot={snapshot}
+                        store={store}
+                        doctor={doctor}
+                        orphans={orphanScan}
+                      />
+                    }
+                    banner={banner}
                     onShowOrphans={() => {
                       setView({ kind: "orphans" });
                     }}
@@ -567,9 +616,9 @@ function needsYouCount(count: number): string {
   return `${count} ${count === 1 ? "needs" : "need"} you`;
 }
 
-/** "1 Job", "2 Jobs": what the Outside Repositories entry holds. */
+/** "1 Job", "2 Jobs", "No Job": what the Outside Repositories entry holds. */
 function jobsOutside(count: number): string {
-  return `${count} ${count === 1 ? "Job" : "Jobs"}`;
+  return count === 0 ? "No Job" : `${count} ${count === 1 ? "Job" : "Jobs"}`;
 }
 
 function Sidebar({
@@ -638,17 +687,14 @@ function Sidebar({
         onSelect={onSelect}
         onMenu={onWorktreeMenu}
       />
-      <button
-        type="button"
-        className="row row-worktree"
-        aria-current={outside ? "true" : undefined}
-        onClick={onOutside}
-      >
-        <span className="row-line">
-          <span className="row-name">Outside Repositories</span>
-        </span>
-        {outsideJobs === 0 ? null : <span className="row-detail">{jobsOutside(outsideJobs)}</span>}
-      </button>
+      <section className="group" aria-labelledby="outside-repositories">
+        <h2 id="outside-repositories" className="group-title">
+          Outside Repositories
+        </h2>
+        <button type="button" className="row" aria-current={outside ? "true" : undefined} onClick={onOutside}>
+          <span className="row-name">{jobsOutside(outsideJobs)}</span>
+        </button>
+      </section>
       <SidebarFooter
         updatedAt={updatedAt}
         doctor={doctor}
@@ -689,7 +735,7 @@ function SidebarWorktrees({
     <>
       {repositories.map((repository) => (
         <section key={repository.git_common_dir} className="group">
-          <h2 className="caption">{repositoryLabel(repository.git_common_dir)}</h2>
+          <h2 className="group-title">{repositoryLabel(repository.git_common_dir)}</h2>
           <ul className="list">
             {repository.worktrees.map((worktree) => (
               <li key={worktree.path}>
@@ -805,6 +851,14 @@ function Center({
   }
 }
 
+/** Whether the Overview has nothing to list: no line of Needs you, and no Service or Isolated Compose service anywhere. */
+export function overviewIsEmpty(needsYou: NeedsYou[], worktrees: WorktreeStatus[]): boolean {
+  return (
+    needsYou.length === 0 &&
+    worktrees.every((worktree) => worktree.services.length === 0 && (worktree.containers ?? []).length === 0)
+  );
+}
+
 /** Whether a line of Needs you is this very Service, which is then listed there and not again among the Services. */
 function pinnedIn(needsYou: NeedsYou[], worktree: WorktreeStatus, service: ServiceStatus): boolean {
   return needsYou.some(
@@ -860,9 +914,7 @@ function Overview({
       />
     )),
   ]);
-  const nothingRuns =
-    needsYou.length === 0 &&
-    worktrees.every((worktree) => worktree.services.length === 0 && (worktree.containers ?? []).length === 0);
+  const nothingRuns = overviewIsEmpty(needsYou, worktrees);
   return (
     <section aria-label="Overview">
       <TitleBar title="Overview">{controls}</TitleBar>
@@ -910,7 +962,7 @@ function NeedsYouSection({ lines, worktrees }: { lines: NeedsYou[]; worktrees: W
   return (
     <section aria-label="Needs you" className="needs-you">
       <h3 className="subtitle">
-        <span className="row-name">Needs you</span> <span className="caption">{lines.length}</span>
+        <span className="row-name">Needs you</span>
       </h3>
       <ul className="list">
         {lines.map((line) => (
@@ -999,6 +1051,7 @@ function NeedsYouLine({ line, worktrees }: { line: NeedsYou; worktrees: Worktree
           state={foreignWord()}
           name={line.process.kind === "process" ? line.process.command : line.process.name}
           mono
+          detail={foreignDetail(line.process)}
           {...whereOf(line.worktree)}
           ports={line.process.ports}
         />
@@ -1115,16 +1168,20 @@ function WorktreeActions({
 
 function WorktreeFacts({ current }: { current: WorktreeStatus }) {
   return (
-    <dl className="facts">
-      <WorktreeNames worktree={current} />
-      <dt className="caption">Path</dt>
-      <dd className="mono">{current.path}</dd>
-      <dt className="caption">Kind</dt>
-      <dd>{current.main ? "Main worktree" : "Worktree"}</dd>
-      <dt className="caption">Services</dt>
-      <dd>{current.services.length}</dd>
-      <dt className="caption">Jobs</dt>
-      <dd>{current.jobs.length}</dd>
-    </dl>
+    <>
+      <header className="inspector-head">
+        <h2 className="title">{basename(current.path)}</h2>
+        <p className="caption foreign-where">{current.main ? "Main worktree" : "Worktree"}</p>
+      </header>
+      <dl className="facts facts-grid">
+        <WorktreeNames worktree={current} />
+        <dt>Path</dt>
+        <dd className="mono">{current.path}</dd>
+        <dt>Services</dt>
+        <dd>{current.services.length}</dd>
+        <dt>Jobs</dt>
+        <dd>{current.jobs.length}</dd>
+      </dl>
+    </>
   );
 }

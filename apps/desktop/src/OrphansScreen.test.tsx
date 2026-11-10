@@ -116,6 +116,23 @@ describe("the Orphans screen", () => {
     expect(search.getAllByRole("listitem")).toHaveLength(1);
   });
 
+  it("opens with a title line holding the button that deletes, and draws each Orphan on one level with a glyph", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+
+    await openOrphans();
+
+    const screenTitle = await screen.findByRole("heading", { name: "Orphans", level: 2 });
+    const line = screenTitle.closest("header");
+    expect(line).toContainElement(screen.getByRole("button", { name: /^Delete \d+ Orphans…$/ }));
+    expect(screen.getAllByRole("button", { name: /^Delete \d+ Orphans…$/ })).toHaveLength(1);
+    const login = within(await screen.findByRole("region", { name: "web-login" }));
+    for (const row of login.getAllByRole("listitem")) {
+      expect(row.querySelector("svg")?.getAttribute("data-glyph")).toBe("ended");
+      expect(row).toHaveClass("item-orphan");
+    }
+  });
+
   it("shows in red the rows of the Orphans that drop data, and only those", async () => {
     app();
     render(<App store={createDaemonStore()} />);

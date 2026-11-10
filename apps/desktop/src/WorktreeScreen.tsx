@@ -8,7 +8,7 @@ import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { ItemRow } from "./ItemRow";
-import { ContainerRow, JobRow, SeenMark, ServiceRow } from "./Rows";
+import { ContainerRow, foreignDetail, JobRow, ServiceRow } from "./Rows";
 import { TitleBar } from "./TitleBar";
 import { foreignId } from "./selection";
 import { foreignWord, jobWord } from "./state";
@@ -23,7 +23,7 @@ function ForeignRow({ process, worktreePath }: { process: ForeignProcess; worktr
       state={foreignWord()}
       name={process.kind === "process" ? process.command : process.name}
       mono
-      detail={process.kind === "process" ? `pid ${process.pid}` : `${process.project} / ${process.service}`}
+      detail={foreignDetail(process)}
       ports={process.ports}
     />
   );
@@ -98,7 +98,7 @@ export function WorktreeScreen({
           </ul>
         </>
       ) : null}
-      {worktree.services.length > 0 ? (
+      {worktree.services.length + containers.length > 0 ? (
         <>
           <h3 className="caption">Services</h3>
           <ul className="list">
@@ -111,13 +111,6 @@ export function WorktreeScreen({
                 seen={seen}
               />
             ))}
-          </ul>
-        </>
-      ) : null}
-      {containers.length > 0 ? (
-        <>
-          <h3 className="caption">Isolated Compose services</h3>
-          <ul className="list">
             {containers.map((container) => (
               <ContainerRow key={container.service} container={container} worktreePath={worktree.path} />
             ))}
@@ -157,7 +150,6 @@ function OutsideJobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
       where={<span className="mono">{job.cwd}</span>}
     >
       <span className="caption mono">{job.id}</span>
-      <SeenMark seen={marked} />
     </ItemRow>
   );
 }
@@ -179,6 +171,7 @@ export function OutsideRepositoriesScreen({
   return (
     <section aria-label="Outside Repositories">
       <TitleBar title="Outside Repositories">{controls}</TitleBar>
+      <h3 className="caption">Jobs started from a directory in no git Repository</h3>
       {jobs.length === 0 ? <p className="muted">No Job started outside a Repository.</p> : null}
       <ul className="list">
         {jobs.map((job) => (

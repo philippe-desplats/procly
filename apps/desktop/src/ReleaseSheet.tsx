@@ -113,32 +113,27 @@ function Effects({ report, tense }: { report: ReleaseReport; tense: Tense }) {
 /**
  * What else a release does, besides stopping and letting go: it applies each Retention policy the dry run reports to
  * the Isolated container of a Worktree already removed, and it leaves every Foreign process of the Worktree running.
- * Drawn only when it holds a line.
+ * One bulleted list with no subtitle, as the mockup draws it, drawn only when it holds a line.
  */
 function Besides({ report, foreign }: { report: ReleaseReport; foreign: ForeignProcess[] }) {
   if (report.retention.length === 0 && foreign.length === 0) {
     return null;
   }
   return (
-    <>
-      <h3 className="caption">It also</h3>
-      <ul className="list">
-        {report.retention.map((applied) => (
-          <li
-            key={`retention:${applied.worktree}:${applied.service}`}
-            className="item loss"
-            title={applied.worktree}
-          >
-            {retentionLine(applied)}
-          </li>
-        ))}
-        {foreign.map((process) => (
-          <li key={foreignId(process)} className="item">
-            {foreignLine(process)}
-          </li>
-        ))}
-      </ul>
-    </>
+    <ul className="bullets">
+      {report.retention.map((applied) => (
+        <li
+          key={`retention:${applied.worktree}:${applied.service}`}
+          className="loss"
+          title={applied.worktree}
+        >
+          {retentionLine(applied)}
+        </li>
+      ))}
+      {foreign.map((process) => (
+        <li key={foreignId(process)}>{foreignLine(process)}</li>
+      ))}
+    </ul>
   );
 }
 
@@ -158,6 +153,7 @@ export function ReleaseSheet({
   onChanged,
 }: {
   path: string;
+  /** What the title calls the Worktree: its folder, which the title line of its screen names it by too. */
   label: string;
   /** Whether git still lists the Worktree, in which case an agent may still be working in it. */
   listed: boolean;

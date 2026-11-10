@@ -141,7 +141,7 @@ impl Choice {
             Self::OpenInEditor => "Open in Editor",
             Self::OpenInTerminal => "Open in Terminal",
             Self::CopyPath => "Copy Path",
-            Self::Release => "Release…",
+            Self::Release => "Release Worktree…",
             Self::CopyMainValue => "Copy",
             Self::FindInOutput => "Find in Output…",
             Self::RevealInFinder => "Reveal in Finder",
@@ -793,7 +793,7 @@ mod tests {
                 "Copy Path CmdOrCtrl+Alt+C",
                 "Copy Slug",
                 "---",
-                "Release…"
+                "Release Worktree…"
             ]
         );
     }

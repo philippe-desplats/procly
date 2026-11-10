@@ -21,10 +21,21 @@ describe("the legend of a Worktree in the sidebar", () => {
   });
 });
 
-describe("the detail of an entry in the sidebar", () => {
-  it("is small and muted under the name, as the count of Jobs of Outside Repositories", () => {
-    const detail = declarations(".row-detail");
-    expect(detail).toMatch(/color:\s*var\(--muted\)\s*;/);
-    expect(detail).toMatch(/font-size:\s*var\(--size-small\)\s*;/);
+describe("the title of a group in the sidebar", () => {
+  it("is strong and small, and sits on the text of the rows under it", () => {
+    const title = declarations(".group-title");
+    expect(title).toMatch(/font-weight:\s*600\s*;/);
+    expect(title).toMatch(/font-size:\s*var\(--size-small\)\s*;/);
+    // The 8px of padding of a row, so that the title and the labels under it start on the same edge.
+    expect(title).toMatch(/padding:\s*14px 8px 4px\s*;/);
+    expect(title).toMatch(/margin:\s*0\s*;/);
+  });
+});
+
+describe("the sidebar", () => {
+  it("leaves the Daemon line the 204 px it needs: 236 px wide, 8px at each side, 8px of padding in the line", () => {
+    expect(declarations(".window")).toMatch(/236px minmax/);
+    expect(declarations(".sidebar")).toMatch(/padding:\s*0 8px 8px\s*;/);
+    expect(declarations(".daemon-line")).toMatch(/padding:\s*6px 8px 2px\s*;/);
   });
 });

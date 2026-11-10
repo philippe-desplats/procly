@@ -25,7 +25,7 @@ describe("the width of the inspector", () => {
   it("is drawn between 320 and 400 px, and the center keeps at least 380 px", () => {
     const columns = /grid-template-columns:\s*([^;]*);/.exec(declarations(".window"))?.[1] ?? "";
 
-    expect(columns.replace(/\s+/g, " ")).toBe("220px minmax(380px, 1fr) minmax(320px, 400px)");
+    expect(columns.replace(/\s+/g, " ")).toBe("236px minmax(380px, 1fr) minmax(320px, 400px)");
   });
 
   it("gives way before the center does: at the smallest window, 960 px, the 3 minimums fit and the center keeps 380 px", () => {
@@ -44,7 +44,7 @@ describe("the width of the inspector", () => {
   it("leaves Settings its 2 panes, with no inspector to size", () => {
     const columns = /grid-template-columns:\s*([^;]*);/.exec(declarations(".window-settings"))?.[1] ?? "";
 
-    expect(columns.replace(/\s+/g, " ")).toBe("220px minmax(0, 1fr)");
+    expect(columns.replace(/\s+/g, " ")).toBe("236px minmax(0, 1fr)");
   });
 });
 

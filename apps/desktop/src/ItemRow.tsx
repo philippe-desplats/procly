@@ -42,7 +42,16 @@ export function ItemRow({
   children?: ReactNode;
 }) {
   return (
-    <SelectableRow target={target} seen={seen} wide={where !== undefined}>
+    <SelectableRow
+      target={target}
+      seen={seen}
+      wide={where !== undefined}
+      trail={
+        <span className="item-ports">
+          <PortPills ports={ports} />
+        </span>
+      }
+    >
       <StateGlyph tone={state.tone} glyph={state.glyph} />
       <span className="item-main">
         {/* The length of the name sets the floor it keeps when the line is short, see `.item-main .item-name`. */}
@@ -57,7 +66,7 @@ export function ItemRow({
             <span className="caption">{detail}</span>{" "}
           </>
         )}
-        <span className={`word tone-${state.tone}`}>{state.word}</span>
+        <span className={`word tone-${state.tone}`}>{seen ? `${state.word}, seen` : state.word}</span>
       </span>
       {where === undefined ? null : (
         <span className="item-where" title={whereTitle}>
@@ -67,9 +76,6 @@ export function ItemRow({
       <span className="item-end">
         {children}
         {moment === undefined ? null : <span className="caption">{moment}</span>}
-        <span className="item-ports">
-          <PortPills ports={ports} />
-        </span>
       </span>
     </SelectableRow>
   );

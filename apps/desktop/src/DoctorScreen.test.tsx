@@ -199,6 +199,21 @@ describe("the Doctor screen", () => {
     expect(doctorCalls(calls)).toEqual([{ cwd: null }, { cwd: null }]);
   });
 
+  it("opens with one title line, the time of the answer and Refresh at its end, and a subtitle under it", async () => {
+    rust(answered(), () => MACHINE);
+    render(<App store={createDaemonStore()} />);
+
+    const doctor = await openDoctor();
+
+    const title = within(doctor).getByRole("heading", { name: "Doctor", level: 2 });
+    const line = title.closest("header");
+    expect(line).toContainElement(within(doctor).getByRole("button", { name: "Refresh" }));
+    expect(line).toContainElement(within(doctor).getByText(/^Updated at /));
+    expect(line).toHaveTextContent(/This Mac and the Daemon.*Doctor runs none of the fixes\./);
+    // Nothing sits above the title line.
+    expect(doctor.parentElement?.querySelector("header.toolbar")).toBeNull();
+  });
+
   it("draws each check with the glyph of its status: a cross, a triangle, a tick or a dash", async () => {
     rust(answered(), () => MACHINE);
     render(<App store={createDaemonStore()} />);
@@ -813,7 +828,7 @@ describe("Daemon not running", () => {
 
     const checks = await screen.findByRole("region", { name: "Checks without the Daemon" });
     // Nothing ran yet, so there is no time to name.
-    expect(within(checks).getByRole("heading")).toHaveTextContent(/^Checks that run without the Daemon$/);
+    expect(within(checks).getByRole("heading")).toHaveTextContent(/^Doctor, which runs without the Daemon$/);
     expect(within(checks).getByText("Checking…")).toBeInTheDocument();
 
     await act(async () => {
@@ -822,7 +837,7 @@ describe("Daemon not running", () => {
     });
 
     expect(await within(checks).findByRole("heading")).toHaveTextContent(
-      /^Checks that run without the Daemon, at 14:01$/,
+      /^Doctor, which runs without the Daemon, at 14:01$/,
     );
   });
 
