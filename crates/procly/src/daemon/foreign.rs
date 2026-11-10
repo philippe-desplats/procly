@@ -370,7 +370,10 @@ mod tests {
     }
 
     fn compose_container(project: &str, service: &str) -> Container {
-        parse_container(&format!("{project}-{service}-1\t{project}\t{service}\tFalse\t/src/app\trunning\t")).unwrap()
+        parse_container(&format!(
+            "{project}-{service}-1\t{project}\t{service}\tFalse\t/src/app\trunning\t"
+        ))
+        .unwrap()
     }
 
     #[test]

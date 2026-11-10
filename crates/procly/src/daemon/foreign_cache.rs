@@ -150,7 +150,9 @@ mod tests {
         cache.sighting(look);
         assert_eq!(looks.get(), 1, "the second Status answers from the first look");
 
-        let older = Instant::now().checked_sub(FRESH_FOR + Duration::from_millis(1)).expect("an instant in the past");
+        let older = Instant::now()
+            .checked_sub(FRESH_FOR + Duration::from_millis(1))
+            .expect("an instant in the past");
         lock(&cache.latest).as_mut().expect("a Sighting is kept").0 = older;
         cache.sighting(look);
         assert_eq!(looks.get(), 2, "a Sighting older than its bound is never an answer");
@@ -167,7 +169,11 @@ mod tests {
 
         cache.refresh(look);
         cache.refresh(look);
-        assert_eq!(looks.get(), 1, "a look that just began, as one a Status made, is not repeated");
+        assert_eq!(
+            looks.get(),
+            1,
+            "a look that just began, as one a Status made, is not repeated"
+        );
 
         let older = Instant::now().checked_sub(LOOK_EVERY).expect("an instant in the past");
         lock(&cache.latest).as_mut().expect("a Sighting is kept").0 = older;
