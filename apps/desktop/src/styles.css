@@ -711,7 +711,9 @@ body {
   gap: 7px;
   min-width: 0;
   margin: 0;
-  padding: 6px 8px 2px;
+  /* 8px at the start, none at the end: the line needs 214px (glyph, gap, words, time) and has 220px in the 236px sidebar,
+     which 8px at each end left 204px for. Its time is the part that must show, so it may reach the end of the row. */
+  padding: 6px 0 2px 8px;
   color: var(--muted);
   font-size: var(--size-small);
 }

@@ -33,5 +33,13 @@ describe("the line of the Daemon at the foot of the sidebar", () => {
       DAEMON_LINE,
     );
     expect(glyph).toBe("healthy");
+
+    // The whole line shows at the default width of the window: its words are not cut with an ellipsis.
+    const cut = await browser.execute((css: string) => {
+      const words = document.querySelector<HTMLElement>(`${css} .daemon-line-words`);
+      return words === null ? null : words.scrollWidth - words.clientWidth;
+    }, DAEMON_LINE);
+    expect(cut).not.toBeNull();
+    expect(cut).toBeLessThanOrEqual(0);
   });
 });

@@ -33,9 +33,27 @@ describe("the title of a group in the sidebar", () => {
 });
 
 describe("the sidebar", () => {
-  it("leaves the Daemon line the 204 px it needs: 236 px wide, 8px at each side, 8px of padding in the line", () => {
+  it("leaves the Daemon line the room it needs: 236 px wide, 8px at each side, then 8px at the start of the line only", () => {
     expect(declarations(".window")).toMatch(/236px minmax/);
     expect(declarations(".sidebar")).toMatch(/padding:\s*0 8px 8px\s*;/);
-    expect(declarations(".daemon-line")).toMatch(/padding:\s*6px 8px 2px\s*;/);
+    expect(declarations(".daemon-line")).toMatch(/padding:\s*6px 0 2px 8px\s*;/);
+    expect(declarations(".daemon-line")).toMatch(/gap:\s*7px\s*;/);
+  });
+
+  it("holds the whole line, glyph, words and time, in the width the sidebar gives it", () => {
+    // Measured with AppKit at 11px in the system face: "Daemon 0.5.0, updated at" 135.1, the time 48.2.
+    const WORDS = 135.1;
+    const TIME = 48.2;
+    const GLYPH = 12;
+    const sidebar = 236;
+    const sidebarPadding = 16;
+    const lineStart = 8;
+    const gap = 7;
+    const timeGap = 0.3 * 11;
+    const needed = lineStart + GLYPH + gap + WORDS + timeGap + TIME;
+
+    expect(needed).toBeLessThanOrEqual(sidebar - sidebarPadding);
+    // With 8px at the end too, which is what the line had, it did not fit and the words were cut.
+    expect(needed + 8).toBeGreaterThan(sidebar - sidebarPadding);
   });
 });
