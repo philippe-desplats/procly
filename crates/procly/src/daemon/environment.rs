@@ -508,7 +508,7 @@ pub(super) fn rehearse_start(
     stopping: &[String],
 ) -> Result<(), EnvironmentError> {
     let branch = pinned_branch(topology, config)?;
-    let mut rehearsal = registry.leases.rehearsal()?;
+    let mut rehearsal = registry.leases.rehearsal(&topology.worktree.path, stopping)?;
     for service in services {
         let Some(declared) = config.services.get(service) else {
             continue;

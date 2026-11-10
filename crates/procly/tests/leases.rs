@@ -655,38 +655,6 @@ fn restart_refuses_a_new_declared_port_that_is_held_before_it_stops_the_service(
 }
 
 #[test]
-fn a_declared_port_left_in_time_wait_is_said_to_free_itself_within_a_minute() {
-    use std::io::Read as _;
-
-    let procly = Procly::new();
-    let main = git_repository(procly.scratch(), "app");
-    let (old, new) = (free_port(), free_port());
-    write(&main, "procly.toml", &web_declaring(old));
-    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
-    assert_success(&procly.procly_in(&main, &["down", "web"]));
-    write(&main, "procly.toml", &web_declaring(new));
-    // The side that closes first keeps the port in TIME_WAIT once the listener is gone, as a dev server does after
-    // answering a request.
-    let listener = std::net::TcpListener::bind(("0.0.0.0", new)).expect("listen on the new declared port");
-    let mut client = std::net::TcpStream::connect(("127.0.0.1", new)).expect("connect to it");
-    let (served, _) = listener.accept().expect("accept the connection");
-    drop(served);
-    let mut rest = Vec::new();
-    client.read_to_end(&mut rest).expect("read until the server closes");
-    drop(client);
-    drop(listener);
-
-    let refused = procly.procly_in(&main, &["up", "web"]);
-
-    assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
-    let message = common::stderr(&refused);
-    assert!(
-        message.contains("frees the port by itself within a minute"),
-        "{message}"
-    );
-}
-
-#[test]
 fn a_running_service_keeps_its_lease_and_status_and_doctor_say_it_differs_from_the_declaration() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
@@ -720,4 +688,67 @@ fn a_running_service_keeps_its_lease_and_status_and_doctor_say_it_differs_from_t
     assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), new);
     let status = stdout(&procly.procly_in(&main, &["status"]));
     assert!(!status.contains("differs from its declared port"), "{status}");
+}
+
+/// A `procly.toml` declaring `web` with 2 Port names, `http` and `admin`, each listened on by a test server.
+fn web_with_2_ports(http: u16, admin: u16) -> String {
+    let server = test_server();
+    format!(
+        "[services.web]\nrun = '{server} --port {{ports.http}} & exec {server} --port {{ports.admin}}'\n\
+         ports = {{ http = {http}, admin = {admin} }}\nhealth = {{ port = 'http' }}\n",
+        server = server.display()
+    )
+}
+
+#[test]
+fn restart_of_a_service_whose_2_port_names_were_swapped_while_it_ran_moves_both_leases() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (first, second) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_with_2_ports(first, second));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    // Swapped while it runs, each port is held by its own tree.
+    write(&main, "procly.toml", &web_with_2_ports(second, first));
+
+    let restarted = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_success(&restarted);
+    assert_eq!(
+        stdout(&restarted),
+        format!("web started http://localhost:{second} port {second}, admin port {first}\n")
+    );
+}
+
+#[test]
+fn a_declared_port_held_only_by_time_wait_is_free_while_a_live_listener_keeps_it_held() {
+    use std::io::Read as _;
+
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    write(&main, "procly.toml", &web_declaring(new));
+    // A live listener on the loopback keeps the new declared port held.
+    let live = std::net::TcpListener::bind(("127.0.0.1", new)).expect("listen on the new declared port");
+    assert_eq!(procly.procly_in(&main, &["up", "web"]).status.code(), Some(125));
+    // The side that closes first leaves the port in TIME_WAIT once the listener is gone, as a dev server does after
+    // answering a request.
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", new)).expect("connect to it");
+    let client_address = client.local_addr().expect("read the client address");
+    // The refusal connected to name what holds the port, so the connection of the client is not the first queued.
+    let served = loop {
+        let (served, peer) = live.accept().expect("accept a connection");
+        if peer == client_address {
+            break served;
+        }
+    };
+    drop(served);
+    let mut rest = Vec::new();
+    client.read_to_end(&mut rest).expect("read until the server closes");
+    drop(client);
+    drop(live);
+
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), new);
 }

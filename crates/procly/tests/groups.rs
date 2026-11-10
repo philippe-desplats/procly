@@ -684,3 +684,22 @@ fn a_group_whose_covered_service_cannot_move_moves_no_lease_of_the_others() {
     assert_eq!(stored_lease(&procly, "api"), u64::from(api));
     drop(foreign);
 }
+
+#[test]
+fn restart_of_a_group_whose_declarations_were_crossed_while_it_ran_moves_each_lease_to_its_declared_port() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (first, second) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(first, second, &starts, &seen));
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    // Swapped while the Group runs, each port is held by its own tree.
+    write(&main, "procly.toml", &monorepo(second, first, &starts, &seen));
+
+    let restarted = procly.procly_in(&main, &["restart", "dev"]);
+
+    assert_success(&restarted);
+    assert_eq!(stored_lease(&procly, "web"), u64::from(second));
+    assert_eq!(stored_lease(&procly, "api"), u64::from(first));
+    assert!(listens(first) && listens(second));
+}

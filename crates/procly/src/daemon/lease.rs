@@ -115,7 +115,7 @@ impl Holder {
                 Scope::Branch(branch) => format!("the Lease of service {} of the Pinned branch {branch}", key.service),
             },
             Self::Process(Some((occupant, _))) => occupant_text(occupant),
-            Self::Process(None) => "a socket that does not answer".to_owned(),
+            Self::Process(None) => "something that does not answer on it".to_owned(),
         }
     }
 
@@ -307,12 +307,22 @@ impl Leases {
     }
 
     /// A copy of the Leases to grant on without storing anything, so that a request about to stop or start several
-    /// Services tells beforehand whether a start would be refused. Blocking: it reads the document on the first
-    /// request.
-    pub(crate) fn rehearsal(&self) -> Result<Rehearsal, StoreError> {
+    /// Services tells beforehand whether a start would be refused. The ports of the Leases that the Services `stopping`
+    /// of `worktree` hold count as free, as the request stops them first, whatever their tree still listens on.
+    /// Blocking: it reads the document on the first request.
+    pub(crate) fn rehearsal(&self, worktree: &Path, stopping: &[String]) -> Result<Rehearsal, StoreError> {
+        let table = self.with_table(Clone::clone)?;
+        let freed = table
+            .iter()
+            .filter(|(key, _)| {
+                matches!(&key.scope, Scope::Worktree(path) if path == worktree) && stopping.contains(&key.service)
+            })
+            .map(|(_, granted)| granted.port)
+            .collect();
         Ok(Rehearsal {
-            table: self.with_table(Clone::clone)?,
+            table,
             now: self.clock.since_epoch(),
+            freed,
         })
     }
 
@@ -330,7 +340,7 @@ impl Leases {
         // Granted on a copy, so that a Lease the document failed to store is not handed out.
         let mut granted_table = table.clone();
         expire(&mut granted_table, request, now);
-        let (granted, yielded) = grant_in(&mut granted_table, request, now, is_free)?;
+        let (granted, yielded) = grant_in(&mut granted_table, request, now, is_free, only_time_wait)?;
         if granted_table != *table {
             self.write(&granted_table)?;
             *table = granted_table;
@@ -636,6 +646,8 @@ fn release_in(
 pub(crate) struct Rehearsal {
     table: Table,
     now: Duration,
+    /// The ports of the Leases of the Services the request stops before it starts any.
+    freed: BTreeSet<u16>,
 }
 
 impl Rehearsal {
@@ -643,7 +655,9 @@ impl Rehearsal {
     /// candidate ports to check that nothing else holds them.
     pub(crate) fn grant(&mut self, request: &LeaseRequest<'_>) -> Result<BTreeMap<String, u16>, LeaseError> {
         expire(&mut self.table, request, self.now);
-        name_holder(grant_in(&mut self.table, request, self.now, is_free).map(|(granted, _)| granted))
+        let freed = &self.freed;
+        let free = |port: u16| freed.contains(&port) || is_free(port);
+        name_holder(grant_in(&mut self.table, request, self.now, free, only_time_wait).map(|(granted, _)| granted))
     }
 }
 
@@ -732,7 +746,8 @@ fn declaration_changed(previous: Option<Granted>, declared: u16) -> bool {
 }
 
 /// Grants the Leases of `request` in `table`, dated `now`, where `is_free` tells whether nothing outside Procly
-/// holds a port, and returns them with the Leases that yielded their port.
+/// holds a port and `only_time_wait` whether a held preferred port is held only by connections in `TIME_WAIT`, and
+/// returns them with the Leases that yielded their port.
 ///
 /// A Lease already granted is kept as it is, so the port stays the same across restarts. The preferred port, the
 /// explicit port of a Pinned branch or else the declared port in the Main worktree, is taken whenever no other
@@ -750,6 +765,7 @@ fn grant_in(
     request: &LeaseRequest<'_>,
     now: Duration,
     is_free: impl Fn(u16) -> bool,
+    only_time_wait: impl Fn(u16) -> bool,
 ) -> Result<(BTreeMap<String, u16>, Vec<Yielded>), LeaseError> {
     let scope = match request.pinned {
         Some(pinned) => Scope::Branch(pinned.name.to_owned()),
@@ -779,8 +795,11 @@ fn grant_in(
         let available = |port: u16| holder(port).is_none() && is_free(port);
         // Only the preferred port is taken from a Lease that yields it, the Pool and the Range skip every Lease.
         let yielding = |port: u16| holder(port).is_none_or(|(other, granted)| yields(request, &key, &other, &granted));
-        let preferable =
-            |port: u16| yielding(port) && (is_free(port) || request.claimed.is_some_and(|claimed| (claimed.0)(port)));
+        // A server binds over the connections a dev server left in `TIME_WAIT`, so they do not keep the preferred port.
+        let preferable = |port: u16| {
+            yielding(port)
+                && (is_free(port) || only_time_wait(port) || request.claimed.is_some_and(|claimed| (claimed.0)(port)))
+        };
         let explicit = request
             .pinned
             .and_then(|pinned| pinned.ports)
@@ -861,13 +880,47 @@ fn is_free(port: u16) -> bool {
     match TcpSocket::new_v6().and_then(|socket| socket.bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))) {
         Ok(()) => true,
         // A host without IPv6 has nothing listening on it.
-        Err(error) => {
-            matches!(
-                error.raw_os_error(),
-                Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
-            ) || error.kind() == io::ErrorKind::Unsupported
-        }
+        Err(error) => no_ipv6(&error),
     }
+}
+
+/// Whether a bind failed for the host having no IPv6, which leaves nothing listening on it.
+fn no_ipv6(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(nix::libc::EAFNOSUPPORT | nix::libc::EADDRNOTAVAIL)
+    ) || error.kind() == io::ErrorKind::Unsupported
+}
+
+/// Whether `port`, which [`is_free`] finds held, is held only by connections in `TIME_WAIT`, as a dev server leaves
+/// on the port it answered a request on a moment ago. A server binding with `SO_REUSEADDR`, as Node, Next and most dev
+/// servers do, binds over them, so the declared port counts as free.
+///
+/// Each wildcard and loopback address binds with `SO_REUSEADDR`, which still fails on an address a socket listens on,
+/// on macOS as on Linux, and nothing may answer on the loopback, so a live listener keeps the port held. Asked about
+/// the preferred port only.
+fn only_time_wait(port: u16) -> bool {
+    let binds = |address: SocketAddr| {
+        let socket = if address.is_ipv4() {
+            TcpSocket::new_v4()
+        } else {
+            TcpSocket::new_v6()
+        };
+        match socket.and_then(|socket| {
+            socket.set_reuseaddr(true)?;
+            socket.bind(address)
+        }) {
+            Ok(()) => true,
+            Err(error) => address.is_ipv6() && no_ipv6(&error),
+        }
+    };
+    let addresses = [
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+    ];
+    addresses.into_iter().all(binds) && !foreign::answers(port)
 }
 
 #[cfg(test)]
@@ -904,7 +957,7 @@ mod tests {
         now: Duration,
         is_free: impl Fn(u16) -> bool,
     ) -> Result<BTreeMap<String, u16>, LeaseError> {
-        super::grant_in(table, request, now, is_free).map(|(granted, _)| granted)
+        super::grant_in(table, request, now, is_free, |_| false).map(|(granted, _)| granted)
     }
 
     /// A request of `web` in `topology`, for the declared ports `ports`, expiring after 30 days.
@@ -1082,13 +1135,13 @@ mod tests {
         for (service, port) in [("api", 3000), ("admin", 3001)] {
             let ports = port_configs(&[("http", port)]);
             let request = main_request(service, &ports, &declared, &first, &no_one, &main);
-            super::grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap();
+            super::grant_in(&mut table, &request, Duration::ZERO, |_| true, |_| false).unwrap();
         }
 
         let swapped = declaring(&[("api", 3001), ("admin", 3000)]);
         let ports = port_configs(&[("http", 3000)]);
         let request = main_request("admin", &ports, &declared, &swapped, &no_one, &main);
-        let (granted, yielded) = super::grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap();
+        let (granted, yielded) = super::grant_in(&mut table, &request, Duration::ZERO, |_| true, |_| false).unwrap();
 
         assert_eq!(granted["http"], 3000);
         let key = |service: &str| LeaseKey {
@@ -1142,7 +1195,7 @@ mod tests {
             for (service, port) in [("api", 3000), ("admin", 3001)] {
                 let ports = port_configs(&[("http", port)]);
                 let request = main_request(service, &ports, &declared, &first, &no_one, &main);
-                super::grant_in(table, &request, Duration::ZERO, |_| true).unwrap();
+                super::grant_in(table, &request, Duration::ZERO, |_| true, |_| false).unwrap();
             }
         };
         let ports = port_configs(&[("http", 3000)]);
@@ -1282,6 +1335,46 @@ mod tests {
             grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap()["http"],
             3000
         );
+    }
+
+    /// A free port of the loopback, as the system hands it out.
+    fn ephemeral_port() -> u16 {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .and_then(|listener| listener.local_addr())
+            .map(|address| address.port())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_port_left_in_time_wait_is_only_time_wait_while_a_live_listener_on_any_address_is_not() {
+        use std::io::Read as _;
+
+        for address in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST] {
+            let port = ephemeral_port();
+            let listener = std::net::TcpListener::bind((address, port)).unwrap();
+            assert!(!is_free(port) && !only_time_wait(port), "a listener on {address}");
+
+            // The side that closes first keeps the port in TIME_WAIT once the listener is gone.
+            let mut client = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            let client_address = client.local_addr().unwrap();
+            // A probe that answered connected first, so the connection of the client is found among the queued ones.
+            let served = loop {
+                let (served, peer) = listener.accept().unwrap();
+                if peer == client_address {
+                    break served;
+                }
+            };
+            drop(served);
+            client.read_to_end(&mut Vec::new()).unwrap();
+            drop(client);
+            drop(listener);
+
+            assert!(
+                !is_free(port),
+                "TIME_WAIT keeps the strict probe of {address} from binding"
+            );
+            assert!(only_time_wait(port), "TIME_WAIT alone after a listener on {address}");
+        }
     }
 
     #[test]
