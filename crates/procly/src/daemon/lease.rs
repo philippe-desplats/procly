@@ -14,7 +14,7 @@ use tokio::net::TcpSocket;
 use super::clock::Clock;
 use super::compose::shell_word;
 use super::doctor::occupant_text;
-use super::foreign;
+use super::{foreign, listeners};
 use super::store::{self, StoreError};
 use crate::config::PortConfig;
 use crate::ports::Range;
@@ -795,10 +795,13 @@ fn grant_in(
         let available = |port: u16| holder(port).is_none() && is_free(port);
         // Only the preferred port is taken from a Lease that yields it, the Pool and the Range skip every Lease.
         let yielding = |port: u16| holder(port).is_none_or(|(other, granted)| yields(request, &key, &other, &granted));
-        // A server binds over the connections a dev server left in `TIME_WAIT`, so they do not keep the preferred port.
+        // A server binds over the connections a dev server left in `TIME_WAIT`, so they do not keep the declared port
+        // of the Main worktree. The explicit port of a Pinned branch keeps the strict probe.
         let preferable = |port: u16| {
             yielding(port)
-                && (is_free(port) || only_time_wait(port) || request.claimed.is_some_and(|claimed| (claimed.0)(port)))
+                && (is_free(port)
+                    || (follows_declaration && only_time_wait(port))
+                    || request.claimed.is_some_and(|claimed| (claimed.0)(port)))
         };
         let explicit = request
             .pinned
@@ -892,35 +895,16 @@ fn no_ipv6(error: &io::Error) -> bool {
     ) || error.kind() == io::ErrorKind::Unsupported
 }
 
-/// Whether `port`, which [`is_free`] finds held, is held only by connections in `TIME_WAIT`, as a dev server leaves
-/// on the port it answered a request on a moment ago. A server binding with `SO_REUSEADDR`, as Node, Next and most dev
-/// servers do, binds over them, so the declared port counts as free.
+/// Whether `port`, which [`is_free`] finds held, is held only by sockets that do not listen, such as the connections in
+/// `TIME_WAIT` a dev server leaves on the port it answered a request on a moment ago, which a server binding with
+/// `SO_REUSEADDR`, as Node, Next and most dev servers do, binds over.
 ///
-/// Each wildcard and loopback address binds with `SO_REUSEADDR`, which still fails on an address a socket listens on,
-/// on macOS as on Linux, and nothing may answer on the loopback, so a live listener keeps the port held. Asked about
-/// the preferred port only.
+/// The socket table of the kernel is read for a socket in the `LISTEN` state on the port, at any address, IPv4 or
+/// IPv6, a network or link-local address included, whoever owns it. A port whose table cannot be read stays held.
+/// Asked about the declared port of the Main worktree only: the Pool, the Range and the explicit port of a Pinned
+/// branch keep the strict probe.
 fn only_time_wait(port: u16) -> bool {
-    let binds = |address: SocketAddr| {
-        let socket = if address.is_ipv4() {
-            TcpSocket::new_v4()
-        } else {
-            TcpSocket::new_v6()
-        };
-        match socket.and_then(|socket| {
-            socket.set_reuseaddr(true)?;
-            socket.bind(address)
-        }) {
-            Ok(()) => true,
-            Err(error) => address.is_ipv6() && no_ipv6(&error),
-        }
-    };
-    let addresses = [
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
-        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
-        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
-    ];
-    addresses.into_iter().all(binds) && !foreign::answers(port)
+    listeners::listens_anywhere(port) == Some(false)
 }
 
 #[cfg(test)]

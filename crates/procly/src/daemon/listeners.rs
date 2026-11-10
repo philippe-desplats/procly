@@ -54,6 +54,80 @@ pub(super) fn listeners(port: Option<u16>) -> Option<Vec<Listener>> {
     Some(listeners)
 }
 
+/// Where `netstat` lives on macOS, tried after the `PATH` of the Daemon, which may lack `/usr/sbin`.
+#[cfg(not(target_os = "linux"))]
+const NETSTAT: [&str; 2] = ["netstat", "/usr/sbin/netstat"];
+
+/// Whether a TCP socket listens on `port` at any address, IPv4 or IPv6, whoever owns it, read from the socket table of
+/// the kernel: `/proc/net/tcp` and `/proc/net/tcp6` on Linux, `netstat` elsewhere. Unlike `lsof`, it sees the sockets
+/// of every user. `None` when the table cannot be read, the caller then cannot tell. Blocking.
+pub(super) fn listens_anywhere(port: u16) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut listening = false;
+        for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            match std::fs::read_to_string(table) {
+                Ok(text) => listening |= proc_net_listens(&text, port),
+                // A kernel without IPv6 has no table for it, and nothing listening on it.
+                Err(error) if table.ends_with('6') && error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return None,
+            }
+        }
+        Some(listening)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        for netstat in NETSTAT {
+            let mut command = Command::new(netstat);
+            command
+                .args(["-an", "-p", "tcp"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null());
+            match bounded_output(&mut command) {
+                // Not at this place, try the next one.
+                Err(_) => {}
+                Ok(Some(output)) if output.status.success() => {
+                    return Some(netstat_listens(&String::from_utf8_lossy(&output.stdout), port));
+                }
+                Ok(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+/// Whether a line of `/proc/net/tcp` or `/proc/net/tcp6` is a socket in the `LISTEN` state, `0A`, on `port`, its
+/// local address being `<address>:<port>` in hexadecimal.
+#[cfg(any(target_os = "linux", test))]
+fn proc_net_listens(table: &str, port: u16) -> bool {
+    table.lines().skip(1).any(|line| {
+        let mut fields = line.split_whitespace();
+        let local = fields.nth(1);
+        let state = fields.nth(1);
+        state == Some("0A")
+            && local
+                .and_then(|local| local.rsplit_once(':'))
+                .and_then(|(_, hex)| u16::from_str_radix(hex, 16).ok())
+                == Some(port)
+    })
+}
+
+/// Whether a line of `netstat -an -p tcp` is a socket in the `LISTEN` state on `port`, its local address being
+/// `<address>.<port>`, such as `*.3000`, `127.0.0.1.3000` or `fe80::1%lo0.3000`.
+#[cfg(any(not(target_os = "linux"), test))]
+fn netstat_listens(table: &str, port: u16) -> bool {
+    table.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.first().is_some_and(|proto| proto.starts_with("tcp"))
+            && fields.get(5) == Some(&"LISTEN")
+            && fields
+                .get(3)
+                .and_then(|local| local.rsplit_once('.'))
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                == Some(port)
+    })
+}
+
 /// The kernel keeps 15 characters of the name of a command, in `comm`, which is all `lsof` reads on Linux.
 #[cfg(any(target_os = "linux", test))]
 const COMM_LIMIT: usize = 15;
@@ -208,6 +282,36 @@ fn ports(output: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_a_listening_socket_on_any_address_from_netstat_and_skips_other_states() {
+        let table = "Active Internet connections (including servers)\n\
+            Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)\n\
+            tcp4       0      0  127.0.0.1.3000         127.0.0.1.52236        TIME_WAIT\n\
+            tcp4       0      0  172.31.0.224.3001      *.*                    LISTEN\n\
+            tcp6       0      0  fe80::1%lo0.3002       *.*                    LISTEN\n\
+            tcp46      0      0  *.3003                 *.*                    LISTEN\n\
+            tcp4       0      0  127.0.0.1.3004         127.0.0.1.52237        ESTABLISHED\n";
+        assert!(!netstat_listens(table, 3000));
+        assert!(netstat_listens(table, 3001));
+        assert!(netstat_listens(table, 3002));
+        assert!(netstat_listens(table, 3003));
+        assert!(!netstat_listens(table, 3004));
+        assert!(!netstat_listens(table, 30));
+    }
+
+    #[test]
+    fn reads_a_listening_socket_from_proc_net_tcp_and_skips_other_states() {
+        // 0x0BB8 is 3000 in TIME_WAIT (06), 0x0BB9 is 3001 in LISTEN (0A).
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   \
+            0: 0100007F:0BB8 0100007F:CC4C 06 00000000:00000000 03:00000123 00000000     0        0 0\n   \
+            1: E0001FAC:0BB9 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 4242 1\n";
+        assert!(!proc_net_listens(table, 3000));
+        assert!(proc_net_listens(table, 3001));
+        let table6 = "  sl  local_address                         remote_address                        st\n   \
+            0: 000080FE000000000000000001000000:0BBA 00000000000000000000000000000000:0000 0A\n";
+        assert!(proc_net_listens(table6, 3002));
+    }
 
     #[test]
     fn reads_the_port_of_every_listening_address_once() {

@@ -201,7 +201,7 @@ pub(super) fn in_worktrees(
 
 /// Whether something accepts connections on `port` of the loopback, IPv4 or IPv6. Unlike a bind, a connection
 /// left in `TIME_WAIT` by a process that has ended does not count.
-pub(super) fn answers(port: u16) -> bool {
+fn answers(port: u16) -> bool {
     [
         SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
         SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
