@@ -15,10 +15,11 @@ const tauri = { browserName: "tauri", "tauri:options": { application: appExecuta
  */
 export const config: WebdriverIO.Config = {
   runner: "local",
-  // The service starts the app once for the whole run, so a flow inherits the window the one before left. The close
-  // flow hides it, and a hidden window has the poller ask the Daemon every 30 seconds instead of every 2 to 10, so it
-  // runs last and every other flow has a shown window, as a developer has.
-  specs: ["./specs/!(close).e2e.ts", "./specs/close.e2e.ts"],
+  // The service starts the app once for the whole run, so a flow inherits the window the one before left: the
+  // Worktrees of the Daemon the flow before stopped, until the poller answers again, and after the close flow a
+  // hidden window, whose poller asks the Daemon every 30 seconds. A flow finds its scene by its folder, never by
+  // position or by branch, and gives each wait 60 seconds, 2 ticks of that cadence.
+  specs: ["./specs/**/*.e2e.ts"],
   tsConfigPath: "./tsconfig.json",
   // One window of one app, and one Daemon: the flows run one after the other.
   maxInstances: 1,

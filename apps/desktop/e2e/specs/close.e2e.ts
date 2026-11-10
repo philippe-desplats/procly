@@ -7,8 +7,7 @@ const MAIN = "main";
 
 describe("the close button of the window", () => {
   it("hides the window and leaves the app running in the menu bar", async () => {
-    // Every flow before stopped its Daemon, so the window draws the full-window state screen, which has no sidebar. The
-    // flow runs last (`wdio.conf.ts`), since the window it hides stays hidden for the rest of the run.
+    // The suite starts with no Daemon, so the window draws the full-window state screen, which has no sidebar.
     await showingTitle(NOT_RUNNING);
     expect(await browser.execute(() => document.visibilityState)).toBe("visible");
 
