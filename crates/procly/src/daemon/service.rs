@@ -795,6 +795,19 @@ fn announce_restart(service: &Service, spec: &ServiceSpec, why: &str, delay: Dur
     service.state.send_replace(ServiceState::Restarting);
 }
 
+/// Kills what is left of the tree of `process`, then reaps its leader, which ended: the one place a leader is reaped, so
+/// that its pid, and the id of its session, stay its own while the tree is looked for. Returns how the leader ended.
+async fn reap_once_decided(process: &mut Process, tree: &Tree) -> std::process::ExitStatus {
+    kill_tree(tree).await;
+    let status = process
+        .child
+        .wait()
+        .await
+        .expect("waiting fails only when the daemon lost track of its own child");
+    tree.reaped();
+    status
+}
+
 /// Watches the process of the Service until it ends for good: stopped, never healthy, or crashed more often than
 /// its restart policy allows.
 ///
@@ -827,23 +840,27 @@ async fn supervise(
             },
             clock.clone(),
         ));
-        let exited = tokio::select! {
-            status = process.child.wait() => Some(status),
-            _ = stop.wait_for(Option::is_some) => None,
+        // The leader is waited for without being reaped: once it ends it stays a zombie that keeps its pid, and with it the
+        // id of its session, so that no other process can take them while the tree is looked for and stopped. Nothing but
+        // this function reaps it, and only after the tree is decided.
+        let exited_by_itself = tokio::select! {
+            () = process_group::ended(process.pgid) => true,
+            _ = stop.wait_for(Option::is_some) => false,
         };
         monitor.abort();
         let healthy = *service.state.borrow() == ServiceState::Healthy;
         ever_healthy |= healthy;
-        let exited_by_itself = exited.is_some();
-        let ended = if let Some(status) = exited {
-            process_group::service_end(status.expect("waiting fails only when the daemon lost track of its own child"))
+        if !exited_by_itself {
+            stop_tree(process.child.as_mut(), process.pgid, &service.tree).await;
+        }
+        // Processes of the tree still running once the leader has ended would keep holding the port.
+        let status = reap_once_decided(&mut process, &service.tree).await;
+        let ended = if exited_by_itself {
+            process_group::service_end(status)
         } else {
-            stop_tree(process.child.as_mut(), &service.tree).await;
             stop.borrow()
                 .expect("the tree is stopped only once a stop was requested")
         };
-        // Processes of the tree still running once the leader has ended would keep holding the port.
-        kill_tree(&service.tree).await;
         // The last lines tell why a Service died, they must be read before anyone is told it ended.
         process.tail.finish().await;
 

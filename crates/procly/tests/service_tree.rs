@@ -14,6 +14,34 @@ fn write(dir: &Path, name: &str, content: &str) {
     std::fs::write(dir.join(name), content).expect("write the file");
 }
 
+/// Runs `start`, which starts a Daemon, while no more than 3 other starts of this binary are running.
+///
+/// A new Daemon copies its executable, 46 MB, and runs the copy once, which macOS has the system assess for about 0.4 s,
+/// one file after another. Measured with `sample` while `up` failed: the test server of a Service stood at its first
+/// instruction, in `_dyld_start`, for the whole 5 s of its health timeout, and `up` ended with exit code 124. That is the
+/// queue of the 19 Daemons the tests of this file started at once. The tests still run at the same time, only the starts
+/// of their Daemons are limited, so that the queue is never longer than 3 files, about 1.2 s.
+fn few_daemons_at_a_time<T>(start: impl FnOnce() -> T) -> T {
+    static STARTING: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+    static FREED: std::sync::Condvar = std::sync::Condvar::new();
+    const AT_A_TIME: usize = 3;
+    let mut starting = STARTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *starting >= AT_A_TIME {
+        starting = FREED.wait(starting).unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    *starting += 1;
+    drop(starting);
+    let started = start();
+    *STARTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+    FREED.notify_one();
+    started
+}
+
+/// Starts the Daemon of `procly` with a first command that asks for nothing, see [`few_daemons_at_a_time`].
+fn start_daemon(procly: &Procly, dir: &Path) {
+    few_daemons_at_a_time(|| assert_success(&procly.procly_in(dir, &["status"])));
+}
+
 /// A task that cleans up for 100 ms when it is asked to stop, then says so, and that ends by itself after 20 s so
 /// that a test that fails never leaves it running.
 fn write_cleaning_task(dir: &Path) {
@@ -50,6 +78,7 @@ fn a_service_whose_listening_task_moves_to_a_group_of_its_own_turns_healthy_and_
     write(&main, "procly.toml", &config);
 
     // Today the listener is outside the group `lsof` is asked about, so this ends with exit code 124.
+    start_daemon(&procly, &main);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let task = read_pid(&pid_file);
     assert_eq!(
@@ -91,6 +120,7 @@ fn down_waits_for_the_whole_tree_before_sending_sigkill_so_that_a_task_in_a_grou
         dir.join("forwarder.sh").display()
     );
     write(&main, "procly.toml", &config);
+    start_daemon(&procly, &main);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let task = read_pid(&dir.join("task.pid"));
 
@@ -116,6 +146,7 @@ fn a_service_whose_leader_ends_on_its_own_leaves_no_task_of_its_tree_behind() {
         dir.join("task.sh").display()
     );
     write(&main, "procly.toml", &config);
+    start_daemon(&procly, &main);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let task = read_pid(&dir.join("task.pid"));
 
@@ -136,6 +167,7 @@ fn a_task_started_late_whose_parent_ends_at_once_is_still_stopped_with_the_servi
         dir.join("task.sh").display()
     );
     write(&main, "procly.toml", &config);
+    start_daemon(&procly, &main);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let task = read_pid(&dir.join("task.pid"));
 
@@ -156,6 +188,7 @@ fn down_asks_the_tasks_a_leader_does_not_forward_to_for_a_clean_stop_without_wai
         dir.join("task.sh").display()
     );
     write(&main, "procly.toml", &config);
+    start_daemon(&procly, &main);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let task = read_pid(&dir.join("task.pid"));
 
@@ -186,6 +219,7 @@ fn a_process_that_leaves_the_session_of_the_service_is_not_part_of_it_and_surviv
         dir.join("task.sh").display()
     );
     write(&main, "procly.toml", &config);
+    start_daemon(&procly, &main);
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     let task = read_pid(&dir.join("task.pid"));
 
@@ -198,6 +232,127 @@ fn a_process_that_leaves_the_session_of_the_service_is_not_part_of_it_and_surviv
     // The test stops it itself.
     nix::sys::signal::kill(task, nix::sys::signal::Signal::SIGTERM).expect("stop the detached process");
     wait_until_gone(task);
+}
+
+/// Whether `pid` is gone, or ends within `within`.
+fn gone_within(pid: nix::unistd::Pid, within: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    while common::is_alive(pid) {
+        if start.elapsed() >= within {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    true
+}
+
+/// What `ps` prints as the state of `pid`, empty once the process is gone.
+fn process_state(pid: nix::unistd::Pid) -> String {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps runs");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn the_daemon_keeps_the_ended_leader_of_a_stopping_service_unreaped_until_its_whole_tree_is_gone() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let dir = procly.scratch();
+    // The task leads a group of its own and takes 1 s to clean up once it is asked to stop.
+    write(
+        dir,
+        "task.sh",
+        &format!(
+            "echo $$ > {pid}\n\
+             trap 'echo stopping > {stopping}; sleep 1; echo cleaned > {cleaned}; exit 0' TERM\n\
+             n=0\n\
+             while [ $n -lt 400 ]; do sleep 0.05; n=$((n + 1)); done\n",
+            pid = dir.join("task.pid").display(),
+            stopping = dir.join("stopping").display(),
+            cleaned = dir.join("cleaned").display(),
+        ),
+    );
+    // The leader ends at once on `SIGTERM` and forwards it to nobody.
+    let config = format!(
+        "[services.web]\nrun = '''echo $$ > {leader}; perl -e 'setpgrp(0,0); exec @ARGV' sh {task} & exec sleep 600'''\n",
+        leader = dir.join("leader.pid").display(),
+        task = dir.join("task.sh").display(),
+    );
+    write(&main, "procly.toml", &config);
+    start_daemon(&procly, &main);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let (leader, task) = (read_pid(&dir.join("leader.pid")), read_pid(&dir.join("task.pid")));
+
+    let down = procly
+        .command()
+        .current_dir(&main)
+        .args(["down", "web"])
+        .spawn()
+        .expect("the procly binary runs");
+    common::eventually("the task to be asked to stop", || dir.join("stopping").exists());
+
+    // The leader has ended, since the Daemon asked the task to stop only then. While the task cleans up, the session of
+    // the leader still has a member, and the pid of the leader must not be free for another process to take, and with it
+    // the id of the session: the Daemon has not reaped it.
+    let state = process_state(leader);
+    assert!(
+        state.starts_with('Z'),
+        "the Daemon reaped the leader while its tree was still stopping, ps shows {state:?}"
+    );
+    let output = down.wait_with_output().expect("down ends");
+    assert_success(&output);
+    assert!(dir.join("cleaned").exists(), "the task was killed before it cleaned up");
+    wait_until_gone(task);
+    common::eventually("the leader to be reaped", || process_state(leader).is_empty());
+}
+
+#[test]
+fn a_child_started_by_a_task_while_the_service_stops_does_not_survive_down() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let dir = procly.scratch();
+    // The task leads a group of its own. Asked to stop, it starts a child in another group of its own that ignores
+    // `SIGTERM`, and ends at once, before anything could have listed the child.
+    write(
+        dir,
+        "forker.sh",
+        &format!(
+            "trap 'perl -e '\"'\"'setpgrp(0,0); $SIG{{TERM}}=q(IGNORE); open my $f, q(>), q({child}); print $f $$; \
+             close $f; sleep 30'\"'\"' & exit 0' TERM\n\
+             echo $$ > {pid}\n\
+             while :; do sleep 0.1; done\n",
+            child = dir.join("child.pid").display(),
+            pid = dir.join("forker.pid").display(),
+        ),
+    );
+    let config = format!(
+        "[services.web]\nrun = '''perl -e 'setpgrp(0,0); exec @ARGV' sh {} & exec sleep 600'''\n",
+        dir.join("forker.sh").display()
+    );
+    write(&main, "procly.toml", &config);
+    start_daemon(&procly, &main);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let forker = read_pid(&dir.join("forker.pid"));
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    let child = read_pid(&dir.join("child.pid"));
+    let survived = !gone_within(child, std::time::Duration::from_secs(2));
+    // Whatever the outcome, the test leaves nothing behind.
+    let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
+    wait_until_gone(forker);
+    assert!(
+        !survived,
+        "a child the task started while the service stopped survived down: {}",
+        procly.daemon_log()
+    );
+    assert!(
+        !procly.daemon_log().contains("taken for another tree's"),
+        "the Daemon took a process of the service for another tree's: {}",
+        procly.daemon_log()
+    );
 }
 
 /// The cases where the Daemon cannot list the processes of the system. The Daemon is told to refuse the listing through
@@ -241,6 +396,11 @@ mod without_the_process_list {
         /// Lets the Daemon list the processes again.
         fn restore(&self) {
             std::fs::remove_file(self.dir.join("refuse")).expect("remove the flag");
+        }
+
+        /// Starts the Daemon with the hook set, see [`super::few_daemons_at_a_time`].
+        fn start_daemon(&self, procly: &Procly, dir: &Path) {
+            super::few_daemons_at_a_time(|| assert_success(&self.procly_in(procly, dir, &["status"])));
         }
 
         fn empty_the_log(&self) {
@@ -307,15 +467,32 @@ mod without_the_process_list {
         _reap: [ReapGroup; 2],
     }
 
+    /// Where the listener of a [`Kept`] Service runs.
+    #[derive(Debug, Clone, Copy)]
+    enum Listener {
+        /// In a process group of its own, as a task of turbo is.
+        OwnGroup,
+        /// In the process group of the leader, as the children of `npm run dev` are.
+        LeaderGroup,
+    }
+
     impl Kept {
         fn up(procly: &Procly, listing: &Listing) -> Self {
+            Self::up_with(procly, listing, Listener::OwnGroup)
+        }
+
+        fn up_with(procly: &Procly, listing: &Listing, form: Listener) -> Self {
             let main = git_repository(procly.scratch(), "app");
             let port = free_port();
             let dir = procly.scratch();
             let (starts, leader, listener) = (dir.join("starts"), dir.join("leader"), dir.join("pid"));
+            let own_group = match form {
+                Listener::OwnGroup => "perl -e 'setpgrp(0,0); exec @ARGV' ",
+                Listener::LeaderGroup => "",
+            };
             let config = format!(
                 "[services.web]\nrun = '''echo start >> {starts}; echo $$ > {leader}; \
-                 perl -e 'setpgrp(0,0); exec @ARGV' {server} --port {port} & echo $! > {pid}; exec sleep 600'''\n\
+                 {own_group}{server} --port {port} & echo $! > {pid}; exec sleep 600'''\n\
                  ports = {{ http = {port} }}\nhealth = {{ timeout = '5s' }}\n",
                 starts = starts.display(),
                 leader = leader.display(),
@@ -323,6 +500,7 @@ mod without_the_process_list {
                 server = test_server().display()
             );
             write(&main, "procly.toml", &config);
+            listing.start_daemon(procly, &main);
             assert_success(&listing.procly_in(procly, &main, &["up", "web"]));
             let (leader, listener) = (read_pid(&leader), read_pid(&listener));
             Self {
@@ -369,6 +547,7 @@ mod without_the_process_list {
         );
         write(&main, "procly.toml", &config);
         let listing = Listing::new(procly.scratch());
+        listing.start_daemon(&procly, &main);
         assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
         let server = read_pid(&pid);
         let _reap = ReapGroup(server);
@@ -376,6 +555,7 @@ mod without_the_process_list {
 
         // The next Daemon cannot list the processes, though it reads the start of the leader it finds.
         listing.refuse();
+        listing.start_daemon(&procly, &main);
         let output = listing.procly_in(&procly, &main, &["up", "web"]);
 
         assert_success(&output);
@@ -422,6 +602,7 @@ mod without_the_process_list {
         );
         write(&main, "procly.toml", &config);
         let listing = Listing::new(procly.scratch());
+        listing.start_daemon(&procly, &main);
         assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
         let listener = read_pid(&pid);
         let _reap = ReapGroup(listener);
@@ -429,6 +610,7 @@ mod without_the_process_list {
 
         // Nothing listens on the group of the leader, and the Daemon cannot list the processes to find who does.
         listing.refuse();
+        listing.start_daemon(&procly, &main);
         let output = listing.procly_in(&procly, &main, &["up", "web"]);
 
         assert_success(&output);
@@ -472,6 +654,7 @@ mod without_the_process_list {
         );
         write(&main, "procly.toml", &config);
         let listing = Listing::new(dir);
+        listing.start_daemon(&procly, &main);
         assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
         let task = read_pid(&dir.join("task.pid"));
         // The task is in a group the Daemon cannot find without the listing, it is left to its own devices.
@@ -518,6 +701,7 @@ mod without_the_process_list {
         );
         write(&main, "procly.toml", &config);
         let listing = Listing::new(dir);
+        listing.start_daemon(&procly, &main);
         assert_success(&listing.procly_in(&procly, &main, &["up", "web"]));
         let task = read_pid(&dir.join("task.pid"));
 
@@ -544,7 +728,7 @@ mod without_the_process_list {
             Stranger::listen(kept.port)
         });
         listing.refuse();
-        assert_success(&listing.procly_in(procly, &kept.main, &["status"]));
+        listing.start_daemon(procly, &kept.main);
         assert!(
             procly.daemon_log().contains("it kept the Service as it was"),
             "the Daemon did not keep the service as it was: {}",
@@ -691,5 +875,90 @@ mod without_the_process_list {
             !status.contains("service web healthy"),
             "status shows a service that ended: {status}"
         );
+    }
+
+    /// What happens to the list of processes between the moment the Daemon re-attaches the Service and the moment its
+    /// leader ends.
+    #[derive(Debug, Clone, Copy)]
+    enum Order {
+        /// Refused at the re-attach, back once the Daemon has seen the leader end.
+        RefusedThenBack,
+        /// Refused at the re-attach, back, and the leader ends at once.
+        BackThenEnds,
+        /// Refused at the re-attach and never back.
+        StaysRefused,
+        /// Refused at the re-attach, back for longer than the Daemon takes between 2 looks at the Services it judges,
+        /// with nothing asking for the tree, then the leader ends.
+        BackAndWaitedThenEnds,
+        /// Refused at the re-attach, back and read by a `status`, then the leader ends.
+        BackAndReadThenEnds,
+        /// Never refused.
+        Readable,
+    }
+
+    /// A Service whose listener runs in the group of its leader, kept by a Daemon that restarted. Its leader ends before
+    /// any reading of the tree could have shown it running, in the order `order`. Whatever the order, the leader's group
+    /// is the Service's to stop: `down` leaves no process and no listener behind.
+    fn the_group_of_the_leader_of_a_kept_service_is_stopped_whatever_the_list_did(order: Order) {
+        let procly = Procly::new();
+        let listing = Listing::new(procly.scratch());
+        let kept = Kept::up_with(&procly, &listing, Listener::LeaderGroup);
+        procly.kill_daemon();
+        if !matches!(order, Order::Readable) {
+            listing.refuse();
+        }
+        listing.start_daemon(&procly, &kept.main);
+        let saw_the_leader_end = || procly.daemon_log().contains("its exit code is unknown");
+        match order {
+            Order::BackThenEnds => listing.restore(),
+            Order::BackAndWaitedThenEnds => {
+                listing.restore();
+                // Nothing in the Daemon reads the tree of a Service kept with its listener in the group of its leader.
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            Order::BackAndReadThenEnds => {
+                listing.restore();
+                assert_success(&listing.procly_in(&procly, &kept.main, &["status"]));
+            }
+            Order::RefusedThenBack | Order::StaysRefused | Order::Readable => {}
+        }
+
+        // Only the leader ends: its group, which holds the listener, is the Service's to stop.
+        nix::sys::signal::kill(kept.leader, Signal::SIGKILL).expect("end the leader");
+        common::eventually("the Daemon to see the leader end", saw_the_leader_end);
+        if matches!(order, Order::RefusedThenBack) {
+            listing.restore();
+        }
+        assert_success(&listing.procly_in(&procly, &kept.main, &["down", "web"]));
+
+        common::eventually_within(
+            Duration::from_secs(5),
+            &format!("the listener of the group of the leader to end ({order:?})"),
+            || !common::is_alive(kept.listener),
+            || procly.daemon_log(),
+        );
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", kept.port)).is_err(),
+            "the listener still holds its port after down ({order:?}): {}",
+            procly.daemon_log()
+        );
+    }
+
+    #[test]
+    fn the_group_of_a_leader_that_ends_is_stopped_when_the_list_came_back_only_after_it_or_never() {
+        the_group_of_the_leader_of_a_kept_service_is_stopped_whatever_the_list_did(Order::RefusedThenBack);
+        the_group_of_the_leader_of_a_kept_service_is_stopped_whatever_the_list_did(Order::StaysRefused);
+    }
+
+    #[test]
+    fn the_group_of_a_leader_that_ends_is_stopped_when_the_list_came_back_before_it_and_nothing_read_the_tree() {
+        the_group_of_the_leader_of_a_kept_service_is_stopped_whatever_the_list_did(Order::BackThenEnds);
+        the_group_of_the_leader_of_a_kept_service_is_stopped_whatever_the_list_did(Order::BackAndWaitedThenEnds);
+    }
+
+    #[test]
+    fn the_group_of_a_leader_that_ends_is_stopped_when_the_tree_was_read_or_the_list_never_refused() {
+        the_group_of_the_leader_of_a_kept_service_is_stopped_whatever_the_list_did(Order::BackAndReadThenEnds);
+        the_group_of_the_leader_of_a_kept_service_is_stopped_whatever_the_list_did(Order::Readable);
     }
 }
