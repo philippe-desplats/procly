@@ -280,6 +280,15 @@ pub(crate) struct Brought {
 /// by the Worktree too when it is Isolated.
 pub(crate) type ComposeKey = ContainerKey;
 
+/// What [`Composes::stop_worktree`] did.
+#[derive(Debug)]
+pub(crate) struct WorktreeContainers {
+    /// The Compose services whose container it stopped, with the Worktree of an Isolated one.
+    pub(crate) stopped: Vec<(String, Option<PathBuf>)>,
+    /// The Compose services whose container keeps running because other Worktrees still need it, with how many.
+    pub(crate) spared: Vec<(String, usize)>,
+}
+
 /// Every container Procly started from a compose file.
 #[derive(Debug)]
 pub(crate) struct Composes {
@@ -870,6 +879,69 @@ impl Composes {
         }
         stopped.sort();
         failure.map_or(Ok(stopped), Err)
+    }
+
+    /// The Compose services of the Repository `repository` whose container runs and that an eject of the whole
+    /// Repository stops although they are not only the Worktree `worktree`'s: the Isolated containers of other
+    /// Worktrees, and the Shared or Logical containers that another Worktree needs or that none does. Each comes with
+    /// the Worktree of an Isolated one, sorted, for the preview of that eject.
+    pub(crate) fn running_outside(&self, repository: &Path, worktree: &Path) -> Vec<(String, Option<PathBuf>)> {
+        running_outside(&self.table(), repository, worktree)
+    }
+
+    /// Stops what the Worktree `worktree` of the Repository `repository` holds in containers, for an eject of that
+    /// Worktree alone, at once and without waiting for any Grace period. Its Isolated containers are stopped. A Shared
+    /// or Logical container the Worktree is the last to need is stopped too, while one other Worktrees still need
+    /// keeps running, with the Worktree no longer counted for it, and is named in `spared` with how many others need it.
+    /// The containers are stopped, never removed, so their volumes stay.
+    pub(crate) async fn stop_worktree(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+    ) -> Result<WorktreeContainers, ComposeError> {
+        let candidates: Vec<_> = self
+            .table()
+            .iter()
+            .filter(|((path, _, isolated), _)| {
+                path == repository && isolated.as_deref().is_none_or(|owner| owner == worktree)
+            })
+            .map(|(key, container)| (key.clone(), Arc::clone(container)))
+            .collect();
+        let mut stopping = Vec::new();
+        let mut spared = Vec::new();
+        for (key, container) in candidates {
+            if key.2.is_some() {
+                stopping.push((key, container));
+                continue;
+            }
+            let others = {
+                let mut state = container.state();
+                if state.alive.is_none() {
+                    continue;
+                }
+                forget_removed(&mut state.worktrees, &key.1);
+                state.worktrees.remove(worktree);
+                state.worktrees.len()
+            };
+            if others == 0 {
+                stopping.push((key, container));
+            } else {
+                spared.push((key.1.clone(), others));
+                self.ledger.recorded(&key, &container).await;
+            }
+        }
+        let mut stopped = Vec::new();
+        let mut failure = None;
+        for ((_, service, isolated), result) in self.stop_containers(stopping).await {
+            match result {
+                Ok(true) => stopped.push((service, isolated)),
+                Ok(false) => {}
+                Err(error) => failure = failure.or(Some(error)),
+            }
+        }
+        stopped.sort();
+        spared.sort();
+        failure.map_or(Ok(WorktreeContainers { stopped, spared }), Err)
     }
 
     /// Stops the containers at once, all together, and tells for each one whether it was running.
@@ -1838,6 +1910,29 @@ pub(super) fn shell_word(text: &str) -> String {
     }
 }
 
+/// See [`Composes::running_outside`].
+fn running_outside(
+    table: &HashMap<ComposeKey, Arc<Container>>,
+    repository: &Path,
+    worktree: &Path,
+) -> Vec<(String, Option<PathBuf>)> {
+    let mut running: Vec<_> = table
+        .iter()
+        .filter(|((path, _, isolated), container)| {
+            let state = container.state();
+            path == repository
+                && state.alive.is_some()
+                && match isolated {
+                    Some(owner) => owner != worktree,
+                    None => state.worktrees.is_empty() || state.worktrees.iter().any(|needing| needing != worktree),
+                }
+        })
+        .map(|((_, service, isolated), _)| (service.clone(), isolated.clone()))
+        .collect();
+    running.sort();
+    running
+}
+
 fn trimmed_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_owned()
 }
@@ -1845,6 +1940,62 @@ fn trimmed_output(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(service: &str, worktrees: &[&str], isolated: Option<&str>) -> ContainerRecord {
+        ContainerRecord {
+            repository: PathBuf::from("/p/work/acme/.git"),
+            service: service.to_owned(),
+            compose: service.to_owned(),
+            project: "acme".to_owned(),
+            project_dir: PathBuf::from("/p/work/acme"),
+            env: Vec::new(),
+            port: None,
+            grace_ms: 1000,
+            worktrees: worktrees.iter().map(PathBuf::from).collect(),
+            deadline_ms: None,
+            isolated: isolated.map(PathBuf::from),
+        }
+    }
+
+    fn table(records: Vec<ContainerRecord>) -> HashMap<ComposeKey, Arc<Container>> {
+        records
+            .into_iter()
+            .map(|record| {
+                let key = record.key();
+                (key, Arc::new(Container::reattached(record, Duration::ZERO)))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_containers_an_eject_of_the_repository_stops_for_other_worktrees_are_told_from_the_records() {
+        let table = table(vec![
+            // Shared, and another Worktree needs it.
+            record("db", &["/p/work/acme", "/p/work/acme-login"], None),
+            // Shared, and only the current Worktree needs it: nothing of another Worktree.
+            record("queue", &["/p/work/acme-login"], None),
+            // Shared, and in its Grace period, so that no Worktree needs it.
+            record("mail", &[], None),
+            // Isolated for the current Worktree, and for another one.
+            record("cache", &["/p/work/acme-login"], Some("/p/work/acme-login")),
+            record("cache", &["/p/work/acme"], Some("/p/work/acme")),
+        ]);
+
+        let listed = running_outside(&table, Path::new("/p/work/acme/.git"), Path::new("/p/work/acme-login"));
+
+        assert_eq!(
+            listed,
+            [
+                ("cache".to_owned(), Some(PathBuf::from("/p/work/acme"))),
+                ("db".to_owned(), None),
+                ("mail".to_owned(), None),
+            ]
+        );
+        assert_eq!(
+            running_outside(&table, Path::new("/p/work/other/.git"), Path::new("/p/work/acme-login")),
+            []
+        );
+    }
 
     #[test]
     fn a_word_of_the_follow_command_is_quoted_only_when_a_shell_would_misread_it() {

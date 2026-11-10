@@ -262,6 +262,26 @@ impl Jobs {
         running
     }
 
+    /// Every running Job of the Repository whose common git directory is `git_common_dir`, whatever its Worktree, by
+    /// identifier in the order they started, for an eject of the whole Repository.
+    pub(crate) fn running_in_repository(&self, git_common_dir: &Path) -> Vec<(String, Arc<Job>)> {
+        let mut running: Vec<_> = self
+            .table()
+            .iter()
+            .filter(|(_, job)| {
+                job.end.borrow().is_none()
+                    && job
+                        .fingerprint
+                        .topology
+                        .as_ref()
+                        .is_some_and(|topology| topology.git_common_dir == git_common_dir)
+            })
+            .map(|(id, job)| (id.clone(), Arc::clone(job)))
+            .collect();
+        running.sort_by_key(|(_, job)| job.started_at);
+        running
+    }
+
     /// Forgets every ended Job of `worktree`, for a Worktree release that has stopped what ran. A running Job stays.
     pub(crate) fn remove_ended_in(&self, worktree: &Path) {
         self.table()
@@ -383,6 +403,16 @@ impl Job {
     /// Follows the output of the Job, from its backlog.
     pub(crate) fn follow(&self) -> Follow {
         output::follow(&self.output)
+    }
+
+    /// The command the Job runs.
+    pub(crate) fn command(&self) -> &str {
+        &self.fingerprint.command
+    }
+
+    /// The root of the Worktree the Job runs in, `None` for a Job outside any Repository.
+    pub(crate) fn worktree(&self) -> Option<&Path> {
+        self.fingerprint.worktree()
     }
 
     /// Stops the whole tree of the Job: `SIGTERM` to its process group, then `SIGKILL` once the stop timeout has passed
