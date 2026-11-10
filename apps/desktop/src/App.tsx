@@ -1052,6 +1052,7 @@ function NeedsYouLine({ line, worktrees }: { line: NeedsYou; worktrees: Worktree
           name={line.process.kind === "process" ? line.process.command : line.process.name}
           mono
           detail={foreignDetail(line.process)}
+          detailWhole={line.process.kind === "process"}
           {...whereOf(line.worktree)}
           ports={line.process.ports}
         />

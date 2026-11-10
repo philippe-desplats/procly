@@ -169,6 +169,7 @@ describe("a row of the center", () => {
 
     const row = within(needs).getByRole("listitem");
     expect(row).toHaveTextContent("node server.js pid 4812");
+    expect(within(row).getByText("pid 4812")).toHaveClass("caption-whole");
     expect(row.querySelector(".word")).toHaveTextContent(foreignWord().word);
   });
 });

@@ -41,6 +41,15 @@ describe("the effects of a sheet", () => {
   });
 });
 
+describe("the pid of a Foreign process", () => {
+  // Measured in the window: beside a long name the detail was cut to "p", so the pid keeps its width and the name gives way.
+  it("is read whole, never cut", () => {
+    const rule = declarations(".item-main .caption-whole");
+    expect(rule).toMatch(/flex:\s*none\s*;/);
+    expect(rule).toMatch(/white-space:\s*nowrap\s*;/);
+  });
+});
+
 describe("an Orphan row", () => {
   it("is one line of 3 columns: its glyph, what it is, and what deleting it does", () => {
     const row = declarations(".item-orphan");

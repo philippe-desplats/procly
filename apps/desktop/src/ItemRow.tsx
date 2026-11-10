@@ -17,6 +17,7 @@ export function ItemRow({
   name,
   mono = false,
   detail,
+  detailWhole = false,
   where,
   whereTitle,
   moment,
@@ -31,6 +32,8 @@ export function ItemRow({
   mono?: boolean;
   /** What the name leaves to say about the item, quietly: a pid, the Compose project. */
   detail?: string;
+  /** Whether the detail keeps its width, which a pid needs to be read at all: the name gives way before it does. */
+  detailWhole?: boolean;
   /** Where the item runs, which gives the row a column for it. */
   where?: ReactNode;
   /** The tooltip of `where`, for a Worktree that has more names than the one shown. */
@@ -63,7 +66,7 @@ export function ItemRow({
         </span>{" "}
         {detail === undefined ? null : (
           <>
-            <span className="caption">{detail}</span>{" "}
+            <span className={detailWhole ? "caption caption-whole" : "caption"}>{detail}</span>{" "}
           </>
         )}
         <span className={`word tone-${state.tone}`}>{seen ? `${state.word}, seen` : state.word}</span>

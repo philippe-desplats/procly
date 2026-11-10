@@ -24,6 +24,7 @@ function ForeignRow({ process, worktreePath }: { process: ForeignProcess; worktr
       name={process.kind === "process" ? process.command : process.name}
       mono
       detail={foreignDetail(process)}
+      detailWhole={process.kind === "process"}
       ports={process.ports}
     />
   );

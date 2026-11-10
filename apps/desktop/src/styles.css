@@ -305,6 +305,13 @@ body {
   white-space: normal;
 }
 
+/* A detail that is read whole, the pid of a Foreign process: it cut to "p" beside a long name, so the name gives way. */
+.item-main .caption-whole {
+  display: inline;
+  flex: none;
+  white-space: nowrap;
+}
+
 .state-glyph {
   display: inline-flex;
 }
