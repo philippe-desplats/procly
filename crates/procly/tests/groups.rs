@@ -53,6 +53,46 @@ fn start_count(starts: &Path) -> usize {
     std::fs::read_to_string(starts).map_or(0, |starts| starts.lines().count())
 }
 
+/// A monorepo whose Service `web` appends a line to `starts` each time it starts, and which a Group `dev` covers.
+/// Nothing in these tests starts the Group.
+fn covered_web(web: u16, starts: &Path) -> String {
+    let server = test_server();
+    format!(
+        "[services.web]\nrun = \"echo start >> {starts}; exec {server} --port {{ports.http}}\"\n\
+         ports = {{ http = {web} }}\n\
+         [services.dev]\ncovers = ['web']\nrun = '{server} --port $PORT_WEB_HTTP'\n",
+        server = server.display(),
+        starts = starts.display(),
+    )
+}
+
+/// The command lines of every process on the machine, one per line, as `ps` prints them.
+fn process_table() -> String {
+    let output = std::process::Command::new("ps")
+        .args(["-A", "-o", "command="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// How many test servers listen for `port` on their command line, the instances of `web` that run.
+fn instances_on(port: u16) -> usize {
+    let wanted = format!("--port {port}");
+    process_table()
+        .lines()
+        .filter(|line| line.contains("procly-test-server") && line.contains(&wanted))
+        .count()
+}
+
+/// How many writers of the output files of the Daemon of `procly` run.
+fn writers_of(procly: &Procly) -> usize {
+    let state = procly.state_dir().display().to_string();
+    process_table()
+        .lines()
+        .filter(|line| line.contains("output-file") && line.contains(&state))
+        .count()
+}
+
 #[test]
 fn a_group_runs_as_one_unit_with_the_leases_and_derived_variables_of_every_service_it_covers() {
     let procly = Procly::new();
@@ -131,6 +171,71 @@ fn a_start_request_for_a_covered_service_while_the_group_runs_answers_reused_via
     // Nothing of its own was started: stopping the Group is all it takes to free the port.
     assert_success(&procly.procly_in(&main, &["down", "dev"]));
     eventually("the covered Service is gone", || !listens(web));
+}
+
+#[test]
+fn a_second_start_request_for_a_covered_service_running_on_its_own_answers_reused_and_starts_nothing() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    write(&main, "procly.toml", &covered_web(free_port(), &starts));
+
+    let first = procly.procly_in(&main, &["up", "web"]);
+    assert_success(&first);
+    let web = lease_of(&procly, &main, "web");
+    let second = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(
+        stdout(&first),
+        format!("web started http://localhost:{web} port {web}\n")
+    );
+    assert!(second.status.success(), "{}", common::failure_message(&second));
+    assert_eq!(
+        stdout(&second),
+        format!("web reused http://localhost:{web} port {web}\n")
+    );
+    assert_eq!(start_count(&starts), 1, "web was started once");
+    assert_eq!(instances_on(web), 1, "one instance of web runs");
+}
+
+#[test]
+fn down_stops_a_covered_service_that_a_second_start_request_found_running() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    write(&main, "procly.toml", &covered_web(free_port(), &starts));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let web = lease_of(&procly, &main, "web");
+    // The second request is the one that used to start a duplicate, whatever it answered.
+    let _ = procly.procly_in(&main, &["up", "web"]);
+
+    let down = procly.procly_in(&main, &["down"]);
+
+    assert_success(&down);
+    assert_eq!(stdout(&down), "web stopped\n");
+    eventually("web to stop listening", || !listens(web));
+    assert_eq!(instances_on(web), 0, "no instance of web is left");
+}
+
+#[test]
+fn stopping_the_daemon_leaves_no_process_nor_writer_of_a_covered_service_started_twice() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let starts = procly.scratch().join("starts");
+    write(&main, "procly.toml", &covered_web(free_port(), &starts));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let web = lease_of(&procly, &main, "web");
+    let _ = procly.procly_in(&main, &["up", "web"]);
+    assert_eq!(
+        writers_of(&procly),
+        1,
+        "web has the writer of its output before the Daemon stops"
+    );
+
+    assert_success(&procly.procly(&["daemon", "stop"]));
+
+    eventually("no instance of web to be left", || instances_on(web) == 0);
+    eventually("no writer to be left", || writers_of(&procly) == 0);
 }
 
 #[test]
