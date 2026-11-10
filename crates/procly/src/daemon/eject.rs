@@ -86,7 +86,8 @@ pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, repository: bool
 }
 
 /// Answers an `EjectPreview` request: the Services and Jobs of the other Worktrees of the Repository holding `cwd`
-/// that an eject of the whole Repository would stop, which it stops no more than it changes a file.
+/// that an eject of the whole Repository would stop, the Compose services among them, which it stops no more than it
+/// changes a file.
 pub(super) async fn preview(registry: &Arc<Registry>, cwd: PathBuf) -> Response {
     preview_of(registry, cwd).await.map_or_else(failure, Response::Eject)
 }
@@ -105,6 +106,13 @@ async fn preview_of(registry: &Registry, cwd: PathBuf) -> Result<EjectReport, Ej
             service,
             worktree: Some(worktree),
             isolated: false,
+        });
+    }
+    for (service, isolated) in registry.composes.running_outside(&git_common_dir, &current) {
+        report.stopped.push(Stopped {
+            service,
+            isolated: isolated.is_some(),
+            worktree: isolated,
         });
     }
     report.jobs = registry
@@ -237,6 +245,15 @@ async fn stop_worktree(
             service,
             worktree: other,
         });
+    }
+    for (id, job) in registry.jobs.running_in_repository(git_common_dir) {
+        if let Some(other) = job.worktree().filter(|other| *other != worktree) {
+            report.spared.push(Spared::Job {
+                job: id,
+                command: job.command().to_owned(),
+                worktree: other.to_owned(),
+            });
+        }
     }
     for (service, others) in containers.spared {
         report.spared.push(Spared::ComposeService { service, others });

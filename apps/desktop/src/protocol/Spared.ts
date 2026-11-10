@@ -5,4 +5,4 @@ import type { Written } from "./Written";
  * Something `eject` did not touch because it is not the Worktree it ran for to take out: it belongs to another
  * Worktree, or every Worktree of the Repository shares it.
  */
-export type Spared = { "kind": "service", service: string, worktree: string, } | { "kind": "compose_service", service: string, others: number, } | { "kind": "file", written: Written, file: string, shared: boolean, };
+export type Spared = { "kind": "service", service: string, worktree: string, } | { "kind": "job", job: string, command: string, worktree: string, } | { "kind": "compose_service", service: string, others: number, } | { "kind": "file", written: Written, file: string, shared: boolean, };

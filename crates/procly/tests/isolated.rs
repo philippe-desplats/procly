@@ -413,6 +413,19 @@ fn docker_eject_stops_the_containers_of_every_worktree_and_keeps_them_with_their
             "{text}"
         );
     }
+    // Only the container of the other Worktree is announced, and before anything stops.
+    let will = text.find(&format!(
+        "will stop db of {} (Isolated Compose service, its container and volumes are kept)",
+        fixture.other.display()
+    ));
+    assert!(
+        will.is_some_and(|will| will < text.find("stopped db").expect("stopped")),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("will stop db of {} ", fixture.main.display())),
+        "{text}"
+    );
     assert!(!fixture.main_project.is_running() && !fixture.other_project.is_running());
     assert_eq!(
         (fixture.main_project.container(), fixture.other_project.container()),

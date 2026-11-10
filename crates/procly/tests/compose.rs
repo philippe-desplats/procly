@@ -895,10 +895,16 @@ fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
 
     // Without waiting for the Grace period, since the Repository is going back to how it was.
     assert_success(&output);
+    let text = stdout(&output);
     assert!(
-        stdout(&output).contains("stopped db (Compose service, its volumes are kept)"),
-        "{}",
-        stdout(&output)
+        text.contains("stopped db (Compose service, its volumes are kept)"),
+        "{text}"
+    );
+    // The container serves the other Worktree too, so that it is announced before anything stops.
+    let will = text.find("will stop db (Compose service, its volumes are kept)");
+    assert!(
+        will.is_some_and(|will| will < text.find("stopped db").expect("stopped")),
+        "{text}"
     );
     assert!(!fixture.project.is_running());
     assert!(!listens(fixture.port));

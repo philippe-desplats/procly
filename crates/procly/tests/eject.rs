@@ -601,8 +601,17 @@ fn eject_stops_the_jobs_of_the_current_worktree_only() {
         "{summary:?}"
     );
     assert!(
-        !summary.iter().any(|line| line.contains(&main_job)),
+        !summary
+            .iter()
+            .any(|line| line.starts_with("stopped") && line.contains(&main_job)),
         "the Job of the Main worktree was stopped: {summary:?}"
+    );
+    assert!(
+        summary.contains(&format!(
+            "kept job {main_job} of {}, sleep 30, it runs for another Worktree",
+            both.main.display()
+        )),
+        "the Job of the Main worktree is not listed as kept: {summary:?}"
     );
     let status = stdout(&procly.procly_in(&both.main, &["status"]));
     assert!(
@@ -866,12 +875,23 @@ fn eject_json_names_the_jobs_stopped_and_what_it_spared_with_its_kind() {
     assert_success(&output);
     let job = common::started(&output).0;
 
+    let main_job = common::started(&procly.procly_in(&both.main, &["run", "sleep 31"])).0;
+
     let output = procly.procly_in(&both.other, &["eject", "--json"]);
 
     let document = json_succeeded(&output);
     assert_eq!(
         document["jobs"],
         serde_json::json!([{ "job": job, "command": "sleep 30", "worktree": both.other }])
+    );
+    assert!(
+        document["spared"]
+            .as_array()
+            .expect("a list")
+            .contains(&serde_json::json!({
+                "kind": "job", "job": main_job, "command": "sleep 31", "worktree": both.main
+            })),
+        "{document}"
     );
     let spared = document["spared"].as_array().expect("a list of spared items");
     assert!(

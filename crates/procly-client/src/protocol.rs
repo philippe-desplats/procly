@@ -439,6 +439,12 @@ pub struct StoppedJob {
 pub enum Spared {
     /// A Service that runs for another Worktree.
     Service { service: String, worktree: PathBuf },
+    /// A Job that runs for another Worktree.
+    Job {
+        job: String,
+        command: String,
+        worktree: PathBuf,
+    },
     /// A Compose service whose container other Worktrees still need, which the Worktree let go of.
     ComposeService { service: String, others: usize },
     /// A file Procly wrote. `shared` tells it is one every Worktree of the Repository shares, such as the git exclude

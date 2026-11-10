@@ -36,7 +36,8 @@ use procly_client::{protocol, state_dir};
 
 use crate::protocol::{
     BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
-    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared, UpService, Written,
+    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared, Stopped, UpService,
+    Written,
 };
 use crate::state_dir::StateDir;
 
@@ -1351,13 +1352,24 @@ fn items_were(count: usize) -> String {
     }
 }
 
+/// What the line of a Service says of it, `verb` being `stopped` once it is and `will stop` before.
+fn stopped_line(verb: &str, stopped: &Stopped) -> String {
+    match &stopped.worktree {
+        Some(worktree) if stopped.isolated => format!(
+            "{verb} {} of {} (Isolated Compose service, its container and volumes are kept)",
+            stopped.service,
+            worktree.display()
+        ),
+        Some(worktree) => format!("{verb} {} of {}", stopped.service, worktree.display()),
+        None => format!("{verb} {} (Compose service, its volumes are kept)", stopped.service),
+    }
+}
+
 /// One line per Service and Job of another Worktree that `eject --repository` is about to stop.
 fn eject_preview(report: &EjectReport) -> String {
     let mut text = String::new();
     for stopped in &report.stopped {
-        if let Some(worktree) = &stopped.worktree {
-            let _ = writeln!(text, "will stop {} of {}", stopped.service, worktree.display());
-        }
+        let _ = writeln!(text, "{}", stopped_line("will stop", stopped));
     }
     for job in &report.jobs {
         let _ = match &job.worktree {
@@ -1379,20 +1391,7 @@ fn eject_preview(report: &EjectReport) -> String {
 fn eject_summary(report: &EjectReport) -> String {
     let mut text = String::new();
     for stopped in &report.stopped {
-        let _ = match &stopped.worktree {
-            Some(worktree) if stopped.isolated => writeln!(
-                text,
-                "stopped {} of {} (Isolated Compose service, its container and volumes are kept)",
-                stopped.service,
-                worktree.display()
-            ),
-            Some(worktree) => writeln!(text, "stopped {} of {}", stopped.service, worktree.display()),
-            None => writeln!(
-                text,
-                "stopped {} (Compose service, its volumes are kept)",
-                stopped.service
-            ),
-        };
+        let _ = writeln!(text, "{}", stopped_line("stopped", stopped));
     }
     for job in &report.jobs {
         let _ = match &job.worktree {
@@ -1428,6 +1427,13 @@ fn eject_summary(report: &EjectReport) -> String {
                 writeln!(
                     text,
                     "kept {service} of {}, it runs for another Worktree",
+                    worktree.display()
+                )
+            }
+            Spared::Job { job, command, worktree } => {
+                writeln!(
+                    text,
+                    "kept job {job} of {}, {command}, it runs for another Worktree",
                     worktree.display()
                 )
             }
