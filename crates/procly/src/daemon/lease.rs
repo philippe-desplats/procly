@@ -640,12 +640,16 @@ fn yields(request: &LeaseRequest<'_>, key: &LeaseKey, other: &LeaseKey, granted:
             != Some(&granted.port)
 }
 
-/// What holds the declared port the Lease `key` of `request` cannot move to: `holder`, the other Lease on it, or else
-/// a process, named later.
+/// What holds the declared port the Lease `key` of `request` cannot move to: `holder`, the other Lease on it, unless
+/// that Lease yields it, or else a process, named later.
 fn holder_of(request: &LeaseRequest<'_>, key: &LeaseKey, holder: Option<(LeaseKey, Granted)>) -> Holder {
     let Some((other, granted)) = holder else {
         return Holder::Process(None);
     };
+    // A Lease that would yield the port is not what keeps it, a process listening on it is.
+    if yields(request, key, &other, &granted) {
+        return Holder::Process(None);
+    }
     Holder::Lease {
         here: other.repository == key.repository && other.scope == key.scope,
         running: matches!(&other.scope, Scope::Worktree(path)
@@ -1123,6 +1127,30 @@ mod tests {
             ),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn a_yielding_lease_on_a_port_a_process_listens_on_names_the_process() {
+        let mut table = Table::new();
+        let main = topology("/src/app", true);
+        let (no_one, declared) = (BTreeSet::new(), BTreeSet::from([3000, 3001]));
+        let first = declaring(&[("api", 3000), ("admin", 3001)]);
+        for (service, port) in [("api", 3000), ("admin", 3001)] {
+            let ports = port_configs(&[("http", port)]);
+            let request = main_request(service, &ports, &declared, &first, &no_one, &main);
+            grant_in(&mut table, &request, Duration::ZERO, |_| true).unwrap();
+        }
+        let swapped = declaring(&[("api", 3001), ("admin", 3000)]);
+        let ports = port_configs(&[("http", 3000)]);
+        let request = main_request("admin", &ports, &declared, &swapped, &no_one, &main);
+
+        let refused = grant_in(&mut table, &request, Duration::ZERO, |port| port != 3000).unwrap_err();
+
+        assert!(matches!(
+            refused,
+            LeaseError::DeclaredPortHeld { ref holder, .. } if matches!(**holder, Holder::Process(None))
+        ));
+        assert_eq!(table.len(), 2, "nothing yielded since nothing moved");
     }
 
     #[test]
