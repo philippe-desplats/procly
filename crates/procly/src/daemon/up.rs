@@ -71,6 +71,18 @@ impl Scope {
         })
     }
 
+    /// Checks that starting the Services of `order` in turn would not be refused for a declared port, once `stopping`
+    /// is stopped. Nothing is granted nor stored. Blocking.
+    pub(super) fn rehearse_start(&self, registry: &Registry, order: &[String], stopping: &[String]) -> anyhow::Result<()> {
+        Ok(environment::rehearse_start(
+            registry,
+            &self.topology,
+            &self.config,
+            order,
+            stopping,
+        )?)
+    }
+
     /// Whether the Compose service `name`, which must be declared, runs one container per Worktree.
     fn is_isolated(&self, name: &str) -> bool {
         self.config

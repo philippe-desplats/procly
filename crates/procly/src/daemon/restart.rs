@@ -93,5 +93,16 @@ fn plan(registry: &Registry, service: &str, cwd: &Path) -> anyhow::Result<Planne
         Some(_) | None => service.to_owned(),
     };
     let order = scope.start_order(Some(&target))?;
+    // Before anything is stopped, so that a start refused for a declared port leaves the Service running on its Lease.
+    let mut stopping = vec![target.clone()];
+    stopping.extend(
+        scope
+            .config()
+            .services
+            .get(&target)
+            .and_then(|declared| declared.covers.clone())
+            .unwrap_or_default(),
+    );
+    scope.rehearse_start(registry, &order, &stopping)?;
     Ok(Planned { scope, target, order })
 }

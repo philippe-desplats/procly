@@ -554,10 +554,14 @@ fn a_new_declared_port_held_by_a_process_fails_up_naming_it_and_keeps_the_lease_
         message.contains(&format!("process {}", std::process::id())),
         "{message}"
     );
-    assert!(
-        message.contains(&format!("{} {}", "kill", std::process::id())),
-        "{message}"
-    );
+    let stop = message
+        .find(&format!("{} {}", "kill", std::process::id()))
+        .unwrap_or_else(|| panic!("the command that stops the process: {message}"));
+    // Releasing the Leases of the Main worktree stops nothing outside Procly, so it comes first.
+    let release = message
+        .find("procly worktree release")
+        .unwrap_or_else(|| panic!("the release of the Main worktree: {message}"));
+    assert!(release < stop, "{message}");
     assert!(message.contains(&format!("port {old}")), "{message}");
     // The refusal survives a restart of the Daemon, the declaration it was granted under is stored with the Lease.
     procly.stop_daemon();
@@ -583,7 +587,100 @@ fn a_declared_port_taken_at_the_first_grant_stays_a_fallback_across_restarts_of_
 
     // The declaration did not change, so the Lease is not refused, it stays where the first grant put it.
     assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    // Once the declared port is free, the next start takes it back.
     drop(foreign);
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+}
+
+#[test]
+fn a_fallback_lease_written_by_0_5_0_keeps_its_port_while_the_declared_port_is_held_across_restarts() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (declared, fallback) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(declared));
+    // As procly 0.5.0 stored a Lease of the Main worktree that fell back from its declared port: no `declared`. Used
+    // a moment ago, so that it does not expire.
+    let used = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_millis();
+    let document = format!(
+        "{{\"version\": 2, \"leases\": [{{\"repository\": {:?}, \"worktree\": {:?}, \"service\": \"web\", \
+         \"port_name\": \"http\", \"port\": {fallback}, \"last_used_ms\": {used}}}]}}\n",
+        main.join(".git").canonicalize().unwrap(),
+        main.canonicalize().unwrap()
+    );
+    std::fs::write(procly.state_dir().join("leases.json"), document).unwrap();
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", declared)).expect("hold the declared port");
+
+    for _ in 0..2 {
+        assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+        assert_success(&procly.procly_in(&main, &["down", "web"]));
+    }
+    procly.stop_daemon();
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), fallback);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+
+    drop(foreign);
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), declared);
+}
+
+#[test]
+fn restart_refuses_a_new_declared_port_that_is_held_before_it_stops_the_service() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    write(&main, "procly.toml", &web_declaring(new));
+    let foreign = std::net::TcpListener::bind(("127.0.0.1", new)).expect("hold the new declared port");
+
+    let refused = procly.procly_in(&main, &["restart", "web"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
+    assert!(
+        common::stderr(&refused).contains(&format!("the declared port {new} of Port name http of service web")),
+        "{}",
+        common::stderr(&refused)
+    );
+    // Nothing was stopped, the Service still answers on its Lease.
+    assert_eq!(common::http_get(old, "/"), "ok\n");
+    let status = stdout(&procly.procly_in(&main, &["status"]));
+    assert!(status.contains(&format!("service web healthy port {old}")), "{status}");
+    drop(foreign);
+}
+
+#[test]
+fn a_declared_port_left_in_time_wait_is_said_to_free_itself_within_a_minute() {
+    use std::io::Read as _;
+
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (old, new) = (free_port(), free_port());
+    write(&main, "procly.toml", &web_declaring(old));
+    assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), old);
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    write(&main, "procly.toml", &web_declaring(new));
+    // The side that closes first keeps the port in TIME_WAIT once the listener is gone, as a dev server does after
+    // answering a request.
+    let listener = std::net::TcpListener::bind(("0.0.0.0", new)).expect("listen on the new declared port");
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", new)).expect("connect to it");
+    let (served, _) = listener.accept().expect("accept the connection");
+    drop(served);
+    let mut rest = Vec::new();
+    client.read_to_end(&mut rest).expect("read until the server closes");
+    drop(client);
+    drop(listener);
+
+    let refused = procly.procly_in(&main, &["up", "web"]);
+
+    assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
+    let message = common::stderr(&refused);
+    assert!(message.contains("frees the port by itself within a minute"), "{message}");
 }
 
 #[test]
