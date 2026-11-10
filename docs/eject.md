@@ -54,9 +54,10 @@ Procly records how each file looked just before it first wrote into it, so that 
 
 ## What it keeps for the other Worktrees
 
-A Repository can have many Worktrees, used by other people or by other agents, so that a plain `eject` never reaches past its own. Each thing it keeps is printed as a `kept` line with the reason.
+A Repository can have many Worktrees, used by other people or by other agents, so that a plain `eject` never reaches past its own. Each thing it keeps is printed as a `kept` line with the reason, except the Isolated containers of the other Worktrees, see below.
 
 - A Service or a Job that runs for another Worktree stays running, and is listed as `kept` with its Worktree. Its Env file, Rules block, Guard and Worktrunk hooks stay in place.
+- The Isolated containers of the other Worktrees stay running and are not listed.
 - The exclusion block of the shared git exclude file, `.git/info/exclude`, stays as long as git lists another Worktree, since it keeps the generated files of every Worktree out of git, and its `kept` line names `procly eject --repository` as the way to remove it. It goes when the Worktree is the only one the Repository has.
 - A file of another Worktree that eject cannot read, such as a settings file that is not JSON, is not its concern. It never fails the eject, and is not listed.
 - A Shared or Logical container that another Worktree still needs keeps running.
