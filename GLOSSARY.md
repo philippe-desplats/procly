@@ -185,7 +185,7 @@ The per-Repository switch that makes Guards and Rules blocks stand aside without
 _Avoid_: disable, pause
 
 **Eject**:
-The removal of everything Procly wrote into a Repository, mechanically for intact Managed blocks and through a generated agent prompt for edited ones.
+The removal of everything Procly wrote into a Worktree, or with `--repository` into the whole Repository, mechanically for intact Managed blocks and through a generated agent prompt for edited ones. What another Worktree owns or every Worktree shares is left, and listed with the reason.
 _Avoid_: uninstall, teardown
 
 ## Relationships
@@ -200,7 +200,7 @@ _Avoid_: uninstall, teardown
 - A **Shared** or **Logical** container is reference-counted by **Worktrees** and stops after its **Grace period**.
 - **Derived variables** are injected into every **Process service** and mirrored in the **Env file**.
 - **Worktree release** keeps the **Logical resources** of a **Worktree**, which become **Orphans** once git no longer lists it.
-- **Eject** removes every **Managed block**, including **Rules blocks** and **Guards**.
+- **Eject** removes the **Managed blocks** of one **Worktree**, including its **Rules blocks** and **Guard**, or of every **Worktree** of the **Repository** with `--repository`.
 
 ## Flagged ambiguities
 

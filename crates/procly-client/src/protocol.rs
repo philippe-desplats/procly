@@ -96,6 +96,9 @@ pub enum Request {
     /// to another Worktree is left, and reported as spared. With `repository`, it does the same for every Worktree of
     /// the Repository and for what they share.
     Eject { cwd: PathBuf, repository: bool },
+    /// Answers with an [`EjectReport`] that lists, in `stopped` and `jobs`, the Services and Jobs of the Worktrees other
+    /// than the one holding `cwd` that an `Eject` with `repository` would stop, and stops and changes nothing.
+    EjectPreview { cwd: PathBuf },
     /// Lists the Orphans of every Repository, and deletes them with `apply`. `cwd` only names the requester in the
     /// Daemon log. With `only`, absent when not given, it is limited to the Orphans it lists: the Daemon deletes those
     /// that still are Orphans, and reports the others as not deleted, with the reason in their `error`.

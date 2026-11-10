@@ -246,7 +246,7 @@ enum Command {
     Eject {
         /// Eject every Worktree of the Repository instead of this one: stop the Services, Jobs and containers of all
         /// of them, whoever uses them, and remove what Procly wrote into each, the exclusion lines of the git exclude
-        /// file included. The Services of the other Worktrees it stops are printed.
+        /// file included. The Services and Jobs of the other Worktrees it will stop are listed before it stops them.
         #[arg(long)]
         repository: bool,
         /// Hand the prompt to your own coding agent in its non-interactive mode, from the current directory, instead
@@ -1278,6 +1278,13 @@ fn orphans_count(count: usize) -> String {
 /// hands to the coding agent instead.
 fn eject(state: &StateDir, repository: bool, agent: Option<AgentCli>, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
+    if repository && !json {
+        // What it is about to stop for the other Worktrees comes first. The document of `--json` lists it afterwards.
+        match client::send(state, &Request::EjectPreview { cwd: cwd.clone() })? {
+            Response::Eject(preview) => print(&eject_preview(&preview))?,
+            other => return unexpected(other),
+        }
+    }
     let report = match client::send(state, &Request::Eject { cwd, repository })? {
         Response::Eject(report) => report,
         other => return unexpected(other),
@@ -1342,6 +1349,29 @@ fn items_were(count: usize) -> String {
         1 => "1 item was".to_owned(),
         _ => format!("{count} items were"),
     }
+}
+
+/// One line per Service and Job of another Worktree that `eject --repository` is about to stop.
+fn eject_preview(report: &EjectReport) -> String {
+    let mut text = String::new();
+    for stopped in &report.stopped {
+        if let Some(worktree) = &stopped.worktree {
+            let _ = writeln!(text, "will stop {} of {}", stopped.service, worktree.display());
+        }
+    }
+    for job in &report.jobs {
+        let _ = match &job.worktree {
+            Some(worktree) => writeln!(
+                text,
+                "will stop job {} of {}, {}",
+                job.job,
+                worktree.display(),
+                job.command
+            ),
+            None => writeln!(text, "will stop job {}, {}", job.job, job.command),
+        };
+    }
+    text
 }
 
 /// One line per Service and Job stopped, per file removed, per file left and per item spared, then what eject never
@@ -1413,7 +1443,7 @@ fn eject_summary(report: &EjectReport) -> String {
                 shared: true,
             } => writeln!(
                 text,
-                "kept {} {}, shared by every Worktree of the Repository",
+                "kept {} {}, shared with the other Worktrees git lists, `procly eject --repository` removes it",
                 written.as_str(),
                 file.display()
             ),

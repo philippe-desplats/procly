@@ -13,7 +13,7 @@ left rules /home/me/app-login/docs/agents.md, edited
 kept web of /home/me/app, it runs for another Worktree
 kept rules /home/me/app/AGENTS.md, written for another Worktree
 kept env file /home/me/app/.env.procly, written for another Worktree
-kept exclusions /home/me/app/.git/info/exclude, shared by every Worktree of the Repository
+kept exclusions /home/me/app/.git/info/exclude, shared with the other Worktrees git lists, `procly eject --repository` removes it
 left Docker volumes and Logical resources
 left the files copied by worktree init and the state of the Daemon, Leases and off
 
@@ -38,7 +38,7 @@ An item in `spared` has a `kind` of `service` (with its `service` and `worktree`
 
 Without `--repository`, it acts on the Worktree it runs in, the Main worktree included, and on nothing else.
 
-1. It stops every Service and every Job of the Worktree, with its whole process tree. The Isolated containers of the Worktree are stopped at once, without waiting for their Grace period, and never removed. A Shared or Logical container, which every Worktree can use, is stopped the same way only when no other Worktree still needs it. Otherwise it keeps running, the Worktree no longer counts for it, and it is listed as `kept`. If a container cannot be stopped, eject fails before it touches a file, and running it again finishes the job.
+1. It stops every Service and every Job of the Worktree, with its whole process tree. The Isolated containers of the Worktree are stopped at once, without waiting for their Grace period, and never removed. A Shared or Logical container, which every Worktree can use, is stopped the same way only when no other Worktree still needs it. Otherwise it keeps running, the Worktree no longer counts for it, and it is listed as `kept`. Before it stops anything, eject reads every file of the Worktree it is to change, and fails with 125 when one cannot be read, so that nothing is half done. If a container cannot be stopped, it fails before it touches a file, and running it again finishes the job.
 2. It removes the Rules blocks of the Worktree, in `AGENTS.md`, `CLAUDE.md` and any file `procly agent install --file` wrote to.
 3. It removes the Guard from the `.claude/settings.json` of the Worktree. The other hooks and settings stay, in their order, but the file is written again in JSON with 2 spaces of indentation, as `agent install` did.
 4. It removes the exclusion block from the `.gitignore` of the Worktree when it holds it. The one in the shared git exclude file goes only when the Worktree is the only one of the Repository, see below.
@@ -56,14 +56,15 @@ Procly records how each file looked just before it first wrote into it, so that 
 A Repository can have many Worktrees, used by other people or by other agents, so that a plain `eject` never reaches past its own. Each thing it keeps is printed as a `kept` line with the reason.
 
 - A Service that runs for another Worktree stays running. Its Env file, Rules block, Guard and Worktrunk hooks stay in place.
-- The exclusion block of the shared git exclude file, `.git/info/exclude`, stays, since it keeps the generated files of every Worktree out of git. It goes when the Worktree is the only one the Repository has.
+- The exclusion block of the shared git exclude file, `.git/info/exclude`, stays as long as git lists another Worktree, since it keeps the generated files of every Worktree out of git, and its `kept` line names `procly eject --repository` as the way to remove it. It goes when the Worktree is the only one the Repository has.
+- A file of another Worktree that eject cannot read, such as a settings file that is not JSON, is not its concern. It never fails the eject, and is not listed.
 - A Shared or Logical container that another Worktree still needs keeps running.
 
 To take Procly out of the whole Repository, run `procly eject --repository` from any of its Worktrees.
 
 ## Ejecting the whole Repository
 
-`procly eject --repository` is the former behaviour of `eject`. From any Worktree, it stops every Service and Job of every Worktree of the Repository, whoever uses them, and the containers of Compose services, the Isolated container of each Worktree included, at once and without waiting for their Grace period. Each one is printed as `stopped web of <worktree>`, so that the Services of the other Worktrees it stops are listed. It then removes the Rules blocks, the Guards, the exclusion blocks, the Env files and the Worktrunk hooks blocks of every Worktree, and the exclusion block of the shared git exclude file. Nothing is `kept`.
+`procly eject --repository` is the former behaviour of `eject`. From any Worktree, it stops every Service and Job of every Worktree of the Repository, whoever uses them, and the containers of Compose services, the Isolated container of each Worktree included, at once and without waiting for their Grace period. Before it stops anything, it prints a `will stop web of <worktree>` line for each Service of another Worktree that it is about to stop, and a `will stop job <id> of <worktree>, <command>` line for each Job, so that you see what it reaches before it does. With `--json` nothing is printed before the document, which lists the same in `stopped` and `jobs`. Each one is then printed as `stopped web of <worktree>`. It then removes the Rules blocks, the Guards, the exclusion blocks, the Env files and the Worktrunk hooks blocks of every Worktree, and the exclusion block of the shared git exclude file. Nothing is `kept`.
 
 ## What it leaves
 

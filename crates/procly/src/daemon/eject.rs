@@ -75,13 +75,46 @@ enum EjectError {
     },
 }
 
-/// Answers an `Eject` request for the Worktree holding `cwd`, or with `repository` for the whole Repository. Services
-/// are stopped first, so that nothing writes an Env file again once it is removed. Stopping fails before any file is
-/// touched, and asking again finishes the job.
+/// Answers an `Eject` request for the Worktree holding `cwd`, or with `repository` for the whole Repository. It reads
+/// every file it is to change first and fails before it stops anything when one cannot be read. Services are stopped
+/// next, so that nothing writes an Env file again once it is removed, and stopping fails before any file is touched.
+/// What can still fail after that, such as a write, leaves a state that asking again finishes.
 pub(super) async fn run(registry: &Arc<Registry>, cwd: PathBuf, repository: bool, peer: Option<i32>) -> Response {
     eject(registry, cwd, repository, peer)
         .await
         .map_or_else(failure, Response::Eject)
+}
+
+/// Answers an `EjectPreview` request: the Services and Jobs of the other Worktrees of the Repository holding `cwd`
+/// that an eject of the whole Repository would stop, which it stops no more than it changes a file.
+pub(super) async fn preview(registry: &Arc<Registry>, cwd: PathBuf) -> Response {
+    preview_of(registry, cwd).await.map_or_else(failure, Response::Eject)
+}
+
+async fn preview_of(registry: &Registry, cwd: PathBuf) -> Result<EjectReport, EjectError> {
+    let Topology {
+        git_common_dir,
+        worktree: current,
+    } = tokio::task::spawn_blocking(move || topology_in(&cwd))
+        .await
+        .map_err(|error| EjectError::Interrupted(error.to_string()))??;
+    let current = current.path;
+    let mut report = EjectReport::default();
+    for (worktree, service) in registry.services.running_outside(&git_common_dir, &current) {
+        report.stopped.push(Stopped {
+            service,
+            worktree: Some(worktree),
+            isolated: false,
+        });
+    }
+    report.jobs = registry
+        .jobs
+        .running_in_repository(&git_common_dir)
+        .iter()
+        .map(|(id, job)| job_report(id, job))
+        .filter(|job| job.worktree.as_deref() != Some(current.as_path()))
+        .collect();
+    Ok(report)
 }
 
 async fn eject(
@@ -90,10 +123,14 @@ async fn eject(
     repository: bool,
     peer: Option<i32>,
 ) -> Result<EjectReport, EjectError> {
-    // Resolving the Topology runs git, and naming the requester runs ps.
+    // Resolving the Topology runs git, naming the requester runs ps, and checking the files reads them. All of it
+    // comes before anything is stopped, so that an eject that cannot be done leaves everything as it was.
+    let checked = Arc::clone(registry);
     let (topology, worktrees, who) = tokio::task::spawn_blocking(move || -> Result<_, EjectError> {
         let topology = topology_in(&cwd)?;
         let worktrees = topology::worktrees(&topology.git_common_dir)?;
+        let scope = Scope::of(repository, &topology.worktree.path);
+        check(&checked, &topology.git_common_dir, &worktrees, scope)?;
         Ok((topology, worktrees, requester::describe(peer, &cwd)))
     })
     .await
@@ -210,15 +247,17 @@ async fn stop_worktree(
 /// Asks each Job to stop, all together, with what the report says of it.
 fn stopping(jobs: Vec<(String, Arc<Job>)>) -> Vec<(StoppedJob, JoinHandle<()>)> {
     jobs.into_iter()
-        .map(|(id, job)| {
-            let report = StoppedJob {
-                job: id,
-                command: job.command().to_owned(),
-                worktree: job.worktree().map(Path::to_path_buf),
-            };
-            (report, tokio::spawn(async move { job.stop().await }))
-        })
+        .map(|(id, job)| (job_report(&id, &job), tokio::spawn(async move { job.stop().await })))
         .collect()
+}
+
+/// What the report says of the Job `job`, which has the identifier `id`.
+fn job_report(id: &str, job: &Job) -> StoppedJob {
+    StoppedJob {
+        job: id.to_owned(),
+        command: job.command().to_owned(),
+        worktree: job.worktree().map(Path::to_path_buf),
+    }
 }
 
 /// Waits until the Jobs [`stopping`] asked to stop have ended.
@@ -235,6 +274,119 @@ async fn ended(jobs: Vec<(StoppedJob, JoinHandle<()>)>) -> Vec<StoppedJob> {
 fn topology_in(cwd: &Path) -> Result<Topology, TopologyError> {
     let cwd = topology::canonicalize(cwd)?;
     topology::resolve(&cwd)?.ok_or(TopologyError::NotARepository { dir: cwd })
+}
+
+/// The Managed blocks Procly writes into files, in the order an eject takes them out. The Env file is no block, and
+/// an eject handles it on its own.
+#[derive(Debug, Clone, Copy)]
+enum Block {
+    Rules,
+    Guard,
+    WorktrunkHooks,
+    Exclusions,
+}
+
+impl Block {
+    const ALL: [Self; 4] = [Self::Rules, Self::Guard, Self::WorktrunkHooks, Self::Exclusions];
+
+    fn written(self) -> Written {
+        match self {
+            Self::Rules => Written::Rules,
+            Self::Guard => Written::Guard,
+            Self::WorktrunkHooks => Written::WorktrunkHooks,
+            Self::Exclusions => Written::Exclusions,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rules => RULES,
+            Self::Guard => hook::BLOCK,
+            Self::WorktrunkHooks => worktrunk::BLOCK,
+            Self::Exclusions => EXCLUSIONS,
+        }
+    }
+
+    /// The files Procly writes the block into by default for `worktree`.
+    fn defaults(self, worktree: &Path, git_common_dir: &Path) -> Vec<PathBuf> {
+        match self {
+            Self::Rules => INSTRUCTION_FILES.iter().map(|name| worktree.join(name)).collect(),
+            Self::Guard => vec![worktree.join(SETTINGS)],
+            Self::WorktrunkHooks => vec![worktree.join(worktrunk::CONFIG)],
+            Self::Exclusions => vec![worktree.join(GITIGNORE_FILE), git_common_dir.join(EXCLUDE_FILE)],
+        }
+    }
+
+    /// Whether Procly wrote the block into `file`, without changing it.
+    fn held(self, managed: &ManagedBlocks, file: &Path) -> Result<bool, EjectError> {
+        Ok(match self {
+            Self::Guard => hook::standing(managed, file)? != Standing::Absent,
+            Self::Rules | Self::WorktrunkHooks | Self::Exclusions => ManagedBlocks::holds(file, self.name())?,
+        })
+    }
+
+    /// Takes the block out of `file` when nobody edited it.
+    fn remove(self, managed: &ManagedBlocks, file: &Path) -> Result<Removal, EjectError> {
+        // The contents Procly writes today count as its own even when the fingerprint was lost with the state directory.
+        Ok(match self {
+            Self::Rules => managed.remove(
+                file,
+                RULES,
+                &[managed::joined(rules(false)), managed::joined(rules(true))],
+            )?,
+            Self::Guard => hook::remove(managed, file)?,
+            Self::WorktrunkHooks => managed.remove(file, worktrunk::BLOCK, &worktrunk::known())?,
+            Self::Exclusions => managed.remove(file, EXCLUSIONS, &[managed::joined(&exclusion_lines())])?,
+        })
+    }
+}
+
+/// Every file that may hold a block, with the block, in the order they are taken out.
+fn targets(places: &Places, managed: &ManagedBlocks) -> Result<Vec<(Block, PathBuf)>, EjectError> {
+    let mut targets = Vec::new();
+    for block in Block::ALL {
+        for file in places.files(managed, block)? {
+            targets.push((block, file));
+        }
+    }
+    Ok(targets)
+}
+
+/// Reads what an eject for `scope` is to change, so that one that cannot be done fails before it stops a Service. A
+/// file outside the scope is no concern of it, and the Guard in a settings file that is no JSON counts for nothing.
+fn check(
+    registry: &Registry,
+    git_common_dir: &Path,
+    worktrees: &[Worktree],
+    scope: Scope<'_>,
+) -> Result<(), EjectError> {
+    let places = Places {
+        git_common_dir,
+        worktrees,
+        scope,
+    };
+    let own_files = targets(&places, &registry.managed)?
+        .into_iter()
+        .map(|(_, file)| file)
+        .chain(worktrees.iter().map(|worktree| worktree.path.join(ENV_FILE)));
+    for file in own_files {
+        if places.reach(&file) == Reach::Own {
+            read_if_any(&file)?;
+        }
+    }
+    Ok(())
+}
+
+/// The text of `file`, or `None` when it does not exist.
+fn read_if_any(file: &Path) -> Result<Option<String>, EjectError> {
+    match fs::read_to_string(file) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(EjectError::Read {
+            path: file.to_owned(),
+            source,
+        }),
+    }
 }
 
 /// Removes what Procly wrote within `scope`, and returns what was removed, what was left because it was edited, and
@@ -262,65 +414,15 @@ fn remove_written(
     let mut outcome = Outcome::default();
     let managed = &registry.managed;
 
-    // The contents Procly writes today count as its own even when the fingerprint was lost with the state directory.
-    let known_rules = [managed::joined(rules(false)), managed::joined(rules(true))];
-    for file in places.files(managed, RULES, |worktree| {
-        INSTRUCTION_FILES.iter().map(|name| worktree.join(name)).collect()
-    })? {
-        outcome.take(
-            &places,
-            Written::Rules,
-            file,
-            |file| Ok(ManagedBlocks::holds(file, RULES)?),
-            |file| Ok(managed.remove(file, RULES, &known_rules)?),
-        )?;
-    }
-
-    for file in places.files(managed, hook::BLOCK, |worktree| vec![worktree.join(SETTINGS)])? {
-        outcome.take(
-            &places,
-            Written::Guard,
-            file,
-            |file| Ok(hook::standing(managed, file)? != Standing::Absent),
-            |file| Ok(hook::remove(managed, file)?),
-        )?;
-    }
-
-    for file in places.files(managed, worktrunk::BLOCK, |worktree| {
-        vec![worktree.join(worktrunk::CONFIG)]
-    })? {
-        outcome.take(
-            &places,
-            Written::WorktrunkHooks,
-            file,
-            |file| Ok(ManagedBlocks::holds(file, worktrunk::BLOCK)?),
-            |file| Ok(managed.remove(file, worktrunk::BLOCK, &worktrunk::known())?),
-        )?;
-    }
-
-    let known_exclusions = [managed::joined(&exclusion_lines())];
-    let exclude = git_common_dir.join(EXCLUDE_FILE);
-    for file in places.files(managed, EXCLUSIONS, |worktree| {
-        vec![worktree.join(GITIGNORE_FILE), exclude.clone()]
-    })? {
-        outcome.take(
-            &places,
-            Written::Exclusions,
-            file,
-            |file| Ok(ManagedBlocks::holds(file, EXCLUSIONS)?),
-            |file| Ok(managed.remove(file, EXCLUSIONS, &known_exclusions)?),
-        )?;
+    for (block, file) in targets(&places, managed)? {
+        outcome.take(&places, managed, block, file)?;
     }
 
     for worktree in worktrees {
         let file = worktree.path.join(ENV_FILE);
-        let text = match fs::read_to_string(&file) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(source) => return Err(EjectError::Read { path: file, source }),
-        };
         if places.reach(&file) != Reach::Own {
-            if envfile::is_generated(&text) {
+            // Nothing that cannot be read is any of the eject's concern here.
+            if fs::read_to_string(&file).is_ok_and(|text| envfile::is_generated(&text)) {
                 outcome.spared.push(Spared::File {
                     written: Written::EnvFile,
                     file,
@@ -329,6 +431,9 @@ fn remove_written(
             }
             continue;
         }
+        let Some(text) = read_if_any(&file)? else {
+            continue;
+        };
         // Intact while it starts with its header and holds what Procly last wrote, a line added since is an edit.
         let edited = !envfile::is_generated(&text) || registry.managed.departs_from_record(&file, ENV_BLOCK, &text)?;
         if edited {
@@ -360,25 +465,24 @@ struct Outcome {
 }
 
 impl Outcome {
-    /// Takes the block out of `file` with `remove` when `file` is within the scope of the eject. A file that is not
-    /// is spared with `held` saying whether Procly wrote into it, and nothing is read of it otherwise.
+    /// Takes the block out of `file` when `file` is within the scope of the eject. A file that is not is spared when
+    /// Procly wrote the block into it, and an eject never fails for it: one nobody can read is not named.
     fn take(
         &mut self,
         places: &Places,
-        kind: Written,
+        managed: &ManagedBlocks,
+        block: Block,
         file: PathBuf,
-        held: impl FnOnce(&Path) -> Result<bool, EjectError>,
-        remove: impl FnOnce(&Path) -> Result<Removal, EjectError>,
     ) -> Result<(), EjectError> {
         match places.reach(&file) {
             Reach::Own => {
-                let removal = remove(&file)?;
-                self.record(places, kind, file, removal);
+                let removal = block.remove(managed, &file)?;
+                self.record(places, block.written(), file, removal);
             }
             reach => {
-                if held(&file)? {
+                if block.held(managed, &file).unwrap_or(false) {
                     self.spared.push(Spared::File {
-                        written: kind,
+                        written: block.written(),
                         file,
                         shared: reach == Reach::Shared,
                     });
@@ -443,15 +547,13 @@ impl Places<'_> {
 
     /// The files that may hold the block `block`: the ones Procly recorded it in, and the ones it writes by default,
     /// when they exist. A file that links out of the Repository is never one of them, since nothing is written there.
-    fn files(
-        &self,
-        managed: &ManagedBlocks,
-        block: &str,
-        defaults: impl Fn(&Path) -> Vec<PathBuf>,
-    ) -> Result<BTreeSet<PathBuf>, EjectError> {
+    fn files(&self, managed: &ManagedBlocks, block: Block) -> Result<BTreeSet<PathBuf>, EjectError> {
         let mut files = BTreeSet::new();
-        let recorded = managed.files_holding(block)?;
-        let defaults = self.worktrees.iter().flat_map(|worktree| defaults(&worktree.path));
+        let recorded = managed.files_holding(block.name())?;
+        let defaults = self
+            .worktrees
+            .iter()
+            .flat_map(|worktree| block.defaults(&worktree.path, self.git_common_dir));
         for file in recorded.into_iter().chain(defaults) {
             if let Some(inside) = self.inside(&file) {
                 files.insert(inside);

@@ -349,6 +349,7 @@ async fn dispatch(
             | Request::Down { .. }
             | Request::Status { .. }
             | Request::Eject { .. }
+            | Request::EjectPreview { .. }
             | Request::Gc { .. }
             | Request::WorktreeRelease { .. }
             | Request::Restart { .. }
@@ -422,6 +423,7 @@ async fn dispatch(
             .await
             .unwrap_or_else(failure),
         Request::Eject { cwd, repository } => eject::run(registry, cwd, repository, peer).await,
+        Request::EjectPreview { cwd } => eject::preview(registry, cwd).await,
         Request::Doctor => doctor::run(registry).await,
         Request::Gc { cwd, apply, only } => gc::run(registry, cwd, apply, only, peer).await,
         Request::WorktreeRelease { path, dry_run } => answer(
