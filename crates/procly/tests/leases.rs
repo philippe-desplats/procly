@@ -752,3 +752,125 @@ fn a_declared_port_held_only_by_time_wait_is_free_while_a_live_listener_keeps_it
 
     assert_eq!(port_of(&procly.procly_in(&main, &["up", "web"])), new);
 }
+
+/// The address of the network interface the host routes to the outside through, when it has one. Connecting a UDP
+/// socket sends nothing, it only picks the route.
+fn interface_address() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("192.0.2.1", 9)).ok()?;
+    let address = socket.local_addr().ok()?.ip();
+    (!address.is_loopback() && !address.is_unspecified()).then_some(address)
+}
+
+/// The link-local address of the loopback, `fe80::1%lo0`, which every macOS has and which never leaves the machine.
+#[cfg(target_os = "macos")]
+fn loopback_link_local(port: u16) -> Option<std::net::SocketAddr> {
+    let output = std::process::Command::new("/sbin/ifconfig").arg("lo0").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().find(|line| line.contains("fe80::1%lo0"))?;
+    let scope = line.split("scopeid 0x").nth(1)?.split_whitespace().next()?;
+    let scope = u32::from_str_radix(scope, 16).ok()?;
+    Some(std::net::SocketAddrV6::new(std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), port, 0, scope).into())
+}
+
+/// Every address a Foreign process may listen on `port` at: the wildcard and the loopback, IPv4 and IPv6, an address
+/// of a network interface, and on macOS the link-local address of the loopback. An address this host lacks is left out.
+fn listening_addresses(port: u16) -> Vec<std::net::SocketAddr> {
+    let mut addresses: Vec<std::net::SocketAddr> = vec![
+        ("0.0.0.0", port).into_socket_addr(),
+        ("127.0.0.1", port).into_socket_addr(),
+        ("::", port).into_socket_addr(),
+        ("::1", port).into_socket_addr(),
+    ];
+    addresses.extend(interface_address().map(|address| std::net::SocketAddr::new(address, port)));
+    #[cfg(target_os = "macos")]
+    addresses.extend(loopback_link_local(port));
+    addresses
+}
+
+/// Parses an address the tests name with a literal.
+trait IntoSocketAddr {
+    fn into_socket_addr(self) -> std::net::SocketAddr;
+}
+
+impl IntoSocketAddr for (&str, u16) {
+    fn into_socket_addr(self) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(self.0.parse().expect("an IP address literal"), self.1)
+    }
+}
+
+/// Leaves `port` in `TIME_WAIT` on the loopback: the side that closes first keeps it once the listener is gone.
+fn leave_in_time_wait(port: u16) {
+    use std::io::Read as _;
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("listen on the port");
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to it");
+    let (served, _) = listener.accept().expect("accept the connection");
+    drop(served);
+    client
+        .read_to_end(&mut Vec::new())
+        .expect("read until the server closes");
+}
+
+#[test]
+fn a_declared_port_a_process_listens_on_at_any_address_is_held_at_the_first_grant_of_the_main_worktree() {
+    for mut address in listening_addresses(0) {
+        let procly = Procly::new();
+        let (start, end) = procly.narrow_range();
+        let main = git_repository(procly.scratch(), "app");
+        let declared = free_port();
+        // The scope of a link-local address stays with it.
+        address.set_port(declared);
+        let Ok(foreign) = std::net::TcpListener::bind(address) else {
+            eprintln!("cannot listen on {address} here, case left out");
+            continue;
+        };
+        write(&main, "procly.toml", &web_declaring(declared));
+
+        let leased = port_of(&procly.procly_in(&main, &["up", "web"]));
+
+        assert!(
+            (start..=end).contains(&leased),
+            "a listener on {address} holds the declared port {declared}, the Lease went to {leased}"
+        );
+        drop(foreign);
+    }
+}
+
+#[test]
+fn the_explicit_port_of_a_pinned_branch_is_held_by_a_listener_at_any_address_and_by_time_wait() {
+    let mut cases: Vec<Option<std::net::SocketAddr>> = listening_addresses(0).into_iter().map(Some).collect();
+    // `None` stands for a port left in TIME_WAIT, which the strict probe of a Pinned branch counts as held.
+    cases.push(None);
+    for case in cases {
+        let procly = Procly::new();
+        let (start, end) = procly.narrow_range();
+        let main = git_repository(procly.scratch(), "app");
+        let explicit = free_port();
+        let config = format!(
+            "{}[pinned.staging.ports]\nweb = {{ http = {explicit} }}\n",
+            web_declaring(free_port())
+        );
+        let staging = worktree_on(&main, "app-staging", "staging", true);
+        write(&staging, "procly.toml", &config);
+        let mut foreign = None;
+        if let Some(mut address) = case {
+            address.set_port(explicit);
+            let Ok(listener) = std::net::TcpListener::bind(address) else {
+                eprintln!("cannot listen on {address} here, case left out");
+                continue;
+            };
+            foreign = Some(listener);
+        } else {
+            leave_in_time_wait(explicit);
+        }
+
+        let leased = port_of(&procly.procly_in(&staging, &["up", "web"]));
+
+        assert!(
+            (start..=end).contains(&leased),
+            "{case:?} holds the explicit port {explicit}, the Lease went to {leased}"
+        );
+        drop(foreign);
+    }
+}

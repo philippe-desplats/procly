@@ -14,8 +14,8 @@ use tokio::net::TcpSocket;
 use super::clock::Clock;
 use super::compose::shell_word;
 use super::doctor::occupant_text;
-use super::{foreign, listeners};
 use super::store::{self, StoreError};
+use super::{foreign, listeners};
 use crate::config::PortConfig;
 use crate::ports::Range;
 use crate::protocol::{KeptBecause, KeptLease, LeaseHeld, Occupant, StaleLease};
@@ -1327,6 +1327,31 @@ mod tests {
             .and_then(|listener| listener.local_addr())
             .map(|address| address.port())
             .unwrap()
+    }
+
+    #[test]
+    fn a_live_listener_on_an_ipv6_or_an_interface_address_is_never_only_time_wait() {
+        // The address of the interface the host routes through, when it has one. A UDP connect sends nothing.
+        let interface = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .and_then(|socket| socket.connect(("192.0.2.1", 9)).map(|()| socket))
+            .and_then(|socket| socket.local_addr())
+            .map(|address| address.ip())
+            .ok()
+            .filter(|address| !address.is_loopback() && !address.is_unspecified());
+        let mut addresses = vec![
+            std::net::IpAddr::from(Ipv6Addr::UNSPECIFIED),
+            std::net::IpAddr::from(Ipv6Addr::LOCALHOST),
+        ];
+        addresses.extend(interface);
+        for address in addresses {
+            let port = ephemeral_port();
+            let Ok(listener) = std::net::TcpListener::bind((address, port)) else {
+                continue;
+            };
+            assert!(!is_free(port), "a listener on {address}");
+            assert!(!only_time_wait(port), "a listener on {address} is not TIME_WAIT");
+            drop(listener);
+        }
     }
 
     #[test]
