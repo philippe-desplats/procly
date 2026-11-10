@@ -188,6 +188,41 @@ fn a_foreign_process_on_a_lease_shows_in_status_within_2_s_of_listening_and_leav
 }
 
 #[test]
+fn a_look_that_panics_never_breaks_status_nor_floods_the_daemon_log() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let panics = procly.scratch().join("look-panics");
+    std::fs::write(&panics, "").expect("make every look panic");
+    let polling = Instant::now();
+
+    // The Daemon takes the environment of the command that starts it, and a client polls it as the app does.
+    while polling.elapsed() < Duration::from_secs(4) {
+        let output = procly
+            .command()
+            .current_dir(&main)
+            .env("PROCLY_TEST_LOOK_PANICS", &panics)
+            .arg("status")
+            .output()
+            .expect("the procly binary runs");
+        assert_success(&output);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let log = procly.daemon_log();
+    assert_eq!(log.matches("cannot look for Foreign processes").count(), 1, "{log}");
+    // Looks 1 s, then 2 s, then 4 s apart: 3 in 4 s, where a look that never waited would panic thousands of times.
+    assert!(log.matches("panicked").count() <= 4, "{log}");
+    assert!(log.len() < 4096, "{log}");
+
+    std::fs::remove_file(&panics).expect("let the looks succeed again");
+    let server = StartedOutside::start(&main);
+    let line = format!("foreign process {}", server.pid());
+    eventually("the Foreign process to show once a look succeeds again", || {
+        stdout(&procly.procly_in(&main, &["status"])).contains(&line)
+    });
+}
+
+#[test]
 fn a_service_stopped_by_down_is_no_foreign_process_in_the_next_status() {
     let procly = Procly::new();
     let main = git_repository(procly.scratch(), "app");
