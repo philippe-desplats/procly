@@ -87,11 +87,11 @@ Ctrl-C also exits with 0 but prints no `ended` line, so a reader tells a real en
 
 ## `up`
 
-A healthy `up` lists the Services it reached in the order they came up, the Services the one you asked for needs first. `needed_by` names the Service that needs it, and is `null` for a Service you asked for. `port` is the Lease the Service listens on and `url` the URL of that Lease, both `null` for a Service without a port. `url` is also `null` when Procly does not know the scheme of that port, see [What `procly up` prints](configuration.md#what-procly-up-prints). `ports` holds every Lease of the Service by Port name, such as `{"admin":4102,"http":4101}` for a Service declaring `http` and `admin`, and is empty for a Service without a port. `port` is always one of them, the one health check probes. `urls` holds the URL of each Lease whose scheme Procly knows, by Port name, such as `{"http":"http://localhost:8025","smtp":"smtp://localhost:1025"}` for a Mailpit, and leaves the others out. `via` is the Group that runs a covered Service, or `null`.
+A healthy `up` lists the Services it reached in the order they came up, the Services the one you asked for needs first. `needed_by` names the Service that needs it, and is `null` for a Service you asked for. `port` is the Lease the Service listens on and `url` the URL of that Lease, both `null` for a Service without a port. `url` is also `null` when Procly does not know the scheme of that port, see [What `procly up` prints](configuration.md#what-procly-up-prints). `ports` holds every Lease of the Service by Port name, such as `{"admin":4102,"http":4101}` for a Service declaring `http` and `admin`, and is empty for a Service without a port. `port` is always one of them, the one health check probes. `urls` holds the URL of each Lease whose scheme Procly knows, by Port name, such as `{"http":"http://localhost:8025","smtp":"smtp://localhost:1025"}` for a Mailpit, and leaves the others out. `via` is the Group that runs a covered Service, or `null`. `warnings` lists what went wrong for that Service without failing `up`, or what Procly cannot tell, and is empty when nothing did. It holds the [Portless alias](configuration.md#portless-aliases) that could not be made, and the doubt about a Service a previous Daemon started and that the Daemon found while it could not list the processes: `up` answers `reused` and the warning says the Daemon cannot tell that the Service is what answers on its Lease, see [After a crash](daemon.md#after-a-crash). Without `--json` each warning is on stderr as `procly: warning: ...`, with `--json` stderr stays empty and the MCP `up` tool returns the document, so an agent reads them in `warnings` and nowhere else. The key was added without a change of the schema version.
 
 ```console
 $ procly up --json web
-{"schema_version":1,"result":"healthy","services":[{"service":"api","outcome":"started","via":null,"port":4100,"url":"http://localhost:4100","ports":{"http":4100},"urls":{"http":"http://localhost:4100"},"needed_by":"web"},{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"urls":{"http":"http://localhost:4101"},"needed_by":null}]}
+{"schema_version":1,"result":"healthy","services":[{"service":"api","outcome":"started","via":null,"port":4100,"url":"http://localhost:4100","ports":{"http":4100},"urls":{"http":"http://localhost:4100"},"needed_by":"web","warnings":[]},{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"urls":{"http":"http://localhost:4101"},"needed_by":null,"warnings":[]}]}
 ```
 
 `procly up --json` without a Service lists every Service it brought up, all with a `needed_by` of `null`.
@@ -165,7 +165,7 @@ A later version of procly may add a check. A reader that does not know a `name` 
 
 ```console
 $ procly restart --json web
-{"schema_version":1,"result":"healthy","services":[{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"urls":{"http":"http://localhost:4101"},"needed_by":null}]}
+{"schema_version":1,"result":"healthy","services":[{"service":"web","outcome":"started","via":null,"port":4101,"url":"http://localhost:4101","ports":{"http":4101},"urls":{"http":"http://localhost:4101"},"needed_by":null,"warnings":[]}]}
 ```
 
 ## `daemon stop`

@@ -121,7 +121,7 @@ run = "turbo dev"
 covers = ["web", "api"]
 ```
 
-`procly up dev` starts `turbo dev` in a process group of its own, with the environment of the caller and then, for every covered Service:
+`procly up dev` starts `turbo dev` in a session and a process group of their own, with the environment of the caller and then, for every covered Service:
 
 - Its Leases, as `PORT_<SERVICE>_<NAME>`, such as `PORT_WEB_HTTP` and `PORT_API_HTTP`. The plain `PORT` and `PORT_<NAME>` of a Service would collide between 2 covered Services, so a Group gets none of them. A Service name is written in upper case, every character that is not a letter or a digit becoming an underscore.
 - Its Derived variables, such as `WEB_URL`.
@@ -478,7 +478,7 @@ The Service receives its Leases in its environment, after the environment of the
 
 Procly also sets `PROCLY=1` and `PROCLY_SERVICE`, the name of the Service, so that a script can tell it is supervised and by which entry. Both are set last, after the Derived variables.
 
-Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process group of the Service listens on. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
+Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process tree of the Service listens on, that is every process of its session: the process group of its leader and those of the tasks it started in groups of their own. A process that left the session with `setsid` is not part of the Service. A Service that an older Daemon started is read through the process group of its leader only. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
 
 ### What `procly up` prints
 
@@ -533,7 +533,7 @@ An alias lives as long as its Lease:
 
 Procly records each alias it makes, in the state directory, with the Lease that holds it. An alias is removed whatever the setting is when its Lease goes, so that turning Portless off never leaves a name pointing at a port another Worktree may get. A name is not scoped to a Repository, so 2 Repositories that both have a `web` in their Main worktree compete for `web`, and the last `procly up` wins.
 
-Portless stays optional. Procly never starts the Portless proxy, and never runs `sudo`: it only runs `portless alias`, so the proxy is yours to start. When `portless` is not on the `PATH` of the Daemon, or a call fails, `procly up` prints one warning on stderr, `procly: warning: ...`, makes no more alias in that command and exits as it would without Portless. A removal that fails in `procly worktree release` or `procly gc --apply` is told the same way, once per command, and is in the `warnings` of their `--json` document. The grant of a Lease only logs it in the Daemon log. A call that does not answer within 10 seconds is a failed call: Procly kills `portless` with everything it started, makes no further call in that command, and the grant of a Lease never waits for a call under way. A removal that fails leaves the alias recorded and is tried again by the next removal, unless Portless answers that the alias does not exist, in which case the alias is gone and the record is dropped. `procly doctor` names the aliases no Lease holds with the command that removes each, see [Checking the installation](doctor.md). It also reports a missing `portless` when the setting is on.
+Portless stays optional. Procly never starts the Portless proxy, and never runs `sudo`: it only runs `portless alias`, so the proxy is yours to start. When `portless` is not on the `PATH` of the Daemon, or a call fails, `procly up` prints one warning on stderr, `procly: warning: ...`, makes no more alias in that command and exits as it would without Portless. With `--json`, or through the MCP tool, the warning is in the `warnings` of the Service in the document and stderr stays empty, see [`up`](json.md#up). A removal that fails in `procly worktree release` or `procly gc --apply` is told the same way, once per command, and is in the `warnings` of their `--json` document. The grant of a Lease only logs it in the Daemon log. A call that does not answer within 10 seconds is a failed call: Procly kills `portless` with everything it started, makes no further call in that command, and the grant of a Lease never waits for a call under way. A removal that fails leaves the alias recorded and is tried again by the next removal, unless Portless answers that the alias does not exist, in which case the alias is gone and the record is dropped. `procly doctor` names the aliases no Lease holds with the command that removes each, see [Checking the installation](doctor.md). It also reports a missing `portless` when the setting is on.
 
 ## Derived variables
 

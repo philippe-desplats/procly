@@ -742,7 +742,7 @@ fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<
 
 /// Prints the Service `up` was asked for, healthy, after the `needs` it brought up first.
 fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow::Result<ExitCode> {
-    warn(needs.iter().chain([requested]));
+    // With `--json` the document carries the warnings, an agent that calls the MCP tool never reads stderr.
     if json {
         let services = needs
             .iter()
@@ -752,6 +752,7 @@ fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow:
         json::print(&json::Up::Healthy { services })?;
         return Ok(ExitCode::SUCCESS);
     }
+    warn(needs.iter().chain([requested]));
     // Stdout is the requested Service alone, what it needed is told on stderr.
     for need in needs {
         eprintln!("{} (needed by {})", reached_line(need), requested.service);
@@ -762,12 +763,12 @@ fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow:
 
 /// Prints every Service `up` brought up or found running, since every Service was asked for, in the order they came up.
 fn up_all(services: &[UpService], json: bool) -> anyhow::Result<ExitCode> {
-    warn(services);
     if json {
         let services = services.iter().map(|up| json::Reached::new(up, None)).collect();
         json::print(&json::Up::Healthy { services })?;
         return Ok(ExitCode::SUCCESS);
     }
+    warn(services);
     for up in services {
         println!("{}", reached_line(up));
     }

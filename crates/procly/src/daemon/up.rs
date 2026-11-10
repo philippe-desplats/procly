@@ -14,7 +14,7 @@ use super::health::HealthCheck;
 use super::held::Admission;
 use super::lease::Scope as LeaseScope;
 use super::portless::{self, Wanted};
-use super::service::{Relation, Service, ServiceSpec, Start};
+use super::service::{Proof, Relation, Service, ServiceSpec, Start};
 use super::{Registry, blocking, message, read_config, topology_of};
 use crate::config::{Config, IsolationMode, ServiceConfig, ServiceKind};
 use crate::driver::{self, Driver};
@@ -165,16 +165,9 @@ pub(super) async fn reach(
     // One warning is enough for a Portless that does not answer, the next call would fail the same way.
     let mut portless_warned = false;
     for current in order {
-        let (outcome, via, port, health) = match start(registry, scope, current, env, gitignore, admission).await {
-            Ok(Running::Process { service, outcome }) => {
-                let health = service.healthy().await.map_err(|end| (end, service.output()));
-                (outcome, None, service.port(), health)
-            }
-            Ok(Running::Covered { group, name, port }) => {
-                let health = group.healthy().await.map_err(|end| (end, group.output()));
-                (StartOutcome::Reused, Some(name), port, health)
-            }
-            Ok(Running::Compose { outcome, port, health }) => (outcome, None, port, health),
+        let (outcome, via, port, health, doubt) = match start(registry, scope, current, env, gitignore, admission).await
+        {
+            Ok(running) => running.wait().await,
             Err(response) => {
                 return match *response {
                     Response::Conflict { service, conflicts, .. } => Response::Conflict {
@@ -217,6 +210,7 @@ pub(super) async fn reach(
             warnings.extend(alias(registry, scope, current, &ports, &urls).await);
             portless_warned = !warnings.is_empty();
         }
+        warnings.extend(doubt.map(|doubt| doubt_warning(current, doubt)));
         drop(admitted);
         // The URL of the Lease the health check probes, among the URLs of every Lease.
         let url = port
@@ -256,6 +250,51 @@ pub(super) async fn reach(
     }
 }
 
+/// How a Service that was started or found running turned out to be: its outcome, the Group running it, the Lease its
+/// health check probes, its health and the port the Daemon could not judge.
+type Waited = (
+    StartOutcome,
+    Option<String>,
+    Option<u16>,
+    Result<(), (ServiceEnd, String)>,
+    Option<u16>,
+);
+
+impl Running {
+    /// Waits for the health of the Service.
+    async fn wait(self) -> Waited {
+        match self {
+            Self::Process {
+                service,
+                outcome,
+                doubt,
+            } => {
+                let health = service.healthy().await.map_err(|end| (end, service.output()));
+                (outcome, None, service.port(), health, doubt)
+            }
+            Self::Covered {
+                group,
+                name,
+                port,
+                doubt,
+            } => {
+                let health = group.healthy().await.map_err(|end| (end, group.output()));
+                (StartOutcome::Reused, Some(name), port, health, doubt)
+            }
+            Self::Compose { outcome, port, health } => (outcome, None, port, health, None),
+        }
+    }
+}
+
+/// What `up` says of a Service found running that the Daemon kept without being able to list the processes to tell
+/// that its tree is what listens on `port`.
+fn doubt_warning(service: &str, port: u16) -> String {
+    format!(
+        "the Daemon cannot list the processes, so it cannot tell that {service} is what listens on port {port}: it kept \
+         the service as it was after a restart of the Daemon, and the process that answers may be another"
+    )
+}
+
 /// The variables Procly injects into the Service `name` of the Worktree holding `cwd`. Blocking.
 pub(super) fn service_environment(
     registry: &Registry,
@@ -283,6 +322,8 @@ enum Running {
     Process {
         service: Arc<Service>,
         outcome: StartOutcome,
+        /// The port the Daemon could not tell what listens on, for a Service found running that it could not judge.
+        doubt: Option<u16>,
     },
     /// A Service covered by a Group that runs, whose health is the Group's, still to be waited for.
     Covered {
@@ -291,6 +332,8 @@ enum Running {
         name: String,
         /// The Lease its health check probes.
         port: Option<u16>,
+        /// As for [`Running::Process`], for the Group.
+        doubt: Option<u16>,
     },
     /// A Compose service, already waited for: `health` tells whether its container answered in time, and if not,
     /// how it ended and its recent logs.
@@ -331,9 +374,51 @@ async fn start(
         };
         match started.map_err(|message| Box::new(Response::Error { message }))? {
             Started::Process(Start::Ready { service, outcome, .. }) => {
-                return Ok(Running::Process { service, outcome });
+                // A Service found running that the Daemon kept without being able to list the processes is judged now
+                // if they can be listed, rather than answered for.
+                match service.prove().await {
+                    Proof::Done => {
+                        return Ok(Running::Process {
+                            service,
+                            outcome,
+                            doubt: None,
+                        });
+                    }
+                    Proof::Unreadable(port) => {
+                        return Ok(Running::Process {
+                            service,
+                            outcome,
+                            doubt: Some(port),
+                        });
+                    }
+                    Proof::Gone => {
+                        drop(admitted);
+                        service.ended().await;
+                    }
+                }
             }
-            Started::Covered { group, name, port } => return Ok(Running::Covered { group, name, port }),
+            Started::Covered { group, name, port } => match group.prove().await {
+                Proof::Done => {
+                    return Ok(Running::Covered {
+                        group,
+                        name,
+                        port,
+                        doubt: None,
+                    });
+                }
+                Proof::Unreadable(doubt) => {
+                    return Ok(Running::Covered {
+                        group,
+                        name,
+                        port,
+                        doubt: Some(doubt),
+                    });
+                }
+                Proof::Gone => {
+                    drop(admitted);
+                    group.ended().await;
+                }
+            },
             Started::Process(Start::Stopping(service)) => {
                 drop(admitted);
                 service.ended().await;

@@ -4,6 +4,8 @@
 //! Every other module goes through this interface and never calls the system itself, so that a Windows port adds a
 //! `#[cfg(windows)]` sibling of this module with the same interface, built on Job Objects, and changes nothing else.
 
+mod tree;
+
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::process::{Child, Command, ExitStatus};
 use std::time::Duration;
@@ -13,10 +15,11 @@ use nix::sys::signal::{Signal, kill, killpg};
 use nix::sys::wait::{WaitStatus, waitpid};
 /// The id of a process or of a process group, which every module names processes by.
 pub(super) use nix::unistd::Pid;
-use process_wrap::tokio::{ChildWrapper, CommandWrap, ProcessGroup};
+use process_wrap::tokio::{CommandWrap, ProcessSession};
 use tokio::task::JoinHandle;
 
 use crate::protocol::{JobEnd, ServiceEnd};
+pub(super) use tree::{Tree, kill_tree, stop_detached, stop_tree};
 
 /// How long a stopped tree gets between `SIGTERM` and `SIGKILL`.
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,6 +30,8 @@ pub(super) const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const KILL_ATTEMPTS: u32 = 100;
 /// How often a stopped group that is not a child of the Daemon is looked at, to tell whether it is gone.
 const GONE_POLL: Duration = Duration::from_millis(20);
+/// How often a child of the Daemon is looked at, besides the signal that tells it ended.
+const ENDED_POLL: Duration = Duration::from_millis(500);
 
 /// Sends `SIGKILL` to the group until it is empty, so that a member forked while the first signal was in flight
 /// goes too. The group keeps its id reserved while any member lives, so this never reaches an unrelated process.
@@ -102,14 +107,68 @@ fn parse_proc_stat(stat: &str) -> Option<Identity> {
 /// Reads the line `ps -o pgid=,lstart=` prints, such as `4242 Sun Oct 18 20:52:01 2026`.
 fn parse_identity(line: &str) -> Option<Identity> {
     let (pgid, started) = line.trim().split_once(char::is_whitespace)?;
-    let started = started.trim();
+    let started = normalized(started);
     if started.is_empty() {
         return None;
     }
     Some(Identity {
         pgid: Pid::from_raw(pgid.parse().ok()?),
-        started: started.to_owned(),
+        started,
     })
+}
+
+/// Whether the child `pid` of the Daemon has ended, which this tells without reaping it: an ended child stays a zombie
+/// that keeps its pid, and the id of its process group and of its session, until the Daemon reaps it. A child the Daemon
+/// has already reaped, or that is not its own, counts as ended since there is nothing left to wait for.
+#[expect(
+    unsafe_code,
+    reason = "nix has no waitid for macOS, and waitid is the only call that waits without reaping (WNOWAIT)"
+)]
+fn has_ended(pid: Pid) -> bool {
+    // SAFETY: a zeroed `siginfo_t` is a valid value of the type, `waitid` only writes to it, and the pointer is valid for
+    // the whole call. No flag but `WNOHANG` and `WNOWAIT` is passed, so it neither blocks nor reaps.
+    unsafe {
+        let mut info: nix::libc::siginfo_t = std::mem::zeroed();
+        let status = nix::libc::waitid(
+            nix::libc::P_PID,
+            pid.as_raw().unsigned_abs(),
+            &raw mut info,
+            nix::libc::WEXITED | nix::libc::WNOHANG | nix::libc::WNOWAIT,
+        );
+        if status != 0 {
+            // No such child any more: it was reaped, or never was the Daemon's.
+            return Errno::last() == Errno::ECHILD;
+        }
+        // With `WNOHANG` and nothing to report, `waitid` succeeds and leaves the structure zeroed.
+        info.si_signo != 0
+    }
+}
+
+/// Returns once the child `pid` of the Daemon has ended, without reaping it, so that its pid, and the ids of its process
+/// group and of its session, stay its own until the Daemon decides to reap it. Whoever calls this owns the reaping: the
+/// child must not be waited for by anything else, and `tokio` does not reap a child that is neither dropped nor waited
+/// for.
+pub(super) async fn ended(pid: Pid) {
+    use tokio::signal::unix::{SignalKind, signal};
+    // Registered before the first look, so that an end between the look and the wait is not missed.
+    let mut sigchld = signal(SignalKind::child()).ok();
+    loop {
+        if has_ended(pid) {
+            return;
+        }
+        match sigchld.as_mut() {
+            // The wait is also bounded by a look every `ENDED_POLL`, in case the signal was coalesced with another.
+            Some(sigchld) => {
+                let _ = tokio::time::timeout(ENDED_POLL, sigchld.recv()).await;
+            }
+            None => tokio::time::sleep(GONE_POLL).await,
+        }
+    }
+}
+
+/// Whether the child `pid` of the Daemon has not ended, without reaping it if it has.
+pub(super) fn is_running_child(pid: Pid) -> bool {
+    !has_ended(pid)
 }
 
 /// Whether the process `pid` still exists. One that is not a child of the Daemon is reaped by init as it ends.
@@ -145,12 +204,20 @@ pub(super) fn detach(command: &mut tokio::process::Command) {
     command.process_group(0);
 }
 
-/// Makes the spawned command lead a process group of its own, so that a signal to the group reaches its whole tree.
-pub(super) fn lead_group(command: &mut CommandWrap) {
-    command.wrap(ProcessGroup::leader());
+/// Makes the spawned command of a Service lead a session of its own, and the process group of the same id. Everything
+/// it starts stays in the session, whatever group a tool puts it in and whoever adopts it once its parent ended, which
+/// is how [`Tree`] finds the tasks of the Service. It has no controlling terminal to give, like the Daemon.
+pub(super) fn lead_session(command: &mut CommandWrap) {
+    command.wrap(ProcessSession);
 }
 
-/// Like [`lead_group`], for a command the Daemon spawns and waits for itself, without the async runtime.
+/// The reading of a start that compares with another: `ps` pads a day of the month under 10 with a second space.
+pub(super) fn normalized(started: &str) -> String {
+    started.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Makes the spawned command lead a process group of its own, so that a signal to the group reaches its whole tree.
+/// For a command the Daemon spawns and waits for itself, without the async runtime.
 pub(super) fn lead_group_blocking(command: &mut Command) {
     command.process_group(0);
 }
@@ -167,20 +234,6 @@ pub(super) fn kill_tree_blocking(child: &mut Child) {
     let _ = child.wait();
     if let Some(group) = group {
         kill_group(group);
-    }
-}
-
-/// Stops the leader of the process group of a Service: `SIGTERM` to the whole group, then `SIGKILL` after the stop
-/// timeout.
-pub(super) async fn stop_tree(child: &mut dyn ChildWrapper) {
-    if let Err(error) = child.signal(Signal::SIGTERM as i32) {
-        eprintln!("cannot send SIGTERM to process group {:?}: {error}", child.id());
-    }
-    if tokio::time::timeout(STOP_TIMEOUT, child.wait()).await.is_err() {
-        if let Err(error) = child.start_kill() {
-            eprintln!("cannot kill process group {:?}: {error}", child.id());
-        }
-        let _ = child.wait().await;
     }
 }
 
@@ -245,6 +298,57 @@ mod tests {
             })
         );
         assert_eq!(parse_proc_stat("4242 (cmd) S 1"), None);
+    }
+
+    #[test]
+    fn tells_a_child_ended_without_reaping_it_so_that_it_keeps_its_pid() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .expect("start a child");
+        let pid = Pid::from_raw(i32::try_from(child.id()).expect("a pid fits in an i32"));
+        let start = std::time::Instant::now();
+        while !has_ended(pid) {
+            assert!(start.elapsed() < Duration::from_secs(10), "the child never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Asked again, it has still ended, and it is still there to be waited for, with the status it ended with.
+        assert!(has_ended(pid));
+        assert!(is_alive(pid), "the child was reaped by looking at it");
+        assert!(!is_running_child(pid));
+        assert_eq!(child.wait().expect("wait for the child").code(), Some(3));
+        // Reaped: nothing is left to wait for.
+        assert!(has_ended(pid));
+    }
+
+    #[test]
+    fn a_child_that_runs_has_not_ended() {
+        let mut child = Command::new("sleep").arg("30").spawn().expect("start a child");
+        let pid = Pid::from_raw(i32::try_from(child.id()).expect("a pid fits in an i32"));
+
+        let running = is_running_child(pid);
+        child.kill().expect("stop the child");
+        child.wait().expect("reap the child");
+
+        assert!(running);
+    }
+
+    #[tokio::test]
+    async fn waits_for_a_child_to_end_and_leaves_it_to_be_reaped_by_whoever_asked() {
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "sleep 0.2; exit 4"])
+            .spawn()
+            .expect("start a child");
+        let pid = Pid::from_raw(i32::try_from(child.id().expect("a pid")).expect("a pid fits in an i32"));
+
+        tokio::time::timeout(Duration::from_secs(10), ended(pid))
+            .await
+            .expect("the end of the child was not noticed");
+
+        // Noticed, and still a zombie of the Daemon until it is waited for.
+        assert!(is_alive(pid), "the child was reaped when its end was noticed");
+        assert_eq!(child.wait().await.expect("wait for the child").code(), Some(4));
     }
 
     #[test]

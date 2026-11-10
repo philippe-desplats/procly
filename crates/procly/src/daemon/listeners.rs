@@ -2,7 +2,7 @@
 //! listening on TCP, to name what holds a port or runs in a Worktree.
 
 use super::process_group::Pid;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -16,11 +16,14 @@ const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often a running lookup is checked for its end.
 const LOOKUP_POLL: Duration = Duration::from_millis(10);
 
-/// The TCP ports the members of the process group `pgid` listen on, sorted, read with `lsof`. `None` when `lsof`
-/// cannot run, the caller then cannot tell.
-pub(super) fn listening_ports(pgid: Pid) -> Option<Vec<u16>> {
-    let pgid = pgid.to_string();
-    let output = lsof(&["-nP", "-a", "-g", &pgid, "-iTCP", "-sTCP:LISTEN", "-Fn"])?;
+/// The TCP ports the members of the process groups `groups` listen on, sorted, read with `lsof`. `None` when `lsof`
+/// cannot run, the caller then cannot tell. Nothing listens in no group: an empty set lists no port.
+pub(super) fn listening_ports(groups: &BTreeSet<Pid>) -> Option<Vec<u16>> {
+    if groups.is_empty() {
+        return Some(Vec::new());
+    }
+    let groups = groups.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+    let output = lsof(&["-nP", "-a", "-g", &groups, "-iTCP", "-sTCP:LISTEN", "-Fn"])?;
     Some(ports(&String::from_utf8_lossy(&output.stdout)))
 }
 

@@ -714,6 +714,67 @@ fn a_cancelled_wait_stops_its_command_and_gets_no_answer_while_the_job_goes_on()
     assert!(server.text("status", json!({})).contains(&job));
 }
 
+/// Ends the process group led by the pid in `0` when the test ends, passed or failed.
+struct ReapGroup(nix::unistd::Pid);
+
+impl Drop for ReapGroup {
+    fn drop(&mut self) {
+        let _ = nix::sys::signal::killpg(self.0, nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
+#[test]
+fn up_returns_the_doubt_about_a_service_kept_without_a_process_list_in_the_document_it_returns() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (port, dir) = (free_port(), procly.scratch());
+    let (leader, listener, listing) = (dir.join("leader"), dir.join("listener"), dir.join("listing"));
+    fs::create_dir(&listing).expect("create the listing directory");
+    // The leader only sleeps, the listener is a task in a group of its own: the form of `turbo run dev`.
+    fs::write(
+        main.join("procly.toml"),
+        format!(
+            "[services.web]\nrun = '''echo $$ > {leader}; perl -e 'setpgrp(0,0); exec @ARGV' {server} --port {port} & \
+             echo $! > {listener}; exec sleep 600'''\nports = {{ http = {port} }}\nhealth = {{ timeout = '5s' }}\n",
+            leader = leader.display(),
+            listener = listener.display(),
+            server = test_server().display()
+        ),
+    )
+    .expect("write procly.toml");
+    let cli = |args: &[&str]| {
+        procly
+            .command()
+            .current_dir(&main)
+            .env("PROCLY_TEST_LISTING", &listing)
+            .args(args)
+            .output()
+            .expect("the procly binary runs")
+    };
+    assert_success(&cli(&["up", "web"]));
+    let _reap = [
+        ReapGroup(common::read_pid(&leader)),
+        ReapGroup(common::read_pid(&listener)),
+    ];
+    // The Daemon that finds the Service running cannot list the processes, and keeps it as it was.
+    procly.kill_daemon();
+    fs::write(listing.join("refuse"), "").expect("refuse the listing");
+    assert_success(&cli(&["status"]));
+    let mut server = McpServer::start_in(&procly, &main);
+
+    let result = server.call("up", json!({ "service": "web" }));
+
+    assert_ne!(result["isError"], json!(true), "{result}");
+    let document: Value = serde_json::from_str(&text_of(&result)).expect("the document of up");
+    assert_eq!(document["services"][0]["outcome"], json!("reused"), "{document}");
+    assert!(
+        document["services"][0]["warnings"][0]
+            .as_str()
+            .is_some_and(|text| text.contains("cannot tell that web is what listens on port")),
+        "an agent that calls the tool was not told the Daemon cannot tell what answers: {document}"
+    );
+}
+
 #[test]
 fn a_cancelled_up_stops_its_command_and_stops_no_service() {
     let procly = Procly::new();

@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 
 use nix::unistd::Pid;
 
-use common::{Procly, assert_success, free_port, git, git_repository, git_worktree_add, stderr, stdout, test_server};
+use common::{
+    Procly, assert_success, free_port, git, git_repository, git_worktree_add, json_succeeded, stderr, stdout,
+    test_server,
+};
 
 /// The `[settings]` table turning Portless on.
 const ON: &str = "[settings]\nportless = true\n";
@@ -641,6 +644,26 @@ fn a_failing_portless_is_a_warning_telling_why_and_up_still_succeeds() {
         format!("procly: warning: `portless alias web {port}` failed: the proxy is not running\n")
     );
     assert_only_aliases(&machine);
+}
+
+#[test]
+fn up_json_carries_the_portless_warning_of_a_service_in_the_document_and_not_on_stderr() {
+    let machine = Machine::failing(3, 0);
+    let main = machine.repository(ON);
+
+    // `json_succeeded` also asserts that stderr stays empty.
+    let document = json_succeeded(&machine.run(&main, &["up", "--json", "web"]));
+
+    let warnings = document["services"][0]["warnings"]
+        .as_array()
+        .expect("a warnings array");
+    assert_eq!(warnings.len(), 1, "{document}");
+    assert!(
+        warnings[0]
+            .as_str()
+            .is_some_and(|text| text.contains("portless alias web") && text.contains("the proxy is not running")),
+        "{document}"
+    );
 }
 
 #[test]

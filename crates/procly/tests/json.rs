@@ -121,6 +121,7 @@ fn up_json_carries_the_outcome_and_the_lease_of_the_service_it_reached() {
             "ports": { "http": port },
             "urls": { "http": format!("http://localhost:{port}") },
             "needed_by": null,
+            "warnings": [],
         }])
     );
     assert_eq!(reused["services"][0]["outcome"], json!("reused"));

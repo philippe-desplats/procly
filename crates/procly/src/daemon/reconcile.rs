@@ -7,17 +7,24 @@
 //! id reserved, so its members are orphans of the Service and are stopped. A pid now held by another process is
 //! never signalled.
 
+use std::collections::BTreeSet;
+
 use super::listeners::listening_ports;
-use super::process_group::{self, Identity, Pid};
+use super::process_group::{self, Identity, Pid, Tree};
 use super::record::ServiceRecord;
-use super::service::{Services, listens_on_lease};
+use super::service::{LeaseHeld, Services, listens_on_lease};
 use super::store::StoreError;
 use crate::protocol::ServiceEnd;
 
 /// What becomes of one recorded Service.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum Verdict {
-    Reattach,
+    /// The Service stays, with the tree read from its record. `doubt` is the port that answered while the processes
+    /// could not be listed to tell what listens on it, so that the Service is judged again once they can.
+    Reattach {
+        tree: Tree,
+        doubt: Option<u16>,
+    },
     Ended(ServiceEnd),
 }
 
@@ -32,23 +39,26 @@ pub(super) async fn run(services: &Services) -> Result<(), StoreError> {
     let mut ended = Vec::new();
     for record in found {
         match judge(&record).await {
-            Verdict::Reattach => kept.push(record),
+            Verdict::Reattach { tree, doubt } => kept.push((record, tree, doubt)),
             Verdict::Ended(end) => ended.push((record, end)),
         }
     }
-    let (records, recorded) = (services.records(), kept.clone());
+    let (records, recorded) = (
+        services.records(),
+        kept.iter().map(|(record, ..)| record.clone()).collect::<Vec<_>>(),
+    );
     // Before any of them is supervised, so that one ending at once is not recorded again.
     let _ = tokio::task::spawn_blocking(move || records.replace(recorded)).await;
     // The output file of a Service that ended while no Daemon ran is no one's, and no Service starts before this.
     let (outputs, followed) = (
         services.outputs().clone(),
         kept.iter()
-            .filter_map(|record| record.output.clone())
+            .filter_map(|(record, ..)| record.output.clone())
             .collect::<Vec<_>>(),
     );
     let _ = tokio::task::spawn_blocking(move || outputs.sweep(&followed)).await;
-    for record in kept {
-        services.reattach(record);
+    for (record, tree, doubt) in kept {
+        services.reattach(record, tree, doubt);
     }
     for (record, end) in ended {
         services.forget(&record, end);
@@ -71,19 +81,38 @@ async fn judge(record: &ServiceRecord) -> Verdict {
     match leader {
         Some(leader) if is_recorded(record, &leader) => {
             // Nothing to probe, a Service without a port is healthy as long as it runs. A Group is probed on the port
-            // of each Service it covers.
-            let mut silent = None;
+            // of each Service it covers, which its tasks may serve from process groups of their own.
+            let (tree, started) = (Tree::default(), record.started.clone());
+            let tree = tokio::task::spawn_blocking(move || {
+                tree.begin_recorded(pgid, started.as_deref());
+                tree
+            })
+            .await
+            .expect("reading the process list never panics");
+            let (mut silent, mut unknown) = (None, None);
             for port in record.port.iter().chain(&record.covered_ports) {
-                if !listens_on_lease(pgid, *port, &record.lease_ports).await {
-                    silent = Some(*port);
-                    break;
+                match listens_on_lease(&tree, *port, &record.lease_ports).await {
+                    LeaseHeld::Yes => {}
+                    LeaseHeld::Unknown => unknown = unknown.or(Some(*port)),
+                    LeaseHeld::No => {
+                        silent = Some(*port);
+                        break;
+                    }
                 }
             }
             let Some(port) = silent else {
-                eprintln!("{label} still runs after a restart of the Daemon, it is re-attached");
-                return Verdict::Reattach;
+                match unknown {
+                    // Nothing proves the Service is not what listens, so it is neither signalled nor dropped, and it is
+                    // judged again as soon as the processes can be listed.
+                    Some(port) => eprintln!(
+                        "{label} still runs after a restart of the Daemon, but the Daemon could not list the \
+                         processes to tell what listens on its Lease, port {port}: it kept the Service as it was"
+                    ),
+                    None => eprintln!("{label} still runs after a restart of the Daemon, it is re-attached"),
+                }
+                return Verdict::Reattach { tree, doubt: unknown };
             };
-            process_group::stop_group(pgid).await;
+            process_group::stop_detached(&tree).await;
             eprintln!(
                 "{label} still ran after a restart of the Daemon but no longer listened on its Lease, port {port}, its \
                  process group was stopped"
@@ -96,7 +125,7 @@ async fn judge(record: &ServiceRecord) -> Verdict {
         }
         None if process_group::group_exists(pgid) => {
             let lease_ports = record.lease_ports.clone();
-            let held = tokio::task::spawn_blocking(move || listening_ports(pgid))
+            let held = tokio::task::spawn_blocking(move || listening_ports(&BTreeSet::from([pgid])))
                 .await
                 .ok()
                 .flatten()
@@ -118,7 +147,9 @@ async fn judge(record: &ServiceRecord) -> Verdict {
     }
 }
 
-/// Whether the live process `leader` is the leader the record names, and not one that got its pid since.
+/// Whether the live process `leader` is the leader the record names, and not one that got its pid since. A record
+/// written before the start was read with one space between the words may still hold 2 for a day under 10.
 fn is_recorded(record: &ServiceRecord, leader: &Identity) -> bool {
-    leader.pgid.as_raw() == record.pgid && record.started.as_ref() == Some(&leader.started)
+    leader.pgid.as_raw() == record.pgid
+        && record.started.as_deref().map(process_group::normalized).as_ref() == Some(&leader.started)
 }
