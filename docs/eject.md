@@ -1,16 +1,19 @@
 # Removing Procly from a Repository
 
-Procly can always be removed (ADR 0008). `procly eject` stops the Services of the Repository and takes out of it everything Procly wrote, so that its tracked files are what they were before Procly. It never touches Docker data.
+Procly can always be removed (ADR 0008). `procly eject` stops the Services, Jobs and Isolated containers of the Worktree it runs in and takes out of that Worktree everything Procly wrote, so that its tracked files are what they were before Procly. It never touches Docker data, and it never touches another Worktree. `procly eject --repository` does the same for every Worktree of the Repository.
 
 ```console
 $ procly eject
-stopped web of /home/me/app
-stopped db (Compose service, its volumes are kept)
-removed rules /home/me/app/AGENTS.md
-removed guard /home/me/app/.claude/settings.json, the file held nothing else and was deleted
-removed exclusions /home/me/app/.git/info/exclude
-removed env file /home/me/app/.env.procly
-left rules /home/me/app/docs/agents.md, edited
+stopped web of /home/me/app-login
+stopped job 3f9a1c2e of /home/me/app-login, bun test
+removed rules /home/me/app-login/AGENTS.md
+removed guard /home/me/app-login/.claude/settings.json, the file held nothing else and was deleted
+removed env file /home/me/app-login/.env.procly
+left rules /home/me/app-login/docs/agents.md, edited
+kept web of /home/me/app, it runs for another Worktree
+kept rules /home/me/app/AGENTS.md, written for another Worktree
+kept env file /home/me/app/.env.procly, written for another Worktree
+kept exclusions /home/me/app/.git/info/exclude, shared by every Worktree of the Repository
 left Docker volumes and Logical resources
 left the files copied by worktree init and the state of the Daemon, Leases and off
 
@@ -20,31 +23,47 @@ Procly was ejected from the git repository whose common git directory is /home/m
 
 Stdout holds the summary, then a blank line and the prompt when something was left. The note about it goes to stderr.
 
-With `--json`, stdout holds 1 document instead, with the Services `stopped`, the files `removed` and `left`, and the `prompt` when something was left, or `null`. With `--agent`, the prompt is handed to the CLI named in `agent` and `prompt` is `null`, and what the agent prints on its standard output goes to stderr. See [JSON output](json.md).
+With `--json`, stdout holds 1 document instead, with the Services `stopped`, the Jobs stopped under `jobs`, the files `removed` and `left`, what was `spared`, and the `prompt` when something was left, or `null`. With `--agent`, the prompt is handed to the CLI named in `agent` and `prompt` is `null`, and what the agent prints on its standard output goes to stderr. See [JSON output](json.md).
 
 ```console
 $ procly eject --json
-{"schema_version":1,"stopped":[],"removed":[{"kind":"rules","file":"/home/me/app/AGENTS.md","deleted":true},{"kind":"guard","file":"/home/me/app/.claude/settings.json","deleted":true}],"left":[],"prompt":null,"agent":null}
+{"schema_version":1,"stopped":[],"jobs":[],"removed":[{"kind":"rules","file":"/home/me/app/AGENTS.md","deleted":true},{"kind":"guard","file":"/home/me/app/.claude/settings.json","deleted":true}],"left":[],"spared":[],"prompt":null,"agent":null}
 ```
 
-A Service in `stopped` has the `worktree` it ran for, `null` for a Compose service whose container serves every Worktree. An Isolated Compose service has the Worktree of its container and `"isolated":true`, a key left out for every other Service, and its text line reads `stopped cache of /home/me/app-login (Isolated Compose service, its container and volumes are kept)`. A `kind` is `rules`, `guard`, `exclusions`, `env_file` or `worktrunk_hooks`, and its text line names it `worktrunk hooks`. The fixed lines about what eject never touches are not in the document.
+A Service in `stopped` has the `worktree` it ran for, `null` for a Compose service whose container serves every Worktree. An Isolated Compose service has the Worktree of its container and `"isolated":true`, a key left out for every other Service, and its text line reads `stopped cache of /home/me/app-login (Isolated Compose service, its container and volumes are kept)`. A Job in `jobs` has its `job` identifier, its `command` and the `worktree` it ran in. A `kind` is `rules`, `guard`, `exclusions`, `env_file` or `worktrunk_hooks`, and its text line names it `worktrunk hooks`. The fixed lines about what eject never touches are not in the document.
+
+An item in `spared` has a `kind` of `service` (with its `service` and `worktree`), `compose_service` (with its `service` and `others`, how many other Worktrees still need its container) or `file`. A `file` has the `file`, what was `written` there, with the values of a `kind` above, and `shared`, true when every Worktree of the Repository shares it and false when it belongs to another Worktree. `spared` is empty with `--repository`.
 
 ## What it does
 
-It acts on the whole Repository, whatever Worktree it runs in.
+Without `--repository`, it acts on the Worktree it runs in, the Main worktree included, and on nothing else.
 
-1. It stops every Service of every Worktree, with its whole process tree. The containers of Compose services, the Isolated container of each Worktree included, are stopped at once, without waiting for their Grace period, and never removed. If a container cannot be stopped, eject fails before it touches a file, and running it again finishes the job.
-2. It removes the Rules blocks, in `AGENTS.md`, `CLAUDE.md` and any file `procly agent install --file` wrote to.
-3. It removes the Guard from `.claude/settings.json`. The other hooks and settings stay, in their order, but the file is written again in JSON with 2 spaces of indentation, as `agent install` did.
-4. It removes the exclusion block from the shared git exclude file and from the `.gitignore` files that hold it.
-5. It removes the Env file, `.env.procly`, of every Worktree.
-6. It removes the Worktrunk hooks block that `procly worktree hooks` wrote into `.config/wt.toml`, see [Worktrunk](worktree-init.md#worktrunk). The rest of the file stays as it was, and a file and a directory that only the block created are deleted.
+1. It stops every Service and every Job of the Worktree, with its whole process tree. The Isolated containers of the Worktree are stopped at once, without waiting for their Grace period, and never removed. A Shared or Logical container, which every Worktree can use, is stopped the same way only when no other Worktree still needs it. Otherwise it keeps running, the Worktree no longer counts for it, and it is listed as `kept`. If a container cannot be stopped, eject fails before it touches a file, and running it again finishes the job.
+2. It removes the Rules blocks of the Worktree, in `AGENTS.md`, `CLAUDE.md` and any file `procly agent install --file` wrote to.
+3. It removes the Guard from the `.claude/settings.json` of the Worktree. The other hooks and settings stay, in their order, but the file is written again in JSON with 2 spaces of indentation, as `agent install` did.
+4. It removes the exclusion block from the `.gitignore` of the Worktree when it holds it. The one in the shared git exclude file goes only when the Worktree is the only one of the Repository, see below.
+5. It removes the Env file, `.env.procly`, of the Worktree.
+6. It removes the Worktrunk hooks block that `procly worktree hooks` wrote into the `.config/wt.toml` of the Worktree, see [Worktrunk](worktree-init.md#worktrunk). The rest of the file stays as it was, and a file and a directory that only the block created are deleted.
 
 A file that held nothing else once its block was gone is deleted, since only Procly can have created it, and so are the directories that leaves empty inside the Worktree. Every other byte of a file stays as it was. A file that links out of the Repository is never written, as for `agent install`.
 
 A block counts as intact when its content is the one Procly recorded the fingerprint of, or the one Procly writes today when the record was lost. Anything else is a block you edited. An Env file counts as Procly's while it starts with its header and holds what Procly last wrote, so a line you added to it is an edit.
 
 Procly records how each file looked just before it first wrote into it, so that eject gives it back to the byte when nothing else in it changed: a file that did not end with a line break ends without one again, an instruction file, `.gitignore` or settings file that existed empty stays an empty file, and a settings file keeps the layout and indentation it had. The settings file is kept whole in the state directory for that. When you changed the file around the block, eject removes the block and keeps your changes, and the settings file is written again with 2 spaces of indentation. A block recorded by a Procly that did not keep this, or after the state directory was lost, is removed with the text around it as it is.
+
+## What it keeps for the other Worktrees
+
+A Repository can have many Worktrees, used by other people or by other agents, so that a plain `eject` never reaches past its own. Each thing it keeps is printed as a `kept` line with the reason.
+
+- A Service that runs for another Worktree stays running. Its Env file, Rules block, Guard and Worktrunk hooks stay in place.
+- The exclusion block of the shared git exclude file, `.git/info/exclude`, stays, since it keeps the generated files of every Worktree out of git. It goes when the Worktree is the only one the Repository has.
+- A Shared or Logical container that another Worktree still needs keeps running.
+
+To take Procly out of the whole Repository, run `procly eject --repository` from any of its Worktrees.
+
+## Ejecting the whole Repository
+
+`procly eject --repository` is the former behaviour of `eject`. From any Worktree, it stops every Service and Job of every Worktree of the Repository, whoever uses them, and the containers of Compose services, the Isolated container of each Worktree included, at once and without waiting for their Grace period. Each one is printed as `stopped web of <worktree>`, so that the Services of the other Worktrees it stops are listed. It then removes the Rules blocks, the Guards, the exclusion blocks, the Env files and the Worktrunk hooks blocks of every Worktree, and the exclusion block of the shared git exclude file. Nothing is `kept`.
 
 ## What it leaves
 

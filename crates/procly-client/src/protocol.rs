@@ -19,7 +19,7 @@ pub struct Worktree {
 }
 
 /// Bumped on any incompatible change, the Daemon refuses a request carrying another version.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -91,9 +91,11 @@ pub enum Request {
     Switch { cwd: PathBuf, off: bool },
     /// Asks whether the Guard of the Repository holding `cwd` stands, once it met a command it knows.
     Guard { cwd: PathBuf },
-    /// Stops the Services of the Repository holding `cwd` and removes what Procly wrote into it, apart from the
-    /// Managed blocks that were edited.
-    Eject { cwd: PathBuf },
+    /// Stops the Services, Jobs and Isolated containers of the Worktree holding `cwd` and removes what Procly wrote
+    /// into that Worktree, apart from the Managed blocks that were edited. What every Worktree shares and what belongs
+    /// to another Worktree is left, and reported as spared. With `repository`, it does the same for every Worktree of
+    /// the Repository and for what they share.
+    Eject { cwd: PathBuf, repository: bool },
     /// Lists the Orphans of every Repository, and deletes them with `apply`. `cwd` only names the requester in the
     /// Daemon log. With `only`, absent when not given, it is limited to the Orphans it lists: the Daemon deletes those
     /// that still are Orphans, and reports the others as not deleted, with the reason in their `error`.
@@ -212,7 +214,7 @@ pub enum Response {
         root: PathBuf,
         services: Vec<GuardService>,
     },
-    /// The Repository is ejected.
+    /// The Worktree, or with `repository` the Repository, is ejected.
     Eject(EjectReport),
     /// The Orphans `gc` found, and what became of each with `apply`.
     Gc(GcReport),
@@ -416,13 +418,45 @@ pub struct Stopped {
     pub isolated: bool,
 }
 
-/// What `eject` did to a Repository.
+/// A Job `eject` stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct StoppedJob {
+    pub job: String,
+    pub command: String,
+    /// The Worktree it ran in, `None` for a Job that ran outside any Repository.
+    pub worktree: Option<PathBuf>,
+}
+
+/// Something `eject` did not touch because it is not the Worktree it ran for to take out: it belongs to another
+/// Worktree, or every Worktree of the Repository shares it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Spared {
+    /// A Service that runs for another Worktree.
+    Service { service: String, worktree: PathBuf },
+    /// A Compose service whose container other Worktrees still need, which the Worktree let go of.
+    ComposeService { service: String, others: usize },
+    /// A file Procly wrote. `shared` tells it is one every Worktree of the Repository shares, such as the git exclude
+    /// file, and not the file of another Worktree.
+    File {
+        written: Written,
+        file: PathBuf,
+        shared: bool,
+    },
+}
+
+/// What `eject` did to a Worktree, or with `repository` to every Worktree of a Repository.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct EjectReport {
     pub stopped: Vec<Stopped>,
+    pub jobs: Vec<StoppedJob>,
     pub removed: Vec<Removed>,
     pub left: Vec<Left>,
+    /// What it did not touch and why, empty with `repository`, and for a Repository of one Worktree.
+    pub spared: Vec<Spared>,
     /// What to undo in the `left` items, written for a coding agent. `None` when nothing was left.
     pub prompt: Option<String>,
 }
@@ -1096,7 +1130,7 @@ mod tests {
             job: "3f9a1c2e".to_owned(),
         })
         .unwrap();
-        assert_eq!(line, "{\"version\":22,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
+        assert_eq!(line, "{\"version\":23,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
     }
 
@@ -1109,7 +1143,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             line,
-            "{\"version\":22,\"request\":\"restart\",\"service\":\"web\",\"cwd\":\"/src/app\"}\n"
+            "{\"version\":23,\"request\":\"restart\",\"service\":\"web\",\"cwd\":\"/src/app\"}\n"
         );
         assert!(matches!(
             decode::<Request>(&line),
@@ -1126,7 +1160,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             line,
-            "{\"version\":22,\"request\":\"worktree_release\",\"path\":\"/src/app\",\"dry_run\":true}\n"
+            "{\"version\":23,\"request\":\"worktree_release\",\"path\":\"/src/app\",\"dry_run\":true}\n"
         );
         assert!(matches!(
             decode::<Request>(&line),
@@ -1134,7 +1168,7 @@ mod tests {
         ));
 
         // A request from a client that never heard of the flag is a real release.
-        let absent = "{\"version\":22,\"request\":\"worktree_release\",\"path\":\"/src/app\"}\n";
+        let absent = "{\"version\":23,\"request\":\"worktree_release\",\"path\":\"/src/app\"}\n";
         assert!(matches!(
             decode::<Request>(absent),
             Ok(Request::WorktreeRelease { dry_run: false, .. })
@@ -1285,7 +1319,7 @@ mod tests {
 
     #[test]
     fn a_logs_request_without_follow_asks_for_the_backlog_only() {
-        let line = r#"{"version":22,"request":"logs","name":"api","cwd":"/src/app","env":[]}"#;
+        let line = r#"{"version":23,"request":"logs","name":"api","cwd":"/src/app","env":[]}"#;
         assert!(matches!(
             decode::<Request>(line),
             Ok(Request::Logs { follow: false, .. })
@@ -1300,20 +1334,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             output,
-            "{\"version\":22,\"response\":\"output\",\"text\":\"ready\\n\"}\n"
+            "{\"version\":23,\"response\":\"output\",\"text\":\"ready\\n\"}\n"
         );
         assert!(matches!(decode::<Response>(&output), Ok(Response::Output { text }) if text == "ready\n"));
         let dropped = encode(Response::OutputDropped { bytes: 4096 }).unwrap();
         assert_eq!(
             dropped,
-            "{\"version\":22,\"response\":\"output_dropped\",\"bytes\":4096}\n"
+            "{\"version\":23,\"response\":\"output_dropped\",\"bytes\":4096}\n"
         );
         assert!(matches!(
             decode::<Response>(&dropped),
             Ok(Response::OutputDropped { bytes: 4096 })
         ));
         let ended = encode(Response::LogsEnded).unwrap();
-        assert_eq!(ended, "{\"version\":22,\"response\":\"logs_ended\"}\n");
+        assert_eq!(ended, "{\"version\":23,\"response\":\"logs_ended\"}\n");
         assert!(matches!(decode::<Response>(&ended), Ok(Response::LogsEnded)));
     }
 

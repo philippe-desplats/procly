@@ -280,6 +280,15 @@ pub(crate) struct Brought {
 /// by the Worktree too when it is Isolated.
 pub(crate) type ComposeKey = ContainerKey;
 
+/// What [`Composes::stop_worktree`] did.
+#[derive(Debug)]
+pub(crate) struct WorktreeContainers {
+    /// The Compose services whose container it stopped, with the Worktree of an Isolated one.
+    pub(crate) stopped: Vec<(String, Option<PathBuf>)>,
+    /// The Compose services whose container keeps running because other Worktrees still need it, with how many.
+    pub(crate) spared: Vec<(String, usize)>,
+}
+
 /// Every container Procly started from a compose file.
 #[derive(Debug)]
 pub(crate) struct Composes {
@@ -870,6 +879,61 @@ impl Composes {
         }
         stopped.sort();
         failure.map_or(Ok(stopped), Err)
+    }
+
+    /// Stops what the Worktree `worktree` of the Repository `repository` holds in containers, for an eject of that
+    /// Worktree alone, at once and without waiting for any Grace period. Its Isolated containers are stopped. A Shared
+    /// or Logical container the Worktree is the last to need is stopped too, while one other Worktrees still need
+    /// keeps running, with the Worktree no longer counted for it, and is named in `spared` with how many others need it.
+    /// The containers are stopped, never removed, so their volumes stay.
+    pub(crate) async fn stop_worktree(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+    ) -> Result<WorktreeContainers, ComposeError> {
+        let candidates: Vec<_> = self
+            .table()
+            .iter()
+            .filter(|((path, _, isolated), _)| {
+                path == repository && isolated.as_deref().is_none_or(|owner| owner == worktree)
+            })
+            .map(|(key, container)| (key.clone(), Arc::clone(container)))
+            .collect();
+        let mut stopping = Vec::new();
+        let mut spared = Vec::new();
+        for (key, container) in candidates {
+            if key.2.is_some() {
+                stopping.push((key, container));
+                continue;
+            }
+            let others = {
+                let mut state = container.state();
+                if state.alive.is_none() {
+                    continue;
+                }
+                forget_removed(&mut state.worktrees, &key.1);
+                state.worktrees.remove(worktree);
+                state.worktrees.len()
+            };
+            if others == 0 {
+                stopping.push((key, container));
+            } else {
+                spared.push((key.1.clone(), others));
+                self.ledger.recorded(&key, &container).await;
+            }
+        }
+        let mut stopped = Vec::new();
+        let mut failure = None;
+        for ((_, service, isolated), result) in self.stop_containers(stopping).await {
+            match result {
+                Ok(true) => stopped.push((service, isolated)),
+                Ok(false) => {}
+                Err(error) => failure = failure.or(Some(error)),
+            }
+        }
+        stopped.sort();
+        spared.sort();
+        failure.map_or(Ok(WorktreeContainers { stopped, spared }), Err)
     }
 
     /// Stops the containers at once, all together, and tells for each one whether it was running.

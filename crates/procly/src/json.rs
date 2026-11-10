@@ -10,7 +10,7 @@ use serde::{Serialize, Serializer};
 use crate::doctor::Report;
 use crate::protocol::{
     AppliedRetention, Check, Conflict, InitReport, JobEnd, KeptLease, KeptResource, LeaseHeld, Left, ReleaseReport,
-    Released, Removed, ServiceEnd, StartOutcome, Stopped, UpService,
+    Released, Removed, ServiceEnd, Spared, StartOutcome, Stopped, StoppedJob, UpService,
 };
 
 /// The version of the `--json` schema of every command, bumped on any incompatible change, independently of the
@@ -269,12 +269,15 @@ pub(crate) enum WorktreeInit<'a> {
     },
 }
 
-/// What `eject` prints: what it stopped, removed and left, and the prompt for what was left.
+/// What `eject` prints: what it stopped, removed, left and spared, and the prompt for what was left.
 #[derive(Debug, Serialize)]
 pub(crate) struct Eject<'a> {
     pub(crate) stopped: &'a [Stopped],
+    pub(crate) jobs: &'a [StoppedJob],
     pub(crate) removed: &'a [Removed],
     pub(crate) left: &'a [Left],
+    /// What it did not touch because it belongs to another Worktree or every Worktree shares it.
+    pub(crate) spared: &'a [Spared],
     /// What to undo in the `left` items, `None` when nothing was left or when it was handed to the `agent`.
     pub(crate) prompt: Option<&'a str>,
     /// The coding agent CLI the prompt was handed to.

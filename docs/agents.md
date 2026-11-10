@@ -99,4 +99,4 @@ The Rules block of a Worktree is rewritten only where Procly wrote it. Another W
 
 ## Removing it all
 
-`procly off` removes nothing. To take the Rules blocks, the Guard, the exclusions and the Env files out of a Repository, see [Removing Procly from a Repository](eject.md).
+`procly off` removes nothing. To take the Rules blocks, the Guard, the exclusions and the Env files out of a Worktree or a Repository, see [Removing Procly from a Repository](eject.md).

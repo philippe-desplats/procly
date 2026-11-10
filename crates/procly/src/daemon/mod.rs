@@ -421,7 +421,7 @@ async fn dispatch(
         Request::WorktreeInit { path, env } => worktree_init::run(Arc::clone(registry), path, env, progress)
             .await
             .unwrap_or_else(failure),
-        Request::Eject { cwd } => eject::run(registry, cwd, peer).await,
+        Request::Eject { cwd, repository } => eject::run(registry, cwd, repository, peer).await,
         Request::Doctor => doctor::run(registry).await,
         Request::Gc { cwd, apply, only } => gc::run(registry, cwd, apply, only, peer).await,
         Request::WorktreeRelease { path, dry_run } => answer(

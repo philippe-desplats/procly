@@ -891,7 +891,7 @@ fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
     let container = fixture.project.container();
     assert!(fixture.project.is_running());
 
-    let output = fixture.procly.procly_in(&fixture.other, &["eject"]);
+    let output = fixture.procly.procly_in(&fixture.other, &["eject", "--repository"]);
 
     // Without waiting for the Grace period, since the Repository is going back to how it was.
     assert_success(&output);
@@ -904,6 +904,43 @@ fn docker_eject_stops_the_container_at_once_and_keeps_it_with_its_volume() {
     assert!(!listens(fixture.port));
     // Stopped, never removed, and the data stays.
     assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}
+
+#[test]
+fn docker_eject_of_one_worktree_keeps_the_container_another_worktree_still_needs() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("grace_period = \"1h\"\n");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+
+    let output = fixture.procly.procly_in(&fixture.other, &["eject"]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    assert!(
+        text.contains("kept db (Compose service), other Worktrees still need its container"),
+        "{text}"
+    );
+    assert!(!text.contains("stopped db"), "{text}");
+    assert!(
+        fixture.project.is_running(),
+        "the container another Worktree needs was stopped"
+    );
+    assert!(listens(fixture.port));
+
+    // The last Worktree that needs it takes it down with it, at once.
+    let output = fixture.procly.procly_in(&fixture.main, &["eject"]);
+
+    assert_success(&output);
+    assert!(
+        stdout(&output).contains("stopped db (Compose service, its volumes are kept)"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!fixture.project.is_running());
     assert!(fixture.project.volume_exists());
 }
 

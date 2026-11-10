@@ -36,11 +36,13 @@ struct Before {
 fn repository(procly: &Procly) -> (PathBuf, u16, Before) {
     let main = git_repository(procly.scratch(), "app");
     let port = free_port();
+    // A Pool of its own, so that a second Worktree never races the other tests for a port of the Range.
+    let pool = free_port();
     write(&main.join("AGENTS.md"), INSTRUCTIONS);
     write(
         &main.join("procly.toml"),
         &format!(
-            "[services.web]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {port} }}\n",
+            "[services.web]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {{ port = {port}, pool = [{pool}] }} }}\n",
             test_server().display()
         ),
     );
@@ -61,6 +63,13 @@ fn adopt_procly(procly: &Procly, main: &Path) {
 
 fn eject(procly: &Procly, dir: &Path) -> Output {
     let output = procly.procly_in(dir, &["eject"]);
+    assert_success(&output);
+    output
+}
+
+/// Ejects the whole Repository, as `procly eject --repository` does from any of its Worktrees.
+fn eject_repository(procly: &Procly, dir: &Path) -> Output {
+    let output = procly.procly_in(dir, &["eject", "--repository"]);
     assert_success(&output);
     output
 }
@@ -186,7 +195,7 @@ fn a_second_eject_finds_nothing_to_remove() {
 }
 
 #[test]
-fn every_worktree_and_every_file_procly_wrote_in_is_cleaned() {
+fn eject_with_repository_cleans_every_worktree_and_every_file_procly_wrote_in() {
     let procly = Procly::new();
     let (main, _, before) = repository(&procly);
     let other = git_worktree_add(&main, "app-other");
@@ -200,7 +209,7 @@ fn every_worktree_and_every_file_procly_wrote_in_is_cleaned() {
     assert!(read(&main.join(".gitignore")).contains("procly managed block: exclusions"));
     assert!(other.join(".claude/settings.json").exists());
 
-    let output = eject(&procly, &other);
+    let output = eject_repository(&procly, &other);
 
     assert!(
         !main.join("docs").exists(),
@@ -249,7 +258,7 @@ fn the_hooks_and_settings_of_the_developer_stay_when_the_guard_goes() {
 }
 
 #[test]
-fn eject_stops_the_services_of_every_worktree_of_the_repository() {
+fn eject_with_repository_stops_the_services_of_every_worktree_of_the_repository() {
     let procly = Procly::new();
     let (main, port, _) = repository(&procly);
     let other = git_worktree_add(&main, "app-other");
@@ -264,7 +273,7 @@ fn eject_stops_the_services_of_every_worktree_of_the_repository() {
         .and_then(|port| port.parse().ok())
         .expect("a port");
 
-    let ejected = eject(&procly, &other);
+    let ejected = eject_repository(&procly, &other);
 
     assert!(!listens(port), "the Service of the Main worktree still listens");
     assert!(!listens(other_port), "the Service of the other Worktree still listens");
@@ -281,6 +290,217 @@ fn eject_stops_the_services_of_every_worktree_of_the_repository() {
         stdout(&procly.procly_in(&main, &["status"])).matches("healthy").count(),
         0
     );
+}
+
+/// The port a `procly up` printed, its last word.
+fn port_of(output: &Output) -> u16 {
+    stdout(output)
+        .trim_end()
+        .rsplit(' ')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .expect("a port")
+}
+
+/// A Repository whose Main worktree and a secondary Worktree both took Procly in and run `web`, with the ports they
+/// listen on.
+struct Both {
+    main: PathBuf,
+    main_port: u16,
+    other: PathBuf,
+    other_port: u16,
+    before: Before,
+}
+
+fn procly_in_both_worktrees(procly: &Procly) -> Both {
+    let (main, main_port, before) = repository(procly);
+    let other = git_worktree_add(&main, "app-other");
+    adopt_procly(procly, &main);
+    assert_success(&procly.procly_in(&other, &["agent", "install"]));
+    let output = procly.procly_in(&other, &["up", "web"]);
+    assert_success(&output);
+    let other_port = port_of(&output);
+    eventually("web of the Main worktree to listen", || listens(main_port));
+    eventually("web of the other Worktree to listen", || listens(other_port));
+    Both {
+        main,
+        main_port,
+        other,
+        other_port,
+        before,
+    }
+}
+
+#[test]
+fn eject_from_a_secondary_worktree_leaves_the_main_worktree_running_and_its_files_in_place() {
+    let procly = Procly::new();
+    let both = procly_in_both_worktrees(&procly);
+    let main_env = read(&both.main.join(".env.procly"));
+    let main_rules = read(&both.main.join("AGENTS.md"));
+    let main_settings = read(&both.main.join(".claude/settings.json"));
+    let exclude = read(&both.main.join(".git/info/exclude"));
+    assert_ne!(exclude, both.before.exclude, "the exclusions block was written");
+
+    let output = eject(&procly, &both.other);
+
+    assert!(listens(both.main_port), "the Service of the Main worktree was stopped");
+    assert!(
+        !listens(both.other_port),
+        "the Service of the current Worktree still listens"
+    );
+    assert_eq!(read(&both.main.join(".env.procly")), main_env);
+    assert_eq!(read(&both.main.join(".git/info/exclude")), exclude);
+    assert_eq!(read(&both.main.join("AGENTS.md")), main_rules);
+    assert_eq!(read(&both.main.join(".claude/settings.json")), main_settings);
+    assert!(!both.other.join(".env.procly").exists());
+    assert!(!both.other.join(".claude").exists());
+    assert!(!read(&both.other.join("AGENTS.md")).contains(RULES_OPEN));
+    let summary = summary(&output);
+    assert!(
+        summary.contains(&format!("stopped web of {}", both.other.display())),
+        "{summary:?}"
+    );
+    let main = both.main.display().to_string();
+    assert!(
+        !summary
+            .iter()
+            .any(|line| line.starts_with("stopped") && line.ends_with(&main)),
+        "{summary:?}"
+    );
+    assert!(
+        !summary
+            .iter()
+            .any(|line| line.starts_with("removed") && line.contains(&format!("{main}/"))),
+        "{summary:?}"
+    );
+}
+
+#[test]
+fn eject_says_what_it_left_of_the_repository_and_of_the_other_worktrees_and_why() {
+    let procly = Procly::new();
+    let both = procly_in_both_worktrees(&procly);
+
+    let output = eject(&procly, &both.other);
+
+    let summary = summary(&output);
+    let main = both.main.display();
+    for line in [
+        format!("kept web of {main}, it runs for another Worktree"),
+        format!("kept rules {main}/AGENTS.md, written for another Worktree"),
+        format!("kept guard {main}/.claude/settings.json, written for another Worktree"),
+        format!("kept env file {main}/.env.procly, written for another Worktree"),
+        format!("kept exclusions {main}/.git/info/exclude, shared by every Worktree of the Repository"),
+    ] {
+        assert!(summary.contains(&line), "{line:?} is not in {summary:?}");
+    }
+}
+
+#[test]
+fn eject_of_a_repository_with_one_worktree_removes_the_shared_exclusions_too() {
+    let procly = Procly::new();
+    let (main, _, before) = repository(&procly);
+    adopt_procly(&procly, &main);
+
+    let output = eject(&procly, &main);
+
+    assert_eq!(read(&main.join(".git/info/exclude")), before.exclude);
+    assert!(!summary(&output).iter().any(|line| line.starts_with("kept ")));
+}
+
+#[test]
+fn eject_from_the_main_worktree_leaves_a_secondary_worktree_alone_too() {
+    let procly = Procly::new();
+    let both = procly_in_both_worktrees(&procly);
+
+    eject(&procly, &both.main);
+
+    assert!(!listens(both.main_port));
+    assert!(
+        listens(both.other_port),
+        "the Service of the other Worktree was stopped"
+    );
+    assert!(both.other.join(".env.procly").exists());
+    assert!(both.other.join(".claude/settings.json").exists());
+    assert!(read(&both.main.join(".git/info/exclude")).contains("procly managed block: exclusions"));
+}
+
+#[test]
+fn eject_with_repository_acts_on_every_worktree_and_lists_the_services_of_the_others_it_stops() {
+    let procly = Procly::new();
+    let both = procly_in_both_worktrees(&procly);
+
+    let output = procly.procly_in(&both.other, &["eject", "--repository"]);
+
+    assert_success(&output);
+    assert!(!listens(both.main_port));
+    assert!(!listens(both.other_port));
+    assert!(!both.main.join(".env.procly").exists());
+    assert!(!both.other.join(".env.procly").exists());
+    assert_eq!(read(&both.main.join(".git/info/exclude")), both.before.exclude);
+    let summary = summary(&output);
+    for worktree in [&both.main, &both.other] {
+        assert!(
+            summary.contains(&format!("stopped web of {}", worktree.display())),
+            "{summary:?}"
+        );
+    }
+    assert!(!summary.iter().any(|line| line.starts_with("kept ")), "{summary:?}");
+}
+
+#[test]
+fn eject_stops_the_jobs_of_the_current_worktree_only() {
+    let procly = Procly::new();
+    let both = procly_in_both_worktrees(&procly);
+    let started = |dir: &Path| {
+        let output = procly.procly_in(dir, &["run", "sleep 30"]);
+        assert_success(&output);
+        common::started(&output).0
+    };
+    let (main_job, other_job) = (started(&both.main), started(&both.other));
+
+    let output = eject(&procly, &both.other);
+
+    let summary = summary(&output);
+    assert!(
+        summary.contains(&format!(
+            "stopped job {other_job} of {}, sleep 30",
+            both.other.display()
+        )),
+        "{summary:?}"
+    );
+    assert!(
+        !summary.iter().any(|line| line.contains(&main_job)),
+        "the Job of the Main worktree was stopped: {summary:?}"
+    );
+    let status = stdout(&procly.procly_in(&both.main, &["status"]));
+    assert!(
+        status.contains(&main_job) && status.contains("running"),
+        "the Job of the Main worktree is not running: {status}"
+    );
+}
+
+#[test]
+fn eject_with_repository_stops_the_jobs_of_every_worktree() {
+    let procly = Procly::new();
+    let both = procly_in_both_worktrees(&procly);
+    let jobs: Vec<_> = [&both.main, &both.other]
+        .into_iter()
+        .map(|dir| {
+            let output = procly.procly_in(dir, &["run", "sleep 30"]);
+            assert_success(&output);
+            common::started(&output).0
+        })
+        .collect();
+
+    let output = eject_repository(&procly, &both.other);
+
+    let summary = summary(&output);
+    for (job, dir) in jobs.iter().zip([&both.main, &both.other]) {
+        assert!(
+            summary.contains(&format!("stopped job {job} of {}, sleep 30", dir.display())),
+            "{summary:?}"
+        );
+    }
 }
 
 /// A `claude` that writes its arguments, one per line, and the directory it ran in to `calls`, then exits with `code`.
@@ -502,6 +722,48 @@ fn eject_json_carries_what_was_stopped_removed_and_left_and_the_prompt() {
         "{prompt}"
     );
     assert_eq!(document["agent"], serde_json::json!(null));
+    assert_eq!(document["jobs"], serde_json::json!([]));
+    assert_eq!(document["spared"], serde_json::json!([]));
+}
+
+#[test]
+fn eject_json_names_the_jobs_stopped_and_what_it_spared_with_its_kind() {
+    let procly = Procly::new();
+    let both = procly_in_both_worktrees(&procly);
+    let output = procly.procly_in(&both.other, &["run", "sleep 30"]);
+    assert_success(&output);
+    let job = common::started(&output).0;
+
+    let output = procly.procly_in(&both.other, &["eject", "--json"]);
+
+    let document = json_succeeded(&output);
+    assert_eq!(
+        document["jobs"],
+        serde_json::json!([{ "job": job, "command": "sleep 30", "worktree": both.other }])
+    );
+    let spared = document["spared"].as_array().expect("a list of spared items");
+    assert!(
+        spared.contains(&serde_json::json!({ "kind": "service", "service": "web", "worktree": both.main })),
+        "{document}"
+    );
+    assert!(
+        spared.contains(&serde_json::json!({
+            "kind": "file",
+            "written": "exclusions",
+            "file": both.main.join(".git/info/exclude"),
+            "shared": true
+        })),
+        "{document}"
+    );
+    assert!(
+        spared.contains(&serde_json::json!({
+            "kind": "file",
+            "written": "env_file",
+            "file": both.main.join(".env.procly"),
+            "shared": false
+        })),
+        "{document}"
+    );
 }
 
 #[test]

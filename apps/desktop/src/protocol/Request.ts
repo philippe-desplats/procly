@@ -30,4 +30,4 @@ env: Array<[string, string]>, } | { "request": "agent_install", cwd: string,
 /**
  * The instruction file for the Rules block, inside the Worktree. Without it, `AGENTS.md` or `CLAUDE.md`.
  */
-file: string | null, } | { "request": "switch", cwd: string, off: boolean, } | { "request": "guard", cwd: string, } | { "request": "eject", cwd: string, } | { "request": "gc", cwd: string, apply: boolean, only?: Array<OrphanId> | null, } | { "request": "worktree_release", path: string, dry_run: boolean, } | { "request": "doctor" } | { "request": "worktree_hooks", cwd: string, } | { "request": "restart", service: string, cwd: string, };
+file: string | null, } | { "request": "switch", cwd: string, off: boolean, } | { "request": "guard", cwd: string, } | { "request": "eject", cwd: string, repository: boolean, } | { "request": "gc", cwd: string, apply: boolean, only?: Array<OrphanId> | null, } | { "request": "worktree_release", path: string, dry_run: boolean, } | { "request": "doctor" } | { "request": "worktree_hooks", cwd: string, } | { "request": "restart", service: string, cwd: string, };
