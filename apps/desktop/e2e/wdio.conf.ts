@@ -1,4 +1,4 @@
-import { appExecutable, discard, isolate, logDirectory, stopDaemon } from "./environment";
+import { appExecutable, discard, isolate, keepLogs, logDirectory, stopDaemon } from "./environment";
 
 // The runner and each worker load this file. The first to do so isolates the run, the others inherit it.
 await isolate();
@@ -28,7 +28,10 @@ export const config: WebdriverIO.Config = {
         embeddedPort: Number(process.env["TAURI_WEBDRIVER_PORT"]),
         startTimeout: 120_000,
         autoInstallTauriDriver: false,
-        captureBackendLogs: false,
+        // What the app writes on its output goes to a file of the log directory, whatever its level, so that a failed
+        // run keeps it (`keepLogs`). Nothing of it reaches the console of the runner.
+        captureBackendLogs: true,
+        backendLogLevel: "trace",
         captureFrontendLogs: false,
         logDir: logDirectory(),
       },
@@ -43,9 +46,13 @@ export const config: WebdriverIO.Config = {
   framework: "mocha",
   reporters: ["spec"],
   mochaOpts: { ui: "bdd", timeout: FIVE_MINUTES },
-  // Whatever a flow left running goes with the Daemon, then the temporary directories.
-  onComplete: async () => {
+  // Whatever a flow left running goes with the Daemon, then the temporary directories. A failed run keeps its logs
+  // first, since nothing of the temporary root survives it.
+  onComplete: async (exitCode: number) => {
     await stopDaemon();
+    if (exitCode !== 0) {
+      keepLogs();
+    }
     discard();
   },
 };
