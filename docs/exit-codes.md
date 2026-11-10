@@ -32,6 +32,6 @@ Every `procly` command exits with one of these codes. They are stable: an agent 
 
 `wait` otherwise exits with the Job's own exit code, and with 128 + N for a Job killed by signal N, as a shell does. Those codes can collide with the ones above, so read them as the Job's when `wait` reports no Procly error on stderr.
 
-`restart` exits with the codes of `up` of one Service, since it answers as `up` does once it has stopped the Service, and with 125 when the Daemon holds no environment for the Service, in which case nothing was stopped, or when a Worktree release of the Worktree began during it, in which case what the release stopped stays stopped.
+`restart` exits with the codes of `up` of one Service, since it answers as `up` does once it has stopped the Service, and with 125 when the Daemon holds no environment for the Service, in which case nothing was stopped, or when a start it would make is refused for a declared port of the Main worktree that is held, in which case nothing was stopped either and the Service keeps running on its Lease, or when a Worktree release of the Worktree began during it, in which case what the release stopped stays stopped.
 
 `mcp` exits with 0 when the client closes its input, and with 125 when Procly itself fails, such as for a client that is not an MCP client. The commands behind its tools exit as above, and a tool returns a non-zero code as a tool error carrying it, see [The MCP server](mcp.md).
