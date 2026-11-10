@@ -145,58 +145,117 @@ pub(super) fn published_by_service(port: u16, main: &Path, service: &str) -> boo
         })
 }
 
-/// The Foreign processes of each of `worktrees`, in their order: the processes listening on TCP whose working
-/// directory is in the Worktree, and the running containers of compose projects whose directory is. A process of a
-/// group in `owned_groups` and a container of a project and service in `owned_containers` are Procly's. Blocking.
-pub(super) fn in_worktrees(
-    worktrees: &[PathBuf],
-    owned_groups: &BTreeSet<i32>,
-    owned_containers: &BTreeSet<(String, String)>,
-) -> Vec<Vec<ForeignProcess>> {
-    let mut foreign = vec![Vec::new(); worktrees.len()];
+/// What Procly runs, which is never a Foreign process: the process groups of its Services and Jobs, and the compose
+/// project and service of each container it started or adopted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Owned {
+    pub(super) groups: BTreeSet<i32>,
+    pub(super) containers: BTreeSet<(String, String)>,
+}
+
+impl Owned {
+    fn contains_group(&self, group: i32) -> bool {
+        self.groups.contains(&group)
+    }
+
+    fn contains_container(&self, project: &str, service: &str) -> bool {
+        self.containers
+            .iter()
+            .any(|(owned_project, owned_service)| owned_project == project && owned_service == service)
+    }
+}
+
+/// What one look at the system found that may be Foreign processes: the processes listening on TCP outside the
+/// Daemon, with their working directories, and the running containers of compose projects, with their directories.
+/// It also keeps what Procly ran while it looked, which stays Procly's for as long as the Sighting is read: a Service
+/// stopped since is no Foreign process, even though the Sighting still lists its listener.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Sighting {
+    /// Each listener with its working directory, its symbolic links resolved.
+    listeners: Vec<(listeners::Listener, PathBuf)>,
+    /// Each container with its project, its service and its working directory, its symbolic links resolved.
+    containers: Vec<(Container, PathBuf)>,
+    owned: Owned,
+}
+
+/// Looks at the system for what may be Foreign processes, with `lsof` and `docker ps`. `owned` tells what Procly runs,
+/// read before and after the look so that a Service that starts or ends while it runs is never taken for a Foreign
+/// process. Blocking.
+pub(super) fn sight(owned: impl Fn() -> Owned) -> Sighting {
+    let mut owned_before = owned();
     let daemon = i32::try_from(std::process::id()).unwrap_or_default();
     let daemon_group = process_group::own_group().as_raw();
     let listening: Vec<_> = listeners::listeners(None)
         .unwrap_or_default()
         .into_iter()
-        .filter(|listener| {
-            listener.pid != daemon && listener.pgid != daemon_group && !owned_groups.contains(&listener.pgid)
-        })
+        .filter(|listener| listener.pid != daemon && listener.pgid != daemon_group)
         .collect();
     let pids: Vec<i32> = listening.iter().map(|listener| listener.pid).collect();
     let directories = listeners::working_directories(&pids);
-    for listener in listening {
-        let Some(directory) = directories.get(&listener.pid) else {
-            continue;
-        };
-        if let Some(index) = deepest(worktrees, &canonical(directory)) {
-            foreign[index].push(ForeignProcess::Process {
-                pid: listener.pid,
-                command: listener.command,
-                ports: listener.ports,
-            });
-        }
-    }
+    let listeners = listening
+        .into_iter()
+        .filter_map(|listener| {
+            let directory = canonical(directories.get(&listener.pid)?);
+            Some((listener, directory))
+        })
+        .collect();
     let label = format!("label={WORKING_DIR_LABEL}");
-    for container in containers(&["--filter", &label], None).unwrap_or_default() {
-        let (Some(project), Some(service), Some(working_dir)) =
-            (&container.project, &container.service, &container.working_dir)
-        else {
-            continue;
-        };
-        if owned_containers.contains(&(project.clone(), service.clone())) {
-            continue;
-        }
-        if let Some(index) = deepest(worktrees, &canonical(working_dir)) {
-            foreign[index].push(ForeignProcess::Container {
-                name: container.name.clone(),
-                project: project.clone(),
-                service: service.clone(),
-                ports: container.ports.clone(),
-            });
-        }
+    let containers = containers(&["--filter", &label], None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|container| {
+            container.project.as_ref()?;
+            container.service.as_ref()?;
+            let directory = canonical(container.working_dir.as_deref()?);
+            Some((container, directory))
+        })
+        .collect();
+    let owned_after = owned();
+    owned_before.groups.extend(owned_after.groups);
+    owned_before.containers.extend(owned_after.containers);
+    Sighting {
+        listeners,
+        containers,
+        owned: owned_before,
     }
-    foreign
+}
+
+impl Sighting {
+    /// The Foreign processes of each of `worktrees`, in their order: the processes listening on TCP whose working
+    /// directory is in the Worktree, and the running containers of compose projects whose directory is. What Procly
+    /// runs now, in `owned`, or ran when the Sighting was made is Procly's.
+    pub(super) fn in_worktrees(&self, worktrees: &[PathBuf], owned: &Owned) -> Vec<Vec<ForeignProcess>> {
+        let mut foreign = vec![Vec::new(); worktrees.len()];
+        for (listener, directory) in &self.listeners {
+            if owned.contains_group(listener.pgid) || self.owned.contains_group(listener.pgid) {
+                continue;
+            }
+            if let Some(index) = deepest(worktrees, directory) {
+                foreign[index].push(ForeignProcess::Process {
+                    pid: listener.pid,
+                    command: listener.command.clone(),
+                    ports: listener.ports.clone(),
+                });
+            }
+        }
+        for (container, directory) in &self.containers {
+            let (Some(project), Some(service)) = (&container.project, &container.service) else {
+                continue;
+            };
+            if owned.contains_container(project, service) || self.owned.contains_container(project, service) {
+                continue;
+            }
+            if let Some(index) = deepest(worktrees, directory) {
+                foreign[index].push(ForeignProcess::Container {
+                    name: container.name.clone(),
+                    project: project.clone(),
+                    service: service.clone(),
+                    ports: container.ports.clone(),
+                });
+            }
+        }
+        foreign
+    }
 }
 
 /// Whether something accepts connections on `port` of the loopback, IPv4 or IPv6. Unlike a bind, a connection
@@ -299,6 +358,74 @@ mod tests {
     fn a_one_off_container_of_compose_run_is_not_the_container_of_its_service() {
         let line = "app-db-run-1\tapp\tdb\tTrue\t/src/app\trunning\t";
         assert!(!parse_container(line).unwrap().is_service("app", "db"));
+    }
+
+    fn listener(pid: i32, port: u16) -> listeners::Listener {
+        listeners::Listener {
+            pid,
+            pgid: pid,
+            command: "node".to_owned(),
+            ports: vec![port],
+        }
+    }
+
+    fn compose_container(project: &str, service: &str) -> Container {
+        parse_container(&format!("{project}-{service}-1\t{project}\t{service}\tFalse\t/src/app\trunning\t")).unwrap()
+    }
+
+    #[test]
+    fn what_procly_runs_now_or_ran_when_the_sighting_was_made_is_no_foreign_process() {
+        let worktrees = [PathBuf::from("/src/app"), PathBuf::from("/src/other")];
+        let sighting = Sighting {
+            listeners: vec![
+                (listener(10, 3000), PathBuf::from("/src/app/web")),
+                (listener(20, 3001), PathBuf::from("/src/app")),
+                (listener(30, 3002), PathBuf::from("/src/app")),
+                (listener(40, 3003), PathBuf::from("/src/other")),
+                (listener(50, 3004), PathBuf::from("/elsewhere")),
+            ],
+            containers: vec![
+                (compose_container("app", "db"), PathBuf::from("/src/app")),
+                (compose_container("app", "cache"), PathBuf::from("/src/app")),
+                (compose_container("app", "queue"), PathBuf::from("/src/app")),
+            ],
+            owned: Owned {
+                // A Service stopped since the Sighting was made.
+                groups: BTreeSet::from([20]),
+                containers: BTreeSet::from([("app".to_owned(), "cache".to_owned())]),
+            },
+        };
+        // A Service started since.
+        let now = Owned {
+            groups: BTreeSet::from([30]),
+            containers: BTreeSet::from([("app".to_owned(), "queue".to_owned())]),
+        };
+
+        let found = sighting.in_worktrees(&worktrees, &now);
+
+        assert_eq!(
+            found,
+            [
+                vec![
+                    ForeignProcess::Process {
+                        pid: 10,
+                        command: "node".to_owned(),
+                        ports: vec![3000],
+                    },
+                    ForeignProcess::Container {
+                        name: "app-db-1".to_owned(),
+                        project: "app".to_owned(),
+                        service: "db".to_owned(),
+                        ports: Vec::new(),
+                    },
+                ],
+                vec![ForeignProcess::Process {
+                    pid: 40,
+                    command: "node".to_owned(),
+                    ports: vec![3003],
+                }],
+            ]
+        );
     }
 
     #[test]
