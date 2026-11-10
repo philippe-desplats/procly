@@ -73,7 +73,12 @@ impl Scope {
 
     /// Checks that starting the Services of `order` in turn would not be refused for a declared port, once `stopping`
     /// is stopped. Nothing is granted nor stored. Blocking.
-    pub(super) fn rehearse_start(&self, registry: &Registry, order: &[String], stopping: &[String]) -> anyhow::Result<()> {
+    pub(super) fn rehearse_start(
+        &self,
+        registry: &Registry,
+        order: &[String],
+        stopping: &[String],
+    ) -> anyhow::Result<()> {
         Ok(environment::rehearse_start(
             registry,
             &self.topology,
@@ -469,6 +474,11 @@ fn start_service(
     // Also on a Reuse, so that `--gitignore` is honored whenever it is asked. A Service whose ports do not check out
     // fails here, before any file is written or Lease granted.
     environment::check(name, declared)?;
+    // All or nothing, before the Env file is rendered, which moves the Leases its Derived variables read: a start
+    // refused for a declared port, of the Service or of any Service its Group covers, moves and yields no Lease.
+    if declared.compose.is_none() {
+        scope.rehearse_start(registry, &[name.to_owned()], &[])?;
+    }
     environment::mirror(registry, &scope.topology, &scope.config, gitignore)?;
     // The Services the Service covers when it is a Group, or the Group covering it.
     let relation = match declared.kind(name)? {

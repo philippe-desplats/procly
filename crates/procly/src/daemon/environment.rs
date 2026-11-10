@@ -174,11 +174,6 @@ pub(super) fn injected_group(
     } = *group;
     let derived = Derived::from_config(&config.services)?;
     let branch = pinned_branch(topology, config)?;
-    // All or nothing: a covered Service whose start would be refused fails the Group before any Lease of the others
-    // moves or yields.
-    if leasing == Leasing::Starting {
-        rehearse_start(registry, topology, config, covers, &[])?;
-    }
     let mut table = grant_referenced(registry, topology, config, branch, &derived)?;
     let mut variables = Vec::new();
     let mut lease_ports = Vec::new();
@@ -484,9 +479,17 @@ fn grant(
     ports: &BTreeMap<String, PortConfig>,
     leasing: Leasing,
 ) -> Result<BTreeMap<String, u16>, EnvironmentError> {
-    let granted = with_lease_request(registry, topology, config, branch, service, ports, leasing, &[], |request| {
-        registry.leases.grant(request)
-    })??;
+    let granted = with_lease_request(
+        registry,
+        topology,
+        config,
+        branch,
+        service,
+        ports,
+        leasing,
+        &[],
+        |request| registry.leases.grant(request),
+    )??;
     // The grant drops the Leases that expired, and their Portless aliases go with them, unless a call of `portless`
     // is under way: the grant never waits for it, and the next removal takes what is left.
     registry.portless.prune_if_idle(&registry.leases);
@@ -533,7 +536,10 @@ pub(super) fn rehearse_start(
 
 /// Hands `use_request` the Lease request of the Service `service`, as [`grant`] makes it, with the Services of
 /// `stopping` counted as not running.
-#[expect(clippy::too_many_arguments, reason = "the facts of one Lease request, each one read where it is made")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the facts of one Lease request, each one read where it is made"
+)]
 fn with_lease_request<T>(
     registry: &Registry,
     topology: &Topology,

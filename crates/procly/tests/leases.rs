@@ -680,7 +680,10 @@ fn a_declared_port_left_in_time_wait_is_said_to_free_itself_within_a_minute() {
 
     assert_eq!(refused.status.code(), Some(125), "{}", common::stderr(&refused));
     let message = common::stderr(&refused);
-    assert!(message.contains("frees the port by itself within a minute"), "{message}");
+    assert!(
+        message.contains("frees the port by itself within a minute"),
+        "{message}"
+    );
 }
 
 #[test]
