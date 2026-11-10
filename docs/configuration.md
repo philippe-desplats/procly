@@ -285,7 +285,7 @@ env = { REDIS_PORT = "{services.cache.ports.redis}" }
 - Each Worktree has Leases of its own for the ports of the Service, drawn like the ones of a Process service: the Main worktree gets the declared port, any other Worktree the Pool and then the Range, or the ports of its Pinned branch. `procly up` and `procly env` give every Worktree its own, and `procly up` answers `started` or `reused` with their URLs, like any other Service.
 - Named volumes belong to the project, so each Worktree has its own data. A volume the compose file gives a fixed `name`, or a bind mount, is still shared, Procly does not look at volumes.
 - `procly down` stops the container of the Worktree at once, with `docker compose stop`, and prints `db stopped`: there is no Grace period, nobody else needs it. The container is never removed and its volumes are kept, until the Worktree is removed and `procly gc --apply` or its [Retention policy](#retention-policy) removes them, see [Collecting Orphans](gc.md). A `procly down` in any Worktree also stops the containers of the Worktrees whose directory no longer exists, removed without `procly down`, and so does the next Daemon when it finds one at its start.
-- `procly status` lists the Isolated containers of the Worktree, `procly logs` reads the one of the Worktree, and `procly eject` stops every one of the Repository and keeps them with their volumes.
+- `procly status` lists the Isolated containers of the Worktree, `procly logs` reads the one of the Worktree, and `procly eject` stops the one of the Worktree and keeps it with its volumes, while `procly eject --repository` stops every one of the Repository.
 
 The limits of the mode:
 

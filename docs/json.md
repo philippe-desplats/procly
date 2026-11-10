@@ -32,7 +32,7 @@ The one exception to 1 document is `logs --follow`, which streams and prints 1 J
 | `worktree release` | what the Worktree release stopped, released and kept, or would, with `--dry-run` | [Releasing a Worktree](worktree-release.md#json) |
 | `worktree hooks` | what became of the Worktrunk hooks block | [below](#worktree-hooks), and [Preparing a Worktree](worktree-init.md#worktrunk) |
 | `agent install`, `off`, `on` | what became of the Rules block and the Guard | [Steering agents to Procly](agents.md) |
-| `eject` | what was stopped, removed and left, and the prompt | [Removing Procly from a Repository](eject.md) |
+| `eject` | what was stopped, removed, left and spared, and the prompt | [Removing Procly from a Repository](eject.md) |
 | `gc` | the Orphans, and what became of each with `--apply` | below, and [Collecting Orphans](gc.md) |
 | `doctor` | every check with its status, message and fix | below, and [Checking the installation](doctor.md) |
 | `unit install`, `unit inspect`, `unit remove` | the Session unit | [The Daemon](daemon.md) |

@@ -398,6 +398,21 @@ impl Services {
         stopping
     }
 
+    /// The key of every running Service of the Repository whose common git directory is `git_common_dir` that runs for
+    /// another Worktree than `worktree`, sorted by Worktree and name, for an eject of one Worktree to say it spared them.
+    pub(crate) fn running_outside(&self, git_common_dir: &Path, worktree: &Path) -> Vec<ServiceKey> {
+        let mut running: Vec<_> = self
+            .table()
+            .iter()
+            .filter(|((path, _), service)| {
+                path != worktree && service.topology.git_common_dir == git_common_dir && service.is_running()
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        running.sort();
+        running
+    }
+
     /// The Worktree root and the name of every running Service, a running Group counting for the Services it covers
     /// too, as it holds their Leases.
     pub(crate) fn running(&self) -> BTreeSet<ServiceKey> {

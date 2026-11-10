@@ -39,7 +39,7 @@ Procly is a single per-user Daemon that owns every Service, port and container a
 - **Worktree lifecycle**: `procly worktree release` stops a Worktree's work and releases its Leases before you remove it, and `procly gc` lists the Orphans removed Worktrees left behind, which `gc --apply` deletes.
 - **Groups**: keep your monorepo-wide dev command as one unit that covers several Services.
 - **Agent steering, opt-in**: `procly agent install` writes a Rules block into `AGENTS.md` and a Guard into `.claude/settings.json`, a Claude Code hook that blocks a dev-server command and answers with the Procly command to run.
-- **Reversible**: `procly off` makes the Guard and the Rules block stand aside, and `procly eject` removes everything Procly wrote into a Repository.
+- **Reversible**: `procly off` makes the Guard and the Rules block stand aside, and `procly eject` removes everything Procly wrote into a Worktree, and `procly eject --repository` into the whole Repository.
 - **Crash tolerant**: Services run in process groups of their own and outlive a crashed Daemon, which the next Daemon re-attaches. A launchd agent or systemd user unit can start the Daemon with your session.
 - **Self-check**: `procly doctor` checks the installation and the Repository, and gives the command that fixes each problem.
 - **Integrations**: `procly mcp` serves the Daemon verbs as MCP tools, `procly worktree hooks` makes Worktrunk run `worktree init` and `worktree release`, and with `portless = true` each HTTP Lease gets a Portless alias that does not change from one Worktree to the next.
@@ -148,7 +148,7 @@ procly worktree release --dry-run   # print what the release would do, change no
 procly worktree hooks      # make Worktrunk run worktree init and release, in .config/wt.toml
 procly agent install       # write the Rules block and the Guard, nothing is written without it
 procly off                 # make the Guard and the Rules block stand aside (procly on reverts)
-procly eject               # remove everything Procly wrote into this Repository
+procly eject               # remove everything Procly wrote into this Worktree (--repository: the whole Repository)
 procly gc                  # list the Orphans removed Worktrees left behind (--apply deletes them)
 procly doctor              # check the installation and this Repository, with the command that fixes each problem
 procly unit install        # start the Daemon with your session (launchd or systemd)

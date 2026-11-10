@@ -400,7 +400,7 @@ fn docker_eject_stops_the_containers_of_every_worktree_and_keeps_them_with_their
     assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
     let containers = (fixture.main_project.container(), fixture.other_project.container());
 
-    let output = fixture.procly.procly_in(&fixture.main, &["eject"]);
+    let output = fixture.procly.procly_in(&fixture.main, &["eject", "--repository"]);
 
     assert_success(&output);
     let text = stdout(&output);
@@ -413,11 +413,58 @@ fn docker_eject_stops_the_containers_of_every_worktree_and_keeps_them_with_their
             "{text}"
         );
     }
+    // Only the container of the other Worktree is announced, and before anything stops.
+    let will = text.find(&format!(
+        "will stop db of {} (Isolated Compose service, its container and volumes are kept)",
+        fixture.other.display()
+    ));
+    assert!(
+        will.is_some_and(|will| will < text.find("stopped db").expect("stopped")),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("will stop db of {} ", fixture.main.display())),
+        "{text}"
+    );
     assert!(!fixture.main_project.is_running() && !fixture.other_project.is_running());
     assert_eq!(
         (fixture.main_project.container(), fixture.other_project.container()),
         containers
     );
+    assert!(fixture.main_project.volume_exists() && fixture.other_project.volume_exists());
+}
+
+#[test]
+fn docker_eject_stops_the_isolated_container_of_the_current_worktree_only() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let other_container = fixture.other_project.container();
+
+    let output = fixture.procly.procly_in(&fixture.main, &["eject"]);
+
+    assert_success(&output);
+    let text = stdout(&output);
+    assert!(
+        text.contains(&format!(
+            "stopped db of {} (Isolated Compose service, its container and volumes are kept)",
+            fixture.main.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        !text.contains(&format!("stopped db of {}", fixture.other.display())),
+        "{text}"
+    );
+    assert!(!fixture.main_project.is_running());
+    assert!(
+        fixture.other_project.is_running(),
+        "the container of the other Worktree was stopped"
+    );
+    assert_eq!(fixture.other_project.container(), other_container);
     assert!(fixture.main_project.volume_exists() && fixture.other_project.volume_exists());
 }
 

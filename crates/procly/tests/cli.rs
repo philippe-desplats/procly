@@ -159,6 +159,7 @@ fn the_help_of_eject_lists_its_exit_codes_and_the_agents_it_can_hand_the_prompt_
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(
         help.contains("--agent")
+            && help.contains("--repository")
             && help.contains("claude")
             && help.contains("codex")
             && help.contains("gemini")

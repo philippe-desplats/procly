@@ -36,7 +36,8 @@ use procly_client::{protocol, state_dir};
 
 use crate::protocol::{
     BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
-    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, UpService, Written,
+    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared, Stopped, UpService,
+    Written,
 };
 use crate::state_dir::StateDir;
 
@@ -231,17 +232,24 @@ enum Command {
         #[command(flatten)]
         json: JsonFlag,
     },
-    /// Remove everything Procly wrote into this Repository: stop its Services, then take out the Rules blocks, the
-    /// Guard, the exclusion lines and the Env files that nobody edited, and print what was removed and what was left.
-    /// Docker volumes and Logical resources are kept. A Managed block you edited is left as it is, and a prompt
-    /// describing what to undo in it is printed.
+    /// Remove everything Procly wrote into this Worktree: stop its Services, Jobs and Isolated containers, then take
+    /// out its Rules blocks, Guard and Env file that nobody edited, and print what was removed and what was left.
+    /// What every Worktree of the Repository shares, such as the exclusion lines of the git exclude file, and what
+    /// belongs to another Worktree are left as they are, and printed with why. `--repository` ejects every Worktree
+    /// and what they share. Docker volumes and Logical resources are kept. A Managed block you edited is left as it
+    /// is, and a prompt describing what to undo in it is printed.
     #[command(
-        after_help = "Exit codes: 0 when the Repository is ejected, also when blocks were left because you edited them, \
+        after_help = "Exit codes: 0 when the Worktree is ejected, also when blocks were left because you edited them, \
                       125 when Procly itself fails, such as for a container that cannot be stopped or the agent \
                       CLI of `--agent` failing, in which case what eject removed stays removed. See docs/eject.md and \
                       docs/exit-codes.md."
     )]
     Eject {
+        /// Eject every Worktree of the Repository instead of this one: stop the Services, Jobs and containers of all
+        /// of them, whoever uses them, and remove what Procly wrote into each, the exclusion lines of the git exclude
+        /// file included. The Services and Jobs of the other Worktrees it will stop are listed before it stops them.
+        #[arg(long)]
+        repository: bool,
         /// Hand the prompt to your own coding agent in its non-interactive mode, from the current directory, instead
         /// of printing it. Without this flag no agent is ever run. With `--json`, the standard output of the agent
         /// goes to stderr.
@@ -578,7 +586,11 @@ fn execute(command: Command) -> anyhow::Result<ExitCode> {
         } => agent_install(&state, file, json.json),
         Command::Off { json } => switch(&state, true, json.json),
         Command::On { json } => switch(&state, false, json.json),
-        Command::Eject { agent, json } => eject(&state, agent, json.json),
+        Command::Eject {
+            repository,
+            agent,
+            json,
+        } => eject(&state, repository, agent, json.json),
         Command::Gc { apply, json } => gc(&state, apply, json.json),
         Command::Doctor { agent, json } => doctor(&state, agent, json.json),
         Command::Init { .. } => unreachable!("init is answered before the state directory is resolved"),
@@ -1263,11 +1275,18 @@ fn orphans_count(count: usize) -> String {
     }
 }
 
-/// Runs `eject`, printing what was stopped, removed and left, then the prompt for what was left, which `--agent` hands
-/// to the coding agent instead.
-fn eject(state: &StateDir, agent: Option<AgentCli>, json: bool) -> anyhow::Result<ExitCode> {
+/// Runs `eject`, printing what was stopped, removed, left and spared, then the prompt for what was left, which `--agent`
+/// hands to the coding agent instead.
+fn eject(state: &StateDir, repository: bool, agent: Option<AgentCli>, json: bool) -> anyhow::Result<ExitCode> {
     let cwd = std::env::current_dir().context("cannot read the current directory")?;
-    let report = match client::send(state, &Request::Eject { cwd })? {
+    if repository && !json {
+        // What it is about to stop for the other Worktrees comes first. The document of `--json` lists it afterwards.
+        match client::send(state, &Request::EjectPreview { cwd: cwd.clone() })? {
+            Response::Eject(preview) => print(&eject_preview(&preview))?,
+            other => return unexpected(other),
+        }
+    }
+    let report = match client::send(state, &Request::Eject { cwd, repository })? {
         Response::Eject(report) => report,
         other => return unexpected(other),
     };
@@ -1276,8 +1295,10 @@ fn eject(state: &StateDir, agent: Option<AgentCli>, json: bool) -> anyhow::Resul
         let handed_to = agent.filter(|_| report.prompt.is_some());
         json::print(&json::Eject {
             stopped: &report.stopped,
+            jobs: &report.jobs,
             removed: &report.removed,
             left: &report.left,
+            spared: &report.spared,
             prompt: report.prompt.as_deref().filter(|_| handed_to.is_none()),
             agent: handed_to.map(AgentCli::program),
         })?;
@@ -1331,23 +1352,57 @@ fn items_were(count: usize) -> String {
     }
 }
 
-/// One line per Service stopped, per file removed and per file left, then what eject never touches.
+/// What the line of a Service says of it, `verb` being `stopped` once it is and `will stop` before.
+fn stopped_line(verb: &str, stopped: &Stopped) -> String {
+    match &stopped.worktree {
+        Some(worktree) if stopped.isolated => format!(
+            "{verb} {} of {} (Isolated Compose service, its container and volumes are kept)",
+            stopped.service,
+            worktree.display()
+        ),
+        Some(worktree) => format!("{verb} {} of {}", stopped.service, worktree.display()),
+        None => format!("{verb} {} (Compose service, its volumes are kept)", stopped.service),
+    }
+}
+
+/// One line per Service and Job of another Worktree that `eject --repository` is about to stop.
+fn eject_preview(report: &EjectReport) -> String {
+    let mut text = String::new();
+    for stopped in &report.stopped {
+        let _ = writeln!(text, "{}", stopped_line("will stop", stopped));
+    }
+    for job in &report.jobs {
+        let _ = match &job.worktree {
+            Some(worktree) => writeln!(
+                text,
+                "will stop job {} of {}, {}",
+                job.job,
+                worktree.display(),
+                job.command
+            ),
+            None => writeln!(text, "will stop job {}, {}", job.job, job.command),
+        };
+    }
+    text
+}
+
+/// One line per Service and Job stopped, per file removed, per file left and per item spared, then what eject never
+/// touches.
 fn eject_summary(report: &EjectReport) -> String {
     let mut text = String::new();
     for stopped in &report.stopped {
-        let _ = match &stopped.worktree {
-            Some(worktree) if stopped.isolated => writeln!(
+        let _ = writeln!(text, "{}", stopped_line("stopped", stopped));
+    }
+    for job in &report.jobs {
+        let _ = match &job.worktree {
+            Some(worktree) => writeln!(
                 text,
-                "stopped {} of {} (Isolated Compose service, its container and volumes are kept)",
-                stopped.service,
-                worktree.display()
+                "stopped job {} of {}, {}",
+                job.job,
+                worktree.display(),
+                job.command
             ),
-            Some(worktree) => writeln!(text, "stopped {} of {}", stopped.service, worktree.display()),
-            None => writeln!(
-                text,
-                "stopped {} (Compose service, its volumes are kept)",
-                stopped.service
-            ),
+            None => writeln!(text, "stopped job {}, {}", job.job, job.command),
         };
     }
     for removed in &report.removed {
@@ -1365,6 +1420,50 @@ fn eject_summary(report: &EjectReport) -> String {
     }
     for left in &report.left {
         let _ = writeln!(text, "left {} {}, edited", left.kind.as_str(), left.file.display());
+    }
+    for spared in &report.spared {
+        let _ = match spared {
+            Spared::Service { service, worktree } => {
+                writeln!(
+                    text,
+                    "kept {service} of {}, it runs for another Worktree",
+                    worktree.display()
+                )
+            }
+            Spared::Job { job, command, worktree } => {
+                writeln!(
+                    text,
+                    "kept job {job} of {}, {command}, it runs for another Worktree",
+                    worktree.display()
+                )
+            }
+            Spared::ComposeService { service, .. } => {
+                writeln!(
+                    text,
+                    "kept {service} (Compose service), other Worktrees still need its container"
+                )
+            }
+            Spared::File {
+                written,
+                file,
+                shared: true,
+            } => writeln!(
+                text,
+                "kept {} {}, shared with the other Worktrees git lists, `procly eject --repository` removes it",
+                written.as_str(),
+                file.display()
+            ),
+            Spared::File {
+                written,
+                file,
+                shared: false,
+            } => writeln!(
+                text,
+                "kept {} {}, written for another Worktree",
+                written.as_str(),
+                file.display()
+            ),
+        };
     }
     text.push_str("left Docker volumes and Logical resources\n");
     text.push_str("left the files copied by worktree init and the state of the Daemon, Leases and off\n");

@@ -118,7 +118,7 @@ fn the_request_is_one_line_and_every_response_line_is_read_in_order_until_the_da
 
     assert_eq!(
         daemon.join().unwrap(),
-        "{\"version\":22,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n"
+        "{\"version\":23,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n"
     );
     assert!(matches!(&responses[..], [
         Response::SetupProgress { command, .. },
