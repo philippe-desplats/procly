@@ -12,6 +12,7 @@ mod environment;
 mod fnv;
 mod follow;
 mod foreign;
+mod foreign_cache;
 mod gc;
 mod health;
 mod held;
@@ -63,6 +64,7 @@ use self::clock::Clock;
 pub(crate) use self::compose::major as compose_major;
 use self::compose::{Composes, Isolated};
 use self::container_record::ContainerRecords;
+use self::foreign_cache::ForeignCache;
 use self::held::HeldEnvironments;
 use self::index::Indexes;
 use self::isolated_record::IsolatedRecords;
@@ -117,6 +119,8 @@ struct Registry {
     /// Set once the containers recorded by the previous Daemon are reconciled, apart from the Services, so that a
     /// container document that cannot be read never has the Services re-attached twice.
     containers_reconciled: tokio::sync::OnceCell<()>,
+    /// What the Daemon last found about Foreign processes, which `Status` answers from.
+    foreign: ForeignCache,
 }
 
 impl Registry {
@@ -233,6 +237,7 @@ async fn serve(state: &StateDir, executable: PathBuf) -> anyhow::Result<()> {
         setup_logs: state.setup_logs(),
         reconciled: tokio::sync::OnceCell::new(),
         containers_reconciled: tokio::sync::OnceCell::new(),
+        foreign: ForeignCache::default(),
     });
     // After the socket is bound, so that the command that started this Daemon is not left waiting to connect while
     // orphans are stopped, and its request waits for the reconciliation instead.
@@ -410,14 +415,16 @@ async fn dispatch(
             |(stopped, released)| Response::Down { stopped, released },
         ),
         Request::Status { cwd, all } => {
-            let registry = Arc::clone(registry);
-            answer(
+            let reporting = Arc::clone(registry);
+            let response = answer(
                 blocking("the status could not be read", move || {
-                    status::report(&registry, &cwd, all)
+                    status::report(&reporting, &cwd, all)
                 })
                 .await,
                 Response::Status,
-            )
+            );
+            foreign_cache::keep_looking(registry);
+            response
         }
         Request::WorktreeInit { path, env } => worktree_init::run(Arc::clone(registry), path, env, progress)
             .await

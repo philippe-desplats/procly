@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Registry, environment, foreign};
+use super::{Registry, environment, foreign, foreign_cache};
 use crate::protocol::{
     JobStatus, RepositoryStatus, ServiceState, ServiceStatus, StaleLease, StatusReport, WorktreeStatus,
 };
@@ -22,11 +22,7 @@ pub(super) fn report(registry: &Registry, cwd: &Path, all: bool) -> anyhow::Resu
     } = registry;
     let cwd = topology::canonicalize(cwd)?;
     let here = topology::resolve(&cwd)?;
-    let owned_groups = services
-        .process_groups()
-        .into_iter()
-        .chain(jobs.process_groups())
-        .collect();
+    let owned = owned(registry);
     let statuses = jobs.statuses();
     let mut services = services.statuses();
     for (topology, status) in &mut services {
@@ -87,7 +83,8 @@ pub(super) fn report(registry: &Registry, cwd: &Path, all: bool) -> anyhow::Resu
         .iter()
         .flat_map(|repository| repository.worktrees.iter().map(|status| status.worktree.path.clone()))
         .collect();
-    let mut found = foreign::in_worktrees(&reported, &owned_groups, &composes.owned()).into_iter();
+    let sighting = registry.foreign.sighting(|| foreign_cache::sight(registry));
+    let mut found = sighting.in_worktrees(&reported, &owned).into_iter();
     for status in repositories
         .iter_mut()
         .flat_map(|repository| repository.worktrees.iter_mut())
@@ -107,6 +104,19 @@ pub(super) fn report(registry: &Registry, cwd: &Path, all: bool) -> anyhow::Resu
         repositories,
         jobs_outside_repositories,
     })
+}
+
+/// What the Services, the Jobs and the containers of `registry` run now, which is never a Foreign process.
+pub(super) fn owned(registry: &Registry) -> foreign::Owned {
+    foreign::Owned {
+        groups: registry
+            .services
+            .process_groups()
+            .into_iter()
+            .chain(registry.jobs.process_groups())
+            .collect(),
+        containers: registry.composes.owned(),
+    }
 }
 
 /// A Worktree of a Repository, with the branch checked out in it and whether git lists it.
