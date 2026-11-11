@@ -91,24 +91,30 @@ export async function pressNamed(label: string): Promise<boolean> {
   }, label);
 }
 
-/** Opens the Worktree the sidebar names `name`, and tells whether the sidebar had it. */
-export async function openWorktree(name: string): Promise<boolean> {
+/**
+ * Opens the Worktree of the sidebar whose folder is `folder`, as its tooltip names it, and tells whether the sidebar
+ * had it. The folder, not the name the row shows: every scene is on a branch `main`, and the window may still draw the
+ * Worktrees of the Daemon a previous flow stopped until its next answer, so only the folder tells the scene's apart.
+ */
+export async function openWorktree(folder: string): Promise<boolean> {
   return browser.execute((wanted: string) => {
-    const row = Array.from(document.querySelectorAll('nav[aria-label="Worktrees"] .row')).find(
-      (candidate) => candidate.querySelector(".row-name")?.textContent === wanted,
+    const row = Array.from(document.querySelectorAll<HTMLElement>('nav[aria-label="Worktrees"] .row')).find(
+      (candidate) => (candidate.getAttribute("title") ?? "").split("\n").includes(`Folder: ${wanted}`),
     );
-    (row as HTMLElement | undefined)?.click();
+    row?.click();
     return row !== undefined;
-  }, name);
+  }, folder);
+}
+
+/** Waits until the sidebar lists the Worktree whose folder is `folder`, then opens it. */
+export async function openingWorktree(folder: string, within = 60_000): Promise<void> {
+  await until(`the Worktree ${folder} in the sidebar`, () => openWorktree(folder), within);
 }
 
 /** Waits until the window has an enabled button named `label`. */
 export async function showingButton(label: string, within = 60_000): Promise<void> {
   await until(`the button "${label}"`, () => hasButton(label), within);
 }
-
-/** The first worktree of the sidebar, once a Daemon reports one. A scene has one, so it is the scene's. */
-export const FIRST_WORKTREE = 'nav[aria-label="Worktrees"] section.group ul.list li button';
 
 /** The output pane of the inspector. */
 export const OUTPUT = 'pre[aria-label="Output"]';
@@ -126,4 +132,9 @@ export async function pick(selector: string, text = ""): Promise<boolean> {
     selector,
     text,
   );
+}
+
+/** Waits until an element `selector` matches holds `text`, then presses the first such element. */
+export async function picking(selector: string, text: string, within = 60_000): Promise<void> {
+  await until(`${text} in ${selector}`, () => pick(selector, text), within);
 }

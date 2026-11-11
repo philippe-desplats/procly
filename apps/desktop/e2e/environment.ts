@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,6 +15,9 @@ const APP = "PROCLY_E2E_APP";
 
 /** The test server fixture a scene runs as a Service. */
 const TEST_SERVER = "PROCLY_E2E_TEST_SERVER";
+
+/** Where a failed run copies its logs before its temporary root is removed. The CI sets it and uploads the directory. */
+const ARTIFACTS = "PROCLY_E2E_ARTIFACTS";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -119,6 +122,8 @@ export async function stopDaemon(): Promise<boolean> {
 export interface Scene {
   /** The Worktree, a git repository the `procly.toml` sits in. */
   path: string;
+  /** The last segment of `path`, unique to the scene, which tells its Worktree apart in the sidebar. */
+  folder: string;
   service: string;
   port: number;
 }
@@ -148,7 +153,7 @@ export async function writeScene(name: string, service: string): Promise<Scene> 
   );
   const config = `[services.${service}]\nrun = '${required(TEST_SERVER)} --port {ports.http}'\nports = { http = ${port} }\n`;
   writeFileSync(join(path, "procly.toml"), config);
-  return { path, service, port };
+  return { path, folder: name, service, port };
 }
 
 /** One Service as `procly status --json` reports it. */
@@ -179,6 +184,31 @@ export async function reportedService(scene: Scene, name: string): Promise<Repor
 /** The test server fixture, which a scene also starts by hand to have a process Procly did not start. */
 export function testServer(): string {
   return required(TEST_SERVER);
+}
+
+/**
+ * Copies what a failed run needs to be diagnosed to the directory `PROCLY_E2E_ARTIFACTS` names: the log of the Daemon,
+ * the output the Daemon captured for each Service and Job, and the logs of the runner, the output of the app among
+ * them. Does nothing when the variable is unset. Called once, by the runner, after the Daemon is stopped and before
+ * the temporary root is removed.
+ */
+export function keepLogs(): void {
+  const target = process.env[ARTIFACTS];
+  const root = process.env[ROOT];
+  if (target === undefined || target === "" || root === undefined) {
+    return;
+  }
+  mkdirSync(target, { recursive: true });
+  const kept: [from: string, to: string][] = [
+    [join(root, "state", "daemon.log"), "daemon.log"],
+    [join(root, "state", "output"), "output"],
+    [logDirectory(), "logs"],
+  ];
+  for (const [from, to] of kept) {
+    if (existsSync(from)) {
+      cpSync(from, join(target, to), { recursive: true });
+    }
+  }
 }
 
 /** Removes everything the run created. Called once, by the runner, after the Daemon is stopped. */
