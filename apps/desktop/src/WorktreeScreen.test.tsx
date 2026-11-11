@@ -180,7 +180,11 @@ describe("the Worktree screen", () => {
     expect(within(center).getByRole("heading", { name: "Foreign processes" })).toBeInTheDocument();
     expect(within(center).getByText("node server.js")).toBeInTheDocument();
     expect(within(center).getByText("legacy-db")).toBeInTheDocument();
-    expect(within(center).getByRole("heading", { name: "Isolated Compose services" })).toBeInTheDocument();
+    // An Isolated Compose service is listed with the Services, and says it is Isolated beside its name.
+    expect(within(center).queryByRole("heading", { name: "Isolated Compose services" })).toBeNull();
+    const cache = within(center).getByText("cache").closest("li");
+    expect(cache).toHaveTextContent("cache Isolated running");
+    expect(cache?.closest("section, div")).toBe(within(center).getByText("web").closest("section, div"));
     expect(within(center).getByText("cache")).toBeInTheDocument();
     expect(within(center).getByRole("heading", { name: "Jobs" })).toBeInTheDocument();
     expect(within(center).getByText("sleep 61")).toBeInTheDocument();
@@ -633,7 +637,7 @@ describe("the Outside Repositories screen", () => {
     app();
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^\d+ Jobs?$/ }));
 
     const center = screen.getByRole("main");
     expect(await within(center).findByRole("heading", { name: "Outside Repositories" })).toBeInTheDocument();
@@ -646,7 +650,7 @@ describe("the Outside Repositories screen", () => {
     app();
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^\d+ Jobs?$/ }));
 
     const center = screen.getByRole("main");
     const command = await within(center).findByText("make watch");
@@ -658,7 +662,7 @@ describe("the Outside Repositories screen", () => {
   it("picks a Job for the inspector, which follows its output from the directory it started in", async () => {
     const calls = app();
     render(<App store={createDaemonStore()} />);
-    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^\d+ Jobs?$/ }));
     const center = screen.getByRole("main");
     await within(center).findByText("make watch");
     expect(within(inspector()).getByText("Select a Job.")).toBeInTheDocument();
@@ -681,7 +685,7 @@ describe("the Outside Repositories screen", () => {
     app();
     render(<App store={createDaemonStore()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^\d+ Jobs?$/ }));
 
     const center = screen.getByRole("main");
     const title = await within(center).findByRole("heading", { name: "Outside Repositories", level: 2 });
@@ -695,7 +699,7 @@ describe("the Outside Repositories screen", () => {
   it("asks for the same refresh as the other screens when Refresh is pressed", async () => {
     const calls = app();
     render(<App store={createDaemonStore()} />);
-    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^\d+ Jobs?$/ }));
     const center = screen.getByRole("main");
     await within(center).findByText("make watch");
     const before = calls.length;
@@ -707,19 +711,10 @@ describe("the Outside Repositories screen", () => {
     });
   });
 
-  it("says so when no Job started outside a Repository", async () => {
-    app({}, { ...(scene as Extract<Response, { response: "status" }>), jobs_outside_repositories: [] });
-    render(<App store={createDaemonStore()} />);
-
-    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
-
-    expect(await screen.findByText("No Job started outside a Repository.")).toBeInTheDocument();
-  });
-
   it("draws a Job as its glyph, then its command, then its state", async () => {
     app();
     render(<App store={createDaemonStore()} />);
-    fireEvent.click(await screen.findByRole("button", { name: /^Outside Repositories/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^\d+ Jobs?$/ }));
     const center = screen.getByRole("main");
     await within(center).findByText("make watch");
 
@@ -821,7 +816,9 @@ describe("the header of the Worktree screen", () => {
     const calls = app({ open_worktree: () => undefined }, onBranch("feature/login"));
     render(<App store={createDaemonStore()} />);
     fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
-    const header = (await screen.findByRole("heading", { level: 2, name: "web-fix" })).closest("header");
+    const header = (
+      await within(screen.getByRole("main")).findByRole("heading", { level: 2, name: "web-fix" })
+    ).closest("header");
     expect(header).not.toBeNull();
 
     fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Editor" }));
@@ -866,7 +863,9 @@ describe("the header of the Worktree screen", () => {
     );
     render(<App store={createDaemonStore()} />);
     fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
-    const header = (await screen.findByRole("heading", { level: 2, name: "web-fix" })).closest("header");
+    const header = (
+      await within(screen.getByRole("main")).findByRole("heading", { level: 2, name: "web-fix" })
+    ).closest("header");
 
     fireEvent.click(within(header as HTMLElement).getByRole("button", { name: "Open in Terminal" }));
 
@@ -874,5 +873,40 @@ describe("the header of the Worktree screen", () => {
     const alert = await screen.findByText("cannot open /p/work/acme/web-fix");
     expect(alert).toHaveAttribute("role", "alert");
     expect(alert.previousElementSibling).toBe(header);
+  });
+
+  it("opens its release sheet under the folder the title line names it by, not under its branch", async () => {
+    app({ preview_release: () => new Promise<void>(() => undefined) }, onBranch("feature/login"));
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^feature\/login/ }));
+    const center = screen.getByRole("main");
+    await within(center).findByRole("heading", { level: 2, name: "web-fix" });
+
+    fireEvent.click(within(center).getByRole("button", { name: "Release…" }));
+
+    expect(await screen.findByRole("dialog", { name: "Release web-fix?" })).toBeInTheDocument();
+  });
+
+  it("lists an Isolated Compose service under Services, with no heading of its own", async () => {
+    app();
+    const center = await openWorktree();
+
+    const services = within(center).getByRole("heading", { name: "Services" }).nextElementSibling;
+    expect(services).toHaveTextContent("cache Isolated running");
+    expect(within(center).queryByRole("heading", { name: /Isolated Compose services/ })).toBeNull();
+  });
+
+  it("says what the Outside Repositories list holds, in a line under the title", async () => {
+    app();
+    render(<App store={createDaemonStore()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^\d+ Jobs?$/ }));
+
+    const center = screen.getByRole("main");
+
+    expect(
+      await within(center).findByRole("heading", {
+        name: "Jobs started from a directory in no git Repository",
+      }),
+    ).toBeInTheDocument();
   });
 });

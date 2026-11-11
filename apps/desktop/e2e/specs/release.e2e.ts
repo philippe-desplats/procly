@@ -23,18 +23,19 @@ describe("a Worktree released through its sheet", () => {
     expect((await reportedService(scene, scene.service))?.state).toBe("healthy");
 
     // The Worktree is found by its folder. Every scene is on `main`, and until its next answer the window may still
-    // list the Worktree of the flow before, whose release would stop nothing.
+    // list the Worktree of the flow before, whose release would stop nothing. The sheet names it by its folder too, as
+    // the title line of its screen does.
     await openingWorktree(scene.folder);
     await browser.waitUntil(() => press("Release…"), { timeout: 60_000, interval: 500 });
 
     // The dry run names the Service it would stop, and the Daemon has not touched it.
-    await showingTitle("Release main?");
+    await showingTitle("Release web-release?");
     await showingText(SHEET, ["Will stop", scene.service]);
     expect((await reportedService(scene, scene.service))?.state).toBe("healthy");
 
     expect(await press("Release")).toBe(true);
 
-    await showingTitle("Released main");
+    await showingTitle("Released web-release");
     await showingText(SHEET, ["Stopped", scene.service]);
     // The real release stopped the Service and forgot it.
     await browser.waitUntil(async () => (await reportedService(scene, scene.service)) === null, {

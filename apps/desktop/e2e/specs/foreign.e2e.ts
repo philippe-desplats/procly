@@ -3,13 +3,16 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { browser, expect } from "@wdio/globals";
 
 import { freePort, procly, stopDaemon, testServer, writeScene, type Scene } from "../environment";
-import { pick, press, showingText } from "../window";
+import { pick, press, showingText, textOf } from "../window";
 
 /** The inspector of the window. */
 const INSPECTOR = 'aside[aria-label="Inspector"]';
 
+/** The section of Needs you on the Overview. */
+const NEEDS_YOU = 'section[aria-label="Needs you"]';
+
 /** A row of Needs you on the Overview, which picks its item for the inspector. */
-const NEEDS_YOU_ROW = 'section[aria-label="Needs you"] li.item button.item-select';
+const NEEDS_YOU_ROW = `${NEEDS_YOU} li.item button.item-select`;
 
 describe("a Foreign process selected in its Worktree", () => {
   let scene: Scene;
@@ -36,10 +39,15 @@ describe("a Foreign process selected in its Worktree", () => {
 
     // The Overview pins the Foreign process in Needs you, with the port it listens on drawn as a pill. Each try asks
     // the poller for a tick, since the Daemon reports the process only once it listens.
+    // The pill is a button of its own beside the row, so the port is read in the whole section and the row is picked by
+    // the pid it names.
     await browser.waitUntil(
       async () => {
         await press("Refresh");
-        return pick(NEEDS_YOU_ROW, String(port));
+        return (
+          ((await textOf(NEEDS_YOU)) ?? "").includes(String(port)) &&
+          (await pick(NEEDS_YOU_ROW, `pid ${String(pid)}`))
+        );
       },
       {
         timeout: 60_000,

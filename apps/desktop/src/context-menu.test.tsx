@@ -82,7 +82,7 @@ interface Call {
  * Plays the Rust side from the answer `last`. A mark answers with the update the Seen set of Rust would publish, and
  * `revealFails` makes the Finder refuse to reveal the Worktree.
  */
-function rust(last: Update, revealFails = false): Call[] {
+function rust(last: Update, revealFails = false, stopFails = false): Call[] {
   const calls: Call[] = [];
   mockIPC(
     (command, args) => {
@@ -100,6 +100,10 @@ function rust(last: Update, revealFails = false): Call[] {
           return undefined;
         case "preview_release":
           return new Promise<void>(() => undefined);
+        case "stop_service":
+          return stopFails
+            ? { response: "error", message: "web is held by something else" }
+            : { response: "down", service: "web" };
         case "reveal_worktree":
           return revealFails
             ? Promise.reject({ kind: "reveal", message: `cannot reveal ${PATH} in the Finder: refused` })
@@ -170,7 +174,7 @@ describe("the context menu of a row", () => {
 
     const entries = await shownMenu(calls);
 
-    expect(titles(entries)).toEqual(["Copy Logs Command", "---", "Mark as Seen"]);
+    expect(titles(entries)).toEqual(["Copy Command Line", "Copy Logs Command", "---", "Mark as Seen"]);
     expect(await screen.findByRole("heading", { name: "sh -c 'exit 3'" })).toBeInTheDocument();
     await choose(entries, "Mark as Seen");
     await waitFor(() => {
@@ -185,7 +189,7 @@ describe("the context menu of a row", () => {
     expect(within(sidebar()).getByRole("button", { name: /^Overview/ })).toHaveTextContent("1 needs you");
 
     const entries = await shownMenu(calls);
-    expect(titles(entries)).toEqual(["Copy Logs Command", "---", "Mark as Unseen"]);
+    expect(titles(entries)).toEqual(["Copy Command Line", "Copy Logs Command", "---", "Mark as Unseen"]);
     await choose(entries, "Mark as Unseen");
 
     await waitFor(() => {
@@ -205,10 +209,57 @@ describe("the context menu of a row", () => {
 
     const entries = await shownMenu(calls);
 
-    expect(entries).toEqual([
+    expect(entries.slice(0, 3)).toEqual([
       { kind: "copy", title: "Copy Port 18731", text: "18731" },
       { kind: "copy", title: "Copy Logs Command", text: "(cd /p/work/acme/web-fix && procly logs web)" },
+      {
+        kind: "copy",
+        title: "Copy Restart Command",
+        text: "(cd /p/work/acme/web-fix && procly restart web)",
+      },
     ]);
+    expect(titles(entries).some((title) => title.startsWith("Mark as"))).toBe(false);
+  });
+
+  it("copies the command line of a Job, which has no port", async () => {
+    const calls = rust(unseen);
+    rightClick(await openWorktree(), /sh -c/);
+
+    const entries = await shownMenu(calls);
+
+    expect(entries[0]).toEqual({ kind: "copy", title: "Copy Command Line", text: "sh -c 'exit 3'" });
+  });
+
+  it("offers Stop on a Service that runs, which sends Down for it from its Worktree", async () => {
+    const calls = rust(unseen);
+    rightClick(await openWorktree(), /^web/);
+
+    const entries = await shownMenu(calls);
+
+    expect(titles(entries).slice(-2)).toEqual(["---", "Stop"]);
+    // Stop names the item of the menu bar whose key it shows, `⌘.`, and the other lines name none.
+    expect(entries.at(-1)).toEqual({ kind: "act", title: "Stop", accelerator: "stop" });
+    expect(entries.filter((entry) => "accelerator" in entry)).toHaveLength(1);
+    await choose(entries, "Stop");
+    await waitFor(() => {
+      expect(calls).toContainEqual({ command: "stop_service", args: { service: "web", cwd: PATH } });
+    });
+  });
+
+  it("says why a Stop was refused, where the failure of an opening shows", async () => {
+    const calls = rust(unseen, false, true);
+    rightClick(await openWorktree(), /^web/);
+
+    await choose(await shownMenu(calls), "Stop");
+
+    expect(await screen.findByText("web is held by something else")).toHaveAttribute("role", "alert");
+  });
+
+  it("offers no Stop on a Job, which only a Service or an Isolated Compose service has", async () => {
+    const calls = rust(unseen);
+    rightClick(await openWorktree(), /sh -c/);
+
+    expect(titles(await shownMenu(calls))).not.toContain("Stop");
   });
 
   it("copies the command that stops a Foreign process and its port", async () => {
@@ -240,7 +291,9 @@ describe("the context menu of a Worktree in the sidebar", () => {
       "Copy Path",
       "Copy Slug",
       "---",
-      "Release…",
+      "Check This Worktree",
+      "---",
+      "Release Worktree…",
     ]);
     expect(entries).toContainEqual({ kind: "copy", title: "Copy Path", text: PATH });
     expect(entries).toContainEqual({ kind: "copy", title: "Copy Slug", text: "web_fix" });
@@ -257,9 +310,30 @@ describe("the context menu of a Worktree in the sidebar", () => {
       expect(calls).toContainEqual({ command: "reveal_worktree", args: { path: PATH } });
     });
 
-    await choose(entries, "Release…");
+    await choose(entries, "Release Worktree…");
     await waitFor(() => {
       expect(calls).toContainEqual({ command: "preview_release", args: { path: PATH } });
+    });
+  });
+
+  it("checks the Worktree it was opened on: its screen opens and doctor runs from its directory", async () => {
+    const calls = rust(unseen);
+    render(<App store={createDaemonStore()} />);
+    fireEvent.contextMenu(await screen.findByRole("button", { name: /^web-fix/ }));
+    const entries = await shownMenu(calls);
+    expect(
+      calls.some((call) => call.command === "doctor" && (call.args as { cwd: unknown }).cwd === PATH),
+    ).toBe(false);
+
+    await choose(entries, "Check This Worktree");
+
+    expect(
+      await within(screen.getByRole("main")).findByRole("heading", { name: "web-fix" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        calls.some((call) => call.command === "doctor" && (call.args as { cwd: unknown }).cwd === PATH),
+      ).toBe(true);
     });
   });
 

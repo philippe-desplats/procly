@@ -357,11 +357,23 @@ describe("the inspector of a Worktree", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
     // The title names the folder, the branch is one of the names the inspector gives.
-    await screen.findByRole("heading", { name: "web-login", level: 2 });
+    await within(screen.getByRole("main")).findByRole("heading", { name: "web-login", level: 2 });
 
     expect(facts()).toEqual(
       expect.arrayContaining([`Branch: ${BRANCH}`, "Folder: web-login", "Slug: web_login"]),
     );
+  });
+
+  it("titles the inspector of a Worktree with nothing picked by its folder, and says what kind it is", async () => {
+    poller(answered(many));
+    render(<App store={createDaemonStore()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: BRANCH }));
+    const inspector = await screen.findByRole("complementary", { name: "Inspector" });
+
+    const title = within(inspector).getByRole("heading", { name: "web-login", level: 2 });
+    expect(title.closest("header")).toHaveClass("inspector-head");
+    expect(within(inspector).getByText("Worktree")).toBeInTheDocument();
   });
 
   it("names the branch, the folder and the slug of the Worktree of the item picked", async () => {
@@ -382,7 +394,7 @@ describe("the inspector of a Worktree", () => {
     render(<App store={createDaemonStore()} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "docs-preview" }));
-    await screen.findByRole("heading", { name: "docs-preview", level: 2 });
+    await within(screen.getByRole("main")).findByRole("heading", { name: "docs-preview", level: 2 });
 
     expect(facts()).toEqual(expect.arrayContaining(["Branch: none", "Folder: docs-preview"]));
   });
@@ -432,7 +444,7 @@ describe("the sidebar", () => {
       .filter(
         (text) =>
           text !== "Overview" &&
-          !text?.startsWith("Outside Repositories") &&
+          !/^\d+ Jobs?$/.test(text ?? "") &&
           text !== "Orphans" &&
           text !== "Doctor" &&
           text !== "Settings⌘,",
@@ -511,28 +523,106 @@ describe("the sidebar", () => {
       poller(answered({ ...base, jobs_outside_repositories: jobs } as Response));
       render(<App store={createDaemonStore()} />);
       const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
-      return within(sidebar).findByRole("button", { name: /^Outside Repositories/ });
+      return within(sidebar).findByRole("button", { name: /^\d+ Jobs?$/ });
     }
 
-    it("says how many Jobs started outside a Repository, in the singular for 1", async () => {
+    it("is a group titled Outside Repositories, with one row that says how many Jobs it holds, in the singular for 1", async () => {
       const entry = await outsideEntry([OUTSIDE_JOB]);
 
-      expect(entry).toHaveTextContent(/^Outside Repositories\s*1 Job$/);
-      expect(within(entry).getByText("1 Job")).toBeInTheDocument();
+      expect(entry).toHaveTextContent(/^1 Job$/);
+      const group = screen.getByRole("region", { name: "Outside Repositories" });
+      expect(within(group).getByRole("heading", { name: "Outside Repositories" })).toBeInTheDocument();
+      expect(within(group).getByRole("button")).toBe(entry);
     });
 
     it("says it in the plural for 2", async () => {
       const entry = await outsideEntry([OUTSIDE_JOB, { ...OUTSIDE_JOB, id: "c0ffee02" }]);
 
-      expect(entry).toHaveTextContent(/^Outside Repositories\s*2 Jobs$/);
-      expect(within(entry).getByText("2 Jobs")).toBeInTheDocument();
+      expect(entry).toHaveTextContent(/^2 Jobs$/);
     });
 
-    it("keeps the entry and draws no count when no Job started outside a Repository", async () => {
-      const entry = await outsideEntry([]);
+    it("draws neither its title nor its row when no Job runs outside a Repository, as the mockup does", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      await within(sidebar).findByRole("button", { name: "web-fix" });
 
-      expect(entry).toHaveAccessibleName("Outside Repositories");
-      expect(within(entry).queryByText(/Job/)).toBeNull();
+      expect(within(sidebar).queryByRole("heading", { name: "Outside Repositories" })).toBeNull();
+      expect(within(sidebar).queryByRole("button", { name: /^(No Job|\d+ Jobs?)$/ })).toBeNull();
+    });
+
+    it("draws the group again as soon as a Job runs outside a Repository", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      await within(sidebar).findByRole("button", { name: "web-fix" });
+
+      await tick(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+
+      expect(await within(sidebar).findByRole("button", { name: "1 Job" })).toBeInTheDocument();
+    });
+
+    it("falls back to the Overview when the last Job ends while the screen is open, and the group goes", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      fireEvent.click(await within(sidebar).findByRole("button", { name: "1 Job" }));
+      expect(
+        await within(screen.getByRole("main")).findByRole("region", { name: "Outside Repositories" }),
+      ).toBeInTheDocument();
+
+      await tick(answered({ ...base, jobs_outside_repositories: [] } as Response));
+
+      expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
+      expect(
+        within(screen.getByRole("main")).queryByRole("region", { name: "Outside Repositories" }),
+      ).toBeNull();
+      expect(within(sidebar).queryByRole("heading", { name: "Outside Repositories" })).toBeNull();
+      expect(within(sidebar).getByRole("button", { name: /^Overview/ })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+    });
+
+    it("lets go of a Job picked there when it vanishes, the inspector asks for a pick again", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      fireEvent.click(await within(sidebar).findByRole("button", { name: "1 Job" }));
+      const screenOfJobs = await within(screen.getByRole("main")).findByRole("region", {
+        name: "Outside Repositories",
+      });
+      fireEvent.click(within(screenOfJobs).getByRole("button", { name: /make watch/ }));
+      const inspector = screen.getByRole("complementary", { name: "Inspector" });
+      expect(await within(inspector).findByRole("heading", { name: "make watch" })).toBeInTheDocument();
+
+      await tick(answered({ ...base, jobs_outside_repositories: [] } as Response));
+
+      expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
+      expect(within(inspector).queryByRole("heading", { name: "make watch" })).toBeNull();
+      expect(within(inspector).getByText("Select a Service or a Job to see its output.")).toBeInTheDocument();
+    });
+
+    it("does not bring the screen back when a Job runs outside a Repository again later", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      fireEvent.click(await within(sidebar).findByRole("button", { name: "1 Job" }));
+      await tick(answered({ ...base, jobs_outside_repositories: [] } as Response));
+      await screen.findByRole("region", { name: "Overview" });
+
+      await tick(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+
+      expect(await within(sidebar).findByRole("button", { name: "1 Job" })).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Overview" })).toBeInTheDocument();
+      expect(
+        within(screen.getByRole("main")).queryByRole("region", { name: "Outside Repositories" }),
+      ).toBeNull();
     });
   });
 });
@@ -597,7 +687,7 @@ describe("Needs you", () => {
 
     const overviewPane = await screen.findByRole("region", { name: "Overview" });
     const needs = within(overviewPane).getByRole("region", { name: "Needs you" });
-    expect(within(needs).getByRole("heading", { name: /^Needs you\s*2$/ })).toBeInTheDocument();
+    expect(within(needs).getByRole("heading", { name: "Needs you" })).toBeInTheDocument();
     // The same glyph as everywhere else, first in the row: a cross for the failure, a diamond for the Foreign process.
     expect(within(needs).getAllByRole("listitem").map(partsOf)).toEqual([
       { glyph: "failure", name: "api", word: "exited 1", where: "web-login", ports: ["18742"] },
@@ -654,7 +744,7 @@ describe("Needs you", () => {
       within(overviewPane)
         .getAllByRole("heading", { level: 3 })
         .map((heading) => heading.textContent),
-    ).toEqual(["Needs you 1", "Services every Worktree, without those above"]);
+    ).toEqual(["Needs you", "Services every Worktree, without those above"]);
   });
 
   it("puts the glyph first in a row of Needs you for a Service, a Job and a Foreign process", async () => {
@@ -725,7 +815,7 @@ describe("Needs you", () => {
     render(<App store={createDaemonStore()} />);
     await screen.findByRole("region", { name: "Overview" });
 
-    fireEvent.click(within(apiRow() as HTMLElement).getByRole("button"));
+    fireEvent.click(within(apiRow() as HTMLElement).getByRole("button", { name: /^api/ }));
 
     const panel = await screen.findByRole("region", { name: "Selection" });
     expect(within(panel).getByRole("heading", { name: "api" })).toBeInTheDocument();
@@ -752,7 +842,7 @@ describe("Needs you", () => {
     render(<App store={createDaemonStore()} />);
     const needs = await screen.findByRole("region", { name: "Needs you" });
 
-    const row = within(needs).getByRole("button");
+    const row = within(needs).getByRole("button", { name: /^node server.js/ });
     expect(row).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(row);
 
@@ -811,13 +901,13 @@ describe("Needs you", () => {
     });
     expect(marked).toEqual([API_KEY]);
     const left = screen.getByRole("region", { name: "Needs you" });
-    expect(within(left).getByRole("heading", { name: /^Needs you\s*1$/ })).toBeInTheDocument();
+    expect(within(left).getByRole("heading", { name: "Needs you" })).toBeInTheDocument();
     expect(within(left).queryByText("exited 1")).not.toBeInTheDocument();
     const row = apiRow();
     expect(row).toBeDefined();
     expect(serviceRows()).toContain(row);
     expect(row).toHaveAttribute("data-seen", "true");
-    expect(row).toHaveTextContent("Seen");
+    expect(row).toHaveTextContent("exited 1, seen");
     // The healthy Service of the same answer is not dimmed.
     expect(serviceRows().filter((candidate) => candidate.hasAttribute("data-seen"))).toHaveLength(1);
   });

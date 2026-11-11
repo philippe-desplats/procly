@@ -13,6 +13,8 @@ import {
 import { reportOfScan, useOrphanScan, type OrphanScan, type OrphanScanStore } from "./orphan-scan";
 import type { GcReport } from "./protocol/GcReport";
 import type { Orphan } from "./protocol/Orphan";
+import { StateGlyph } from "./StateMark";
+import { TitleBar } from "./TitleBar";
 
 /**
  * The Orphans the Daemon found, grouped by the removed Worktree that left them, each naming the data its deletion
@@ -31,18 +33,27 @@ export function OrphansScreen({ store }: { store: OrphanScanStore }) {
 
   return (
     <section aria-label="Orphans">
-      <h2 className="title">Orphans</h2>
-      <p className="muted">
-        What removed Worktrees left behind: Leases, Logical resources, output and setup directories, Isolated
-        containers and their volumes.
-      </p>
+      <TitleBar
+        title="Orphans"
+        under="What removed Worktrees left behind, in every Repository."
+        actions={
+          report === null || report.orphans.length === 0 ? undefined : (
+            <button
+              type="button"
+              className="button"
+              onClick={() => {
+                setSheet("confirm");
+              }}
+            >
+              {`Delete ${orphansCount(report.orphans.length)}…`}
+            </button>
+          )
+        }
+      />
       <ScanView
         scan={scan}
         onLook={() => {
           void store.run();
-        }}
-        onDelete={() => {
-          setSheet("confirm");
         }}
       />
       {sheet === "confirm" && report !== null ? (
@@ -58,15 +69,7 @@ export function OrphansScreen({ store }: { store: OrphanScanStore }) {
   );
 }
 
-function ScanView({
-  scan,
-  onLook,
-  onDelete,
-}: {
-  scan: OrphanScan;
-  onLook: () => void;
-  onDelete: () => void;
-}) {
+function ScanView({ scan, onLook }: { scan: OrphanScan; onLook: () => void }) {
   if (scan.kind === "failure") {
     return (
       <>
@@ -86,15 +89,7 @@ function ScanView({
   const { orphans, skipped, warnings } = report;
   return (
     <>
-      {orphans.length === 0 ? (
-        <p>No Orphan.</p>
-      ) : (
-        <div className="actions-row">
-          <button type="button" className="button" onClick={onDelete}>
-            {`Delete ${orphansCount(orphans.length)}…`}
-          </button>
-        </div>
-      )}
+      {orphans.length === 0 ? <p>No Orphan.</p> : null}
       {groupByWorktree(orphans).map((group) => {
         const label = removedWorktreeLabel(group.worktree);
         return (
@@ -105,7 +100,8 @@ function ScanView({
               {group.orphans.map((orphan, index) => {
                 const line = describeOrphan(orphan);
                 return (
-                  <li key={index} className="item item-block">
+                  <li key={index} className="item item-orphan">
+                    <StateGlyph tone="ended" glyph="ended" />
                     <span className="item-name">{line.what}</span>
                     <span className={line.loss ? "loss" : "muted"}>{line.drops}</span>
                   </li>

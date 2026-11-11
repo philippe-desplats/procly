@@ -207,28 +207,34 @@ function FollowedPanel({
   );
 }
 
+/** The title block of the inspector, set apart from what is under it by a rule, as the one of a Foreign process is. */
 function Heading({ selected }: { selected: Followed }) {
   switch (selected.kind) {
     case "service":
       return (
-        <>
+        <header className="inspector-head">
           <h2 className="title">{selected.service.service}</h2>
           <p className="caption foreign-where">{`Process service in ${selected.repository}`}</p>
-        </>
+        </header>
       );
     case "job":
       return (
-        <>
+        <header className="inspector-head">
           <h2 className="title mono">{selected.job.command}</h2>
           <p className="caption foreign-where">
             {selected.worktree === null
               ? "Job outside Repositories"
               : `Job in ${worktreeLabel(selected.worktree)}`}
           </p>
-        </>
+        </header>
       );
     case "compose":
-      return <h2 className="title">{selected.container.service}</h2>;
+      return (
+        <header className="inspector-head">
+          <h2 className="title">{selected.container.service}</h2>
+          <p className="caption foreign-where">{`Isolated Compose service in ${worktreeLabel(selected.worktree)}`}</p>
+        </header>
+      );
     default: {
       const unhandled: never = selected;
       throw new Error(`unhandled selection: ${JSON.stringify(unhandled)}`);
@@ -242,7 +248,7 @@ export function WorktreeNames({ worktree }: { worktree: WorktreeStatus }) {
     <>
       {worktreeNames(worktree).map(([name, value]) => (
         <Fragment key={name}>
-          <dt className="caption">{name}</dt>
+          <dt>{name}</dt>
           <dd className={name === "Branch" ? undefined : "mono"}>{value}</dd>
         </Fragment>
       ))}
@@ -338,10 +344,10 @@ function OpenLocalhost({ port }: { port: number }) {
 
 function Facts({ selected, at }: { selected: Followed; at: number }) {
   return (
-    <dl className="facts">
+    <dl className="facts facts-grid">
       {selected.worktree === null ? null : (
         <>
-          <dt className="caption">Worktree</dt>
+          <dt>Worktree</dt>
           <dd>{worktreeLabel(selected.worktree)}</dd>
           <WorktreeNames worktree={selected.worktree} />
         </>
@@ -350,20 +356,20 @@ function Facts({ selected, at }: { selected: Followed; at: number }) {
         <>
           {selected.service.port === null ? null : (
             <>
-              <dt className="caption">Port</dt>
+              <dt>Port</dt>
               <dd className="port-line">
                 <PortPill port={selected.service.port} />
                 {selected.service.state === "ended" ? null : <OpenLocalhost port={selected.service.port} />}
               </dd>
             </>
           )}
-          <dt className="caption">Started</dt>
+          <dt>Started</dt>
           <dd>{formatMoment(selected.service.started_at, at)}</dd>
         </>
       ) : null}
       {selected.kind === "compose" && selected.container.port !== null ? (
         <>
-          <dt className="caption">Port</dt>
+          <dt>Port</dt>
           <dd>
             <PortPill port={selected.container.port} />
           </dd>
@@ -371,9 +377,9 @@ function Facts({ selected, at }: { selected: Followed; at: number }) {
       ) : null}
       {selected.kind === "job" ? (
         <>
-          <dt className="caption">Job</dt>
+          <dt>Job</dt>
           <dd className="mono">{selected.job.id}</dd>
-          <dt className="caption">Directory</dt>
+          <dt>Directory</dt>
           <dd className="mono">{selected.job.cwd}</dd>
         </>
       ) : null}

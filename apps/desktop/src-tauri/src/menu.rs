@@ -18,7 +18,7 @@ use tauri::{AppHandle, State, Wry};
 ///
 /// The window receives a choice it carries out as its id, and reads it through the type ts-rs exports from this enum
 /// (ADR 0015), so the ids cannot drift between the two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export, rename = "MenuChoice"))]
 pub(crate) enum Choice {
@@ -141,7 +141,7 @@ impl Choice {
             Self::OpenInEditor => "Open in Editor",
             Self::OpenInTerminal => "Open in Terminal",
             Self::CopyPath => "Copy Path",
-            Self::Release => "Release…",
+            Self::Release => "Release Worktree…",
             Self::CopyMainValue => "Copy",
             Self::FindInOutput => "Find in Output…",
             Self::RevealInFinder => "Reveal in Finder",
@@ -152,7 +152,7 @@ impl Choice {
 
     /// The key equivalent of the item. Each has one character, and none is a digit from 1 to 9, which no Worktree
     /// gets. Restart has none, since `⌘R` is Refresh.
-    fn accelerator(self) -> Option<&'static str> {
+    pub(crate) fn accelerator(self) -> Option<&'static str> {
         match self {
             Self::Settings => Some("CmdOrCtrl+,"),
             Self::Overview => Some("CmdOrCtrl+0"),
@@ -793,7 +793,7 @@ mod tests {
                 "Copy Path CmdOrCtrl+Alt+C",
                 "Copy Slug",
                 "---",
-                "Release…"
+                "Release Worktree…"
             ]
         );
     }

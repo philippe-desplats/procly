@@ -165,7 +165,8 @@ describe("the title line of a screen", () => {
     expect(value(declarations(".title-bar .caption"), "white-space")).toBe("nowrap");
   });
 
-  it("gives Release… the room under the bar that sticks 16px down, then the 12px it has everywhere else", () => {
-    expect(px(value(declarations(".actions-row.release-row"), "margin-top"))).toBeGreaterThanOrEqual(16 + 12);
+  it("gives Release… the 18px of air of the mockup under a bar that sticks where it sits in the flow", () => {
+    expect(declarations(".title-bar")).toMatch(/top:\s*-16px\s*;/);
+    expect(px(value(declarations(".actions-row.release-row"), "margin-top"))).toBe(18);
   });
 });

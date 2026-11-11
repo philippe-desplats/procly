@@ -27,6 +27,6 @@ describe("the top of the sidebar", () => {
   });
 
   it("leaves no padding above the strip, so that it starts at the top edge of the window", () => {
-    expect(rule(".sidebar")).toMatch(/padding-top:\s*0/);
+    expect(rule(".sidebar")).toMatch(/padding:\s*0 8px 8px/);
   });
 });

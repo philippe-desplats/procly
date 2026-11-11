@@ -3,6 +3,7 @@ import { ItemRow } from "./ItemRow";
 import { basename, worktreeTooltip } from "./labels";
 import { isSeen, useFailed } from "./needs-you";
 import type { ContainerStatus } from "./protocol/ContainerStatus";
+import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { JobStatus } from "./protocol/JobStatus";
 import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
@@ -14,9 +15,11 @@ export function RemovedMark({ worktree }: { worktree: WorktreeStatus }) {
   return worktree.listed ? null : <span className="mark">Removed</span>;
 }
 
-/** The mark of a failure the developer saw: its row stays, dimmed, and says so in words as well. */
-export function SeenMark({ seen }: { seen: boolean }) {
-  return seen ? <span className="mark">Seen</span> : null;
+/** What a Foreign process leaves to say after its name, quietly: its pid, or the Compose project and service it is. */
+export function foreignDetail(process: ForeignProcess): string {
+  return process.kind === "process"
+    ? `pid ${String(process.pid)}`
+    : `${process.project} / ${process.service}`;
 }
 
 /**
@@ -69,9 +72,7 @@ export function ServiceRow({
       {...(worktree === undefined ? {} : worktreeWhere(worktree))}
       moment={formatMoment(service.started_at, at)}
       ports={service.port === null ? [] : [service.port]}
-    >
-      <SeenMark seen={marked} />
-    </ItemRow>
+    />
   );
 }
 
@@ -88,12 +89,14 @@ export function JobRow({ job, seen }: { job: JobStatus; seen: FailureKey[] }) {
       mono
     >
       <span className="caption mono">{job.id}</span>
-      <SeenMark seen={marked} />
     </ItemRow>
   );
 }
 
-/** An Isolated Compose service of a Worktree. The inspector holds its Stop. */
+/**
+ * An Isolated Compose service of a Worktree, listed with the Services and said to be Isolated beside its name, since
+ * the kind is said in text. The inspector holds its Stop.
+ */
 export function ContainerRow({
   container,
   worktreePath,
@@ -109,6 +112,7 @@ export function ContainerRow({
       seen={false}
       state={{ word: "running", tone: "ok", glyph: "healthy" }}
       name={container.service}
+      detail="Isolated"
       {...(worktree === undefined ? {} : worktreeWhere(worktree))}
       ports={container.port === null ? [] : [container.port]}
     />

@@ -78,7 +78,7 @@ body {
 
 .window {
   display: grid;
-  grid-template-columns: 220px minmax(380px, 1fr) minmax(320px, 400px);
+  grid-template-columns: 236px minmax(380px, 1fr) minmax(320px, 400px);
   height: 100%;
 }
 
@@ -91,8 +91,9 @@ body {
 .sidebar {
   background: var(--side);
   border-right: 1px solid var(--line);
-  /* The drag strip starts at the top edge of the window, under the traffic lights. */
-  padding-top: 0;
+  /* The drag strip starts at the top edge of the window, under the traffic lights. The sidebar keeps 8px at its sides as
+     the mockup does, a row adds its own 8px, so the Daemon line has the 204px it needs to hold on one row. */
+  padding: 0 8px 8px;
 }
 
 /* The overlay title bar leaves the top of the sidebar to the traffic lights. The strip clears them and moves the window. */
@@ -101,7 +102,7 @@ body {
   top: 0;
   flex: none;
   height: 52px;
-  margin: 0 -16px 4px;
+  margin: 0 -8px 4px;
   background: var(--side);
 }
 
@@ -181,6 +182,16 @@ body {
   color: var(--muted);
 }
 
+/* The title of a group of the sidebar, a Repository or Outside Repositories: strong, and on the text of the rows under it
+   (the 8px of padding of a row), as the mockup draws it. */
+.group-title {
+  margin: 0;
+  padding: 14px 8px 4px;
+  color: var(--muted);
+  font-size: var(--size-small);
+  font-weight: 600;
+}
+
 .row-count {
   color: var(--muted);
   font-size: var(--size-small);
@@ -215,12 +226,6 @@ body {
   white-space: nowrap;
 }
 
-/* What an entry holds, on the line under its name: "2 Jobs" under Outside Repositories. */
-.row-detail {
-  color: var(--muted);
-  font-size: var(--size-small);
-}
-
 .row-reason {
   display: flex;
   align-items: center;
@@ -245,7 +250,7 @@ body {
 
 .item {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   padding: 6px 0;
   border-bottom: 1px solid var(--line);
@@ -298,6 +303,13 @@ body {
   -webkit-line-clamp: 1;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+
+/* A detail that is read whole, the pid of a Foreign process: it cut to "p" beside a long name, so the name gives way. */
+.item-main .caption-whole {
+  display: inline;
+  flex: none;
+  white-space: nowrap;
 }
 
 .state-glyph {
@@ -359,7 +371,8 @@ body {
    3:1 it needs to be read by its shape. */
 .item[data-seen="true"] .item-name,
 .item[data-seen="true"] .item-where,
-.item[data-seen="true"] .item-end > :not(.mark) {
+.item[data-seen="true"] .item-end > *,
+.item[data-seen="true"] .item-ports {
   opacity: 0.55;
 }
 
@@ -480,13 +493,24 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
-/* A port as a chip. */
+/* A port as a chip, a button that copies it. */
 .port {
   display: inline-block;
   padding: 1px 7px;
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--side);
+  color: var(--text);
+  cursor: default;
+}
+
+.port:hover {
+  border-color: var(--faint);
+}
+
+.port:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .port + .port {
@@ -517,7 +541,10 @@ body {
    column. A single line stays as tall as the strip. */
 .title-bar {
   position: sticky;
-  top: 0;
+  /* The line sticks where the padding of the pane ends, so that its offset is the padding it bleeds into. With 0 it sat
+     16px below the place it takes in the flow, which put its rule under the strip of the sidebar and the content under
+     the rule, a row touching it. */
+  top: -16px;
   z-index: 1;
   display: flex;
   flex-wrap: wrap;
@@ -649,7 +676,7 @@ body {
 
 /* Settings replaces the inspector, so the window has 2 panes. */
 .window-settings {
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: 236px minmax(0, 1fr);
 }
 
 /* Settings stays at the bottom of the sidebar, whatever the list above it holds. */
@@ -680,35 +707,47 @@ body {
 /* The Daemon answers: a quiet dot and when the last Status was read. */
 .daemon-line {
   display: flex;
-  align-items: center;
+  /* The glyph stays beside the first line when the time wraps under the words. */
+  align-items: flex-start;
   gap: 7px;
   min-width: 0;
   margin: 0;
-  padding: 6px 8px 2px;
+  /* 8px at the start, none at the end: the line needs 214px (glyph, gap, words, time) and has 220px in the 236px sidebar,
+     which 8px at each end left 204px for. Its time is the part that must show, so it may reach the end of the row. */
+  padding: 6px 0 2px 8px;
   color: var(--muted);
   font-size: var(--size-small);
 }
 
 .daemon-line .glyph {
+  /* Centered on the first line: 16px of line (11px at 1.45) and a 12px glyph leave 2px. */
+  margin-top: 2px;
   color: var(--ok);
 }
 
-/* One row, never wrapped: where the sidebar is too narrow the words give way with an ellipsis, the time stays whole. */
+/* The line shows whole whatever the font. It needs 214px of the 220px the 236px sidebar gives it in the system font of
+   macOS, and the font of another platform is wider (WebKitGTK overflowed by 10px), so it has no budget to hold on one row
+   for every font. The time wraps under the words when it does not fit beside them, in a font 15 percent wider it is
+   the 2nd line, and in the system font of macOS nothing wraps and the look is the same. The words are cut with an
+   ellipsis only when they alone do not fit, which takes a font about 40 percent wider. */
 .daemon-line-text {
   display: flex;
+  flex-wrap: wrap;
+  column-gap: 0.3em;
   min-width: 0;
-  white-space: nowrap;
 }
 
 .daemon-line-words {
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .daemon-line-time {
   flex: none;
-  margin-left: 0.3em;
+  white-space: nowrap;
 }
 
 .field {
@@ -1001,11 +1040,29 @@ body {
   margin: 12px 0;
 }
 
-/* Release… under the title line of a Worktree. The line sticks 16px below the top of the pane, the padding of the pane,
-   while it takes its place in the flow at the top, so the row clears those 16px and then the 12px of air it has
-   everywhere else. */
+/* Release… under the title line of a Worktree: 18px of air under the line, as the mockup leaves it. */
 .actions-row.release-row {
-  margin-top: 28px;
+  margin-top: 18px;
+}
+
+/* An Orphan on one line, as the mockup draws it: its glyph, what it is, and what deleting it does at the end. The 2nd
+   column is the narrower, so that a long path in the effect wraps under itself and never pushes the name out. */
+.item-orphan {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1.5fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.item-orphan > :last-child {
+  text-align: right;
+}
+
+/* The effects of a sheet in one bulleted list, quiet, with what is lost in red as `.loss` says. */
+.bullets {
+  margin: 8px 0;
+  padding-left: 18px;
+  color: var(--muted);
 }
 
 /* An item that states more than one line: what it is, then what it drops or why it failed. */
@@ -1239,6 +1296,7 @@ body {
 }
 
 .state-column .copybox,
+.state-column .sheet,
 .state-warning {
   text-align: left;
 }
