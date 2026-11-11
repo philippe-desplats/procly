@@ -1,4 +1,4 @@
-import { appExecutable, discard, isolate, logDirectory, stopDaemon } from "./environment";
+import { appExecutable, discard, isolate, keepLogs, logDirectory, stopDaemon } from "./environment";
 
 // The runner and each worker load this file. The first to do so isolates the run, the others inherit it.
 await isolate();
@@ -15,7 +15,10 @@ const tauri = { browserName: "tauri", "tauri:options": { application: appExecuta
  */
 export const config: WebdriverIO.Config = {
   runner: "local",
-  specs: ["./specs/**/*.e2e.ts"],
+  // The service starts the app once for the whole run, so a flow inherits the window the one before left. The close
+  // flow hides it, and a hidden window has the poller ask the Daemon every 30 seconds instead of every 2 to 10, so it
+  // runs last and every other flow has a shown window, as a developer has.
+  specs: ["./specs/!(close).e2e.ts", "./specs/close.e2e.ts"],
   tsConfigPath: "./tsconfig.json",
   // One window of one app, and one Daemon: the flows run one after the other.
   maxInstances: 1,
@@ -28,7 +31,10 @@ export const config: WebdriverIO.Config = {
         embeddedPort: Number(process.env["TAURI_WEBDRIVER_PORT"]),
         startTimeout: 120_000,
         autoInstallTauriDriver: false,
-        captureBackendLogs: false,
+        // What the app writes on its output goes to a file of the log directory, whatever its level, so that a failed
+        // run keeps it (`keepLogs`). Nothing of it reaches the console of the runner.
+        captureBackendLogs: true,
+        backendLogLevel: "trace",
         captureFrontendLogs: false,
         logDir: logDirectory(),
       },
@@ -43,9 +49,13 @@ export const config: WebdriverIO.Config = {
   framework: "mocha",
   reporters: ["spec"],
   mochaOpts: { ui: "bdd", timeout: FIVE_MINUTES },
-  // Whatever a flow left running goes with the Daemon, then the temporary directories.
-  onComplete: async () => {
+  // Whatever a flow left running goes with the Daemon, then the temporary directories. A failed run keeps its logs
+  // first, since nothing of the temporary root survives it.
+  onComplete: async (exitCode: number) => {
     await stopDaemon();
+    if (exitCode !== 0) {
+      keepLogs();
+    }
     discard();
   },
 };

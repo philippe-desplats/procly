@@ -1,7 +1,7 @@
 import { browser, expect } from "@wdio/globals";
 
 import { procly, reportedService, stopDaemon, writeScene, type Scene } from "../environment";
-import { openWorktree, press, showingText, showingTitle } from "../window";
+import { openingWorktree, press, showingText, showingTitle } from "../window";
 
 /** The sheet the Release button opens, and the one that shows the report. */
 const SHEET = "div.sheet";
@@ -22,9 +22,10 @@ describe("a Worktree released through its sheet", () => {
     expect(up.code).toBe(0);
     expect((await reportedService(scene, scene.service))?.state).toBe("healthy");
 
-    // The scene's branch is `main`, which is what the sidebar names the Worktree. The sheet names it by its folder, as
+    // The Worktree is found by its folder. Every scene is on `main`, and until its next answer the window may still
+    // list the Worktree of the flow before, whose release would stop nothing. The sheet names it by its folder too, as
     // the title line of its screen does.
-    await browser.waitUntil(() => openWorktree("main"), { timeout: 60_000, interval: 500 });
+    await openingWorktree(scene.folder);
     await browser.waitUntil(() => press("Release…"), { timeout: 60_000, interval: 500 });
 
     // The dry run names the Service it would stop, and the Daemon has not touched it.

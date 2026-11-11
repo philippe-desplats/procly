@@ -1,7 +1,7 @@
 import { browser, expect } from "@wdio/globals";
 
 import { procly, reportedService, stopDaemon, writeScene, type Scene } from "../environment";
-import { openWorktree, pick, pressNamed, showingButton } from "../window";
+import { openingWorktree, picking, pressNamed, showingButton } from "../window";
 
 describe("a Service restarted from the Worktree screen", () => {
   let scene: Scene;
@@ -21,13 +21,11 @@ describe("a Service restarted from the Worktree screen", () => {
     expect(before?.state).toBe("healthy");
     expect(before?.port).not.toBeNull();
 
-    // The scene's branch is `main`, which is what the sidebar names the Worktree.
-    await browser.waitUntil(() => openWorktree("main"), { timeout: 60_000, interval: 500 });
+    // The Worktree is found by its folder. Every scene is on `main`, and until its next answer the window may still
+    // list the Worktree of the flow before with a Service of the same name, whose Restart would reach nothing.
+    await openingWorktree(scene.folder);
     // The row picks the Service, and the inspector holds its actions.
-    await browser.waitUntil(() => pick("main button.item-select", scene.service), {
-      timeout: 60_000,
-      interval: 500,
-    });
+    await picking("main button.item-select", scene.service);
     await showingButton(`Restart ${scene.service}`);
     expect(await pressNamed(`Restart ${scene.service}`)).toBe(true);
 

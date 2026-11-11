@@ -1,10 +1,10 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { browser, expect } from "@wdio/globals";
+import { expect } from "@wdio/globals";
 
 import { procly, stopDaemon, writeScene, type Scene } from "../environment";
-import { FIRST_WORKTREE, OUTPUT, pick, showingText } from "../window";
+import { OUTPUT, openingWorktree, picking, showingText } from "../window";
 
 /** The Job waits for a file to exist before it prints its second line, so the test decides when it is written. */
 const COMMAND = "sh -c 'echo before; while [ ! -f go ]; do sleep 0.2; done; echo after-open; sleep 120'";
@@ -24,12 +24,11 @@ describe("the output of a Job followed in the inspector", () => {
     const started = await procly(["run", COMMAND], scene.path);
     expect(started.code).toBe(0);
 
-    // The sidebar lists the Worktree once the Daemon reports the Job, then the Job is picked in the center.
-    await browser.waitUntil(async () => pick(FIRST_WORKTREE), { timeout: 60_000, interval: 500 });
-    await browser.waitUntil(async () => pick("li.item button.item-select", "while [ ! -f go ]"), {
-      timeout: 60_000,
-      interval: 500,
-    });
+    // The sidebar lists the Worktree once the Daemon reports the Job, then the Job is picked in the center. The
+    // Worktree is found by its folder: until its next answer, the window may still list the Worktree of the flow
+    // before, whose Daemon is gone, and opening that one would show no Job.
+    await openingWorktree(scene.folder);
+    await picking("main li.item button.item-select", "while [ ! -f go ]");
 
     await showingText(OUTPUT, ["before"]);
     // Nothing has printed the second line yet, it is written only now that the window follows the Job.
