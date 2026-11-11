@@ -237,6 +237,9 @@ describe("the context menu of a row", () => {
     const entries = await shownMenu(calls);
 
     expect(titles(entries).slice(-2)).toEqual(["---", "Stop"]);
+    // Stop names the item of the menu bar whose key it shows, `⌘.`, and the other lines name none.
+    expect(entries.at(-1)).toEqual({ kind: "act", title: "Stop", accelerator: "stop" });
+    expect(entries.filter((entry) => "accelerator" in entry)).toHaveLength(1);
     await choose(entries, "Stop");
     await waitFor(() => {
       expect(calls).toContainEqual({ command: "stop_service", args: { service: "web", cwd: PATH } });

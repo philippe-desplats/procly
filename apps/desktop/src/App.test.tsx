@@ -444,7 +444,7 @@ describe("the sidebar", () => {
       .filter(
         (text) =>
           text !== "Overview" &&
-          !/^(No Job|\d+ Jobs?)$/.test(text ?? "") &&
+          !/^\d+ Jobs?$/.test(text ?? "") &&
           text !== "Orphans" &&
           text !== "Doctor" &&
           text !== "Settings⌘,",
@@ -523,7 +523,7 @@ describe("the sidebar", () => {
       poller(answered({ ...base, jobs_outside_repositories: jobs } as Response));
       render(<App store={createDaemonStore()} />);
       const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
-      return within(sidebar).findByRole("button", { name: /^(No Job|\d+ Jobs?)$/ });
+      return within(sidebar).findByRole("button", { name: /^\d+ Jobs?$/ });
     }
 
     it("is a group titled Outside Repositories, with one row that says how many Jobs it holds, in the singular for 1", async () => {
@@ -541,10 +541,88 @@ describe("the sidebar", () => {
       expect(entry).toHaveTextContent(/^2 Jobs$/);
     });
 
-    it("keeps the row, saying no Job, when no Job started outside a Repository", async () => {
-      const entry = await outsideEntry([]);
+    it("draws neither its title nor its row when no Job runs outside a Repository, as the mockup does", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      await within(sidebar).findByRole("button", { name: "web-fix" });
 
-      expect(entry).toHaveTextContent(/^No Job$/);
+      expect(within(sidebar).queryByRole("heading", { name: "Outside Repositories" })).toBeNull();
+      expect(within(sidebar).queryByRole("button", { name: /^(No Job|\d+ Jobs?)$/ })).toBeNull();
+    });
+
+    it("draws the group again as soon as a Job runs outside a Repository", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      await within(sidebar).findByRole("button", { name: "web-fix" });
+
+      await tick(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+
+      expect(await within(sidebar).findByRole("button", { name: "1 Job" })).toBeInTheDocument();
+    });
+
+    it("falls back to the Overview when the last Job ends while the screen is open, and the group goes", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      fireEvent.click(await within(sidebar).findByRole("button", { name: "1 Job" }));
+      expect(
+        await within(screen.getByRole("main")).findByRole("region", { name: "Outside Repositories" }),
+      ).toBeInTheDocument();
+
+      await tick(answered({ ...base, jobs_outside_repositories: [] } as Response));
+
+      expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
+      expect(
+        within(screen.getByRole("main")).queryByRole("region", { name: "Outside Repositories" }),
+      ).toBeNull();
+      expect(within(sidebar).queryByRole("heading", { name: "Outside Repositories" })).toBeNull();
+      expect(within(sidebar).getByRole("button", { name: /^Overview/ })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+    });
+
+    it("lets go of a Job picked there when it vanishes, the inspector asks for a pick again", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      fireEvent.click(await within(sidebar).findByRole("button", { name: "1 Job" }));
+      const screenOfJobs = await within(screen.getByRole("main")).findByRole("region", {
+        name: "Outside Repositories",
+      });
+      fireEvent.click(within(screenOfJobs).getByRole("button", { name: /make watch/ }));
+      const inspector = screen.getByRole("complementary", { name: "Inspector" });
+      expect(await within(inspector).findByRole("heading", { name: "make watch" })).toBeInTheDocument();
+
+      await tick(answered({ ...base, jobs_outside_repositories: [] } as Response));
+
+      expect(await screen.findByRole("region", { name: "Overview" })).toBeInTheDocument();
+      expect(within(inspector).queryByRole("heading", { name: "make watch" })).toBeNull();
+      expect(within(inspector).getByText("Select a Service or a Job to see its output.")).toBeInTheDocument();
+    });
+
+    it("does not bring the screen back when a Job runs outside a Repository again later", async () => {
+      const base = status as Extract<Response, { response: "status" }>;
+      poller(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+      render(<App store={createDaemonStore()} />);
+      const sidebar = screen.getByRole("navigation", { name: "Worktrees" });
+      fireEvent.click(await within(sidebar).findByRole("button", { name: "1 Job" }));
+      await tick(answered({ ...base, jobs_outside_repositories: [] } as Response));
+      await screen.findByRole("region", { name: "Overview" });
+
+      await tick(answered({ ...base, jobs_outside_repositories: [OUTSIDE_JOB] } as Response));
+
+      expect(await within(sidebar).findByRole("button", { name: "1 Job" })).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Overview" })).toBeInTheDocument();
+      expect(
+        within(screen.getByRole("main")).queryByRole("region", { name: "Outside Repositories" }),
+      ).toBeNull();
     });
   });
 });

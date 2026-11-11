@@ -4,6 +4,7 @@ import { useCallback, useRef } from "react";
 import { useTauriEvent } from "./doctor";
 import { logsCommand, portOf, stopCommandOf } from "./menu";
 import type { ContextEntry } from "./protocol/ContextEntry";
+import type { MenuChoice } from "./protocol/MenuChoice";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import type { Selected } from "./selection";
 import { inWorktree } from "./shell";
@@ -17,7 +18,7 @@ export const CONTEXT_CHOICE = "context-choice";
  */
 export type MenuLine =
   | { kind: "copy"; title: string; text: string }
-  | { kind: "act"; title: string; run: () => void }
+  | { kind: "act"; title: string; run: () => void; accelerator?: MenuChoice }
   | { kind: "separator" };
 
 const SEPARATOR: MenuLine = { kind: "separator" };
@@ -28,7 +29,14 @@ function copy(title: string, text: string): MenuLine {
 
 /** The lines as Rust receives them, without what the window runs. */
 export function entriesOf(lines: MenuLine[]): ContextEntry[] {
-  return lines.map((line) => (line.kind === "act" ? { kind: "act", title: line.title } : line));
+  return lines.map((line) => {
+    if (line.kind !== "act") {
+      return line;
+    }
+    return line.accelerator === undefined
+      ? { kind: "act", title: line.title }
+      : { kind: "act", title: line.title, accelerator: line.accelerator };
+  });
 }
 
 /** Whether a failure is Seen, and how to mark it either way. */
@@ -42,8 +50,8 @@ export interface Marks {
  * The context menu of a row, as the mockup draws it: the command that stops a Foreign process, the port, the command
  * line of a Job, the logs command, the command that restarts a Service, then, after a separator, Stop when `stop` is
  * given, which a Service or an Isolated Compose service that runs has, and Mark as Seen or Mark as Unseen when the row
- * is a failure, which `marks` says. Stop has no key equivalent here: a context menu line is a title, and `⌘.` is the
- * key of the Actions menu.
+ * is a failure, which `marks` says. Stop shows `⌘.`, the key of the Stop of the Actions menu: the line names that item
+ * and Rust reads the key from it, so the 2 cannot drift. The key only shows here, the menu bar acts on it.
  */
 export function rowMenu(
   selected: Selected,
@@ -72,7 +80,7 @@ export function rowMenu(
   }
   const after: MenuLine[] = [];
   if (stop !== null) {
-    after.push({ kind: "act", title: "Stop", run: stop });
+    after.push({ kind: "act", title: "Stop", run: stop, accelerator: "stop" });
   }
   if (marks !== null) {
     after.push(

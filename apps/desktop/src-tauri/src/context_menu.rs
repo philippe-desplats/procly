@@ -11,6 +11,8 @@ use serde::Deserialize;
 use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
 use tauri::{State, Window};
 
+use crate::menu::Choice;
+
 /// The event that tells the window which entry of the context menu it showed last was chosen, by its index.
 pub(crate) const CONTEXT_CHOICE: &str = "context-choice";
 
@@ -27,9 +29,14 @@ pub(crate) enum ContextEntry {
         title: String,
         text: String,
     },
-    /// An item the window carries out once it is told its index.
+    /// An item the window carries out once it is told its index. `accelerator` names the item of the menu bar whose
+    /// key equivalent this line shows, so that the 2 are one definition and cannot drift. The context menu only shows
+    /// the key: the menu bar keeps acting on it, on the selection it acts on today.
     Act {
         title: String,
+        #[serde(default)]
+        #[cfg_attr(test, ts(optional))]
+        accelerator: Option<Choice>,
     },
     Separator,
 }
@@ -59,6 +66,17 @@ pub(crate) fn picked(entries: &[ContextEntry], id: &str) -> Option<Picked> {
     }
 }
 
+/// The key equivalent an entry shows, the one of the item of the menu bar it names, none for an entry that names none.
+fn key_of(entry: &ContextEntry) -> Option<&'static str> {
+    match entry {
+        ContextEntry::Act {
+            accelerator: Some(choice),
+            ..
+        } => choice.accelerator(),
+        ContextEntry::Act { .. } | ContextEntry::Copy { .. } | ContextEntry::Separator => None,
+    }
+}
+
 /// The entries of the context menu shown last, which its choices are read against.
 #[derive(Debug, Default)]
 pub(crate) struct ContextMenus(Mutex<Vec<ContextEntry>>);
@@ -76,8 +94,12 @@ fn native(window: &Window, entries: &[ContextEntry]) -> tauri::Result<Menu<tauri
     let menu = Menu::new(window)?;
     for (index, entry) in entries.iter().enumerate() {
         match entry {
-            ContextEntry::Copy { title, .. } | ContextEntry::Act { title } => {
-                menu.append(&MenuItemBuilder::with_id(id(index), title).build(window)?)?;
+            ContextEntry::Copy { title, .. } | ContextEntry::Act { title, .. } => {
+                let mut item = MenuItemBuilder::with_id(id(index), title);
+                if let Some(key) = key_of(entry) {
+                    item = item.accelerator(key);
+                }
+                menu.append(&item.build(window)?)?;
             }
             ContextEntry::Separator => menu.append(&PredefinedMenuItem::separator(window)?)?,
         }
@@ -109,7 +131,6 @@ pub(crate) fn show_context_menu(entries: Vec<ContextEntry>, window: Window, menu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::menu::Choice;
 
     fn entries() -> Vec<ContextEntry> {
         vec![
@@ -120,8 +141,48 @@ mod tests {
             ContextEntry::Separator,
             ContextEntry::Act {
                 title: "Mark as Unseen".to_owned(),
+                accelerator: None,
             },
         ]
+    }
+
+    #[test]
+    fn an_act_entry_shows_the_key_of_the_item_of_the_menu_bar_it_names_and_the_same_key_as_the_bar() {
+        let stop: ContextEntry =
+            serde_json::from_str(r#"{"kind":"act","title":"Stop","accelerator":"stop"}"#).expect("a Stop entry");
+
+        assert_eq!(
+            stop,
+            ContextEntry::Act {
+                title: "Stop".to_owned(),
+                accelerator: Some(Choice::Stop),
+            }
+        );
+        // The one definition of the key is the menu bar's: the entry reads it, it does not restate it.
+        assert_eq!(key_of(&stop), Choice::Stop.accelerator());
+        assert_eq!(key_of(&stop), Some("CmdOrCtrl+."));
+    }
+
+    #[test]
+    fn an_entry_that_names_no_item_of_the_menu_bar_shows_no_key() {
+        let plain: ContextEntry =
+            serde_json::from_str(r#"{"kind":"act","title":"Mark as Seen"}"#).expect("an entry with no accelerator");
+
+        assert_eq!(key_of(&plain), None);
+        // An item of the menu bar with no key of its own gives none to the entry that names it.
+        let release = ContextEntry::Act {
+            title: "Release Worktree…".to_owned(),
+            accelerator: Some(Choice::Release),
+        };
+        assert_eq!(key_of(&release), None);
+        assert_eq!(key_of(&ContextEntry::Separator), None);
+        assert_eq!(
+            key_of(&ContextEntry::Copy {
+                title: "Copy Port 1".to_owned(),
+                text: "1".to_owned()
+            }),
+            None
+        );
     }
 
     #[test]

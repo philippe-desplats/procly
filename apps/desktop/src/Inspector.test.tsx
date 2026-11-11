@@ -469,7 +469,7 @@ describe("the inspector of a Job", () => {
 
     const other = new Rust(answered(outside));
     await open(other);
-    fireEvent.click(screen.getByRole("button", { name: /^(No Job|\d+ Jobs?)$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^\d+ Jobs?$/ }));
     fireEvent.click(await screen.findByRole("button", { name: /sleep 5/ }));
 
     const outsideHeading = await within(inspector()).findByRole("heading", { name: "sleep 5" });

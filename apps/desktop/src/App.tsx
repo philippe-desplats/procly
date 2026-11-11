@@ -99,6 +99,16 @@ export function App({
     setCurrentView(next);
     setSelection(null);
   }, []);
+  // The entry of the Jobs outside any Repository is only there while one runs. When the last one ends under its open
+  // screen, the Overview takes its place, as it does for a Worktree that is no longer reported, and what was picked
+  // there goes with it. Kept while rendering, as React advises for state that follows a prop.
+  if (
+    view.kind === "outside" &&
+    snapshot.kind === "status" &&
+    snapshot.report.jobs_outside_repositories.length === 0
+  ) {
+    setView({ kind: "overview" });
+  }
   // The context menu of a row reads the newest answer, which a callback made once would not see.
   const rowMenuOf = useRef<(target: Selection) => void>(() => undefined);
   const control = useMemo(
@@ -616,9 +626,9 @@ function needsYouCount(count: number): string {
   return `${count} ${count === 1 ? "needs" : "need"} you`;
 }
 
-/** "1 Job", "2 Jobs", "No Job": what the Outside Repositories entry holds. */
+/** "1 Job", "2 Jobs": what the Outside Repositories entry holds, which is only drawn while a Job runs there. */
 function jobsOutside(count: number): string {
-  return count === 0 ? "No Job" : `${count} ${count === 1 ? "Job" : "Jobs"}`;
+  return `${count} ${count === 1 ? "Job" : "Jobs"}`;
 }
 
 function Sidebar({
@@ -649,7 +659,7 @@ function Sidebar({
   checking: boolean;
   orphans: boolean;
   outside: boolean;
-  /** How many Jobs started outside any Repository, so the entry says whether it holds something. */
+  /** How many Jobs started outside any Repository: the entry is drawn only when there is one. */
   outsideJobs: number;
   /** When the poller last read a Status, `null` while none was read. */
   updatedAt: number | null;
@@ -687,14 +697,21 @@ function Sidebar({
         onSelect={onSelect}
         onMenu={onWorktreeMenu}
       />
-      <section className="group" aria-labelledby="outside-repositories">
-        <h2 id="outside-repositories" className="group-title">
-          Outside Repositories
-        </h2>
-        <button type="button" className="row" aria-current={outside ? "true" : undefined} onClick={onOutside}>
-          <span className="row-name">{jobsOutside(outsideJobs)}</span>
-        </button>
-      </section>
+      {outsideJobs === 0 ? null : (
+        <section className="group" aria-labelledby="outside-repositories">
+          <h2 id="outside-repositories" className="group-title">
+            Outside Repositories
+          </h2>
+          <button
+            type="button"
+            className="row"
+            aria-current={outside ? "true" : undefined}
+            onClick={onOutside}
+          >
+            <span className="row-name">{jobsOutside(outsideJobs)}</span>
+          </button>
+        </section>
+      )}
       <SidebarFooter
         updatedAt={updatedAt}
         doctor={doctor}

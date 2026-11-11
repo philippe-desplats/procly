@@ -173,7 +173,6 @@ export function OutsideRepositoriesScreen({
     <section aria-label="Outside Repositories">
       <TitleBar title="Outside Repositories">{controls}</TitleBar>
       <h3 className="caption">Jobs started from a directory in no git Repository</h3>
-      {jobs.length === 0 ? <p className="muted">No Job started outside a Repository.</p> : null}
       <ul className="list">
         {jobs.map((job) => (
           <OutsideJobRow key={job.id} job={job} seen={seen} />
