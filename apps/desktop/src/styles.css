@@ -707,7 +707,8 @@ body {
 /* The Daemon answers: a quiet dot and when the last Status was read. */
 .daemon-line {
   display: flex;
-  align-items: center;
+  /* The glyph stays beside the first line when the time wraps under the words. */
+  align-items: flex-start;
   gap: 7px;
   min-width: 0;
   margin: 0;
@@ -719,25 +720,34 @@ body {
 }
 
 .daemon-line .glyph {
+  /* Centered on the first line: 16px of line (11px at 1.45) and a 12px glyph leave 2px. */
+  margin-top: 2px;
   color: var(--ok);
 }
 
-/* One row, never wrapped: where the sidebar is too narrow the words give way with an ellipsis, the time stays whole. */
+/* The line shows whole whatever the font. It needs 214px of the 220px the 236px sidebar gives it in the system font of
+   macOS, and the font of another platform is wider (WebKitGTK overflowed by 10px), so it has no budget to hold on one row
+   for every font. The time wraps under the words when it does not fit beside them, in a font 15 percent wider it is
+   the 2nd line, and in the system font of macOS nothing wraps and the look is the same. The words are cut with an
+   ellipsis only when they alone do not fit, which takes a font about 40 percent wider. */
 .daemon-line-text {
   display: flex;
+  flex-wrap: wrap;
+  column-gap: 0.3em;
   min-width: 0;
-  white-space: nowrap;
 }
 
 .daemon-line-words {
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .daemon-line-time {
   flex: none;
-  margin-left: 0.3em;
+  white-space: nowrap;
 }
 
 .field {
