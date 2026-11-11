@@ -206,6 +206,47 @@ fn the_guard_is_registered_once_next_to_the_hooks_the_developer_already_has() {
 }
 
 #[test]
+fn the_guard_goes_into_a_tab_indented_settings_file_without_reindenting_it() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join(".claude/settings.json"),
+        "{\n\t\"model\": \"opus\",\n\t\"env\": {\n\t\t\"A\": \"1\"\n\t}\n}\n",
+    );
+
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+
+    let written = read(&main.join(".claude/settings.json"));
+    let kept =
+        "{\n\t\"model\": \"opus\",\n\t\"env\": {\n\t\t\"A\": \"1\"\n\t},\n\t\"hooks\": {\n\t\t\"PreToolUse\": [\n";
+    assert!(written.starts_with(kept), "{written:?}");
+    assert!(written.ends_with("\t}\n}\n"), "{written:?}");
+    assert!(written.lines().all(|line| !line.starts_with(' ')), "{written:?}");
+    assert_eq!(
+        settings(&main)["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "procly guard"
+    );
+}
+
+#[test]
+fn the_guard_goes_into_a_four_space_settings_file_without_reindenting_it() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(&main.join(".claude/settings.json"), "{\n    \"model\": \"opus\"\n}\n");
+
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+
+    let written = read(&main.join(".claude/settings.json"));
+    let kept = "{\n    \"model\": \"opus\",\n    \"hooks\": {\n        \"PreToolUse\": [\n";
+    assert!(written.starts_with(kept), "{written:?}");
+    assert!(written.ends_with("    }\n}\n"), "{written:?}");
+    assert_eq!(
+        settings(&main)["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "procly guard"
+    );
+}
+
+#[test]
 fn a_settings_file_that_is_not_json_stops_the_install_before_anything_is_written() {
     let procly = Procly::new();
     let main = repository_with_instructions(&procly);
