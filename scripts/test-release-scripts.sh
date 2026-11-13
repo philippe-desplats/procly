@@ -49,7 +49,8 @@ check "the cask has an on_intel block with its own url" \
 check "the cask installs the app" grep -q '^  app "Procly.app"$' <<< "${cask}"
 check "the cask links the command line from the bundle" \
   grep -q '^  binary "#{appdir}/Procly.app/Contents/MacOS/procly"$' <<< "${cask}"
-check "the cask conflicts with the formula" grep -q '^  conflicts_with formula: "procly"$' <<< "${cask}"
+# Homebrew 7 accepts only `cask:` keys in `conflicts_with` and refuses to load a cask declaring `formula:`.
+check "the cask declares no conflicts_with" bash -c '! grep -q "conflicts_with" <<< "$0"' "${cask}"
 check "the cask needs macOS 13" grep -q '^  depends_on macos: :ventura$' <<< "${cask}"
 check "the cask names the version once" test "$(grep -c '^  version "1.2.3"$' <<< "${cask}")" -eq 1
 

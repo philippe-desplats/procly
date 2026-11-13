@@ -63,8 +63,6 @@ cask "procly-app" do
   desc "Desktop app for the Procly supervisor, with the procly command line"
   homepage "https://github.com/${repository}"
 
-  # The formula installs the same command line, so the 2 cannot live side by side.
-  conflicts_with formula: "procly"
   depends_on macos: :ventura
 
   app "Procly.app"
