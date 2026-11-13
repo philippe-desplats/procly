@@ -52,15 +52,17 @@ Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x
 ### Homebrew
 
 ```sh
+brew trust philippe-desplats/procly
 brew install philippe-desplats/procly/procly
 procly --version
 ```
 
-The formula lives in the tap [`philippe-desplats/homebrew-procly`](https://github.com/philippe-desplats/homebrew-procly) and installs the binary of the matching GitHub release.
+Homebrew 7 refuses to load a formula or a cask from a tap that is not trusted, hence `brew trust philippe-desplats/procly` first. The formula lives in the tap [`philippe-desplats/homebrew-procly`](https://github.com/philippe-desplats/homebrew-procly) and installs the binary of the matching GitHub release.
 
-On macOS 13 or newer, the desktop app has a cask of its own. It installs `Procly.app` and the `procly` command line it carries, so it replaces the formula:
+On macOS 13 or newer, the desktop app has a cask of its own. It installs `Procly.app` and the `procly` command line it carries, so it replaces the formula: run `brew uninstall procly` first, otherwise `procly` stays the formula's.
 
 ```sh
+brew trust philippe-desplats/procly
 brew install --cask philippe-desplats/procly/procly-app
 ```
 

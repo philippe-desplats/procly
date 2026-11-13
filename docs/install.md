@@ -5,24 +5,28 @@ Procly is one binary, `procly`, for macOS (Apple silicon and Intel) and Linux (x
 ## Homebrew
 
 ```console
+$ brew trust philippe-desplats/procly
 $ brew install philippe-desplats/procly/procly
 $ procly --version
 procly 0.4.0
 ```
 
+Homebrew 7 refuses to load a formula or a cask from a tap that is not trusted, so `brew trust philippe-desplats/procly` comes first, once per machine. Without it the install stops with `Refusing to load ... from untrusted tap philippe-desplats/procly`.
+
 The formula lives in the tap `philippe-desplats/homebrew-procly` and installs the binary of the matching GitHub release. `brew upgrade procly` moves to a newer release.
 
 ## The desktop app
 
-On macOS 13 or newer, the desktop app is a cask of the same tap:
+On macOS 13 or newer, the desktop app is a cask of the same tap, which needs the same trust:
 
 ```console
+$ brew trust philippe-desplats/procly
 $ brew install --cask philippe-desplats/procly/procly-app
 $ procly --version
 procly <version>
 ```
 
-The cask installs `Procly.app` in `/Applications` and links `procly` to the command line the app carries, the one it starts the Daemon with. Both are one release. The formula installs the same command line, so Homebrew refuses the cask while the formula is installed: `brew uninstall procly` first. The formula stays for Linux and for the command line alone.
+The cask installs `Procly.app` in `/Applications` and links `procly` to the command line the app carries, the one it starts the Daemon with. Both are one release. The formula installs the same command line under the same name: while the formula is linked, the cask installs the app but leaves `procly` pointing at the formula, with a warning that ends in `skipping link`, so the command line and the app can then be 2 different releases. Run `brew uninstall procly` before installing the cask. The formula stays for Linux and for the command line alone.
 
 Each release carries one signed and notarized disk image per architecture, `Procly-<version>-aarch64-apple-darwin.dmg` for Apple silicon and `Procly-<version>-x86_64-apple-darwin.dmg` for Intel, with their checksums in `SHA256SUMS`, to install the app without Homebrew. There is no updater: `brew upgrade --cask procly-app` moves to a newer release.
 
