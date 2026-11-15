@@ -13,6 +13,7 @@ use super::environment::{self, DeclaredService, Leasing};
 use super::health::HealthCheck;
 use super::held::Admission;
 use super::lease::Scope as LeaseScope;
+use super::mismatch::Expectation;
 use super::portless::{self, Wanted};
 use super::service::{Proof, Relation, Service, ServiceSpec, Start};
 use super::{Registry, blocking, message, read_config, topology_of};
@@ -590,13 +591,26 @@ fn service_spec(
     let mut env = env;
     env.extend(variables);
     let worktree = scope.worktree().to_owned();
+    // A tree may listen on any Lease of its Worktree, the Lease of another Service may be a port this one declares.
+    let mut worktree_leases: Vec<u16> = registry
+        .leases
+        .bound_to_worktrees()?
+        .into_iter()
+        .filter(|lease| lease.repository == scope.topology.git_common_dir && lease.worktree == worktree)
+        .map(|lease| lease.port)
+        .collect();
+    worktree_leases.extend(&lease_ports);
+    let ports = Expectation {
+        plans: port_plans,
+        worktree_leases,
+    };
     Ok(ServiceSpec {
         command,
         cwd: worktree.clone(),
         env,
         health,
         lease_ports,
-        port_plans,
+        ports,
         covers,
         health_timeout: scope.config.health_timeout(declared),
         name: name.to_owned(),

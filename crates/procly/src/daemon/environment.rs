@@ -99,21 +99,25 @@ pub(super) struct Injected {
 impl Injected {
     /// The ports the Service `name`, declared as `declared`, is expected on, `None` when it has no Lease to probe.
     pub(super) fn plan(&self, name: &str, declared: &ServiceConfig) -> Option<PortPlan> {
-        port_plan(name, declared, self.health_port, &self.leases)
+        // Checked when the Leases were granted, so it reads the same Port name again.
+        let health_port_name = declared.health_port_name(name).ok().flatten();
+        port_plan(name, declared, health_port_name, &self.leases)
     }
 }
 
 /// The ports the Service `name` is expected on once granted `granted`, `None` when its health check probes no Lease,
-/// `health_port` being the one it probes.
+/// `health_port_name` being the Port name it probes.
 fn port_plan(
     name: &str,
     declared: &ServiceConfig,
-    health_port: Option<u16>,
+    health_port_name: Option<&str>,
     granted: &BTreeMap<String, u16>,
 ) -> Option<PortPlan> {
+    let health_port_name = health_port_name?;
     Some(PortPlan {
         service: name.to_owned(),
-        leased: health_port?,
+        leased: *granted.get(health_port_name)?,
+        health_declared: declared.ports.get(health_port_name)?.port,
         leases: granted.values().copied().collect(),
         declared: declared.ports.values().map(|port| port.port).collect(),
     })
@@ -221,7 +225,7 @@ pub(super) fn injected_group(
         }
         let health_port = health_port_name.and_then(|port_name| leases.get(port_name).copied());
         checks.push(HealthCheck::declared(health_port, &declared.health));
-        plans.extend(port_plan(service, declared, health_port, &leases));
+        plans.extend(port_plan(service, declared, health_port_name, &leases));
         table.insert(service.clone(), leases);
     }
     let resources = referenced_resources(registry, topology, config, &derived, &table)?;

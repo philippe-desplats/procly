@@ -6,24 +6,21 @@
 
 use crate::protocol::{ServiceEnd, ServicePorts};
 
-/// The ports of one Service with a Lease, as the Daemon granted and as the configuration declares them.
+/// The ports of one Service with a Lease to probe, as the Daemon granted and as the configuration declares them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PortPlan {
     pub(crate) service: String,
     /// The Lease its health check probes.
     pub(crate) leased: u16,
+    /// The port the Port name of its health check declares, the one of the Main worktree.
+    pub(crate) health_declared: u16,
     /// Every Lease of the Service, `leased` included.
     pub(crate) leases: Vec<u16>,
-    /// The port each of its Port names declares, the one of the Main worktree.
+    /// The port each of its Port names declares.
     pub(crate) declared: Vec<u16>,
 }
 
 impl PortPlan {
-    /// Its declared ports that are none of its Leases, which only a tree ignoring the Leases listens on.
-    fn fixed(&self) -> impl Iterator<Item = u16> + '_ {
-        self.declared.iter().copied().filter(|port| !self.leases.contains(port))
-    }
-
     /// The ports of `listening` tied to this Service, sorted as `listening` is.
     fn seen(&self, listening: &[u16]) -> Vec<u16> {
         listening
@@ -34,59 +31,73 @@ impl PortPlan {
     }
 }
 
-/// Whether any of the `plans` may be judged before the health timeout, a declared port of it being none of its
-/// Leases. In the Main worktree a Lease is the declared port, and nothing is judged early.
-pub(crate) fn judged_early(plans: &[PortPlan]) -> bool {
-    plans.iter().any(|plan| plan.fixed().next().is_some())
+/// What the tree of a Service is judged on while it starts: the plan of the Service, or of each Service its Group
+/// covers, and every Lease of the Worktree, which a tree may listen on rightfully whatever it declares.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Expectation {
+    pub(crate) plans: Vec<PortPlan>,
+    pub(crate) worktree_leases: Vec<u16>,
 }
 
-/// The Port mismatch the tree listening on `listening` already is, if it is one: it listens on a declared port of a
-/// Service that is not its Lease, and not on the Lease the health check of that Service probes. A port no Service
-/// declares, such as a debugger opened before the Lease, never decides it.
-pub(crate) fn certain(plans: &[PortPlan], listening: &[u16]) -> Option<ServiceEnd> {
-    let (leased, actual) = own_pair(plans, listening)?;
-    Some(report(plans, listening, leased, actual))
-}
+impl Expectation {
+    /// The port of `plan` that decides a Port mismatch early: the declared port of its health check, unless it is a
+    /// Lease of the Service or of any other Service of the Worktree.
+    fn watched(&self, plan: &PortPlan) -> Option<u16> {
+        let port = plan.health_declared;
+        (!plan.leases.contains(&port) && !self.worktree_leases.contains(&port)).then_some(port)
+    }
 
-/// The Port mismatch of a tree listening on `listening`, named per Service of `plans`. `leased` and `actual` are the
-/// pair judged without the plans, kept unless a Service is found on a declared port of its own instead of its Lease,
-/// whose pair then stands for the whole tree, so that one Service's port is never paired with another's Lease.
-pub(crate) fn port_mismatch(plans: &[PortPlan], listening: &[u16], leased: u16, actual: u16) -> ServiceEnd {
-    let (leased, actual) = own_pair(plans, listening).unwrap_or((leased, actual));
-    report(plans, listening, leased, actual)
-}
+    /// Whether the tree may be judged before the health timeout. Where each health Lease is its declared port, as in
+    /// the Main worktree unless that port was held when the Lease was granted, nothing is judged early.
+    pub(crate) fn judged_early(&self) -> bool {
+        self.plans.iter().any(|plan| self.watched(plan).is_some())
+    }
 
-/// The Lease of the first Service found on a declared port of its own and not on that Lease, with that port.
-fn own_pair(plans: &[PortPlan], listening: &[u16]) -> Option<(u16, u16)> {
-    plans.iter().find_map(|plan| {
-        let on_fixed = plan.fixed().find(|port| listening.contains(port))?;
-        (!listening.contains(&plan.leased)).then_some((plan.leased, on_fixed))
-    })
-}
-
-fn report(plans: &[PortPlan], listening: &[u16], leased: u16, actual: u16) -> ServiceEnd {
-    let services: Vec<ServicePorts> = plans
-        .iter()
-        .map(|plan| ServicePorts {
-            service: plan.service.clone(),
-            leased: plan.leased,
-            seen: plan.seen(listening),
+    /// The Lease and the port of the first Service whose tree listens on its watched port and not on its health
+    /// Lease, which makes the Port mismatch certain. A port no Service declares for its health check, such as a
+    /// debugger or a fixed HMR port opened before the Lease, never decides it.
+    pub(crate) fn decided(&self, listening: &[u16]) -> Option<(u16, u16)> {
+        self.plans.iter().find_map(|plan| {
+            let port = self.watched(plan).filter(|port| listening.contains(port))?;
+            (!listening.contains(&plan.leased)).then_some((plan.leased, port))
         })
-        .collect();
-    let unattributed = listening
-        .iter()
-        .copied()
-        .filter(|port| {
-            !plans
-                .iter()
-                .any(|plan| plan.leases.contains(port) || plan.declared.contains(port))
-        })
-        .collect();
-    ServiceEnd::PortMismatch {
-        leased,
-        actual,
-        services,
-        unattributed,
+    }
+
+    /// Whether every Service of the plans listens on a port tied to it, so that a report waits for nothing more.
+    pub(crate) fn all_seen(&self, listening: &[u16]) -> bool {
+        self.plans.iter().all(|plan| !plan.seen(listening).is_empty())
+    }
+
+    /// The Port mismatch of a tree listening on `listening`, named per Service of the plans. `leased` and `actual`
+    /// are the pair judged before, kept unless a Service is found on its watched port instead of its Lease, whose pair
+    /// then stands for the whole tree, so that one Service's port is never paired with another's Lease.
+    pub(crate) fn port_mismatch(&self, listening: &[u16], leased: u16, actual: u16) -> ServiceEnd {
+        let (leased, actual) = self.decided(listening).unwrap_or((leased, actual));
+        let services = self
+            .plans
+            .iter()
+            .map(|plan| ServicePorts {
+                service: plan.service.clone(),
+                leased: plan.leased,
+                seen: plan.seen(listening),
+            })
+            .collect();
+        let unattributed = listening
+            .iter()
+            .copied()
+            .filter(|port| {
+                !self
+                    .plans
+                    .iter()
+                    .any(|plan| plan.leases.contains(port) || plan.declared.contains(port))
+            })
+            .collect();
+        ServiceEnd::PortMismatch {
+            leased,
+            actual,
+            services,
+            unattributed,
+        }
     }
 }
 
@@ -98,46 +109,76 @@ mod tests {
         PortPlan {
             service: service.to_owned(),
             leased,
+            health_declared: declared,
             leases: vec![leased],
             declared: vec![declared],
         }
     }
 
-    fn group() -> Vec<PortPlan> {
-        vec![plan("api", 24004, 3000), plan("web", 24005, 3001)]
+    fn of(plans: Vec<PortPlan>) -> Expectation {
+        let worktree_leases = plans.iter().flat_map(|plan| plan.leases.clone()).collect();
+        Expectation { plans, worktree_leases }
+    }
+
+    fn group() -> Expectation {
+        of(vec![plan("api", 24004, 3000), plan("web", 24005, 3001)])
     }
 
     #[test]
-    fn a_plan_whose_leases_are_its_declared_ports_is_never_judged_early() {
-        assert!(!judged_early(&[plan("web", 3000, 3000)]));
-        assert!(judged_early(&[plan("web", 3000, 3000), plan("api", 24004, 3001)]));
+    fn a_plan_whose_health_lease_is_its_declared_port_is_never_judged_early() {
+        assert!(!of(vec![plan("web", 3000, 3000)]).judged_early());
+        assert!(of(vec![plan("web", 3000, 3000), plan("api", 24004, 3001)]).judged_early());
     }
 
     #[test]
-    fn a_declared_port_listened_on_instead_of_its_lease_is_certain() {
-        let pair = |listening: &[u16]| match certain(&group(), listening) {
-            Some(ServiceEnd::PortMismatch { leased, actual, .. }) => Some((leased, actual)),
-            _ => None,
-        };
-        assert_eq!(pair(&[3001]), Some((24005, 3001)));
+    fn a_health_port_declared_as_a_lease_of_another_service_of_the_worktree_is_never_watched() {
+        let mut expectation = group();
+        expectation.worktree_leases.push(3001);
+
         assert_eq!(
-            pair(&[3000, 24005]),
+            expectation.decided(&[3001]),
+            None,
+            "3001 is the Lease of a Service of the Worktree"
+        );
+        assert_eq!(expectation.decided(&[3000]), Some((24004, 3000)));
+    }
+
+    #[test]
+    fn a_health_port_declared_and_listened_on_instead_of_its_lease_decides() {
+        assert_eq!(group().decided(&[3001]), Some((24005, 3001)));
+        assert_eq!(
+            group().decided(&[3000, 24005]),
             Some((24004, 3000)),
             "api is on its declared port, web on its Lease"
         );
     }
 
     #[test]
-    fn a_port_no_service_declares_or_a_declared_port_next_to_its_lease_is_not_certain() {
-        assert_eq!(certain(&group(), &[]), None);
-        assert_eq!(certain(&group(), &[9229]), None, "a debugger opened before the Lease");
-        assert_eq!(certain(&group(), &[24004, 9229]), None);
-        assert_eq!(certain(&group(), &[3000, 24004]), None, "api listens on its Lease too");
+    fn a_port_no_health_check_declares_or_a_declared_port_next_to_its_lease_does_not_decide() {
+        assert_eq!(group().decided(&[]), None);
+        assert_eq!(group().decided(&[9229]), None, "a debugger opened before the Lease");
+        assert_eq!(group().decided(&[24004, 9229]), None);
+        assert_eq!(group().decided(&[3000, 24004]), None, "api listens on its Lease too");
+
+        let mut hmr = plan("web", 24005, 3001);
+        hmr.declared.push(3002);
+        hmr.leases.push(24006);
+        assert_eq!(
+            of(vec![hmr]).decided(&[3002]),
+            None,
+            "a fixed HMR port is not the health port"
+        );
+    }
+
+    #[test]
+    fn every_service_seen_is_complete_and_one_missing_is_not() {
+        assert!(group().all_seen(&[3000, 24005]));
+        assert!(!group().all_seen(&[3000, 9229]));
     }
 
     #[test]
     fn each_service_is_named_with_its_own_lease_and_the_ports_tied_to_it() {
-        let end = port_mismatch(&group(), &[3000, 3001, 9229], 24004, 3001);
+        let end = group().port_mismatch(&[3000, 3001, 9229], 24004, 3001);
 
         assert_eq!(
             end,
@@ -163,7 +204,7 @@ mod tests {
 
     #[test]
     fn the_pair_is_the_one_of_the_service_found_on_its_declared_port() {
-        let ServiceEnd::PortMismatch { leased, actual, .. } = port_mismatch(&group(), &[24004, 3001], 24005, 24004)
+        let ServiceEnd::PortMismatch { leased, actual, .. } = group().port_mismatch(&[24004, 3001], 24005, 24004)
         else {
             unreachable!("a Port mismatch is built")
         };
@@ -171,13 +212,13 @@ mod tests {
     }
 
     #[test]
-    fn without_a_service_on_its_declared_port_the_pair_judged_without_the_plans_stays() {
+    fn without_a_service_on_its_declared_port_the_pair_judged_before_stays() {
         let ServiceEnd::PortMismatch {
             leased,
             actual,
             unattributed,
             ..
-        } = port_mismatch(&group(), &[5173], 24004, 5173)
+        } = group().port_mismatch(&[5173], 24004, 5173)
         else {
             unreachable!("a Port mismatch is built")
         };

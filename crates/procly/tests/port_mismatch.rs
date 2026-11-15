@@ -230,3 +230,71 @@ fn in_the_main_worktree_apps_on_their_declared_ports_are_on_their_leases_and_hea
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     assert_eq!(status_row(&procly, &main, "web")["state"], json!("healthy"));
 }
+
+#[test]
+fn a_fixed_second_port_opened_before_the_lease_of_the_health_port_is_no_early_mismatch() {
+    let procly = Procly::new();
+    let (http, hmr) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    // The health port follows its Lease, the HMR port is written in the app and opens first.
+    let config = format!(
+        "[services.web]\nrun = '{server} --port {{ports.http}} --also {hmr} --after 1500'\n\
+         ports = {{ http = {http}, hmr = {hmr} }}\nhealth = {{ port = 'http', timeout = '60s' }}\n"
+    );
+    let (_, secondary) = worktrees(&procly, &config);
+
+    let output = procly.procly_in(&secondary, &["up", "web"]);
+
+    assert_success(&output);
+    assert_eq!(status_row(&procly, &secondary, "web")["state"], json!("healthy"));
+}
+
+#[test]
+fn a_covered_service_on_its_lease_that_is_the_declared_port_of_another_is_no_early_mismatch() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    // In a secondary Worktree `web` takes its Lease from its Pool, the port `api` declares, and binds it first.
+    let config = format!(
+        "[services.api]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {api} }}\n\
+         [services.web]\nrun = '{server} --port {{ports.http}}'\nports = {{ http = {{ port = {web}, pool = [{api}] }} }}\n\
+         [services.dev]\ncovers = ['api', 'web']\nhealth = {{ timeout = '60s' }}\n\
+         run = \"exec {server} --port $PORT_API_HTTP --also $PORT_WEB_HTTP --after 1500\"\n"
+    );
+    let (_, secondary) = worktrees(&procly, &config);
+    assert_eq!(
+        lease_of(&procly, &secondary, "web"),
+        api,
+        "the Lease of web is the declared port of api"
+    );
+
+    let output = procly.procly_in(&secondary, &["up", "dev"]);
+
+    assert_success(&output);
+    assert_eq!(status_row(&procly, &secondary, "dev")["state"], json!("healthy"));
+}
+
+#[test]
+fn apps_binding_their_declared_ports_seconds_apart_are_both_named() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    let run = format!("{server} --port {api} & sleep 1.5; exec {server} --port {web}");
+    let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let (output, took) = timed_up(&procly, &secondary, &["dev"]);
+
+    assert_fast_mismatch(&output, took);
+    let message = stderr(&output);
+    assert!(
+        message.contains(&format!(
+            "api on port {api} instead of its Lease, port {api_lease}, web on port {web} instead of its Lease, port \
+             {web_lease}"
+        )),
+        "{message}"
+    );
+}
