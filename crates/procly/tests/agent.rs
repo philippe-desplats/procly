@@ -491,6 +491,46 @@ fn the_guard_names_the_service_that_runs_in_the_directory_of_a_dev_command() {
 }
 
 #[test]
+fn the_guard_moves_a_dev_command_by_its_directory_option_and_by_an_absolute_cd() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join("procly.toml"),
+        "[services.web]\nrun = 'cd apps/web && bun run dev'\n[services.api]\nrun = 'cd apps/api && bun run dev'\n\
+         [services.dev]\nrun = 'bun run dev'\ncovers = ['web', 'api']\n",
+    );
+    std::fs::create_dir_all(main.join("apps/web")).unwrap();
+    std::fs::create_dir_all(main.join("apps/api")).unwrap();
+    let absolute = format!("cd {}/apps/web && bun run dev", main.display());
+    // The root as the agent may write it, through another path than the one the Daemon knows, as `/var` for
+    // `/private/var`.
+    let link = main.with_file_name("link-to-main");
+    std::os::unix::fs::symlink(&main, &link).unwrap();
+    let through_link = format!("cd {}/apps/web && bun run dev", link.display());
+
+    for (command, instead) in [
+        ("bun --cwd apps/web run dev", "`procly up web`"),
+        ("bun run --cwd apps/web dev", "`procly up web`"),
+        (absolute.as_str(), "`procly up web`"),
+        (through_link.as_str(), "`procly up web`"),
+        // Moved to apps/web, but web runs `bun` and not `yarn`, so the agent picks the Service.
+        ("yarn --cwd apps/web dev", "`procly up <service>`"),
+        // Narrowed to one package, so not the Group of the whole Repository.
+        ("turbo dev --filter=@acme/web", "`procly up <service>`"),
+    ] {
+        let reason = denial(&guard(&procly, &main, command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(
+            reason.contains(&format!("Run {instead} instead.")),
+            "{command}: {reason}"
+        );
+        assert!(
+            ["web", "api", "dev"].iter().all(|name| reason.contains(name)),
+            "{command}: {reason}"
+        );
+    }
+}
+
+#[test]
 fn the_guard_sends_a_root_dev_command_run_below_the_root_to_the_service_to_pick() {
     let procly = Procly::new();
     let main = repository_with_services(&procly);

@@ -127,10 +127,7 @@ fn equivalent(
                     if place.is_none() || place != place_of(&run, Some(Path::new("")), root) {
                         return None;
                     }
-                    let matched = same_start(
-                        &compared(blocked),
-                        &compared(strip_launchers(&words_of(&run.command))),
-                    )?;
+                    let matched = same_start(&compared(blocked), &compared(strip_launchers(&words_of(&run.command))))?;
                     Some((matched, service))
                 })
                 .collect();
@@ -1068,8 +1065,16 @@ mod tests {
         };
         for (command, directory, instead) in [
             ("cd /p/work/acme/web/apps/web && bun run dev", Some(""), "procly up web"),
-            ("cd /p/work/acme/web/apps/web/ && bun dev", Some("apps/api"), "procly up web"),
-            ("pushd /p/work/acme/web/apps/../apps/api && bun dev", Some(""), "procly up api"),
+            (
+                "cd /p/work/acme/web/apps/web/ && bun dev",
+                Some("apps/api"),
+                "procly up web",
+            ),
+            (
+                "pushd /p/work/acme/web/apps/../apps/api && bun dev",
+                Some(""),
+                "procly up api",
+            ),
             ("cd /p/work/acme/web && bun run dev", Some("apps/web"), "procly up dev"),
             ("bun --cwd /p/work/acme/web/apps/web run dev", Some(""), "procly up web"),
             // An absolute path does not need to know where the agent is.
