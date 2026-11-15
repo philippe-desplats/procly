@@ -4,27 +4,44 @@
 //! answers `ok` to every request, with the status `<STATUS>` to a request for `/status/<STATUS>`, `200` to a request
 //! for `/host/<HOST>` whose `Host` header is `<HOST>` and `421` when it is not, `400` to a request target that is not
 //! a path, and `200` to any other, and exits with code `<CODE>` after answering a request for `/exit/<CODE>`.
+//!
+//! `--also <PORT>`, which may be repeated, listens on that port too, and before the main one, as a debugger or an HMR
+//! socket would. `--after <MS>` waits that many milliseconds once those are listened on, before the main port is.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
+use std::time::Duration;
+
+/// What the command line asks for.
+struct Options {
+    port: u16,
+    also: Vec<u16>,
+    after: Duration,
+}
 
 fn main() -> ExitCode {
-    let port = match port() {
-        Ok(port) => port,
+    let options = match options() {
+        Ok(options) => options,
         Err(message) => {
             eprintln!("procly-test-server: {message}");
             return ExitCode::from(2);
         }
     };
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("procly-test-server: cannot listen on port {port}: {error}");
+    for port in options.also {
+        let Some(listener) = listen(port) else {
             return ExitCode::from(2);
-        }
+        };
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                answer(stream);
+            }
+        });
+    }
+    std::thread::sleep(options.after);
+    let Some(listener) = listen(options.port) else {
+        return ExitCode::from(2);
     };
-    println!("listening on {port}");
 
     for stream in listener.incoming().flatten() {
         if let Some(code) = answer(stream) {
@@ -35,13 +52,52 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn port() -> Result<u16, String> {
-    let mut args = std::env::args().skip(1);
-    let port = match (args.next().as_deref(), args.next()) {
-        (Some("--port"), Some(port)) => port,
-        (None, _) => std::env::var("PORT").map_err(|_| "no port given, pass --port <PORT> or set PORT".to_owned())?,
-        _ => return Err("usage: procly-test-server [--port <PORT>]".to_owned()),
+/// Listens on `port`, saying so on stdout, or says on stderr why it cannot.
+fn listen(port: u16) -> Option<TcpListener> {
+    match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            println!("listening on {port}");
+            Some(listener)
+        }
+        Err(error) => {
+            eprintln!("procly-test-server: cannot listen on port {port}: {error}");
+            None
+        }
+    }
+}
+
+fn options() -> Result<Options, String> {
+    const USAGE: &str = "usage: procly-test-server [--port <PORT>] [--also <PORT>]... [--after <MS>]";
+    let number = |flag: &str, value: Option<String>| -> Result<String, String> {
+        value.ok_or_else(|| format!("{flag} needs a value, {USAGE}"))
     };
+    let mut port = None;
+    let mut also = Vec::new();
+    let mut after = Duration::ZERO;
+    let mut args = std::env::args().skip(1);
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--port" => port = Some(number("--port", args.next())?),
+            "--also" => also.push(parse_port(&number("--also", args.next())?)?),
+            "--after" => {
+                let ms = number("--after", args.next())?;
+                after = Duration::from_millis(ms.parse().map_err(|_| format!("invalid delay {ms:?}"))?);
+            }
+            _ => return Err(USAGE.to_owned()),
+        }
+    }
+    let port = match port {
+        Some(port) => port,
+        None => std::env::var("PORT").map_err(|_| "no port given, pass --port <PORT> or set PORT".to_owned())?,
+    };
+    Ok(Options {
+        port: parse_port(&port)?,
+        also,
+        after,
+    })
+}
+
+fn parse_port(port: &str) -> Result<u16, String> {
     port.parse().map_err(|_| format!("invalid port {port:?}"))
 }
 
