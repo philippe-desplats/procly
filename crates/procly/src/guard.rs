@@ -119,12 +119,12 @@ fn equivalent(
         Kind::DevServer => {
             // Run from the same directory, so that `cd apps/api && pnpm dev` is never the `pnpm dev` of `apps/web`,
             // and `pnpm dev` run in `apps/web` is the Service that changes to it.
-            let place = place_of(recognized, directory);
+            let place = place_of(recognized, directory, root);
             let matches: Vec<(usize, &GuardService)> = services
                 .iter()
                 .filter_map(|service| {
                     let run = recognize(service.run.as_deref()?)?;
-                    if place.is_none() || place != place_of(&run, Some(Path::new(""))) {
+                    if place.is_none() || place != place_of(&run, Some(Path::new("")), root) {
                         return None;
                     }
                     let matched = same_start(
@@ -195,7 +195,7 @@ fn compose_files(words: &[String]) -> Vec<&str> {
 /// another. A file given with an absolute path is placed against `root`, the root of the Worktree: the compose file of
 /// the root named that way is managed, any other absolute path, inside the Worktree or not, is not.
 fn unmanaged_compose_file(recognized: &Recognized, directory: Option<&Path>, root: &Path) -> Option<String> {
-    let place = place_of(recognized, directory);
+    let place = place_of(recognized, directory, root);
     let blocked = words_of(&recognized.command);
     compose_files(strip_launchers(&blocked))
         .into_iter()
@@ -220,14 +220,34 @@ pub(crate) const COMPOSE_FILES: [&str; 4] = [
 ];
 
 /// Where the recognized command runs, relative to the root of the Worktree: `directory` moved by the `cd` before it,
-/// then by a directory option of its package manager, such as `--cwd apps/web`. `None` when the directory is not known
-/// and when the `cd` leaves it to a place only an absolute path tells.
-fn place_of(recognized: &Recognized, directory: Option<&Path>) -> Option<PathBuf> {
-    let place = resolve(directory?, recognized.moved_to.as_deref().unwrap_or("."))?;
+/// then by a directory option of its package manager, such as `--cwd apps/web`. An absolute path is placed against
+/// `root`, the root of the Worktree. `None` when the directory is not known and the command is not moved by an
+/// absolute path, and when it is moved out of the Worktree or to a place only the home directory tells.
+fn place_of(recognized: &Recognized, directory: Option<&Path>, root: &Path) -> Option<PathBuf> {
+    let place = moved(directory, recognized.moved_to.as_deref().unwrap_or("."), root)?;
     match directory_option(strip_launchers(&words_of(&recognized.command))) {
-        Some(option) => resolve(&place, option),
+        Some(option) => moved(Some(&place), option, root),
         None => Some(place),
     }
+}
+
+/// Where `path` leads from `directory`, both relative to `root`, the root of the Worktree. An absolute `path` is placed
+/// with [`within`], and when that leaves it outside `root`, again on the canonical paths of both, so that a symlink to
+/// the Worktree and the `/tmp` that is `/private/tmp` lead into it. `None` for an absolute path that is not inside
+/// `root` either way, and for a relative one when `directory` is not known.
+fn moved(directory: Option<&Path>, path: &str, root: &Path) -> Option<PathBuf> {
+    if !path.starts_with('/') {
+        return resolve(directory?, path);
+    }
+    let placed = within(root, path);
+    if placed.is_relative() {
+        return Some(placed);
+    }
+    let canonical = placed.canonicalize().ok()?;
+    canonical
+        .strip_prefix(root.canonicalize().ok()?)
+        .ok()
+        .map(Path::to_owned)
 }
 
 /// The options of a package manager that run it in another directory, as a `cd` to it would.
@@ -1034,6 +1054,69 @@ mod tests {
         // Moved to the directory of web, but another program than the one its `run` names: the agent picks.
         assert_eq!(equivalent("yarn --cwd apps/web dev", ""), None);
         assert_eq!(equivalent("bun --cwd apps/other run dev", ""), None);
+    }
+
+    #[test]
+    fn an_absolute_cd_into_the_worktree_is_placed_as_the_relative_one_and_one_outside_it_is_not() {
+        let services = [
+            process("web", "cd apps/web && bun run dev"),
+            process("api", "cd apps/api && bun run dev"),
+            process("dev", "bun run dev"),
+        ];
+        let equivalent = |command: &str, directory: Option<&Path>| {
+            equivalent(&recognize(command).unwrap(), &services, directory, root())
+        };
+        for (command, directory, instead) in [
+            ("cd /p/work/acme/web/apps/web && bun run dev", Some(""), "procly up web"),
+            ("cd /p/work/acme/web/apps/web/ && bun dev", Some("apps/api"), "procly up web"),
+            ("pushd /p/work/acme/web/apps/../apps/api && bun dev", Some(""), "procly up api"),
+            ("cd /p/work/acme/web && bun run dev", Some("apps/web"), "procly up dev"),
+            ("bun --cwd /p/work/acme/web/apps/web run dev", Some(""), "procly up web"),
+            // An absolute path does not need to know where the agent is.
+            ("cd /p/work/acme/web/apps/web && bun dev", None, "procly up web"),
+        ] {
+            assert_eq!(
+                equivalent(command, directory.map(Path::new)).as_deref(),
+                Some(instead),
+                "{command}"
+            );
+        }
+        for command in [
+            "cd /srv/app && bun dev",
+            "cd /p/work/acme/web2/apps/web && bun dev",
+            "cd /p/work/acme/web/../apps/web && bun dev",
+        ] {
+            assert_eq!(equivalent(command, Some(Path::new(""))), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn an_absolute_cd_through_a_symlink_is_placed_where_the_symlink_leads() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("worktree");
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        std::fs::create_dir_all(temporary.path().join("elsewhere/apps/web")).unwrap();
+        std::os::unix::fs::symlink(&root, temporary.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(temporary.path().join("elsewhere"), temporary.path().join("away")).unwrap();
+        let services = [process("web", "cd apps/web && bun run dev")];
+        let equivalent = |command: String, root: &Path| {
+            equivalent(&recognize(&command).unwrap(), &services, Some(Path::new("")), root)
+        };
+        let link = temporary.path().join("link").display().to_string();
+        let canonical = root.canonicalize().unwrap();
+        // Through a symlink to the root, and to a root the Daemon gives canonical, as `/private/tmp` for `/tmp`.
+        assert_eq!(
+            equivalent(format!("cd {link}/apps/web && bun dev"), &root).as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(
+            equivalent(format!("cd {}/apps/web && bun dev", root.display()), &canonical).as_deref(),
+            Some("procly up web")
+        );
+        // A symlink that leads out of the Worktree, and a directory that does not exist, are not inside it.
+        let away = temporary.path().join("away").display().to_string();
+        assert_eq!(equivalent(format!("cd {away}/apps/web && bun dev"), &root), None);
+        assert_eq!(equivalent(format!("cd {link}/apps/gone && bun dev"), &root), None);
     }
 
     #[test]
