@@ -124,12 +124,12 @@ fn equivalent(
                 .iter()
                 .filter_map(|service| {
                     let run = recognize(service.run.as_deref()?)?;
-                    if place.is_none() || place != resolve(Path::new(""), run.moved_to.as_deref().unwrap_or(".")) {
+                    if place.is_none() || place != place_of(&run, Some(Path::new(""))) {
                         return None;
                     }
                     let matched = same_start(
-                        &without_run(blocked),
-                        &without_run(strip_launchers(&words_of(&run.command))),
+                        &compared(blocked),
+                        &compared(strip_launchers(&words_of(&run.command))),
                     )?;
                     Some((matched, service))
                 })
@@ -219,10 +219,64 @@ pub(crate) const COMPOSE_FILES: [&str; 4] = [
     "docker-compose.yml",
 ];
 
-/// Where the recognized command runs, relative to the root of the Worktree: `directory` moved by the `cd` before it.
-/// `None` when the directory is not known and when the `cd` leaves it to a place only an absolute path tells.
+/// Where the recognized command runs, relative to the root of the Worktree: `directory` moved by the `cd` before it,
+/// then by a directory option of its package manager, such as `--cwd apps/web`. `None` when the directory is not known
+/// and when the `cd` leaves it to a place only an absolute path tells.
 fn place_of(recognized: &Recognized, directory: Option<&Path>) -> Option<PathBuf> {
-    resolve(directory?, recognized.moved_to.as_deref().unwrap_or("."))
+    let place = resolve(directory?, recognized.moved_to.as_deref().unwrap_or("."))?;
+    match directory_option(strip_launchers(&words_of(&recognized.command))) {
+        Some(option) => resolve(&place, option),
+        None => Some(place),
+    }
+}
+
+/// The options of a package manager that run it in another directory, as a `cd` to it would.
+const DIRECTORY_OPTIONS: [&str; 4] = ["--cwd", "--prefix", "--dir", "-C"];
+
+/// The directory a package manager is told to run in by a directory option, written `--cwd apps/web` or
+/// `--cwd=apps/web`, the last one when it is given several. `None` for any other program and when it is given none.
+/// What follows `--` is for the script, not for the package manager.
+fn directory_option(words: &[String]) -> Option<&str> {
+    let (program, rest) = words.split_first()?;
+    if !RUNNERS.contains(&basename(program)) {
+        return None;
+    }
+    let mut directory = None;
+    let mut words = rest.iter().map(String::as_str).take_while(|word| *word != "--");
+    while let Some(word) = words.next() {
+        if DIRECTORY_OPTIONS.contains(&word) {
+            directory = words.next().or(directory);
+        } else if let Some((option, value)) = word.split_once('=')
+            && DIRECTORY_OPTIONS.contains(&option)
+        {
+            directory = Some(value);
+        }
+    }
+    directory
+}
+
+/// `words` without the directory option of their package manager and its value, which [`place_of`] reads as where the
+/// command runs.
+fn without_directory_option(words: &[String]) -> Vec<String> {
+    if directory_option(words).is_none() {
+        return words.to_vec();
+    }
+    let mut kept = Vec::with_capacity(words.len());
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            kept.push(word.clone());
+            kept.extend(words.by_ref().cloned());
+        } else if DIRECTORY_OPTIONS.contains(&word.as_str()) {
+            words.next();
+        } else if !word
+            .split_once('=')
+            .is_some_and(|(option, _)| DIRECTORY_OPTIONS.contains(&option))
+        {
+            kept.push(word.clone());
+        }
+    }
+    kept
 }
 
 /// `path` as written from `base`, a directory relative to the root of the Worktree, with its `.` and `..` resolved. A
@@ -246,6 +300,11 @@ fn within(root: &Path, path: &str) -> PathBuf {
         return PathBuf::from(path);
     };
     absolute.strip_prefix(root).map_or(absolute.clone(), Path::to_owned)
+}
+
+/// The words of a command that say what it starts, wherever it runs: `bun --cwd apps/web run dev` is `bun dev`.
+fn compared(words: &[String]) -> Vec<String> {
+    without_run(&without_directory_option(words))
 }
 
 /// `words` without the `run` of a package manager, which `bun run dev` and `bun dev` both run the script `dev` with.
@@ -940,6 +999,41 @@ mod tests {
         assert_eq!(equivalent("bun dev", Some(Path::new("apps/docs"))), None);
         assert_eq!(equivalent("bun dev", Some(Path::new("apps"))), None);
         assert_eq!(equivalent("cd apps/web && bun dev", None), None);
+    }
+
+    #[test]
+    fn a_directory_option_moves_the_command_like_a_cd_and_is_not_compared_with_the_run() {
+        let services = [
+            process("web", "cd apps/web && bun run dev"),
+            process("api", "cd apps/api && bun run dev"),
+            process("dev", "bun run dev"),
+            process("docs", "npm --prefix=apps/docs run dev"),
+        ];
+        let equivalent = |command: &str, directory: &str| {
+            equivalent(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new(directory)),
+                root(),
+            )
+        };
+        for (command, directory, instead) in [
+            ("bun --cwd apps/web run dev", "", "procly up web"),
+            ("bun run --cwd apps/web dev", "", "procly up web"),
+            ("bun --cwd=apps/web dev", "", "procly up web"),
+            ("bun --cwd web run dev", "apps", "procly up web"),
+            ("cd apps && bun --cwd web dev", "", "procly up web"),
+            ("bun --cwd ../api dev", "apps/web", "procly up api"),
+            ("bun --cwd . run dev", "", "procly up dev"),
+            // The directory option of a Service is where it runs too.
+            ("cd apps/docs && npm run dev", "", "procly up docs"),
+            ("npm --prefix apps/docs run dev", "", "procly up docs"),
+        ] {
+            assert_eq!(equivalent(command, directory).as_deref(), Some(instead), "{command}");
+        }
+        // Moved to the directory of web, but another program than the one its `run` names: the agent picks.
+        assert_eq!(equivalent("yarn --cwd apps/web dev", ""), None);
+        assert_eq!(equivalent("bun --cwd apps/other run dev", ""), None);
     }
 
     #[test]
