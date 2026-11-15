@@ -119,18 +119,15 @@ fn equivalent(
         Kind::DevServer => {
             // Run from the same directory, so that `cd apps/api && pnpm dev` is never the `pnpm dev` of `apps/web`,
             // and `pnpm dev` run in `apps/web` is the Service that changes to it.
-            let place = place_of(recognized, directory);
+            let place = place_of(recognized, directory, root);
             let matches: Vec<(usize, &GuardService)> = services
                 .iter()
                 .filter_map(|service| {
                     let run = recognize(service.run.as_deref()?)?;
-                    if place.is_none() || place != resolve(Path::new(""), run.moved_to.as_deref().unwrap_or(".")) {
+                    if place.is_none() || place != place_of(&run, Some(Path::new("")), root) {
                         return None;
                     }
-                    let matched = same_start(
-                        &without_run(blocked),
-                        &without_run(strip_launchers(&words_of(&run.command))),
-                    )?;
+                    let matched = same_start(&compared(blocked), &compared(strip_launchers(&words_of(&run.command))))?;
                     Some((matched, service))
                 })
                 .collect();
@@ -195,7 +192,7 @@ fn compose_files(words: &[String]) -> Vec<&str> {
 /// another. A file given with an absolute path is placed against `root`, the root of the Worktree: the compose file of
 /// the root named that way is managed, any other absolute path, inside the Worktree or not, is not.
 fn unmanaged_compose_file(recognized: &Recognized, directory: Option<&Path>, root: &Path) -> Option<String> {
-    let place = place_of(recognized, directory);
+    let place = place_of(recognized, directory, root);
     let blocked = words_of(&recognized.command);
     compose_files(strip_launchers(&blocked))
         .into_iter()
@@ -219,10 +216,84 @@ pub(crate) const COMPOSE_FILES: [&str; 4] = [
     "docker-compose.yml",
 ];
 
-/// Where the recognized command runs, relative to the root of the Worktree: `directory` moved by the `cd` before it.
-/// `None` when the directory is not known and when the `cd` leaves it to a place only an absolute path tells.
-fn place_of(recognized: &Recognized, directory: Option<&Path>) -> Option<PathBuf> {
-    resolve(directory?, recognized.moved_to.as_deref().unwrap_or("."))
+/// Where the recognized command runs, relative to the root of the Worktree: `directory` moved by the `cd` before it,
+/// then by a directory option of its package manager, such as `--cwd apps/web`. An absolute path is placed against
+/// `root`, the root of the Worktree. `None` when the directory is not known and the command is not moved by an
+/// absolute path, and when it is moved out of the Worktree or to a place only the home directory tells.
+fn place_of(recognized: &Recognized, directory: Option<&Path>, root: &Path) -> Option<PathBuf> {
+    let place = moved(directory, recognized.moved_to.as_deref().unwrap_or("."), root)?;
+    match directory_option(strip_launchers(&words_of(&recognized.command))) {
+        Some(option) => moved(Some(&place), option, root),
+        None => Some(place),
+    }
+}
+
+/// Where `path` leads from `directory`, both relative to `root`, the root of the Worktree. An absolute `path` is placed
+/// with [`within`], and when that leaves it outside `root`, again on the canonical paths of both, so that a symlink to
+/// the Worktree and the `/tmp` that is `/private/tmp` lead into it. `None` for an absolute path that is not inside
+/// `root` either way, and for a relative one when `directory` is not known.
+fn moved(directory: Option<&Path>, path: &str, root: &Path) -> Option<PathBuf> {
+    if !path.starts_with('/') {
+        return resolve(directory?, path);
+    }
+    let placed = within(root, path);
+    if placed.is_relative() {
+        return Some(placed);
+    }
+    let canonical = placed.canonicalize().ok()?;
+    canonical
+        .strip_prefix(root.canonicalize().ok()?)
+        .ok()
+        .map(Path::to_owned)
+}
+
+/// The options of a package manager that run it in another directory, as a `cd` to it would.
+const DIRECTORY_OPTIONS: [&str; 4] = ["--cwd", "--prefix", "--dir", "-C"];
+
+/// The directory a package manager is told to run in by a directory option, written `--cwd apps/web` or
+/// `--cwd=apps/web`, the last one when it is given several. `None` for any other program and when it is given none.
+/// What follows `--` is for the script, not for the package manager.
+fn directory_option(words: &[String]) -> Option<&str> {
+    let (program, rest) = words.split_first()?;
+    if !RUNNERS.contains(&basename(program)) {
+        return None;
+    }
+    let mut directory = None;
+    let mut words = rest.iter().map(String::as_str).take_while(|word| *word != "--");
+    while let Some(word) = words.next() {
+        if DIRECTORY_OPTIONS.contains(&word) {
+            directory = words.next().or(directory);
+        } else if let Some((option, value)) = word.split_once('=')
+            && DIRECTORY_OPTIONS.contains(&option)
+        {
+            directory = Some(value);
+        }
+    }
+    directory
+}
+
+/// `words` without the directory option of their package manager and its value, which [`place_of`] reads as where the
+/// command runs.
+fn without_directory_option(words: &[String]) -> Vec<String> {
+    if directory_option(words).is_none() {
+        return words.to_vec();
+    }
+    let mut kept = Vec::with_capacity(words.len());
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            kept.push(word.clone());
+            kept.extend(words.by_ref().cloned());
+        } else if DIRECTORY_OPTIONS.contains(&word.as_str()) {
+            words.next();
+        } else if !word
+            .split_once('=')
+            .is_some_and(|(option, _)| DIRECTORY_OPTIONS.contains(&option))
+        {
+            kept.push(word.clone());
+        }
+    }
+    kept
 }
 
 /// `path` as written from `base`, a directory relative to the root of the Worktree, with its `.` and `..` resolved. A
@@ -246,6 +317,11 @@ fn within(root: &Path, path: &str) -> PathBuf {
         return PathBuf::from(path);
     };
     absolute.strip_prefix(root).map_or(absolute.clone(), Path::to_owned)
+}
+
+/// The words of a command that say what it starts, wherever it runs: `bun --cwd apps/web run dev` is `bun dev`.
+fn compared(words: &[String]) -> Vec<String> {
+    without_run(&without_directory_option(words))
 }
 
 /// `words` without the `run` of a package manager, which `bun run dev` and `bun dev` both run the script `dev` with.
@@ -301,13 +377,18 @@ pub(crate) const PACKAGE_OPTIONS: [&str; 8] = [
     "--cwd",
 ];
 
+/// The options of [`PACKAGE_OPTIONS`] that take a value, every one but `-w`, which takes none in pnpm.
+pub(crate) const PACKAGE_OPTIONS_WITH_VALUE: [&str; 7] =
+    ["--workspace", "--prefix", "--filter", "-F", "--dir", "-C", "--cwd"];
+
 /// Whether `words` run the dev script of a whole Repository: `pnpm dev`, `npm start`, `turbo run dev`, with no
-/// option narrowing it to one package and a plain script name.
+/// option narrowing it to one package, written `--filter web` or `--filter=web`, and a plain script name.
 pub(crate) fn runs_the_whole_repository(words: &[String]) -> bool {
     let Some((program, rest)) = words.split_first() else {
         return false;
     };
-    if !RUNNERS.contains(&basename(program)) || rest.iter().any(|word| PACKAGE_OPTIONS.contains(&word.as_str())) {
+    let narrows = |word: &String| PACKAGE_OPTIONS.contains(&word.split('=').next().unwrap_or_default());
+    if !RUNNERS.contains(&basename(program)) || rest.iter().any(narrows) {
         return false;
     }
     let positional = positional(rest, &[]);
@@ -423,7 +504,7 @@ fn classify(words: &[String]) -> Option<Kind> {
     }
     match program {
         "npm" | "pnpm" | "yarn" | "bun" | "turbo" => {
-            let positional = positional(rest, &["--workspace", "--prefix", "--filter", "-F", "--dir", "-C"]);
+            let positional = positional(rest, &PACKAGE_OPTIONS_WITH_VALUE);
             let script = match (program, positional.as_slice()) {
                 ("npm", ["start", ..]) => Some("start"),
                 ("npm", [..]) => script_after_run(&positional),
@@ -527,6 +608,49 @@ mod tests {
             "turbo run dev --filter=web",
         ] {
             assert_eq!(kind(command), Some(Kind::DevServer), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_package_options_that_take_a_value_are_all_of_them_but_the_one_that_takes_none() {
+        assert!(
+            PACKAGE_OPTIONS_WITH_VALUE
+                .iter()
+                .all(|option| PACKAGE_OPTIONS.contains(option))
+        );
+        let without_value: Vec<&str> = PACKAGE_OPTIONS
+            .into_iter()
+            .filter(|option| !PACKAGE_OPTIONS_WITH_VALUE.contains(option))
+            .collect();
+        assert_eq!(without_value, ["-w"]);
+    }
+
+    #[test]
+    fn a_dev_server_is_recognized_behind_a_directory_option_written_either_way() {
+        for command in [
+            "bun --cwd apps/web run dev",
+            "bun run --cwd apps/web dev",
+            "bun --cwd=apps/web dev",
+            "yarn --cwd apps/web dev",
+            "yarn --cwd=apps/web dev",
+            "npm --prefix apps/web run dev",
+            "npm --prefix=apps/web start",
+            "pnpm --dir apps/web dev",
+            "pnpm --dir=apps/web dev",
+            "pnpm -C=apps/web dev",
+            "pnpm --filter=web dev",
+            "turbo --cwd apps/web dev",
+            "turbo dev --filter=@acme/web",
+        ] {
+            assert_eq!(kind(command), Some(Kind::DevServer), "{command}");
+        }
+        for command in [
+            "bun --cwd apps/web run build",
+            "yarn --cwd apps/web install",
+            "npm --prefix apps/web test",
+            "pnpm -C=apps/web build",
+        ] {
+            assert_eq!(kind(command), None, "{command}");
         }
     }
 
@@ -802,6 +926,33 @@ mod tests {
     }
 
     #[test]
+    fn an_option_written_with_its_value_after_an_equals_sign_narrows_the_command_to_one_package() {
+        for command in [
+            "turbo dev --filter=@acme/web",
+            "npm run dev --workspace=web",
+            "pnpm --filter=web dev",
+            "bun --cwd=apps/web dev",
+            "pnpm --dir=apps/web dev",
+            "npm --prefix=apps/web start",
+            "pnpm -C=apps/web dev",
+        ] {
+            assert!(!runs_the_whole_repository(&words_of(command)), "{command}");
+        }
+        assert!(runs_the_whole_repository(&words_of("turbo dev")));
+        // Nothing declared starts it, so the agent is left to pick the Service, never sent to the whole Repository.
+        let services = [process("dev", "bun run dev")];
+        assert_eq!(
+            equivalent(
+                &recognize("turbo dev --filter=@acme/web").unwrap(),
+                &services,
+                Some(Path::new("")),
+                root()
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn a_compose_command_is_the_compose_services_it_names_or_all_of_them() {
         let compose = |name: &str, service: &str| GuardService {
             name: name.to_owned(),
@@ -865,6 +1016,112 @@ mod tests {
         assert_eq!(equivalent("bun dev", Some(Path::new("apps/docs"))), None);
         assert_eq!(equivalent("bun dev", Some(Path::new("apps"))), None);
         assert_eq!(equivalent("cd apps/web && bun dev", None), None);
+    }
+
+    #[test]
+    fn a_directory_option_moves_the_command_like_a_cd_and_is_not_compared_with_the_run() {
+        let services = [
+            process("web", "cd apps/web && bun run dev"),
+            process("api", "cd apps/api && bun run dev"),
+            process("dev", "bun run dev"),
+            process("docs", "npm --prefix=apps/docs run dev"),
+        ];
+        let equivalent = |command: &str, directory: &str| {
+            equivalent(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new(directory)),
+                root(),
+            )
+        };
+        for (command, directory, instead) in [
+            ("bun --cwd apps/web run dev", "", "procly up web"),
+            ("bun run --cwd apps/web dev", "", "procly up web"),
+            ("bun --cwd=apps/web dev", "", "procly up web"),
+            ("bun --cwd web run dev", "apps", "procly up web"),
+            ("cd apps && bun --cwd web dev", "", "procly up web"),
+            ("bun --cwd ../api dev", "apps/web", "procly up api"),
+            ("bun --cwd . run dev", "", "procly up dev"),
+            // The directory option of a Service is where it runs too.
+            ("cd apps/docs && npm run dev", "", "procly up docs"),
+            ("npm --prefix apps/docs run dev", "", "procly up docs"),
+        ] {
+            assert_eq!(equivalent(command, directory).as_deref(), Some(instead), "{command}");
+        }
+        // Moved to the directory of web, but another program than the one its `run` names: the agent picks.
+        assert_eq!(equivalent("yarn --cwd apps/web dev", ""), None);
+        assert_eq!(equivalent("bun --cwd apps/other run dev", ""), None);
+    }
+
+    #[test]
+    fn an_absolute_cd_into_the_worktree_is_placed_as_the_relative_one_and_one_outside_it_is_not() {
+        let services = [
+            process("web", "cd apps/web && bun run dev"),
+            process("api", "cd apps/api && bun run dev"),
+            process("dev", "bun run dev"),
+        ];
+        let equivalent = |command: &str, directory: Option<&Path>| {
+            equivalent(&recognize(command).unwrap(), &services, directory, root())
+        };
+        for (command, directory, instead) in [
+            ("cd /p/work/acme/web/apps/web && bun run dev", Some(""), "procly up web"),
+            (
+                "cd /p/work/acme/web/apps/web/ && bun dev",
+                Some("apps/api"),
+                "procly up web",
+            ),
+            (
+                "pushd /p/work/acme/web/apps/../apps/api && bun dev",
+                Some(""),
+                "procly up api",
+            ),
+            ("cd /p/work/acme/web && bun run dev", Some("apps/web"), "procly up dev"),
+            ("bun --cwd /p/work/acme/web/apps/web run dev", Some(""), "procly up web"),
+            // An absolute path does not need to know where the agent is.
+            ("cd /p/work/acme/web/apps/web && bun dev", None, "procly up web"),
+        ] {
+            assert_eq!(
+                equivalent(command, directory.map(Path::new)).as_deref(),
+                Some(instead),
+                "{command}"
+            );
+        }
+        for command in [
+            "cd /srv/app && bun dev",
+            "cd /p/work/acme/web2/apps/web && bun dev",
+            "cd /p/work/acme/web/../apps/web && bun dev",
+        ] {
+            assert_eq!(equivalent(command, Some(Path::new(""))), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn an_absolute_cd_through_a_symlink_is_placed_where_the_symlink_leads() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("worktree");
+        std::fs::create_dir_all(root.join("apps/web")).unwrap();
+        std::fs::create_dir_all(temporary.path().join("elsewhere/apps/web")).unwrap();
+        std::os::unix::fs::symlink(&root, temporary.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(temporary.path().join("elsewhere"), temporary.path().join("away")).unwrap();
+        let services = [process("web", "cd apps/web && bun run dev")];
+        let equivalent = |command: String, root: &Path| {
+            equivalent(&recognize(&command).unwrap(), &services, Some(Path::new("")), root)
+        };
+        let link = temporary.path().join("link").display().to_string();
+        let canonical = root.canonicalize().unwrap();
+        // Through a symlink to the root, and to a root the Daemon gives canonical, as `/private/tmp` for `/tmp`.
+        assert_eq!(
+            equivalent(format!("cd {link}/apps/web && bun dev"), &root).as_deref(),
+            Some("procly up web")
+        );
+        assert_eq!(
+            equivalent(format!("cd {}/apps/web && bun dev", root.display()), &canonical).as_deref(),
+            Some("procly up web")
+        );
+        // A symlink that leads out of the Worktree, and a directory that does not exist, are not inside it.
+        let away = temporary.path().join("away").display().to_string();
+        assert_eq!(equivalent(format!("cd {away}/apps/web && bun dev"), &root), None);
+        assert_eq!(equivalent(format!("cd {link}/apps/gone && bun dev"), &root), None);
     }
 
     #[test]
