@@ -550,17 +550,19 @@ fn service_spec(
 ) -> anyhow::Result<ServiceSpec> {
     let service = scope.service(registry, name)?;
     let declared = service.declared;
-    let (command, variables, health, lease_ports, covers) = match declared.kind(name)? {
+    let (command, variables, health, lease_ports, covers, port_plans) = match declared.kind(name)? {
         ServiceKind::Process { run } => {
             let injected = environment::injected(&service, Leasing::Starting)?;
             let health = HealthCheck::declared(injected.health_port, &declared.health);
             let lease_ports = injected.leases.values().copied().collect();
+            let port_plans = injected.plan(name, declared).into_iter().collect();
             (
                 ports::render(run, &injected.leases),
                 injected.variables,
                 health,
                 lease_ports,
                 Vec::new(),
+                port_plans,
             )
         }
         ServiceKind::Group { run, covers } => {
@@ -577,6 +579,7 @@ fn service_spec(
                 health,
                 injected.lease_ports,
                 covers.to_vec(),
+                injected.plans,
             )
         }
         ServiceKind::Compose { .. } => {
@@ -593,6 +596,7 @@ fn service_spec(
         env,
         health,
         lease_ports,
+        port_plans,
         covers,
         health_timeout: scope.config.health_timeout(declared),
         name: name.to_owned(),

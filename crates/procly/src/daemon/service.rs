@@ -16,6 +16,7 @@ use super::cpu::groups_cpu;
 use super::health::HealthCheck;
 use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
+use super::mismatch::{self, PortPlan};
 use super::output_file::{self, OutputFiles, Tail};
 use super::process_group::{self, Pid, Tree, kill_tree, stop_detached, stop_tree};
 use super::record::{ServiceRecord, ServiceRecords};
@@ -90,6 +91,8 @@ pub(crate) struct ServiceSpec {
     pub(crate) idle: Option<Duration>,
     /// The port of every Lease of the Service, which may listen on all of them.
     pub(crate) lease_ports: Vec<u16>,
+    /// The ports the Service, or each Service it covers when it is a Group, is expected on.
+    pub(crate) port_plans: Vec<PortPlan>,
     /// The Services it covers when it is a Group, whose Leases it holds.
     pub(crate) covers: Vec<String>,
 }
@@ -185,7 +188,7 @@ pub(crate) enum Start {
     Stopping(Arc<Service>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ServiceState {
     Starting,
     Healthy,
@@ -542,7 +545,7 @@ impl Services {
             .table()
             .iter()
             .map(|((worktree, name), service)| {
-                let state = match *service.state.borrow() {
+                let state = match service.state.borrow().clone() {
                     ServiceState::Starting => protocol::ServiceState::Starting,
                     ServiceState::Healthy => protocol::ServiceState::Healthy,
                     ServiceState::Restarting => protocol::ServiceState::Restarting,
@@ -583,10 +586,11 @@ impl Service {
     /// Waits until the Service is healthy, restarts included, or returns how it ended before.
     pub(crate) async fn healthy(&self) -> Result<(), ServiceEnd> {
         let mut state = self.state.subscribe();
-        let state = *state
+        let state = state
             .wait_for(|state| matches!(state, ServiceState::Healthy | ServiceState::Ended(_)))
             .await
-            .expect("the service holds its own state sender, so the channel never closes");
+            .expect("the service holds its own state sender, so the channel never closes")
+            .clone();
         match state {
             ServiceState::Healthy => Ok(()),
             ServiceState::Ended(end) => Err(end),
@@ -877,6 +881,7 @@ async fn supervise(
                 health: spec.health.clone(),
                 health_timeout: spec.health_timeout,
                 lease_ports: spec.lease_ports.clone(),
+                port_plans: spec.port_plans.clone(),
                 idle: spec.idle,
             },
             clock.clone(),
@@ -900,6 +905,7 @@ async fn supervise(
             process_group::service_end(status)
         } else {
             stop.borrow()
+                .clone()
                 .expect("the tree is stopped only once a stop was requested")
         };
         // The last lines tell why a Service died, they must be read before anyone is told it ended.
@@ -913,7 +919,7 @@ async fn supervise(
         if healthy && clock.now().saturating_sub(started) >= STABLE_RUN {
             restarts = 0;
         }
-        let mut why = describe(ended);
+        let mut why = describe(&ended);
         let next = loop {
             restarts += 1;
             if restarts > spec.restart.attempts {
@@ -942,6 +948,7 @@ async fn supervise(
                 // A stop during the delay cancels the restart, there is no process left to stop.
                 let end = stop
                     .borrow()
+                    .clone()
                     .expect("the stop was requested, which is what ended the wait");
                 finish(&service, &records, &spec.topology, &spec.name, end).await;
                 return;
@@ -972,8 +979,8 @@ fn epoch_millis(clock: &Clock) -> u64 {
 }
 
 /// What a process did, for the Daemon log.
-fn describe(end: ServiceEnd) -> String {
-    match end {
+fn describe(end: &ServiceEnd) -> String {
+    match *end {
         ServiceEnd::Exited { code } => format!("exited with code {code}"),
         ServiceEnd::Signaled { signal } => format!("was killed by signal {signal}"),
         ServiceEnd::HealthTimeout { .. }
@@ -1033,6 +1040,7 @@ async fn supervise_reattached(
     let end = if stopped {
         stop_detached(&service.tree).await;
         stop.borrow()
+            .clone()
             .expect("the tree is stopped only once a stop was requested")
     } else {
         // Processes of the tree still running once the leader has ended would keep holding the port.
@@ -1085,15 +1093,21 @@ struct Watch {
     health_timeout: Duration,
     /// The port of every Lease of the Service.
     lease_ports: Vec<u16>,
+    /// The ports it, or each Service it covers, is expected on.
+    port_plans: Vec<PortPlan>,
     idle: Option<Duration>,
 }
 
 /// Watches one run of the process: its health first, then its idleness.
 async fn monitor(service: Arc<Service>, watch: Watch, clock: Clock) {
+    let ports = Expected {
+        lease_ports: &watch.lease_ports,
+        plans: &watch.port_plans,
+    };
     let Some(healthy_at) = check_health(
         &service,
         &watch.health,
-        &watch.lease_ports,
+        ports,
         &service.tree,
         watch.health_timeout,
         &clock,
@@ -1107,28 +1121,50 @@ async fn monitor(service: Arc<Service>, watch: Watch, clock: Clock) {
     }
 }
 
+/// The ports a Service is judged on while it starts.
+#[derive(Clone, Copy)]
+struct Expected<'a> {
+    /// The port of every Lease of the Service, or of the Services it covers.
+    lease_ports: &'a [u16],
+    plans: &'a [PortPlan],
+}
+
 /// Marks the Service healthy once its health check passes and its process tree listens on the Lease the check
-/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. Returns the reading of
-/// `clock` taken as the Service turned healthy, before anyone could hear of it, or `None` when it did not.
+/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. A tree listening on the
+/// declared port of a Service instead of its Lease is one at once, read at most every [`OWNERSHIP_RETRY`] while it
+/// starts. Returns the reading of `clock` taken as the Service turned healthy, before anyone could hear of it, or
+/// `None` when it did not.
 async fn check_health(
     service: &Service,
     check: &HealthCheck,
-    lease_ports: &[u16],
+    expected: Expected<'_>,
     tree: &Tree,
     timeout: Duration,
     clock: &Clock,
 ) -> Option<Duration> {
     let mut state = service.state.subscribe();
     let deadline = tokio::time::Instant::now() + timeout;
+    let early = mismatch::judged_early(expected.plans);
+    let mut read_at: Option<tokio::time::Instant> = None;
     loop {
         let mut wait = HEALTH_INTERVAL;
         if *state.borrow_and_update() != ServiceState::Starting {
             return None;
         }
+        if early && read_at.is_none_or(|at| at.elapsed() >= OWNERSHIP_RETRY) {
+            read_at = Some(tokio::time::Instant::now());
+            if let Some(end) = listening(tree)
+                .await
+                .and_then(|listening| mismatch::certain(expected.plans, &listening))
+            {
+                service.request_stop(end);
+                return None;
+            }
+        }
         // A Service that accepts the connection and never answers must not hold the check past its deadline.
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
-            match ownership_all(tree, check, lease_ports).await {
+            match ownership_all(tree, check, expected).await {
                 Ownership::Listening => {
                     let healthy_at = clock.now();
                     // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
@@ -1150,7 +1186,7 @@ async fn check_health(
         }
         if tokio::time::Instant::now() >= deadline {
             // Only now when nothing answers, a Service may open another port, such as a debugger, long before its Lease.
-            let end = match ownership_all(tree, check, lease_ports).await {
+            let end = match ownership_all(tree, check, expected).await {
                 Ownership::Elsewhere(mismatch) => mismatch,
                 Ownership::Listening | Ownership::Pending => ServiceEnd::HealthTimeout {
                     timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
@@ -1231,11 +1267,22 @@ enum Ownership {
 }
 
 /// The verdict on every port the check probes, the first that is not `Listening` deciding: a Group listens on the
-/// Lease of each Service it covers.
-async fn ownership_all(tree: &Tree, check: &HealthCheck, lease_ports: &[u16]) -> Ownership {
-    for port in check.ports() {
-        match ownership(tree, Some(port), lease_ports).await {
+/// Lease of each Service it covers. A Port mismatch names each Service of the plans.
+async fn ownership_all(tree: &Tree, check: &HealthCheck, expected: Expected<'_>) -> Ownership {
+    let ports = check.ports();
+    if ports.is_empty() {
+        return Ownership::Listening;
+    }
+    // Without `lsof`, the answer on the Lease is all there is to go by.
+    let Some(listening) = listening(tree).await else {
+        return Ownership::Listening;
+    };
+    for port in ports {
+        match ownership_of(port, expected.lease_ports, &listening) {
             Ownership::Listening => {}
+            Ownership::Elsewhere(ServiceEnd::PortMismatch { leased, actual, .. }) => {
+                return Ownership::Elsewhere(mismatch::port_mismatch(expected.plans, &listening, leased, actual));
+            }
             other => return other,
         }
     }
@@ -1246,19 +1293,23 @@ async fn ownership(tree: &Tree, leased: Option<u16>, lease_ports: &[u16]) -> Own
     let Some(leased) = leased else {
         return Ownership::Listening;
     };
+    // Without `lsof`, the answer on the Lease is all there is to go by.
+    listening(tree).await.map_or(Ownership::Listening, |listening| {
+        ownership_of(leased, lease_ports, &listening)
+    })
+}
+
+/// The ports the tree listens on, sorted, `None` when they cannot be read.
+async fn listening(tree: &Tree) -> Option<Vec<u16>> {
     // The tasks of a tool such as turbo listen from groups of their own, found through their parents.
     let tree = tree.clone();
-    let listening = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         tree.refresh();
         listening_ports(&tree.groups())
     })
     .await
     .ok()
-    .flatten();
-    // Without `lsof`, the answer on the Lease is all there is to go by.
-    listening.map_or(Ownership::Listening, |listening| {
-        ownership_of(leased, lease_ports, &listening)
-    })
+    .flatten()
 }
 
 /// Judges the ports a process group listens on against its Lease `leased`, a Port mismatch reporting the lowest
@@ -1268,7 +1319,12 @@ fn ownership_of(leased: u16, lease_ports: &[u16], listening: &[u16]) -> Ownershi
         return Ownership::Listening;
     }
     match listening.iter().copied().find(|port| !lease_ports.contains(port)) {
-        Some(actual) => Ownership::Elsewhere(ServiceEnd::PortMismatch { leased, actual }),
+        Some(actual) => Ownership::Elsewhere(ServiceEnd::PortMismatch {
+            leased,
+            actual,
+            services: Vec::new(),
+            unattributed: Vec::new(),
+        }),
         None => Ownership::Pending,
     }
 }
@@ -1325,7 +1381,14 @@ mod tests {
 
     #[test]
     fn listening_elsewhere_than_any_lease_is_a_port_mismatch_on_the_lowest_such_port() {
-        let mismatch = |actual| Ownership::Elsewhere(ServiceEnd::PortMismatch { leased: 24000, actual });
+        let mismatch = |actual| {
+            Ownership::Elsewhere(ServiceEnd::PortMismatch {
+                leased: 24000,
+                actual,
+                services: Vec::new(),
+                unattributed: Vec::new(),
+            })
+        };
         assert_eq!(ownership_of(24000, &[24000, 24001], &[5173, 9229]), mismatch(5173));
         assert_eq!(ownership_of(24000, &[24000, 24001], &[24001, 5173]), mismatch(5173));
     }

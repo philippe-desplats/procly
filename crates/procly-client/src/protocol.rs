@@ -595,7 +595,7 @@ pub struct KeptResource {
 }
 
 /// Why a Service ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServiceEnd {
@@ -620,10 +620,18 @@ pub enum ServiceEnd {
         restarts: u32,
     },
     /// The process group of the Service listened on `actual` and not on its Lease `leased`, and its whole process
-    /// tree was stopped.
+    /// tree was stopped. `leased` and `actual` belong to one Service, the one `services` finds on its declared port
+    /// when there is one.
     PortMismatch {
         leased: u16,
         actual: u16,
+        /// The Service, or each Service a Group covers, with its Lease and the ports seen for it. Empty when sent by
+        /// a Daemon from before it was added.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        services: Vec<ServicePorts>,
+        /// The ports the tree listened on that are no Lease and no declared port of any of those Services.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unattributed: Vec<u16>,
     },
     /// A previous Daemon started the Service, and its process ended without the Daemon of now being able to wait
     /// for it, so its exit code is unknown.
@@ -639,6 +647,19 @@ pub enum ServiceEnd {
     NotListening {
         port: u16,
     },
+}
+
+/// One Service of a Port mismatch: its Lease, and the ports its tree was seen listening on that are a Lease or a
+/// declared port of this Service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ServicePorts {
+    pub service: String,
+    /// The Lease its health check probes.
+    pub leased: u16,
+    /// Sorted. Its declared port without `leased` is what a Port mismatch looks like for it, `leased` alone is no
+    /// mismatch, and none means it listened on no port of its own.
+    pub seen: Vec<u16>,
 }
 
 /// Whether a start request started new work or ended in Reuse.
@@ -747,7 +768,7 @@ pub struct StaleLease {
     pub declared: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ServiceState {
@@ -1240,6 +1261,68 @@ mod tests {
         assert_eq!(
             line,
             r#"{"kind":"lease","service":"web","port_name":"http","port":24000,"repository":"/src/app/.git","worktree":"/src/app-a","deleted":false,"error":null}"#
+        );
+    }
+
+    #[test]
+    fn a_port_mismatch_of_a_daemon_from_before_the_services_reads_with_none() {
+        let before = r#"{"kind":"port_mismatch","leased":24004,"actual":3001}"#;
+
+        let end: ServiceEnd = serde_json::from_str(before).unwrap();
+
+        assert_eq!(
+            end,
+            ServiceEnd::PortMismatch {
+                leased: 24004,
+                actual: 3001,
+                services: Vec::new(),
+                unattributed: Vec::new(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&end).unwrap(),
+            before,
+            "and is sent back as it came"
+        );
+    }
+
+    #[test]
+    fn a_port_mismatch_with_its_services_reads_in_the_shape_of_before() {
+        /// [`ServiceEnd`] as protocol 23 declared it until the Services of a Port mismatch were added.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum EndBefore {
+            PortMismatch { leased: u16, actual: u16 },
+        }
+        let end = ServiceEnd::PortMismatch {
+            leased: 24004,
+            actual: 3000,
+            services: vec![
+                ServicePorts {
+                    service: "api".to_owned(),
+                    leased: 24004,
+                    seen: vec![3000],
+                },
+                ServicePorts {
+                    service: "web".to_owned(),
+                    leased: 24005,
+                    seen: vec![24005],
+                },
+            ],
+            unattributed: vec![9229],
+        };
+        let line = serde_json::to_string(&end).unwrap();
+        assert_eq!(
+            line,
+            r#"{"kind":"port_mismatch","leased":24004,"actual":3000,"services":[{"service":"api","leased":24004,"seen":[3000]},{"service":"web","leased":24005,"seen":[24005]}],"unattributed":[9229]}"#
+        );
+
+        assert_eq!(
+            serde_json::from_str::<EndBefore>(&line).unwrap(),
+            EndBefore::PortMismatch {
+                leased: 24004,
+                actual: 3000
+            }
         );
     }
 

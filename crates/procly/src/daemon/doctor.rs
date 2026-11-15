@@ -101,7 +101,7 @@ fn leased_ports(registry: &Registry) -> Check {
     let mut fixes = Vec::new();
     for (topology, status) in registry.services.statuses() {
         if let ServiceState::Ended {
-            end: ServiceEnd::PortMismatch { leased, actual },
+            end: ServiceEnd::PortMismatch { leased, actual, .. },
         } = status.state
         {
             let worktree = topology.worktree.path.display();

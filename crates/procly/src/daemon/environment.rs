@@ -16,6 +16,7 @@ use super::health::HealthCheck;
 use super::index::{IndexError, IndexRequest};
 use super::lease::{Claimed, LeaseError, LeaseRequest, PinnedBranch};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
+use super::mismatch::PortPlan;
 use super::resource::{LogicalResource, ResourceKey};
 use super::store::StoreError;
 use crate::config::{self, Config, ConfigError, IsolationMode, PortConfig, ServiceConfig, ServiceKind};
@@ -95,6 +96,29 @@ pub(super) struct Injected {
     pub(super) health_port: Option<u16>,
 }
 
+impl Injected {
+    /// The ports the Service `name`, declared as `declared`, is expected on, `None` when it has no Lease to probe.
+    pub(super) fn plan(&self, name: &str, declared: &ServiceConfig) -> Option<PortPlan> {
+        port_plan(name, declared, self.health_port, &self.leases)
+    }
+}
+
+/// The ports the Service `name` is expected on once granted `granted`, `None` when its health check probes no Lease,
+/// `health_port` being the one it probes.
+fn port_plan(
+    name: &str,
+    declared: &ServiceConfig,
+    health_port: Option<u16>,
+    granted: &BTreeMap<String, u16>,
+) -> Option<PortPlan> {
+    Some(PortPlan {
+        service: name.to_owned(),
+        leased: health_port?,
+        leases: granted.values().copied().collect(),
+        declared: declared.ports.values().map(|port| port.port).collect(),
+    })
+}
+
 /// Checks the ports of the Service `name` against its health check and its command, and returns the Port name its
 /// health check probes. Run before any Lease is granted, so that a request bound to fail stores none.
 pub(super) fn check<'a>(name: &str, declared: &'a ServiceConfig) -> Result<Option<&'a str>, EnvironmentError> {
@@ -153,6 +177,8 @@ pub(super) struct InjectedGroup {
     pub(super) lease_ports: Vec<u16>,
     /// The health check of each covered Service, which the Group passes once all of them do.
     pub(super) checks: Vec<HealthCheck>,
+    /// The ports each covered Service with a Lease to probe is expected on, in the order of `covers`.
+    pub(super) plans: Vec<PortPlan>,
 }
 
 /// The variables Procly injects into the Group `group`, granting the Leases of the Services it covers.
@@ -178,6 +204,7 @@ pub(super) fn injected_group(
     let mut variables = Vec::new();
     let mut lease_ports = Vec::new();
     let mut checks = Vec::new();
+    let mut plans = Vec::new();
     for service in covers {
         let declared = config
             .services
@@ -192,10 +219,9 @@ pub(super) fn injected_group(
             ));
             lease_ports.push(*port);
         }
-        checks.push(HealthCheck::declared(
-            health_port_name.and_then(|port_name| leases.get(port_name).copied()),
-            &declared.health,
-        ));
+        let health_port = health_port_name.and_then(|port_name| leases.get(port_name).copied());
+        checks.push(HealthCheck::declared(health_port, &declared.health));
+        plans.extend(port_plan(service, declared, health_port, &leases));
         table.insert(service.clone(), leases);
     }
     let resources = referenced_resources(registry, topology, config, &derived, &table)?;
@@ -214,6 +240,7 @@ pub(super) fn injected_group(
         variables,
         lease_ports,
         checks,
+        plans,
     })
 }
 

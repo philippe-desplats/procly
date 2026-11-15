@@ -374,7 +374,12 @@ mod tests {
                 r#"{"kind":"health_timeout","timeout_ms":5}"#,
             ),
             (
-                ServiceEnd::PortMismatch { leased: 1, actual: 2 },
+                ServiceEnd::PortMismatch {
+                    leased: 1,
+                    actual: 2,
+                    services: Vec::new(),
+                    unattributed: Vec::new(),
+                },
                 r#"{"kind":"port_mismatch","leased":1,"actual":2}"#,
             ),
             (
