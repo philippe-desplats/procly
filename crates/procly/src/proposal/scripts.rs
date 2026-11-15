@@ -371,15 +371,99 @@ pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), Pr
                 return Ok(());
             }
         };
-        proposal.add(
+        let fixed = fixed_ports(worktree, &packages, &members, &covers)?;
+        let group = proposal.add(
             "dev",
             ServiceEntry {
                 covers: Some(covers),
                 ..ServiceEntry::process(run)
             },
         );
+        // The Leases of a secondary Worktree reach the apps only through these variables, a Group gets no `PORT`.
+        let warning = format!(
+            "Group {group} isolates a secondary Worktree only when each app it covers reads its port from \
+             PORT_<SERVICE>_<NAME>, otherwise start the Services one by one"
+        );
+        let named: Vec<String> = fixed
+            .iter()
+            .map(|fixed| format!("{} has port {} written in {}", fixed.service, fixed.port, fixed.place))
+            .collect();
+        proposal.notes.push(if named.is_empty() {
+            format!("the {warning}.")
+        } else {
+            format!("the {warning}, and {}.", named.join(", "))
+        });
+        proposal.comments.insert(group, format!("The {warning}."));
     }
     Ok(())
+}
+
+/// A port an app a Group covers binds whatever the Lease, since it is written in a file of the app.
+#[derive(Debug)]
+struct FixedPort {
+    service: String,
+    port: u16,
+    /// Where the port is written, as stderr names it.
+    place: String,
+}
+
+/// The example of an Env file a package may hold, whose `PORT` key is the port its app reads when its own Env file,
+/// which init never reads, copies it.
+const ENV_EXAMPLE: &str = ".env.example";
+
+/// The fixed ports of the `covers` among the `members` of the Worktree, in the order of their Service names: a port the
+/// `dev` script of the package writes, or else a `PORT` key of its `.env.example`.
+fn fixed_ports(
+    worktree: &Path,
+    packages: &[Package],
+    members: &[Member],
+    covers: &[String],
+) -> Result<Vec<FixedPort>, ProposalError> {
+    let mut fixed = Vec::new();
+    for (package, member) in packages.iter().zip(members) {
+        if !covers.contains(&member.service) {
+            continue;
+        }
+        let manifest = package.dir.join("package.json");
+        let found = match bind_port(&package.script) {
+            Some((port, _)) => Some((port, format!("the dev script of {}", manifest.display()))),
+            None => example_port(worktree, &package.dir)?
+                .map(|port| (port, package.dir.join(ENV_EXAMPLE).display().to_string())),
+        };
+        if let Some((port, place)) = found {
+            fixed.push(FixedPort {
+                service: member.service.clone(),
+                port,
+                place,
+            });
+        }
+    }
+    fixed.sort_by(|a, b| a.service.cmp(&b.service));
+    Ok(fixed)
+}
+
+/// The `PORT` the `.env.example` of the package in `dir` sets, `None` when it has no such file or no such key.
+fn example_port(worktree: &Path, dir: &Path) -> Result<Option<u16>, ProposalError> {
+    let path = worktree.join(dir).join(ENV_EXAMPLE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(ProposalError::Read { path, source }),
+    };
+    Ok(text.lines().find_map(port_assignment))
+}
+
+/// The port a line of an Env file assigns to `PORT`, as in `PORT=3000`, `export PORT="3000"` or `PORT = 3000`.
+fn port_assignment(line: &str) -> Option<u16> {
+    let line = line.trim();
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    let (key, value) = line.split_once('=')?;
+    if key.trim() != "PORT" {
+        return None;
+    }
+    let quotes = ['"', '\''];
+    let value = value.split('#').next().unwrap_or_default().trim();
+    value.trim_matches(quotes).parse().ok().filter(|port| *port > 0)
 }
 
 #[cfg(test)]
@@ -481,5 +565,21 @@ mod tests {
             Vec::<PathBuf>::new(),
             "only whole-segment stars are read"
         );
+    }
+
+    #[test]
+    fn the_port_an_env_line_assigns_is_read_from_the_forms_dotenv_files_use() {
+        for (line, port) in [
+            ("PORT=3000", Some(3000)),
+            ("  export PORT=\"3001\"", Some(3001)),
+            ("PORT = '3002' # the web app", Some(3002)),
+            ("API_PORT=3003", None),
+            ("# PORT=3004", None),
+            ("PORT=", None),
+            ("PORT=${WEB_PORT}", None),
+            ("PORT=0", None),
+        ] {
+            assert_eq!(port_assignment(line), port, "{line}");
+        }
     }
 }

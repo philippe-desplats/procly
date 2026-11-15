@@ -154,6 +154,7 @@ fn a_monorepo_gets_a_service_per_app_dev_script_and_a_group_for_the_root_dev_com
 [services.api]
 run = \"cd apps/api && bun run dev\"
 
+# The Group dev isolates a secondary Worktree only when each app it covers reads its port from PORT_<SERVICE>_<NAME>, otherwise start the Services one by one.
 [services.dev]
 run = \"bun run dev\"
 covers = [\"api\", \"web\"]
@@ -1081,4 +1082,116 @@ fn init_says_nothing_of_worktree_hooks_without_a_worktrunk_config_or_once_the_bl
     assert_success(&procly.procly_in(&with_block, &["worktree", "hooks"]));
 
     assert!(!stderr(&init(&procly, &with_block)).contains("worktree hooks"));
+}
+
+/// What stderr and the comment above a proposed Group say about secondary Worktrees, before any fixed port is named.
+const GROUP_WARNING: &str = "the Group dev isolates a secondary Worktree only when each app it covers reads its port \
+                             from PORT_<SERVICE>_<NAME>, otherwise start the Services one by one";
+
+/// The line of stderr that warns about the Group, which there is exactly one of.
+fn group_warning(output: &Output) -> String {
+    let notes = stderr(output);
+    let warnings: Vec<&str> = notes
+        .lines()
+        .filter(|line| line.contains("isolates a secondary"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "one line warns about the Group\n{notes}");
+    warnings[0].to_owned()
+}
+
+#[test]
+fn a_proposed_group_is_said_to_isolate_secondary_worktrees_only_through_the_port_variables() {
+    let procly = Procly::new();
+    let main = repository(&procly, &MONOREPO);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(group_warning(&output), format!("procly: {GROUP_WARNING}."));
+    let proposal = stdout(&output);
+    let mut lines = proposal.lines().skip_while(|line| !line.starts_with("# The Group dev"));
+    assert!(
+        lines
+            .next()
+            .is_some_and(|comment| comment.contains("PORT_<SERVICE>_<NAME>")),
+        "{proposal}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("[services.dev]"),
+        "the comment sits right above the Group\n{proposal}"
+    );
+    assert_loads(&procly, &main, "dev");
+}
+
+#[test]
+fn no_group_proposed_means_no_warning_about_it() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            ("package.json", r#"{"name": "acme", "workspaces": ["apps/*"]}"#),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "next dev"}}"#,
+            ),
+        ],
+    );
+
+    let output = init(&procly, &main);
+
+    assert!(!stderr(&output).contains("isolates a secondary"), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("isolates a secondary"), "{}", stdout(&output));
+}
+
+#[test]
+fn a_port_in_the_env_example_of_a_covered_app_is_named_with_its_file() {
+    let procly = Procly::new();
+    let mut files = MONOREPO.to_vec();
+    files.push((
+        "apps/web/.env.example",
+        "# copy to .env\nDATABASE_URL=postgres://localhost/web\nPORT=3001\n",
+    ));
+    let main = repository(&procly, &files);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(
+        group_warning(&output),
+        format!("procly: {GROUP_WARNING}, and web has port 3001 written in apps/web/.env.example.")
+    );
+}
+
+#[test]
+fn a_port_in_the_dev_script_of_a_covered_app_is_named_with_its_package_json() {
+    let procly = Procly::new();
+    let mut files = MONOREPO.to_vec();
+    files[2] = (
+        "apps/web/package.json",
+        r#"{"name": "@acme/web", "scripts": {"dev": "next dev --port 3001"}}"#,
+    );
+    files.push(("apps/api/.env.example", "export PORT='3000'\n"));
+    let main = repository(&procly, &files);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(
+        group_warning(&output),
+        format!(
+            "procly: {GROUP_WARNING}, and api has port 3000 written in apps/api/.env.example, web has port 3001 \
+             written in the dev script of apps/web/package.json."
+        )
+    );
+}
+
+#[test]
+fn a_dot_env_file_is_never_read() {
+    let procly = Procly::new();
+    let mut files = MONOREPO.to_vec();
+    files.push(("apps/web/.env", "PORT=3001\n"));
+    files.push(("apps/api/.env.local", "PORT=3000\n"));
+    let main = repository(&procly, &files);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(group_warning(&output), format!("procly: {GROUP_WARNING}."));
 }
