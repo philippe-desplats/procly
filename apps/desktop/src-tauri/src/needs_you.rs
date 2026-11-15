@@ -116,8 +116,8 @@ fn failures(report: &StatusReport) -> Vec<(FailureKey, NeedsYou)> {
     let mut found = Vec::new();
     for worktree in report.repositories.iter().flat_map(|repository| &repository.worktrees) {
         for service in &worktree.services {
-            if let ServiceState::Ended { end } = service.state
-                && service_end_is_failure(&end)
+            if let ServiceState::Ended { end } = &service.state
+                && service_end_is_failure(end)
             {
                 found.push((
                     FailureKey::Service {
@@ -129,7 +129,7 @@ fn failures(report: &StatusReport) -> Vec<(FailureKey, NeedsYou)> {
                         worktree: worktree.worktree.path.clone(),
                         service: service.service.clone(),
                         started_at: service.started_at,
-                        end,
+                        end: end.clone(),
                     },
                 ));
             }
@@ -467,7 +467,7 @@ mod tests {
             ServiceEnd::Idle { timeout_ms: 600_000 },
             ServiceEnd::Exited { code: 0 },
         ] {
-            assert_eq!(needs(&report_with_service(end)), [], "{end:?} is routine");
+            assert_eq!(needs(&report_with_service(end.clone())), [], "{end:?} is routine");
         }
     }
 
@@ -482,6 +482,8 @@ mod tests {
             ServiceEnd::PortMismatch {
                 leased: 24_000,
                 actual: 24_001,
+                services: Vec::new(),
+                unattributed: Vec::new(),
             },
             ServiceEnd::Lost,
             ServiceEnd::Orphaned {
@@ -492,12 +494,12 @@ mod tests {
         ];
         for end in failures {
             assert_eq!(
-                needs(&report_with_service(end)),
+                needs(&report_with_service(end.clone())),
                 [NeedsYou::Service {
                     worktree: PathBuf::from("/p/work/acme/web"),
                     service: "api".to_owned(),
                     started_at: 1_000,
-                    end,
+                    end: end.clone(),
                 }],
                 "{end:?} is a failure"
             );

@@ -795,6 +795,7 @@ fn up_unhealthy(
     needed_by: Option<String>,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
+    let (why, code) = unhealthy(&service, &end);
     if json {
         json::print(&json::Up::Unhealthy {
             service: &service,
@@ -807,7 +808,6 @@ fn up_unhealthy(
         Some(needed_by) => format!("{service}, needed by {needed_by},"),
         None => service,
     };
-    let (why, code) = unhealthy(end);
     if output.is_empty() {
         eprintln!("procly: service {service} {why}, it printed nothing");
     } else {
@@ -817,9 +817,9 @@ fn up_unhealthy(
     Ok(ExitCode::from(code))
 }
 
-/// Why a Service is not healthy, after its name, and the exit code of `up` for it.
-fn unhealthy(end: ServiceEnd) -> (String, u8) {
-    match end {
+/// Why the Service `service` is not healthy, after its name, and the exit code of `up` for it.
+fn unhealthy(service: &str, end: &ServiceEnd) -> (String, u8) {
+    match *end {
         ServiceEnd::Exited { code } => (
             format!("exited with code {code} before it became healthy"),
             EXIT_SERVICE_ENDED,
@@ -843,11 +843,22 @@ fn unhealthy(end: ServiceEnd) -> (String, u8) {
             format!("kept crashing, it was restarted {restarts} times and is not restarted again"),
             EXIT_SERVICE_ENDED,
         ),
-        ServiceEnd::PortMismatch { leased, actual } => (
-            format!(
-                "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
-                 tree was stopped"
-            ),
+        ServiceEnd::PortMismatch {
+            leased,
+            actual,
+            ref services,
+            ref unattributed,
+        } => (
+            match status::by_service(service, services, unattributed) {
+                Some(by_service) => format!(
+                    "listens on ports other than the Leases of the Services it covers (Port mismatch): {by_service}, \
+                     its process tree was stopped"
+                ),
+                None => format!(
+                    "listens on port {actual} instead of its Lease, port {leased} (Port mismatch), its process \
+                     tree was stopped"
+                ),
+            },
             EXIT_PORT_MISMATCH,
         ),
         // Ends a Daemon finds when it restarts, which `up` never waits on, since it starts the Service again.

@@ -127,7 +127,7 @@ fn banner_of(item: &NeedsYou, report: &StatusReport) -> Option<Banner> {
         NeedsYou::Service {
             worktree, service, end, ..
         } => Some(Banner {
-            title: format!("{service}: {}", service_end(*end)),
+            title: format!("{service}: {}", service_end(end)),
             body: label_of(report, worktree),
             place: Some(item.place()),
         }),

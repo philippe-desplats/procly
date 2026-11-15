@@ -5,8 +5,10 @@
 ```console
 $ cd ~/code/acme
 $ procly init
+procly: the Group dev isolates a secondary Worktree only when each app it covers reads its port from PORT_<SERVICE>_<NAME>, otherwise start the Services one by one, and web has port 3001 written in the dev script of apps/web/package.json.
 # Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.
 
+# The Group dev isolates a secondary Worktree only when each app it covers reads its port from PORT_<SERVICE>_<NAME>, otherwise start the Services one by one.
 [services.dev]
 run = "bun run dev"
 covers = ["web"]
@@ -56,7 +58,22 @@ Every command left out is named on stderr, with the reason, so that you add it o
 
 A Group covers exactly the Services its command starts, so once commands are left out it covers the Services of the ones that stay. A command is tied to a package by a filter (`--filter`, `-F`, `--workspace`, `yarn workspace`, turbo's `--filter`) that names the `name` of the package or its directory (`./apps/web`), by a directory option (`--dir`, `-C`, `--prefix`), or by the `cd` that precedes it. A command that runs the `dev` script of the whole Worktree (`turbo dev`, `pnpm -r dev`) covers every Service. The Services the Group does not cover stay declared, and `procly up` starts them on their own next to the Group. A kept command that names no package (`next dev` at the root), or names them with a pattern (`--filter "@acme/*"`, `--filter web...`), cannot be tied to one Service. Procly does not guess: stderr names the command and the reason, no Group is proposed, and the Services are started one by one.
 
-A Group that runs the script as it is runs it with the Leases of the Services it covers. The Services it covers get their Leases in `PORT_<SERVICE>_<NAME>`, but a script that writes its port still binds that port in a Worktree other than the Main one, which `up` then reports as a Port mismatch. Point the root command at the Leases, or start the Services one by one.
+A Group that runs the script as it is runs it with the Leases of the Services it covers. The Services it covers get their Leases in `PORT_<SERVICE>_<NAME>`, but a script that writes its port still binds that port in a Worktree other than the Main one, which `up` then reports as a Port mismatch. Point the root command at the Leases, or start the Services one by one, see [A Group whose apps read their port from a file](configuration.md#a-group-whose-apps-read-their-port-from-a-file).
+
+Every proposed Group comes with a comment right above its table, and one line on stderr that says the same:
+
+```toml
+# The Group dev isolates a secondary Worktree only when each app it covers reads its port from PORT_<SERVICE>_<NAME>, otherwise start the Services one by one.
+[services.dev]
+run = "bun run dev"
+covers = ["api", "web"]
+```
+
+When init sees a port written for an app the Group covers, the line on stderr names the app and where the port is written: in the `dev` script of its `package.json`, or as a `PORT` key of the `.env.example` of its package. A `.env` file, or any other Env file, is never read, since it may hold secrets and is not committed.
+
+```text
+procly: the Group dev isolates a secondary Worktree only when each app it covers reads its port from PORT_<SERVICE>_<NAME>, otherwise start the Services one by one, and web has port 3001 written in apps/web/.env.example.
+```
 
 ## The compose file
 

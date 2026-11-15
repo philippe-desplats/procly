@@ -97,6 +97,9 @@ struct Proposal {
     /// What the proposal tells the user on the way, a choice it made that deserves a second look.
     #[serde(skip)]
     notes: Vec<String>,
+    /// A comment written right above the table of a Service, by the name of the Service.
+    #[serde(skip)]
+    comments: BTreeMap<String, String>,
 }
 
 impl Proposal {
@@ -165,6 +168,7 @@ pub(crate) fn propose(worktree: &Path, repository: &str) -> Result<Proposed, Pro
         });
     }
     let body = toml::to_string(&proposal).expect("a proposal holds only strings, numbers and tables, which serialize");
+    let body = with_comments(&body, &proposal.comments);
     Ok(Proposed {
         toml: format!(
             "# Proposed by `procly init`. Review it before you commit it, `procly up` starts what it declares.\n\n{body}"
@@ -173,9 +177,39 @@ pub(crate) fn propose(worktree: &Path, repository: &str) -> Result<Proposed, Pro
     })
 }
 
+/// `body` with each comment of `comments` written as a line right above the table of its Service. A Service name of a
+/// proposal is a bare TOML key, so its table is written `[services.<name>]`.
+fn with_comments(body: &str, comments: &BTreeMap<String, String>) -> String {
+    let mut text = String::with_capacity(body.len());
+    for line in body.split_inclusive('\n') {
+        let comment = line
+            .trim_end()
+            .strip_prefix("[services.")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|name| comments.get(name));
+        if let Some(comment) = comment {
+            text.push_str("# ");
+            text.push_str(comment);
+            text.push('\n');
+        }
+        text.push_str(line);
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_comment_is_written_above_the_table_of_its_service_only() {
+        let body = "[services.api]\nrun = \"a\"\n\n[services.dev]\nrun = \"b\"\n\n[services.dev.env]\nX = \"1\"\n";
+        let comments = BTreeMap::from([("dev".to_owned(), "the Group".to_owned())]);
+        assert_eq!(
+            with_comments(body, &comments),
+            "[services.api]\nrun = \"a\"\n\n# the Group\n[services.dev]\nrun = \"b\"\n\n[services.dev.env]\nX = \"1\"\n"
+        );
+    }
 
     #[test]
     fn a_service_name_drops_the_scope_and_keeps_what_a_placeholder_carries() {

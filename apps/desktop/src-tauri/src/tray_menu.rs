@@ -118,8 +118,8 @@ pub(crate) fn label_of(report: &StatusReport, path: &Path) -> String {
         .map_or_else(|| name_of(path), worktree_label)
 }
 
-pub(crate) fn service_end(end: ServiceEnd) -> String {
-    match end {
+pub(crate) fn service_end(end: &ServiceEnd) -> String {
+    match *end {
         ServiceEnd::Exited { code } => format!("exited {code}"),
         ServiceEnd::Signaled { signal } => format!("signaled {signal}"),
         ServiceEnd::HealthTimeout { .. } => "health timeout".to_owned(),
@@ -165,7 +165,7 @@ fn line(item: &NeedsYou, report: &StatusReport) -> String {
     match item {
         NeedsYou::Service {
             worktree, service, end, ..
-        } => format!("{}: {service} {}", name_of(worktree), service_end(*end)),
+        } => format!("{}: {service} {}", name_of(worktree), service_end(end)),
         NeedsYou::Job {
             worktree, command, end, ..
         } => {
@@ -198,7 +198,7 @@ fn copy_ports(report: &StatusReport) -> Vec<CopyPort> {
         let name = worktree_label(worktree);
         for service in &worktree.services {
             if let (Some(port), ServiceState::Starting | ServiceState::Healthy | ServiceState::Restarting) =
-                (service.port, service.state)
+                (service.port, &service.state)
             {
                 found.push(CopyPort {
                     label: format!("{name}: {} {port}", service.service),

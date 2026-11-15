@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use crate::duration;
 use crate::protocol::{
-    ContainerStatus, ForeignProcess, JobEnd, JobState, JobStatus, ServiceEnd, ServiceState, ServiceStatus, StatusReport,
+    ContainerStatus, ForeignProcess, JobEnd, JobState, JobStatus, ServiceEnd, ServicePorts, ServiceState,
+    ServiceStatus, StatusReport,
 };
 
 pub(crate) fn json(report: &StatusReport) -> String {
@@ -65,11 +66,11 @@ pub(crate) fn text(report: &StatusReport) -> String {
 
 fn service_line(text: &mut String, service: &ServiceStatus) {
     let port = service.port.map(|port| format!(" port {port}")).unwrap_or_default();
-    let state = match service.state {
+    let state = match &service.state {
         ServiceState::Starting => format!("starting{port}"),
         ServiceState::Healthy => format!("healthy{port}"),
         ServiceState::Restarting => format!("restarting{port}"),
-        ServiceState::Ended { end } => format!("ended: {}", ended(end)),
+        ServiceState::Ended { end } => format!("ended: {}", ended(&service.service, end)),
     };
     let reattached = if service.reattached {
         ", re-attached after a restart of the Daemon"
@@ -130,24 +131,72 @@ pub(crate) fn ports_text(ports: &[u16]) -> String {
     }
 }
 
-/// How a Service ended, after `ended: `.
-fn ended(end: ServiceEnd) -> String {
+/// The Port mismatch of the Group `group` told per Service it covers, with its Lease and the ports seen for it, then
+/// the ports no Service declares. `None` for the Port mismatch of a Service alone, whose pair says it all, or of a
+/// Daemon that named no Service.
+pub(crate) fn by_service(group: &str, services: &[ServicePorts], unattributed: &[u16]) -> Option<String> {
+    if services.iter().all(|service| service.service == group) {
+        return None;
+    }
+    let mut parts: Vec<String> = services
+        .iter()
+        .map(|ServicePorts { service, leased, seen }| {
+            let elsewhere: Vec<u16> = seen.iter().copied().filter(|port| port != leased).collect();
+            if seen.contains(leased) {
+                format!("{service} on its Lease, port {leased}")
+            } else if elsewhere.is_empty() {
+                format!("{service} on no port of its own, its Lease is port {leased}")
+            } else {
+                format!("{service} on {} instead of its Lease, port {leased}", ports(&elsewhere))
+            }
+        })
+        .collect();
+    if !unattributed.is_empty() {
+        parts.push(format!("and {} that no Service declares", ports(unattributed)));
+    }
+    Some(parts.join(", "))
+}
+
+/// `port 3000`, `ports 3000 and 3001`, `ports 3000, 3001 and 3002`.
+fn ports(ports: &[u16]) -> String {
+    match ports {
+        [] => String::new(),
+        [port] => format!("port {port}"),
+        [rest @ .., last] => format!(
+            "ports {} and {last}",
+            rest.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// How the Service `service` ended, after `ended: `.
+fn ended(service: &str, end: &ServiceEnd) -> String {
     match end {
         ServiceEnd::Exited { code } => format!("exited with code {code}"),
         ServiceEnd::Signaled { signal } => format!("killed by signal {signal}"),
         ServiceEnd::HealthTimeout { timeout_ms } => format!(
             "not healthy within {}, its process tree was stopped",
-            duration::format(Duration::from_millis(timeout_ms))
+            duration::format(Duration::from_millis(*timeout_ms))
         ),
         ServiceEnd::Stopped => "stopped by procly down".to_owned(),
         ServiceEnd::Idle { timeout_ms } => format!(
             "stopped after {} idle",
-            duration::format(Duration::from_millis(timeout_ms))
+            duration::format(Duration::from_millis(*timeout_ms))
         ),
         ServiceEnd::Failed { restarts } => format!("kept crashing, given up after {restarts} restarts"),
-        ServiceEnd::PortMismatch { leased, actual } => {
-            format!("listened on port {actual} instead of its Lease, port {leased} (Port mismatch)")
-        }
+        ServiceEnd::PortMismatch {
+            leased,
+            actual,
+            services,
+            unattributed,
+        } => match by_service(service, services, unattributed) {
+            Some(by_service) => {
+                format!(
+                    "listened on ports other than the Leases of the Services it covers (Port mismatch): {by_service}"
+                )
+            }
+            None => format!("listened on port {actual} instead of its Lease, port {leased} (Port mismatch)"),
+        },
         ServiceEnd::Lost => "exit code unknown, a previous Daemon started it".to_owned(),
         ServiceEnd::Orphaned { pgid, port: Some(port) } => format!(
             "its leader ended while no Daemon ran, the rest of process group {pgid} held port {port} of its Lease \
@@ -334,5 +383,36 @@ mod tests {
     #[test]
     fn text_says_so_when_there_is_nothing_to_report() {
         assert_eq!(text(&StatusReport::default()), "no jobs\n");
+    }
+
+    fn ports_of(service: &str, leased: u16, seen: &[u16]) -> ServicePorts {
+        ServicePorts {
+            service: service.to_owned(),
+            leased,
+            seen: seen.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_group_mismatch_names_each_service_where_it_was_seen_then_the_ports_no_service_declares() {
+        let services = [
+            ports_of("api", 24004, &[3000, 3002]),
+            ports_of("web", 24005, &[24005]),
+            ports_of("docs", 24006, &[]),
+        ];
+
+        assert_eq!(
+            by_service("dev", &services, &[9229]).as_deref(),
+            Some(
+                "api on ports 3000 and 3002 instead of its Lease, port 24004, web on its Lease, port 24005, docs on \
+                 no port of its own, its Lease is port 24006, and port 9229 that no Service declares"
+            )
+        );
+    }
+
+    #[test]
+    fn the_mismatch_of_a_service_alone_or_of_a_daemon_that_named_none_is_told_by_its_pair() {
+        assert_eq!(by_service("web", &[ports_of("web", 24004, &[3000])], &[]), None);
+        assert_eq!(by_service("web", &[], &[9229]), None);
     }
 }
