@@ -127,9 +127,15 @@ covers = ["web", "api"]
 - Its Derived variables, such as `WEB_URL`.
 - `PROCLY=1` and `PROCLY_SERVICE`, the name of the Group.
 
-The Group is healthy once every covered Service answers its health check on its Lease, as it would on its own. If one never does, `up` stops the tree of the Group and exits with 124. A Port mismatch on any Lease is reported as for a Service. `procly env dev` prints the same variables without starting anything.
+The Group is healthy once every covered Service answers its health check on its Lease, as it would on its own. If one never does, `up` stops the tree of the Group and exits with 124. A Port mismatch on any Lease is reported as for a Service, and names each covered Service with its own Lease and the ports seen for it. A port is tied to a covered Service when it is one of its Leases or its declared port, and a port that is neither for any of them is named apart:
 
-A limit of Groups: Procly cannot tell which covered Service listens on which Lease. The Group runs one command, and a covered Service declares no command, directory or process of its own, so the processes of the tree that listen cannot be attributed to a covered Service. If 2 covered Services listen each on the Lease of the other, for instance because each app reads its port from its own `.env` file where the ports are swapped, the Group is healthy, since every Lease is listened on by its tree, and `up` reports for each covered Service the Lease it was granted, not the port it listens on. Have each app read its port from `PORT_<SERVICE>_<NAME>`, which the Group injects, rather than from a file of its own, and check the URLs `procly up` prints when the declared ports change.
+```text
+procly: service dev listens on ports other than the Leases of the Services it covers (Port mismatch): api on port 3000 instead of its Lease, port 24004, web on port 3001 instead of its Lease, port 24005, its process tree was stopped
+```
+
+`procly env dev` prints the same variables without starting anything.
+
+A limit of Groups: Procly cannot tell which covered Service listens on which Lease. The Group runs one command, and a covered Service declares no command, directory or process of its own, so the processes of the tree that listen cannot be attributed to a covered Service, other than by the port it declares. If 2 covered Services listen each on the Lease of the other, for instance because each app reads its port from its own `.env` file where the ports are swapped, the Group is healthy, since every Lease is listened on by its tree, and `up` reports for each covered Service the Lease it was granted, not the port it listens on. Have each app read its port from `PORT_<SERVICE>_<NAME>`, which the Group injects, rather than from a file of its own, and check the URLs `procly up` prints when the declared ports change.
 
 A Group and the Services it covers never run side by side in one Worktree:
 
@@ -139,6 +145,21 @@ A Group and the Services it covers never run side by side in one Worktree:
 - `procly up dev` forgets the ended rows of the Services it covers, since the Group now stands for them. `procly status` then lists `dev` and no row of `web` or `api`, so that no ended row offers a Restart that would restart the whole Group. The ended rows of the Services it does not cover stay.
 
 `up dev` starts what `dev` needs and what the Services it covers need, but not the covered Services. A need that points to a Service of the same Group is the Group itself, and a Service outside the Group that needs a covered Service starts the Group instead, since a Group never starts over a covered Service that runs alone. A Group refuses `ports`, `env`, and the `health` keys `port`, `path` and `status`, which are the ones of the Services it covers, and `health.timeout` is its own. It does not need a Service it covers, and it covers at least 1 Service, each one a declared Process service that is not itself a Group, and no Service is covered by 2 Groups. The Leases of a covered Service count as used as long as its Group runs, and are dated again when it ends.
+
+### A Group whose apps read their port from a file
+
+An app that reads its port from a file of its own, such as `PORT=3001` in its `.env`, listens on that port in every Worktree. In the Main worktree that is its Lease. In a secondary Worktree the Lease is another port, the Group fails at once with a Port mismatch, and 2 Worktrees running the Group would fight over the same port. Pick one of these:
+
+- Have each app read its Lease from `PORT_<SERVICE>_<NAME>`, which the Group injects, such as `PORT_WEB_HTTP`, and fall back to its own file when the variable is unset. With Next.js, `next dev --port ${PORT_WEB_HTTP:-3001}` in the `dev` script of `web`.
+- When the task runner filters the environment, declare those variables to it. Turborepo in strict mode passes a task only the variables its `turbo.json` lists, under `globalEnv` or the `env` of the task:
+
+  ```json
+  { "globalEnv": ["PORT", "PORT_API_HTTP", "PORT_WEB_HTTP"] }
+  ```
+
+- Or start the Services one by one, `procly up api` then `procly up web`. Each one then gets `PORT` on its own, the variable most dev servers already read.
+
+`procly init` says so above the Group it proposes, and names on stderr the apps whose port it sees written in their `dev` script or in a `.env.example`, see [Proposing a configuration](init.md#the-root-script-of-a-monorepo).
 
 ## `procly up` without arguments
 
@@ -499,6 +520,8 @@ The Service receives its Leases in its environment, after the environment of the
 Procly also sets `PROCLY=1` and `PROCLY_SERVICE`, the name of the Service, so that a script can tell it is supervised and by which entry. Both are set last, after the Derived variables.
 
 Once something answers on the Lease the health check probes, or once the health timeout has passed, Procly reads the TCP ports the process tree of the Service listens on, that is every process of its session: the process group of its leader and those of the tasks it started in groups of their own. A process that left the session with `setsid` is not part of the Service. A Service that an older Daemon started is read through the process group of its leader only. When it listens on none of its Leases and on another port, `up` stops its process tree and exits with 4, a Port mismatch naming the port it listened on.
+
+In a Worktree whose Lease differs from the declared port, Procly also reads those ports while it waits for the health check, at most every 250 ms. As soon as the tree listens on the declared port of the Service, or of a Service its Group covers, and not on the Lease of that Service, `up` and `restart` stop it and exit with 4 at once, rather than at the end of the health timeout: the app read its port from a file of its own, or ignored `PORT`. A port the tree opens early that no Service declares, such as a debugger or an HMR socket, decides nothing. In the Main worktree, where each Lease is its declared port, nothing is read early.
 
 ### What `procly up` prints
 
