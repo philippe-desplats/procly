@@ -301,13 +301,18 @@ pub(crate) const PACKAGE_OPTIONS: [&str; 8] = [
     "--cwd",
 ];
 
+/// The options of [`PACKAGE_OPTIONS`] that take a value, every one but `-w`, which takes none in pnpm.
+pub(crate) const PACKAGE_OPTIONS_WITH_VALUE: [&str; 7] =
+    ["--workspace", "--prefix", "--filter", "-F", "--dir", "-C", "--cwd"];
+
 /// Whether `words` run the dev script of a whole Repository: `pnpm dev`, `npm start`, `turbo run dev`, with no
-/// option narrowing it to one package and a plain script name.
+/// option narrowing it to one package, written `--filter web` or `--filter=web`, and a plain script name.
 pub(crate) fn runs_the_whole_repository(words: &[String]) -> bool {
     let Some((program, rest)) = words.split_first() else {
         return false;
     };
-    if !RUNNERS.contains(&basename(program)) || rest.iter().any(|word| PACKAGE_OPTIONS.contains(&word.as_str())) {
+    let narrows = |word: &String| PACKAGE_OPTIONS.contains(&word.split('=').next().unwrap_or_default());
+    if !RUNNERS.contains(&basename(program)) || rest.iter().any(narrows) {
         return false;
     }
     let positional = positional(rest, &[]);
@@ -423,7 +428,7 @@ fn classify(words: &[String]) -> Option<Kind> {
     }
     match program {
         "npm" | "pnpm" | "yarn" | "bun" | "turbo" => {
-            let positional = positional(rest, &["--workspace", "--prefix", "--filter", "-F", "--dir", "-C"]);
+            let positional = positional(rest, &PACKAGE_OPTIONS_WITH_VALUE);
             let script = match (program, positional.as_slice()) {
                 ("npm", ["start", ..]) => Some("start"),
                 ("npm", [..]) => script_after_run(&positional),
@@ -527,6 +532,49 @@ mod tests {
             "turbo run dev --filter=web",
         ] {
             assert_eq!(kind(command), Some(Kind::DevServer), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_package_options_that_take_a_value_are_all_of_them_but_the_one_that_takes_none() {
+        assert!(
+            PACKAGE_OPTIONS_WITH_VALUE
+                .iter()
+                .all(|option| PACKAGE_OPTIONS.contains(option))
+        );
+        let without_value: Vec<&str> = PACKAGE_OPTIONS
+            .into_iter()
+            .filter(|option| !PACKAGE_OPTIONS_WITH_VALUE.contains(option))
+            .collect();
+        assert_eq!(without_value, ["-w"]);
+    }
+
+    #[test]
+    fn a_dev_server_is_recognized_behind_a_directory_option_written_either_way() {
+        for command in [
+            "bun --cwd apps/web run dev",
+            "bun run --cwd apps/web dev",
+            "bun --cwd=apps/web dev",
+            "yarn --cwd apps/web dev",
+            "yarn --cwd=apps/web dev",
+            "npm --prefix apps/web run dev",
+            "npm --prefix=apps/web start",
+            "pnpm --dir apps/web dev",
+            "pnpm --dir=apps/web dev",
+            "pnpm -C=apps/web dev",
+            "pnpm --filter=web dev",
+            "turbo --cwd apps/web dev",
+            "turbo dev --filter=@acme/web",
+        ] {
+            assert_eq!(kind(command), Some(Kind::DevServer), "{command}");
+        }
+        for command in [
+            "bun --cwd apps/web run build",
+            "yarn --cwd apps/web install",
+            "npm --prefix apps/web test",
+            "pnpm -C=apps/web build",
+        ] {
+            assert_eq!(kind(command), None, "{command}");
         }
     }
 
@@ -799,6 +847,33 @@ mod tests {
         ] {
             assert_eq!(equivalent(command, ""), None, "{command}");
         }
+    }
+
+    #[test]
+    fn an_option_written_with_its_value_after_an_equals_sign_narrows_the_command_to_one_package() {
+        for command in [
+            "turbo dev --filter=@acme/web",
+            "npm run dev --workspace=web",
+            "pnpm --filter=web dev",
+            "bun --cwd=apps/web dev",
+            "pnpm --dir=apps/web dev",
+            "npm --prefix=apps/web start",
+            "pnpm -C=apps/web dev",
+        ] {
+            assert!(!runs_the_whole_repository(&words_of(command)), "{command}");
+        }
+        assert!(runs_the_whole_repository(&words_of("turbo dev")));
+        // Nothing declared starts it, so the agent is left to pick the Service, never sent to the whole Repository.
+        let services = [process("dev", "bun run dev")];
+        assert_eq!(
+            equivalent(
+                &recognize("turbo dev --filter=@acme/web").unwrap(),
+                &services,
+                Some(Path::new("")),
+                root()
+            ),
+            None
+        );
     }
 
     #[test]
