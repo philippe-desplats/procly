@@ -399,7 +399,7 @@ async fn dispatch(
             cwd,
             env,
             gitignore,
-        } => up::up(registry, service, cwd, env, gitignore).await,
+        } => up::up(registry, service, cwd, env, gitignore, peer).await,
         Request::Env { service, cwd } => {
             let registry = Arc::clone(registry);
             // Resolving the Topology runs git, and reading the configuration and the Leases are blocking.

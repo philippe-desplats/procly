@@ -16,7 +16,7 @@ use super::lease::Scope as LeaseScope;
 use super::mismatch::Expectation;
 use super::portless::{self, Wanted};
 use super::service::{Proof, Relation, Service, ServiceSpec, Start};
-use super::{Registry, blocking, foreign, message, read_config, topology_of};
+use super::{Registry, blocking, foreign, message, read_config, requester, topology_of};
 use crate::config::{Config, IsolationMode, ServiceConfig, ServiceKind};
 use crate::driver::{self, Driver};
 use crate::protocol::{Response, ServiceEnd, StartOutcome, UpService};
@@ -136,15 +136,27 @@ impl Scope {
     }
 }
 
+/// Who asked [`reach`] for its Services, and the release gate it runs under.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Caller<'a> {
+    /// The pid of the requesting command, when the kernel tells it: neither it nor any of its ancestors is ever warned
+    /// of as a Foreign process, since it would be told to stop itself or the agent that ran it.
+    pub(super) pid: Option<i32>,
+    /// The admission of a Restart, under which each start and each read of the Leases happens.
+    pub(super) admission: Option<&'a Admission>,
+}
+
 /// Brings up the Services `name` needs, each one healthy before the next starts, then `name`, and answers with
 /// where to reach it. Without `name`, brings up every Service no Group covers. Stops at the first Service that does
-/// not become healthy. `env` is held as the environment of the last `up` of every Service it reaches.
+/// not become healthy. `env` is held as the environment of the last `up` of every Service it reaches. `peer` is the
+/// pid of the requesting command, when the kernel tells it.
 pub(super) async fn up(
     registry: &Arc<Registry>,
     name: Option<String>,
     cwd: PathBuf,
     env: Vec<(String, String)>,
     gitignore: bool,
+    peer: Option<i32>,
 ) -> Response {
     let planned = {
         let name = name.clone();
@@ -164,12 +176,16 @@ pub(super) async fn up(
     for current in &order {
         registry.held.hold(scope.worktree(), current, &env);
     }
-    reach(registry, &scope, name, &order, &env, gitignore, None).await
+    let caller = Caller {
+        pid: peer,
+        admission: None,
+    };
+    reach(registry, &scope, name, &order, &env, gitignore, caller).await
 }
 
 /// Brings up the Services of `order`, the start order of `name`, each one healthy before the next starts, in `env`,
-/// and answers as [`up`] does. With the `admission` of a Restart, each start and each read of the Leases happens under
-/// the release gate of the Worktree, and none once a Worktree release has begun.
+/// and answers as [`up`] does. With the admission of a Restart in `caller`, each start and each read of the Leases
+/// happens under the release gate of the Worktree, and none once a Worktree release has begun.
 pub(super) async fn reach(
     registry: &Arc<Registry>,
     scope: &Scope,
@@ -177,8 +193,9 @@ pub(super) async fn reach(
     order: &[String],
     env: &[(String, String)],
     gitignore: bool,
-    admission: Option<&Admission>,
+    caller: Caller<'_>,
 ) -> Response {
+    let admission = caller.admission;
     let mut reached = Vec::new();
     // One warning is enough for a Portless that does not answer, the next call would fail the same way.
     let mut portless_warned = false;
@@ -229,10 +246,12 @@ pub(super) async fn reach(
             portless_warned = !warnings.is_empty();
         }
         warnings.extend(doubt.map(|doubt| doubt_warning(current, doubt)));
-        if outcome == StartOutcome::Started {
-            warnings.extend(foreign_warnings(registry, scope, current).await);
-        }
         drop(admitted);
+        // Once the release gate is let go: listing the processes takes as long as `lsof` does, which a Worktree release
+        // must never wait on.
+        if outcome == StartOutcome::Started {
+            warnings.extend(foreign_warnings(registry, scope, current, caller.pid).await);
+        }
         // The URL of the Lease the health check probes, among the URLs of every Lease.
         let url = port
             .and_then(|port| ports.iter().find(|&(_, &lease)| lease == port))
@@ -318,17 +337,25 @@ fn doubt_warning(service: &str, port: u16) -> String {
 
 /// What `up` says of each Foreign process listening from the directory of the Process service `name` it started, which
 /// the Service may fail against, as a second dev server of the same app does. Nothing for a Compose service or a
-/// Group, and nothing when the system cannot be read: the warning never fails `up`.
-async fn foreign_warnings(registry: &Arc<Registry>, scope: &Scope, name: &str) -> Vec<String> {
+/// Group, nothing of the requesting command `requested_by` nor of any of its ancestors, and nothing when the system
+/// cannot be read: the warning never fails `up`.
+async fn foreign_warnings(
+    registry: &Arc<Registry>,
+    scope: &Scope,
+    name: &str,
+    requested_by: Option<i32>,
+) -> Vec<String> {
     let (registry, scope, name) = (Arc::clone(registry), scope.clone(), name.to_owned());
-    // Listing the processes runs `lsof`.
-    blocking(START_FAILED, move || Ok(foreign_listening(&registry, &scope, &name)))
-        .await
-        .unwrap_or_default()
+    // Listing the processes runs `lsof` and `ps`.
+    blocking(START_FAILED, move || {
+        Ok(foreign_listening(&registry, &scope, &name, requested_by))
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// As [`foreign_warnings`]. Blocking.
-fn foreign_listening(registry: &Registry, scope: &Scope, name: &str) -> Vec<String> {
+fn foreign_listening(registry: &Registry, scope: &Scope, name: &str, requested_by: Option<i32>) -> Vec<String> {
     let Ok(declared) = scope.declared(name) else {
         return Vec::new();
     };
@@ -340,8 +367,14 @@ fn foreign_listening(registry: &Registry, scope: &Scope, name: &str) -> Vec<Stri
     };
     let directory = scope.worktree().join(directory);
     let directory = topology::canonicalize(&directory).unwrap_or(directory);
-    foreign::listening_from(&directory, &super::status::owned(registry))
+    let listening = foreign::listening_from(&directory, &super::status::owned(registry));
+    if listening.is_empty() {
+        return Vec::new();
+    }
+    let lineage = requested_by.map(requester::lineage).unwrap_or_default();
+    listening
         .iter()
+        .filter(|listener| !lineage.contains(&listener.pid))
         .map(|listener| {
             format!(
                 "foreign process {pid} {command} {ports} listens from the directory {name} runs in, started outside \

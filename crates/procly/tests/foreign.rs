@@ -388,3 +388,89 @@ fn a_service_without_cd_warns_of_a_foreign_process_listening_from_the_root_of_th
     assert!(stdout(&reused).starts_with("web reused"), "{}", stdout(&reused));
     assert!(warnings(&reused).is_empty(), "{}", stderr(&reused));
 }
+
+#[test]
+fn a_foreign_process_that_rewrote_its_title_is_named_by_its_executable_and_nothing_of_the_title_shows() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    std::fs::write(main.join("procly.toml"), web_running("", free_port())).expect("write the config");
+    // The title Puma gives itself, with a word of the command line that must never be shown.
+    let server = StartedOutside::named(&main, "puma 6.4.0 (tcp://127.0.0.1:3000) [myapp] --secret-token=abc");
+
+    let up = procly.procly_in(&main, &["up", "web"]);
+    let status = stdout(&procly.procly_in(&main, &["status"]));
+    let json = procly.procly_in(&main, &["status", "--json"]);
+
+    assert_success(&up);
+    let warned = warnings(&up);
+    assert_eq!(warned.len(), 1, "{}", stderr(&up));
+    assert!(
+        warned[0].contains(&format!(
+            "foreign process {} procly-test-server port {}",
+            server.pid(),
+            server.port
+        )),
+        "{warned:?}"
+    );
+    assert!(
+        status.contains(&format!(
+            "    foreign process {} procly-test-server port {}, started outside Procly\n",
+            server.pid(),
+            server.port
+        )),
+        "{status}"
+    );
+    assert_success(&json);
+    let document: serde_json::Value = serde_json::from_str(&stdout(&json)).expect("the status is JSON");
+    let foreign = &document["repositories"][0]["worktrees"][0]["foreign"][0];
+    assert_eq!(foreign["pid"], server.pid(), "{document}");
+    assert_eq!(foreign["command"], "procly-test-server", "{document}");
+    for shown in [stderr(&up), status, stdout(&json)] {
+        for word in ["secret-token", "myapp", "tcp://"] {
+            assert!(!shown.contains(word), "{word} is shown in {shown}");
+        }
+    }
+}
+
+#[test]
+fn up_never_warns_of_the_process_running_it_and_still_warns_of_an_unrelated_one() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    std::fs::write(main.join("procly.toml"), web_running("", free_port())).expect("write the config");
+    let unrelated = StartedOutside::start(&main);
+    // A coding agent listening from the root of the Worktree, as a CLI with an IDE bridge does, runs `procly up`.
+    let procly_up = procly.command();
+    let mut agent = Command::new(test_server());
+    for (key, value) in procly_up.get_envs() {
+        match value {
+            Some(value) => agent.env(key, value),
+            None => agent.env_remove(key),
+        };
+    }
+    let agent = agent
+        .current_dir(&main)
+        .args(["--port", &free_port().to_string(), "--then"])
+        .arg(procly_up.get_program())
+        .args(["up", "web"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the test server starts");
+    let agent_pid = agent.id();
+
+    // The test server ends once `procly up` has.
+    let output = agent.wait_with_output().expect("procly up runs under the test server");
+
+    assert_success(&output);
+    let warned = warnings(&output);
+    assert_eq!(warned.len(), 1, "{}", stderr(&output));
+    assert!(
+        warned[0].contains(&format!("foreign process {} ", unrelated.pid())),
+        "{warned:?}"
+    );
+    assert!(
+        !stderr(&output).contains(&format!("foreign process {agent_pid} ")),
+        "{}",
+        stderr(&output)
+    );
+}

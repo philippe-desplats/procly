@@ -57,10 +57,10 @@ pub(super) fn listeners(port: Option<u16>) -> Option<Vec<Listener>> {
     Some(listeners)
 }
 
-/// The name of the program of each of the processes `pids` whose first argument can be read: the file name of their
-/// `argv[0]`, which is the name a command was run by, such as `claude` for a CLI installed as a file named after its
-/// version, where `lsof` prints the name of the executable file. Only that word is read, never the rest of the command
-/// line, which can carry secrets. Blocking.
+/// The name of the program of each of the processes `pids` whose first argument can be read and holds no whitespace:
+/// the file name of their `argv[0]`, which is the name a command was run by, such as `claude` for a CLI installed as a
+/// file named after its version, where `lsof` prints the name of the executable file. Only that word is read, never
+/// the rest of the command line, which can carry secrets. Blocking.
 fn program_names(pids: &[i32]) -> BTreeMap<i32, String> {
     first_arguments(pids)
         .into_iter()
@@ -68,8 +68,15 @@ fn program_names(pids: &[i32]) -> BTreeMap<i32, String> {
         .collect()
 }
 
-/// The file name of `argument`, the first argument of a process, `None` when it has none.
+/// The file name of `argument`, the first argument of a process, `None` when it has none or holds whitespace.
+///
+/// A first argument with whitespace is a title the process gave itself, as Puma's `puma 6.4.0 (tcp://127.0.0.1:3000)
+/// [myapp]` or a `$0` set in Perl or Ruby, and it may hold the rest of its command line: the caller names the process
+/// by its executable file instead.
 fn program_name(argument: &str) -> Option<&str> {
+    if argument.contains(char::is_whitespace) {
+        return None;
+    }
     argument
         .trim_end_matches('/')
         .rsplit('/')
@@ -148,7 +155,8 @@ fn widen_command(pid: i32, comm: &str) -> String {
 /// `comm` when it is whole, else the file name of `executable` or of `first_argument` that it is the start of.
 ///
 /// A name that `comm` is not the start of is another program, such as the interpreter of a script, or a name the
-/// process gave itself, and it never replaces `comm`. A deleted executable shows as `/path/name (deleted)`.
+/// process gave itself, and it never replaces `comm`, nor does a first argument with whitespace. A deleted executable
+/// shows as `/path/name (deleted)`.
 #[cfg(any(target_os = "linux", test))]
 fn full_command(comm: &str, executable: Option<&str>, first_argument: Option<&str>) -> String {
     if comm.len() < COMM_LIMIT {
@@ -156,7 +164,8 @@ fn full_command(comm: &str, executable: Option<&str>, first_argument: Option<&st
     }
     [
         executable.map(|path| path.strip_suffix(" (deleted)").unwrap_or(path)),
-        first_argument,
+        // A first argument with whitespace is a title that may hold the rest of the command line.
+        first_argument.filter(|argument| !argument.contains(char::is_whitespace)),
     ]
     .into_iter()
     .flatten()
@@ -292,13 +301,23 @@ mod tests {
     #[test]
     fn the_program_of_a_process_is_the_file_name_of_its_first_argument() {
         assert_eq!(program_name("/Users/me/.local/bin/claude"), Some("claude"));
-        assert_eq!(program_name("next-server (v15.1.0)"), Some("next-server (v15.1.0)"));
-        assert_eq!(
-            program_name("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-            Some("Google Chrome")
-        );
         assert_eq!(program_name("node"), Some("node"));
         assert_eq!(program_name(""), None);
+    }
+
+    #[test]
+    fn a_first_argument_with_whitespace_names_no_program_since_it_is_a_title_that_may_hold_the_command_line() {
+        assert_eq!(
+            program_name("puma 6.4.0 (tcp://127.0.0.1:3000) [myapp] --secret-token=abc"),
+            None
+        );
+        assert_eq!(program_name("next-server (v15.1.0)"), None);
+        assert_eq!(program_name("worker\t/srv/app"), None);
+        // `lsof` names it as well from its executable file.
+        assert_eq!(
+            program_name("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            None
+        );
     }
 
     #[test]
@@ -350,6 +369,11 @@ mod tests {
             "postgres"
         );
         assert_eq!(full_command("procly-test-ser", None, None), "procly-test-ser");
+        // A first argument with whitespace is a title that may hold the rest of the command line.
+        assert_eq!(
+            full_command("procly-test-ser", None, Some("procly-test-server --secret-token=abc")),
+            "procly-test-ser"
+        );
         // The interpreter of a script is another program than the one `comm` names.
         assert_eq!(
             full_command("long-script-name", Some("/usr/bin/python3"), Some("python3")),
