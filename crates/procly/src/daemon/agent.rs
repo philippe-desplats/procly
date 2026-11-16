@@ -162,7 +162,7 @@ fn declaration_order(worktree: &Path) -> Vec<String> {
         let Ok(document) = toml::de::DeTable::parse(&text) else {
             continue;
         };
-        let Some(toml::de::DeValue::Table(services)) = document.get_ref().get("services").map(|value| value.get_ref())
+        let Some(toml::de::DeValue::Table(services)) = document.get_ref().get("services").map(toml::Spanned::get_ref)
         else {
             continue;
         };

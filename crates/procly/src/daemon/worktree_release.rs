@@ -50,7 +50,6 @@ pub(super) async fn run(
             .context("the request could not be read")?;
     }
     eprintln!("worktree release of {} requested by {who}", worktree.display());
-    let output_owner = topology.clone();
 
     // Before anything is stopped, so that a Restart under way starts nothing the release would miss, and a Restart
     // after it has no environment to start with.
@@ -107,45 +106,45 @@ pub(super) async fn run(
     registry.services.remove_ended_in(&worktree);
 
     // Once the Services are gone, so that only a container still running keeps a Lease of the Worktree.
-    let (leases, kept_leases, logical_resources, warning) = {
+    let report = {
         let registry = Arc::clone(&registry);
-        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let running = registry.running();
-            let (leases, kept) = registry.leases.release_worktree(
-                &topology.git_common_dir,
-                &topology.worktree.path,
-                branch.as_deref(),
-                &running,
-            )?;
-            // The aliases of the Leases just released go with them.
-            let warning = registry.portless.prune(&registry.leases);
-            // The Leases are released whatever the configuration says, a broken one only hides the resources.
-            let resources = logical_resources(&registry, &topology).unwrap_or_else(|error| {
-                eprintln!(
-                    "cannot name the Logical resources of {}, they are kept: {error:#}",
-                    topology.worktree.path.display()
-                );
-                Vec::new()
-            });
-            Ok((leases, kept, resources, warning))
-        })
-        .await
-        .context("the leases could not be released")??
-    };
-    report.leases = leases;
-    report.kept_leases = kept_leases;
-    report.logical_resources = logical_resources;
-    report.warnings.extend(warning);
-    // Last, once nothing the release stopped runs, so that no output file of the Worktree is written any more.
-    let (deleted, warning) = {
-        let registry = Arc::clone(&registry);
-        tokio::task::spawn_blocking(move || delete_output_directory(&registry, &output_owner))
+        tokio::task::spawn_blocking(move || release_leases(&registry, &topology, branch.as_deref(), report))
             .await
-            .context("the output directory could not be deleted")?
+            .context("the leases could not be released")??
     };
-    report.deleted_output_directory = deleted;
-    report.warnings.extend(warning);
     log(&report);
+    Ok(report)
+}
+
+/// Releases the Leases of the Worktree of `topology` once its Services are gone, names its Logical resources, then
+/// deletes its output directory, and returns `report` with what it did. Blocking, it writes the state directory.
+fn release_leases(
+    registry: &Registry,
+    topology: &Topology,
+    branch: Option<&str>,
+    mut report: ReleaseReport,
+) -> anyhow::Result<ReleaseReport> {
+    let running = registry.running();
+    let (leases, kept) =
+        registry
+            .leases
+            .release_worktree(&topology.git_common_dir, &topology.worktree.path, branch, &running)?;
+    report.leases = leases;
+    report.kept_leases = kept;
+    // The aliases of the Leases just released go with them.
+    report.warnings.extend(registry.portless.prune(&registry.leases));
+    // The Leases are released whatever the configuration says, a broken one only hides the resources.
+    report.logical_resources = logical_resources(registry, topology).unwrap_or_else(|error| {
+        eprintln!(
+            "cannot name the Logical resources of {}, they are kept: {error:#}",
+            topology.worktree.path.display()
+        );
+        Vec::new()
+    });
+    // Last, once nothing the release stopped runs, so that no output file of the Worktree is written any more.
+    let (deleted, not_deleted) = delete_output_directory(registry, topology);
+    report.deleted_output_directory = deleted;
+    report.warnings.extend(not_deleted);
     Ok(report)
 }
 
