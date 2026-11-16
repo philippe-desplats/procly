@@ -128,7 +128,10 @@ fn a_service_procly_started_is_no_foreign_process() {
 
     let status = stdout(&procly.procly_in(&main, &["status"]));
 
-    assert!(status.contains(&format!("service web healthy http://localhost:{port} port {port}")), "{status}");
+    assert!(
+        status.contains(&format!("service web healthy http://localhost:{port} port {port}")),
+        "{status}"
+    );
     assert!(!status.contains("foreign"), "{status}");
 }
 
@@ -231,7 +234,10 @@ fn a_service_stopped_by_down_is_no_foreign_process_in_the_next_status() {
     assert_success(&procly.procly_in(&main, &["up", "web"]));
     // What the Daemon found lists the listener of the Service, which it ran while it looked.
     let status = stdout(&procly.procly_in(&main, &["status"]));
-    assert!(status.contains(&format!("service web healthy http://localhost:{port} port {port}")), "{status}");
+    assert!(
+        status.contains(&format!("service web healthy http://localhost:{port} port {port}")),
+        "{status}"
+    );
 
     assert_success(&procly.procly_in(&main, &["down", "web"]));
 

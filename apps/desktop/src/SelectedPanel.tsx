@@ -368,7 +368,12 @@ function Facts({ selected, at }: { selected: Followed; at: number }) {
               <dt>Port</dt>
               <dd className="port-line">
                 <PortPill port={selected.service.port} />
-                {selected.service.state === "ended" ? null : <OpenLocalhost port={selected.service.port} url={leaseUrl(selected.service, selected.service.port)} />}
+                {selected.service.state === "ended" ? null : (
+                  <OpenLocalhost
+                    port={selected.service.port}
+                    url={leaseUrl(selected.service, selected.service.port)}
+                  />
+                )}
               </dd>
             </>
           )}

@@ -96,7 +96,9 @@ impl OpenError {
         match self {
             Self::NoEditor => AppFailureKind::NoEditor,
             Self::Missing { .. } => AppFailureKind::Missing,
-            Self::Launch { .. } | Self::Browser { .. } | Self::NoPort | Self::NotLocalhost { .. } => AppFailureKind::Launch,
+            Self::Launch { .. } | Self::Browser { .. } | Self::NoPort | Self::NotLocalhost { .. } => {
+                AppFailureKind::Launch
+            }
             Self::Reveal { .. } => AppFailureKind::Reveal,
             Self::Task(_) => AppFailureKind::Task,
         }

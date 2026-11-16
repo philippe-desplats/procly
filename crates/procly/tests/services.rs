@@ -703,11 +703,15 @@ fn status_gives_each_running_service_the_url_of_its_lease_with_the_scheme_of_its
     let json = common::json_succeeded(&procly.procly_in(&main, &["status", "--json"]));
 
     assert!(
-        text.contains(&format!("    service api healthy http://localhost:{plain} port {plain}\n")),
+        text.contains(&format!(
+            "    service api healthy http://localhost:{plain} port {plain}\n"
+        )),
         "{text}"
     );
     assert!(
-        text.contains(&format!("    service web healthy https://localhost:{secure} port {secure}\n")),
+        text.contains(&format!(
+            "    service web healthy https://localhost:{secure} port {secure}\n"
+        )),
         "{text}"
     );
     let services = &json["repositories"][0]["worktrees"][0]["services"];

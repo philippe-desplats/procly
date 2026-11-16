@@ -94,11 +94,7 @@ fn reach(service: &ServiceStatus) -> String {
     let Some(port) = service.port else {
         return String::new();
     };
-    let probed = |url: &&String| {
-        url.rsplit_once(':')
-            .and_then(|(_, lease)| lease.parse::<u16>().ok())
-            == Some(port)
-    };
+    let probed = |url: &&String| url.rsplit_once(':').and_then(|(_, lease)| lease.parse::<u16>().ok()) == Some(port);
     let mut reach = match service.urls.values().find(probed) {
         Some(url) => format!(" {url} port {port}"),
         None => format!(" port {port}"),

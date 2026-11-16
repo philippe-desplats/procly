@@ -527,7 +527,11 @@ mod tests {
                 "node ace serve --port {ports.http} --cert ./https/cert.pem",
             ),
         ] {
-            assert_eq!(bound(script).map(|(_, script)| script).as_deref(), Some(replaced), "{script}");
+            assert_eq!(
+                bound(script).map(|(_, script)| script).as_deref(),
+                Some(replaced),
+                "{script}"
+            );
         }
     }
 
