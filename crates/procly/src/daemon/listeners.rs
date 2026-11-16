@@ -42,16 +42,96 @@ pub(super) fn listeners(port: Option<u16>) -> Option<Vec<Listener>> {
     let address = port.map_or_else(|| "-iTCP".to_owned(), |port| format!("-iTCP:{port}"));
     // `+c 0` prints the whole command name instead of its first 9 characters.
     let output = lsof(&["+c", "0", "-nP", &address, "-sTCP:LISTEN", "-Fpgcn"])?;
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(unused_mut, reason = "only the Linux build widens the names")
-    )]
     let mut listeners = parse_listeners(&String::from_utf8_lossy(&output.stdout));
-    #[cfg(target_os = "linux")]
+    let pids: Vec<i32> = listeners.iter().map(|listener| listener.pid).collect();
+    let mut programs = program_names(&pids);
     for listener in &mut listeners {
-        listener.command = widen_command(listener.pid, &listener.command);
+        match programs.remove(&listener.pid) {
+            Some(program) => listener.command = program,
+            #[cfg(target_os = "linux")]
+            None => listener.command = widen_command(listener.pid, &listener.command),
+            #[cfg(not(target_os = "linux"))]
+            None => {}
+        }
     }
     Some(listeners)
+}
+
+/// The name of the program of each of the processes `pids` whose first argument can be read and holds no whitespace:
+/// the file name of their `argv[0]`, which is the name a command was run by, such as `claude` for a CLI installed as a
+/// file named after its version, where `lsof` prints the name of the executable file. Only that word is read, never
+/// the rest of the command line, which can carry secrets. Blocking.
+fn program_names(pids: &[i32]) -> BTreeMap<i32, String> {
+    first_arguments(pids)
+        .into_iter()
+        .filter_map(|(pid, argument)| Some((pid, program_name(&argument)?.to_owned())))
+        .collect()
+}
+
+/// The file name of `argument`, the first argument of a process, `None` when it has none or holds whitespace.
+///
+/// A first argument with whitespace is a title the process gave itself, as Puma's `puma 6.4.0 (tcp://127.0.0.1:3000)
+/// [myapp]` or a `$0` set in Perl or Ruby, and it may hold the rest of its command line: the caller names the process
+/// by its executable file instead.
+fn program_name(argument: &str) -> Option<&str> {
+    if argument.contains(char::is_whitespace) {
+        return None;
+    }
+    argument
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+}
+
+/// The first argument of each of the processes `pids` that `/proc` shows, the part of its command line before the
+/// first NUL.
+#[cfg(target_os = "linux")]
+fn first_arguments(pids: &[i32]) -> BTreeMap<i32, String> {
+    pids.iter()
+        .filter_map(|&pid| {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            let first = cmdline.split(|byte| *byte == 0).next()?;
+            Some((pid, String::from_utf8_lossy(first).into_owned()))
+        })
+        .collect()
+}
+
+/// The first argument of each of the processes `pids` that `ps` shows, which on macOS prints it whole as the `comm`
+/// of a process, spaces included, and the name of its executable file when it cannot read it.
+#[cfg(not(target_os = "linux"))]
+fn first_arguments(pids: &[i32]) -> BTreeMap<i32, String> {
+    if pids.is_empty() {
+        return BTreeMap::new();
+    }
+    let pids: Vec<String> = pids.iter().map(i32::to_string).collect();
+    let mut command = Command::new("ps");
+    // `-ww` so that the column is never cut at the width of a terminal.
+    command
+        .args(["-ww", "-o", "pid=,comm=", "-p", &pids.join(",")])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    // `ps` exits with 1 when one of the processes has ended since, and still prints the others.
+    let Ok(Some(output)) = bounded_output(&mut command) else {
+        return BTreeMap::new();
+    };
+    parse_first_arguments(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The lines of `ps -o pid=,comm=`, a pid then the first argument of its process.
+#[cfg(any(not(target_os = "linux"), test))]
+fn parse_first_arguments(output: &str) -> BTreeMap<i32, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (pid, argument) = line.trim_start().split_once(char::is_whitespace)?;
+            let argument = argument.trim_start();
+            if argument.is_empty() {
+                return None;
+            }
+            Some((pid.parse().ok()?, argument.to_owned()))
+        })
+        .collect()
 }
 
 /// The kernel keeps 15 characters of the name of a command, in `comm`, which is all `lsof` reads on Linux.
@@ -75,7 +155,8 @@ fn widen_command(pid: i32, comm: &str) -> String {
 /// `comm` when it is whole, else the file name of `executable` or of `first_argument` that it is the start of.
 ///
 /// A name that `comm` is not the start of is another program, such as the interpreter of a script, or a name the
-/// process gave itself, and it never replaces `comm`. A deleted executable shows as `/path/name (deleted)`.
+/// process gave itself, and it never replaces `comm`, nor does a first argument with whitespace. A deleted executable
+/// shows as `/path/name (deleted)`.
 #[cfg(any(target_os = "linux", test))]
 fn full_command(comm: &str, executable: Option<&str>, first_argument: Option<&str>) -> String {
     if comm.len() < COMM_LIMIT {
@@ -83,7 +164,8 @@ fn full_command(comm: &str, executable: Option<&str>, first_argument: Option<&st
     }
     [
         executable.map(|path| path.strip_suffix(" (deleted)").unwrap_or(path)),
-        first_argument,
+        // A first argument with whitespace is a title that may hold the rest of the command line.
+        first_argument.filter(|argument| !argument.contains(char::is_whitespace)),
     ]
     .into_iter()
     .flatten()
@@ -217,6 +299,44 @@ mod tests {
     }
 
     #[test]
+    fn the_program_of_a_process_is_the_file_name_of_its_first_argument() {
+        assert_eq!(program_name("/Users/me/.local/bin/claude"), Some("claude"));
+        assert_eq!(program_name("node"), Some("node"));
+        assert_eq!(program_name(""), None);
+    }
+
+    #[test]
+    fn a_first_argument_with_whitespace_names_no_program_since_it_is_a_title_that_may_hold_the_command_line() {
+        assert_eq!(
+            program_name("puma 6.4.0 (tcp://127.0.0.1:3000) [myapp] --secret-token=abc"),
+            None
+        );
+        assert_eq!(program_name("next-server (v15.1.0)"), None);
+        assert_eq!(program_name("worker\t/srv/app"), None);
+        // `lsof` names it as well from its executable file.
+        assert_eq!(
+            program_name("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            None
+        );
+    }
+
+    #[test]
+    fn reads_the_first_argument_of_each_process_ps_lists_spaces_included() {
+        let output = "  4242 /Users/me/.local/bin/claude\n 4243 /Applications/Google Chrome.app/Contents/MacOS/Google \
+                      Chrome\n4244 \n";
+        assert_eq!(
+            parse_first_arguments(output),
+            BTreeMap::from([
+                (4242, "/Users/me/.local/bin/claude".to_owned()),
+                (
+                    4243,
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_owned()
+                ),
+            ])
+        );
+    }
+
+    #[test]
     fn widens_a_command_the_kernel_cut_to_15_characters_from_its_executable() {
         let cut = "procly-test-ser";
         assert_eq!(
@@ -249,6 +369,11 @@ mod tests {
             "postgres"
         );
         assert_eq!(full_command("procly-test-ser", None, None), "procly-test-ser");
+        // A first argument with whitespace is a title that may hold the rest of the command line.
+        assert_eq!(
+            full_command("procly-test-ser", None, Some("procly-test-server --secret-token=abc")),
+            "procly-test-ser"
+        );
         // The interpreter of a script is another program than the one `comm` names.
         assert_eq!(
             full_command("long-script-name", Some("/usr/bin/python3"), Some("python3")),

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::held::Admission;
-use super::up::{self, Scope};
+use super::up::{self, Caller, Scope};
 use super::{Registry, blocking, down, failure, requester};
 use crate::protocol::Response;
 
@@ -65,7 +65,10 @@ pub(super) async fn run(registry: &Arc<Registry>, service: String, cwd: PathBuf,
         &order,
         &env,
         false,
-        Some(&admission),
+        Caller {
+            pid: peer,
+            admission: Some(&admission),
+        },
     )
     .await;
     // What started before the release began is the release's to stop, the Restart did not bring the Service back.

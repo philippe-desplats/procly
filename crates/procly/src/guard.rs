@@ -228,6 +228,21 @@ fn place_of(recognized: &Recognized, directory: Option<&Path>, root: &Path) -> O
     }
 }
 
+/// The directory of a Service whose command is `run`, relative to `root`, the root of its Worktree: where the `cd` or
+/// `pushd` commands at the head of `run` lead, placed as the Guard places a command, and the root itself when `run`
+/// starts with none. `None` when they lead out of the Worktree or to a place only the home directory tells.
+pub(crate) fn service_directory(run: &str, root: &Path) -> Option<PathBuf> {
+    let mut place = PathBuf::new();
+    for segment in segments(run) {
+        let words = strip_launchers(&segment.words);
+        if !matches!(words.first().map(|word| basename(word)), Some("cd" | "pushd")) {
+            break;
+        }
+        place = moved(Some(&place), words.get(1).map_or("~", String::as_str), root)?;
+    }
+    (!place.starts_with("..")).then_some(place)
+}
+
 /// Where `path` leads from `directory`, both relative to `root`, the root of the Worktree. An absolute `path` is placed
 /// with [`within`], and when that leaves it outside `root`, again on the canonical paths of both, so that a symlink to
 /// the Worktree and the `/tmp` that is `/private/tmp` lead into it. `None` for an absolute path that is not inside
@@ -1092,6 +1107,25 @@ mod tests {
             "cd /p/work/acme/web/../apps/web && bun dev",
         ] {
             assert_eq!(equivalent(command, Some(Path::new(""))), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn the_directory_of_a_service_is_where_the_cd_at_the_head_of_its_run_leads_and_else_the_root() {
+        for (run, directory) in [
+            ("bun run dev", Some("")),
+            ("cd apps/web && bun run dev", Some("apps/web")),
+            ("cd ./apps/web/ && bun run dev", Some("apps/web")),
+            ("cd apps && cd web; next dev", Some("apps/web")),
+            ("pushd /p/work/acme/web/apps/api && bun dev", Some("apps/api")),
+            // Only a `cd` at the head moves it.
+            ("bun install && cd apps/web && bun dev", Some("")),
+            ("cd /srv/app && bun dev", None),
+            ("cd .. && bun dev", None),
+            ("cd && bun dev", None),
+            ("cd ~/app && bun dev", None),
+        ] {
+            assert_eq!(service_directory(run, root()), directory.map(PathBuf::from), "{run}");
         }
     }
 

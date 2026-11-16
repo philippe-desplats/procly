@@ -7,10 +7,14 @@
 //!
 //! `--also <PORT>`, which may be repeated, listens on that port too, and before the main one, as a debugger or an HMR
 //! socket would. `--after <MS>` waits that many milliseconds once those are listened on, before the main port is.
+//!
+//! `--then <PROGRAM> [ARGS]...`, which takes the rest of the command line, runs that program once the main port is
+//! listened on, as a child sharing its standard streams, keeps answering while it runs, and exits with its code, as a
+//! coding agent that listens and runs `procly` does.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::Duration;
 
 /// What the command line asks for.
@@ -18,6 +22,8 @@ struct Options {
     port: u16,
     also: Vec<u16>,
     after: Duration,
+    /// The program to run once listening, and its arguments.
+    then: Option<(String, Vec<String>)>,
 }
 
 fn main() -> ExitCode {
@@ -42,6 +48,20 @@ fn main() -> ExitCode {
     let Some(listener) = listen(options.port) else {
         return ExitCode::from(2);
     };
+    if let Some((program, args)) = options.then {
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                answer(stream);
+            }
+        });
+        return match Command::new(&program).args(args).status() {
+            Ok(status) => ExitCode::from(status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(1)),
+            Err(error) => {
+                eprintln!("procly-test-server: cannot run {program}: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
 
     for stream in listener.incoming().flatten() {
         if let Some(code) = answer(stream) {
@@ -67,16 +87,22 @@ fn listen(port: u16) -> Option<TcpListener> {
 }
 
 fn options() -> Result<Options, String> {
-    const USAGE: &str = "usage: procly-test-server [--port <PORT>] [--also <PORT>]... [--after <MS>]";
+    const USAGE: &str =
+        "usage: procly-test-server [--port <PORT>] [--also <PORT>]... [--after <MS>] [--then <PROGRAM> [ARGS]...]";
     let number = |flag: &str, value: Option<String>| -> Result<String, String> {
         value.ok_or_else(|| format!("{flag} needs a value, {USAGE}"))
     };
     let mut port = None;
     let mut also = Vec::new();
     let mut after = Duration::ZERO;
+    let mut then = None;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
+            "--then" => {
+                let program = number("--then", args.next())?;
+                then = Some((program, args.by_ref().collect()));
+            }
             "--port" => port = Some(number("--port", args.next())?),
             "--also" => also.push(parse_port(&number("--also", args.next())?)?),
             "--after" => {
@@ -94,6 +120,7 @@ fn options() -> Result<Options, String> {
         port: parse_port(&port)?,
         also,
         after,
+        then,
     })
 }
 

@@ -3,6 +3,7 @@ mod common;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use common::{Procly, assert_success, eventually, free_port, git_repository, stderr, stdout, test_server};
 use serde_json::Value;
@@ -79,7 +80,7 @@ fn a_restart_replays_the_environment_of_the_last_up_on_the_same_lease_with_a_new
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        format!("web started http://localhost:{port} port {port}\n")
+        format!("web restarted http://localhost:{port} port {port}\n")
     );
     let after = service_status(&procly, &main, "web");
     assert_eq!(after["port"], before["port"], "{after}");
@@ -116,6 +117,7 @@ fn restart_json_is_the_document_of_an_up_of_one_service() {
     let services = document["services"].as_array().expect("the Services reached");
     assert_eq!(services.len(), 1, "{document}");
     assert_eq!(services[0]["service"], "web", "{document}");
+    // `restarted` is the text of `restart` only, the document keeps the outcome of `up`.
     assert_eq!(services[0]["outcome"], "started", "{document}");
 }
 
@@ -152,7 +154,9 @@ fn a_restart_starts_the_needs_that_do_not_run_and_leaves_the_running_ones_alone(
         .lines()
         .map(|line| line.split(' ').take(2).collect::<Vec<_>>().join(" "))
         .collect();
+    // Only the Service restarted reads `restarted`, what it needs keeps the words of `up`.
     assert_eq!(needs, ["db reused", "api started"], "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("web restarted"), "{}", stdout(&output));
     assert_eq!(lines(&order), ["db", "api", "web", "api", "web"]);
     assert_eq!(service_status(&procly, &main, "db")["started_at"], db_started);
 }
@@ -221,7 +225,7 @@ fn a_service_a_group_covers_is_restarted_through_its_group() {
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("dev restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start", "start"]);
 }
 
@@ -255,7 +259,7 @@ fn a_covered_service_that_ended_while_its_group_does_not_run_is_restarted_throug
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("dev restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start"]);
 }
 
@@ -270,7 +274,7 @@ fn a_covered_service_that_runs_on_its_own_is_restarted_alone_since_its_group_can
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("web started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("web restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), Vec::<String>::new());
 }
 
@@ -297,7 +301,7 @@ fn a_service_that_never_became_healthy_can_be_restarted_once_its_cause_is_fixed(
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("web started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("web restarted"), "{}", stdout(&output));
 }
 
 #[test]
@@ -327,8 +331,91 @@ fn a_group_a_previous_daemon_started_is_restarted_with_the_environment_of_an_up_
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("dev restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start", "start"]);
+}
+
+/// How long the `lsof` of [`slow_lsof`] blocks once armed, longer than a Worktree release ever takes here.
+const SLOW_LSOF: Duration = Duration::from_secs(6);
+
+/// A directory holding an `lsof` that runs the real one, except that the listing of every listening process, which the
+/// Foreign process warning of `up` makes, first blocks for [`SLOW_LSOF`] once the file `armed` of the directory exists.
+/// It renames that file `blocking` as it starts blocking, and blocks only once.
+fn slow_lsof(parent: &Path) -> std::path::PathBuf {
+    let dir = parent.join("slow-lsof");
+    std::fs::create_dir_all(&dir).expect("create the directory of the fake lsof");
+    let script = dir.join("lsof");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncase \" $* \" in\n  *\" +c 0 -nP -iTCP -sTCP:LISTEN \"*)\n    \
+             if mv '{dir}/armed' '{dir}/blocking' 2>/dev/null; then sleep {secs}; fi ;;\nesac\n\
+             for lsof in /usr/sbin/lsof /usr/bin/lsof; do\n  \
+             if [ -x \"$lsof\" ]; then exec \"$lsof\" \"$@\"; fi\ndone\nexit 1\n",
+            dir = dir.display(),
+            secs = SLOW_LSOF.as_secs(),
+        ),
+    )
+    .expect("write the fake lsof");
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("make the fake lsof executable");
+    dir
+}
+
+#[test]
+fn the_foreign_process_check_of_a_restart_never_holds_back_a_worktree_release() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.web]\nrun = '{} --port {{ports.http}}'\nports = {{ http = {} }}\n",
+            test_server().display(),
+            free_port(),
+        ),
+    );
+    let lsof = slow_lsof(procly.scratch());
+    // The Daemon this `up` starts finds the fake `lsof` first on the PATH it inherits.
+    let path = format!("{}:{}", lsof.display(), std::env::var("PATH").unwrap_or_default());
+    let procly_with_path = |args: &[&str]| {
+        let mut command = procly.command();
+        command.current_dir(&main).env("PATH", &path).args(args);
+        command
+    };
+    assert_success(
+        &procly_with_path(&["up", "web"])
+            .output()
+            .expect("the procly binary runs"),
+    );
+    std::fs::write(lsof.join("armed"), "").expect("arm the fake lsof");
+    let restart = procly_with_path(&["restart", "web"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the procly binary runs");
+    // The Restart has started web again and is checking for Foreign processes.
+    eventually("the check of the restart to list the processes", || {
+        lsof.join("blocking").exists()
+    });
+
+    let released_at = Instant::now();
+    let release = procly_with_path(&["worktree", "release"])
+        .output()
+        .expect("the procly binary runs");
+    let took = released_at.elapsed();
+
+    assert_success(&release);
+    assert!(
+        took < SLOW_LSOF / 2,
+        "the release took {took:?}, held back by the lsof of the restart"
+    );
+    let restart = restart.wait_with_output().expect("the restart ends");
+    assert!(
+        stderr(&restart).contains("was released while web was restarting"),
+        "{}",
+        stderr(&restart)
+    );
 }
 
 #[test]
