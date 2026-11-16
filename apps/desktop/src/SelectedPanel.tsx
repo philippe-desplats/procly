@@ -315,14 +315,17 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
 }
 
 /**
- * The address of the Lease on `port` of `service`: the URL `Status` gives it, with the scheme of its Port name such as
- * `https://localhost:<port>` for a Port named `https`, else `http://localhost:<port>`, for a port of no known scheme
- * and for a Daemon older than the `urls` of `Status`.
+ * The address of the Lease on `port` of `service`: the URL `Status` gives it when a browser opens its scheme, such as
+ * `https://localhost:<port>` for a Port named `https`, else `http://localhost:<port>`, for a port of no known scheme,
+ * for a scheme a browser does not open such as `smtp` or `postgresql`, and for a Daemon older than the `urls` of
+ * `Status`.
  */
 function leaseUrl(service: ServiceStatus, port: number): string {
   const address = `localhost:${String(port)}`;
   const urls = Object.values(service.urls ?? {});
-  return urls.find((url) => url.endsWith(`://${address}`)) ?? `http://${address}`;
+  return (
+    urls.find((url) => url === `https://${address}` || url === `http://${address}`) ?? `http://${address}`
+  );
 }
 
 /** Opens the Lease of a Service in the browser at `url`. A failure of Rust to open it stays under the button. */

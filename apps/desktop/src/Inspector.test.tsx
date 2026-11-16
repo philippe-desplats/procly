@@ -557,6 +557,18 @@ describe("the inspector of a Service", () => {
     });
   });
 
+  it("opens http when the probed Port has a scheme a browser does not open, such as smtp", async () => {
+    const rust = new Rust(answered(withUrls({ smtp: "smtp://localhost:18731" })));
+    await open(rust);
+    fireEvent.click(screen.getByRole("button", { name: /^api/ }));
+
+    fireEvent.click(await within(inspector()).findByRole("button", { name: "Open localhost:18731" }));
+
+    await waitFor(() => {
+      expect(rust.last("open_localhost")?.args).toEqual({ url: "http://localhost:18731" });
+    });
+  });
+
   it("draws the port as a pill with Open localhost beside it on the same line, and no Browser row", async () => {
     const rust = new Rust(answered(status));
     await open(rust);
