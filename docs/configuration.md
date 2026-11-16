@@ -102,6 +102,10 @@ If a need does not become healthy, `up` stops there and exits with the code of t
 
 `needs` is about starting. `procly down web` leaves what `web` needs running, and a restart of `web` does not start its needs again.
 
+### The directory of a Service
+
+The directory of a Process service is where the `cd` or `pushd` commands at the head of its `run` lead, read as the Guard reads them: a relative path from the root of the Worktree, or an absolute path inside the Worktree, symbolic links resolved. A `run` that starts with no `cd`, such as `bun run dev`, runs from the root of the Worktree. `run = "cd apps/web && bun run dev"` runs from `apps/web`. When `procly up` or `procly restart` starts the Service and a Foreign process listens from that directory, the answer warns of it, see [Foreign processes](daemon.md#foreign-processes). A `cd` that leads out of the Worktree, or to the home directory, gives the Service no directory and no warning. A Compose service and a Group have none. There is no key to declare it.
+
 ## Groups
 
 A Group is a Process service that covers other Services. It runs one command, usually the monorepo-wide dev command, as one unit, so a team can adopt Procly without splitting that command into one per app. The Services it covers stay declared with their own Port names, Derived variables and health settings, which is where the Group takes its Leases and variables from.
@@ -546,6 +550,8 @@ The scheme of a Lease is the first of these that applies:
 - `http` for the Lease the health check of a Process service probes, and for the Lease of an HTTP health check, one that sets `health.path` or `health.status`.
 
 Up to v0.1, `procly up` printed an `http` URL and the port of the health check alone, whatever that port spoke. Since v0.2 the line names every Lease. Since the CLI output is public interface (ADR 0009), the change is recorded here: a Process service with a single Port name prints the same line as before unless that name is `https`, `smtp`, `redis` or `amqp`, in which case its URL has that scheme instead of `http`, a Service with several Port names gets one more `, <lease>` for each of the others, and a Compose service whose port has no known scheme, such as a MySQL, prints `mysql started db port 3306` where it printed `mysql started http://localhost:3306 port 3306`. A script that reads the port of the health check reads the number before the first comma. With `--json`, `url` and `urls` carry the same URLs, see [JSON output](json.md#up).
+
+`procly restart` prints the line of `procly up` for the Service it restarted, with `restarted` where `up` says `started`, such as `web restarted http://localhost:3000 port 3000`, a Shared or Logical Compose service that was reached again keeping `reused`. Up to v0.5 it printed `started`, and the change is recorded here since the CLI output is public interface (ADR 0009). The lines of the Services it needs keep `reused` or `started`, and `procly restart --json` keeps an `outcome` of `started`, see [JSON output](json.md#restart).
 
 `procly status` gives a running Service the same URLs, by the same rule. Its line shows the URL of the Lease its health check probes where it showed the port alone, then the URL of each other Lease whose scheme is known: `service web healthy https://localhost:3000 port 3000` where it printed `service web healthy port 3000` up to v0.5. A Lease of no known scheme keeps the line as it was. With `--json`, the Service carries them under `urls`, see [JSON output](json.md#status).
 
