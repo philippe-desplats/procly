@@ -679,6 +679,58 @@ fn wait_for_file(path: &Path) {
 }
 
 #[test]
+fn an_output_directory_that_cannot_be_deleted_is_named_in_a_warning_and_in_the_log_of_the_daemon() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    write(&main, "procly.toml", &web_declaring(free_port()));
+    port_of(&procly.procly_in(&main, &["up", "web"]));
+    let directory = output_directory_of(&procly, &main);
+    // A directory the release cannot empty, inside the output directory the test's own state directory holds.
+    let locked = directory.join("locked");
+    std::fs::create_dir(&locked).expect("create the locked directory");
+    std::fs::write(locked.join("kept.log"), "kept\n").expect("write the kept file");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("lock the directory");
+
+    let json = procly.procly_in(&main, &["worktree", "release", "--json"]);
+    // Released again, the directory is still there and the deletion fails again, this time in text.
+    let text = procly.procly_in(&main, &["worktree", "release"]);
+    let log = procly.daemon_log();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("unlock the directory");
+
+    let document = json_succeeded(&json);
+    assert_eq!(
+        document["deleted_output_directory"],
+        serde_json::Value::Null,
+        "{document}"
+    );
+    let named = format!("output directory {} ", directory.display());
+    let warning = document["warnings"]
+        .as_array()
+        .expect("a list of warnings")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .find(|warning| warning.starts_with(&named))
+        .unwrap_or_else(|| panic!("no warning names {}: {document}", directory.display()))
+        .to_owned();
+    assert!(warning.contains("Permission denied"), "{warning}");
+    assert_success(&text);
+    assert!(
+        common::stderr(&text).contains(&named),
+        "the warning is not on stderr: {}",
+        common::stderr(&text)
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.contains(&named) && line.contains("Permission denied")),
+        "the Daemon did not log the failure: {log}"
+    );
+    assert!(locked.join("kept.log").exists());
+}
+
+#[test]
 fn a_worktree_with_something_still_running_after_the_release_keeps_its_output_directory() {
     let procly = Procly::new();
     procly.narrow_range();

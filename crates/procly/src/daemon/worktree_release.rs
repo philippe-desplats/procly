@@ -235,8 +235,9 @@ fn output_directory(registry: &Registry, topology: &Topology) -> Option<PathBuf>
 }
 
 /// Deletes the output directory of the Worktree of `topology` once nothing of the Worktree runs any more, and returns
-/// it, with a warning when it could not be deleted. A Service, a Job or a container of the Worktree that still runs
-/// keeps it, as does a directory already gone. Blocking, it deletes from the state directory.
+/// it. When the deletion fails, possibly once part of it is gone, it returns no directory and a warning naming it and
+/// the error, which the Daemon logs too. A Service, a Job or a container of the Worktree that still runs keeps it, as
+/// does a directory already gone. Blocking, it deletes from the state directory.
 fn delete_output_directory(registry: &Registry, topology: &Topology) -> (Option<PathBuf>, Option<String>) {
     let worktree = &topology.worktree.path;
     let runs =
@@ -244,6 +245,7 @@ fn delete_output_directory(registry: &Registry, topology: &Topology) -> (Option<
     let Some(directory) = output_directory(registry, topology).filter(|_| !runs) else {
         return (None, None);
     };
+    let before = entries_in(&directory);
     match worktree_dir::remove(&directory) {
         Ok(()) => {
             eprintln!(
@@ -253,14 +255,23 @@ fn delete_output_directory(registry: &Registry, topology: &Topology) -> (Option<
             );
             (Some(directory), None)
         }
-        Err(error) => (
-            None,
-            Some(format!(
-                "cannot delete the output directory {}: {error}",
-                directory.display()
-            )),
-        ),
+        Err(error) => {
+            // Files may already be gone, so the warning says whether the logs of the Worktree are partly lost.
+            let how = if entries_in(&directory) < before {
+                "was only partly deleted"
+            } else {
+                "was not deleted"
+            };
+            let warning = format!("output directory {} {how}: {error}", directory.display());
+            eprintln!("worktree release of {}: {warning}", worktree.display());
+            (None, Some(warning))
+        }
     }
+}
+
+/// How many entries the directory at `path` holds, 0 when it cannot be read. Blocking.
+fn entries_in(path: &Path) -> usize {
+    std::fs::read_dir(path).map_or(0, Iterator::count)
 }
 
 /// The Logical resources the configuration gives the Worktree, which a Worktree release keeps: the named ones of each
