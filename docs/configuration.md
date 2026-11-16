@@ -547,6 +547,25 @@ The scheme of a Lease is the first of these that applies:
 
 Up to v0.1, `procly up` printed an `http` URL and the port of the health check alone, whatever that port spoke. Since v0.2 the line names every Lease. Since the CLI output is public interface (ADR 0009), the change is recorded here: a Process service with a single Port name prints the same line as before unless that name is `https`, `smtp`, `redis` or `amqp`, in which case its URL has that scheme instead of `http`, a Service with several Port names gets one more `, <lease>` for each of the others, and a Compose service whose port has no known scheme, such as a MySQL, prints `mysql started db port 3306` where it printed `mysql started http://localhost:3306 port 3306`. A script that reads the port of the health check reads the number before the first comma. With `--json`, `url` and `urls` carry the same URLs, see [JSON output](json.md#up).
 
+`procly status` gives a running Service the same URLs, by the same rule. Its line shows the URL of the Lease its health check probes where it showed the port alone, then the URL of each other Lease whose scheme is known: `service web healthy https://localhost:3000 port 3000` where it printed `service web healthy port 3000` up to v0.5. A Lease of no known scheme keeps the line as it was. With `--json`, the Service carries them under `urls`, see [JSON output](json.md#status).
+
+### Services that serve HTTPS
+
+A dev server that serves HTTPS only, such as `next dev --experimental-https` or an AdonisJS server with its own certificates, declares its port with the Port name `https`:
+
+```toml
+[services.web]
+run = "next dev --experimental-https --port {ports.https}"
+ports = { https = 3000 }
+```
+
+- `procly up`, `procly status`, their JSON, the MCP tools and the app give it an `https://localhost:<n>` URL, and the app opens that URL. A port named `http` answers nothing to an HTTPS server, which is why the name matters.
+- The variables follow the Port name: the Service gets `PORT_HTTPS`, and a Group that covers it gets `PORT_<SERVICE>_HTTPS`, such as `PORT_WEB_HTTPS`.
+- The health check stays the TCP connection. The HTTP check sends its `GET` in plain text, so a Service whose health check probes a Port named `https` and sets `health.path` or `health.status` is refused when the configuration loads, before anything starts, see [`[services.<name>.health]`](#servicesnamehealth).
+- A Port named `https` gets no Portless alias, since only an `http://` URL is aliased, see [Portless aliases](#portless-aliases).
+
+`procly init` proposes the Port name `https` for a `dev` script that passes `--experimental-https` or `--https`, see [Proposing a configuration](init.md#ports-named-in-a-script).
+
 ### Portless aliases
 
 With `portless = true` in `[settings]`, `procly up` runs `portless alias <name> <port>` for each Lease it prints as an `http://` URL, so that you reach the Service by a name that does not change from one Worktree to the next. The setting is off by default, and nothing calls `portless` while it is.
@@ -641,6 +660,8 @@ The rest of the file is kept byte for byte, and writing the block again changes 
 Health is a TCP connection to the Lease of the Service, on `127.0.0.1` or `::1`, optionally followed by an HTTP `GET`.
 
 The request always goes to the Lease, whatever a URL names. A URL gives the `Host` header of the request, its host and port as written, for a dev server that answers only on a host name of its own, and the path. Without a URL, the `Host` header is `localhost` with the Lease. Only `http://` is accepted, any other scheme, or a URL without a host, fails before anything starts.
+
+The HTTP check does not speak TLS. A health check that probes a Port named `https` and sets `path` or `status` fails when the configuration loads, naming the Service and the Port: drop `path` and `status` to keep the TCP check, see [Services that serve HTTPS](#services-that-serve-https).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
