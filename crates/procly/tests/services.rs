@@ -626,3 +626,99 @@ fn the_output_file_of_a_flooding_service_stays_bounded_and_is_removed_once_it_is
     assert_success(&procly.procly_in(&main, &["down", "web"]));
     assert_eq!(output_files(&procly), Vec::<u64>::new());
 }
+
+/// A `procly.toml` declaring one Service `name` that runs the test server on `port`, with the Port name `port_name`.
+fn named_port_service(name: &str, port_name: &str, port: u16) -> String {
+    format!(
+        "[services.{name}]\nrun = \"{} --port {port}\"\nports = {{ {port_name} = {port} }}\n",
+        test_server().display()
+    )
+}
+
+#[test]
+fn an_http_health_check_on_a_port_named_https_is_refused_when_the_configuration_loads() {
+    for health in ["path = '/health'\n", "status = 204\n"] {
+        let procly = Procly::new();
+        let main = git_repository(procly.scratch(), "app");
+        let port = free_port();
+        let config = format!(
+            "{}[services.web.health]\n{health}",
+            named_port_service("web", "https", port)
+        );
+        write(&main, "procly.toml", &config);
+
+        let output = procly.procly_in(&main, &["up", "web"]);
+
+        assert_eq!(output.status.code(), Some(125), "{health}: {}", common::stderr(&output));
+        let stderr = common::stderr(&output);
+        assert!(
+            stderr.contains(
+                "the health check of service web probes its Port https over HTTP, which does not speak TLS: drop \
+                 health.path and health.status to keep the TCP check"
+            ),
+            "{health}: {stderr}"
+        );
+        assert!(
+            TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "{health}: nothing started"
+        );
+    }
+}
+
+#[test]
+fn a_port_named_https_without_an_http_check_becomes_healthy_on_the_tcp_check() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let config = format!(
+        "{}[services.web.health]\ntimeout = '5s'\n",
+        named_port_service("web", "https", port)
+    );
+    write(&main, "procly.toml", &config);
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("web started https://localhost:{port} port {port}\n")
+    );
+}
+
+#[test]
+fn status_gives_each_running_service_the_url_of_its_lease_with_the_scheme_of_its_port_name() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (secure, plain) = (free_port(), free_port());
+    let config = format!(
+        "{}{}",
+        named_port_service("api", "http", plain),
+        named_port_service("web", "https", secure)
+    );
+    write(&main, "procly.toml", &config);
+    assert_success(&procly.procly_in(&main, &["up", "api"]));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+
+    let text = stdout(&procly.procly_in(&main, &["status"]));
+    let json = common::json_succeeded(&procly.procly_in(&main, &["status", "--json"]));
+
+    assert!(
+        text.contains(&format!("    service api healthy http://localhost:{plain} port {plain}\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("    service web healthy https://localhost:{secure} port {secure}\n")),
+        "{text}"
+    );
+    let services = &json["repositories"][0]["worktrees"][0]["services"];
+    assert_eq!(
+        services[0]["urls"],
+        serde_json::json!({ "http": format!("http://localhost:{plain}") }),
+        "{json}"
+    );
+    assert_eq!(
+        services[1]["urls"],
+        serde_json::json!({ "https": format!("https://localhost:{secure}") }),
+        "{json}"
+    );
+}
