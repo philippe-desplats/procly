@@ -142,6 +142,21 @@ fn docker_up_starts_the_service_through_the_unmodified_compose_file_on_its_lease
 }
 
 #[test]
+fn docker_status_gives_no_url_to_a_compose_service_whose_port_has_no_known_scheme() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = fixture("");
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+
+    let text = stdout(&fixture.procly.procly_in(&fixture.main, &["status"]));
+    let json = json_succeeded(&fixture.procly.procly_in(&fixture.main, &["status", "--json"]));
+
+    assert!(!text.contains("://"), "{text}");
+    assert!(!json.to_string().contains("\"urls\""), "{json}");
+}
+
+#[test]
 fn docker_2_worktrees_share_one_container_on_one_port() {
     let Some(_docker) = require_docker() else {
         return;

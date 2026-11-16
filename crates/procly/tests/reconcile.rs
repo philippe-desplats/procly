@@ -274,7 +274,7 @@ fn the_status_after_a_daemon_crash_tells_which_service_was_reattached_and_which_
         format!(
             "repository {git}\n  worktree app (main) {main} on main\n\
              \x20   service api ended: exit code unknown, a previous Daemon started it\n\
-             \x20   service web healthy port {web}, re-attached after a restart of the Daemon\n\
+             \x20   service web healthy http://localhost:{web} port {web}, re-attached after a restart of the Daemon\n\
              \x20   no jobs\n",
             git = main.join(".git").display(),
             main = main.display()

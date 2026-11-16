@@ -399,6 +399,8 @@ impl Attention {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use procly_client::protocol::{RepositoryStatus, ServiceStatus, Worktree, WorktreeStatus};
 
     use super::*;
@@ -427,6 +429,7 @@ mod tests {
             started_at,
             restartable: false,
             stale_leases: Vec::new(),
+            urls: BTreeMap::new(),
             state: ServiceState::Ended { end },
         }
     }
@@ -533,6 +536,7 @@ mod tests {
                 started_at: 1,
                 restartable: false,
                 stale_leases: Vec::new(),
+                urls: BTreeMap::new(),
                 state,
             });
         }

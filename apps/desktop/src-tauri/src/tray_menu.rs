@@ -400,6 +400,7 @@ pub(crate) fn action(id: &str) -> Option<Action> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use chrono::FixedOffset;
@@ -429,6 +430,7 @@ mod tests {
             started_at: 1,
             restartable: true,
             stale_leases: Vec::new(),
+            urls: BTreeMap::new(),
             state,
         }
     }
