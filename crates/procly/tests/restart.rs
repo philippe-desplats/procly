@@ -79,7 +79,7 @@ fn a_restart_replays_the_environment_of_the_last_up_on_the_same_lease_with_a_new
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        format!("web started http://localhost:{port} port {port}\n")
+        format!("web restarted http://localhost:{port} port {port}\n")
     );
     let after = service_status(&procly, &main, "web");
     assert_eq!(after["port"], before["port"], "{after}");
@@ -116,6 +116,7 @@ fn restart_json_is_the_document_of_an_up_of_one_service() {
     let services = document["services"].as_array().expect("the Services reached");
     assert_eq!(services.len(), 1, "{document}");
     assert_eq!(services[0]["service"], "web", "{document}");
+    // `restarted` is the text of `restart` only, the document keeps the outcome of `up`.
     assert_eq!(services[0]["outcome"], "started", "{document}");
 }
 
@@ -152,7 +153,9 @@ fn a_restart_starts_the_needs_that_do_not_run_and_leaves_the_running_ones_alone(
         .lines()
         .map(|line| line.split(' ').take(2).collect::<Vec<_>>().join(" "))
         .collect();
+    // Only the Service restarted reads `restarted`, what it needs keeps the words of `up`.
     assert_eq!(needs, ["db reused", "api started"], "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("web restarted"), "{}", stdout(&output));
     assert_eq!(lines(&order), ["db", "api", "web", "api", "web"]);
     assert_eq!(service_status(&procly, &main, "db")["started_at"], db_started);
 }
@@ -221,7 +224,7 @@ fn a_service_a_group_covers_is_restarted_through_its_group() {
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("dev restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start", "start"]);
 }
 
@@ -255,7 +258,7 @@ fn a_covered_service_that_ended_while_its_group_does_not_run_is_restarted_throug
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("dev restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start"]);
 }
 
@@ -270,7 +273,7 @@ fn a_covered_service_that_runs_on_its_own_is_restarted_alone_since_its_group_can
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("web started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("web restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), Vec::<String>::new());
 }
 
@@ -297,7 +300,7 @@ fn a_service_that_never_became_healthy_can_be_restarted_once_its_cause_is_fixed(
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("web started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("web restarted"), "{}", stdout(&output));
 }
 
 #[test]
@@ -327,7 +330,7 @@ fn a_group_a_previous_daemon_started_is_restarted_with_the_environment_of_an_up_
     let output = procly.procly_in(&main, &["restart", "web"]);
 
     assert_success(&output);
-    assert!(stdout(&output).starts_with("dev started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("dev restarted"), "{}", stdout(&output));
     assert_eq!(lines(&starts), ["start", "start"]);
 }
 

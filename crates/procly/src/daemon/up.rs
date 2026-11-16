@@ -16,12 +16,12 @@ use super::lease::Scope as LeaseScope;
 use super::mismatch::Expectation;
 use super::portless::{self, Wanted};
 use super::service::{Proof, Relation, Service, ServiceSpec, Start};
-use super::{Registry, blocking, message, read_config, topology_of};
+use super::{Registry, blocking, foreign, message, read_config, topology_of};
 use crate::config::{Config, IsolationMode, ServiceConfig, ServiceKind};
 use crate::driver::{self, Driver};
-use crate::ports;
 use crate::protocol::{Response, ServiceEnd, StartOutcome, UpService};
-use crate::topology::Topology;
+use crate::topology::{self, Topology};
+use crate::{guard, ports, status};
 
 /// What `failed` says when a blocking step of `up` could not run to its end.
 const START_FAILED: &str = "the service could not be started";
@@ -229,6 +229,9 @@ pub(super) async fn reach(
             portless_warned = !warnings.is_empty();
         }
         warnings.extend(doubt.map(|doubt| doubt_warning(current, doubt)));
+        if outcome == StartOutcome::Started {
+            warnings.extend(foreign_warnings(registry, scope, current).await);
+        }
         drop(admitted);
         // The URL of the Lease the health check probes, among the URLs of every Lease.
         let url = port
@@ -311,6 +314,44 @@ fn doubt_warning(service: &str, port: u16) -> String {
         "the Daemon cannot list the processes, so it cannot tell that {service} is what listens on port {port}: it kept \
          the service as it was after a restart of the Daemon, and the process that answers may be another"
     )
+}
+
+/// What `up` says of each Foreign process listening from the directory of the Process service `name` it started, which
+/// the Service may fail against, as a second dev server of the same app does. Nothing for a Compose service or a
+/// Group, and nothing when the system cannot be read: the warning never fails `up`.
+async fn foreign_warnings(registry: &Arc<Registry>, scope: &Scope, name: &str) -> Vec<String> {
+    let (registry, scope, name) = (Arc::clone(registry), scope.clone(), name.to_owned());
+    // Listing the processes runs `lsof`.
+    blocking(START_FAILED, move || Ok(foreign_listening(&registry, &scope, &name)))
+        .await
+        .unwrap_or_default()
+}
+
+/// As [`foreign_warnings`]. Blocking.
+fn foreign_listening(registry: &Registry, scope: &Scope, name: &str) -> Vec<String> {
+    let Ok(declared) = scope.declared(name) else {
+        return Vec::new();
+    };
+    let Ok(ServiceKind::Process { run }) = declared.kind(name) else {
+        return Vec::new();
+    };
+    let Some(directory) = guard::service_directory(run, scope.worktree()) else {
+        return Vec::new();
+    };
+    let directory = scope.worktree().join(directory);
+    let directory = topology::canonicalize(&directory).unwrap_or(directory);
+    foreign::listening_from(&directory, &super::status::owned(registry))
+        .iter()
+        .map(|listener| {
+            format!(
+                "foreign process {pid} {command} {ports} listens from the directory {name} runs in, started outside \
+                 Procly: {name} may fail against it, stop it with `kill {pid}` or see `procly status`",
+                pid = listener.pid,
+                command = listener.command,
+                ports = status::ports_text(&listener.ports),
+            )
+        })
+        .collect()
 }
 
 /// The variables Procly injects into the Service `name` of the Worktree holding `cwd`. Blocking.

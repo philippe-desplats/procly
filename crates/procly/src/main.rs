@@ -36,8 +36,8 @@ use procly_client::{protocol, state_dir};
 
 use crate::protocol::{
     BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
-    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared, Stopped, UpService,
-    Written,
+    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared, StartOutcome,
+    Stopped, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -724,7 +724,8 @@ fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<
                 urls,
                 warnings,
             };
-            up_reached(&requested, &needs, json)
+            let restart = matches!(request, Request::Restart { .. });
+            up_reached(&requested, &needs, restart, json)
         }
         Response::UpAll { services } => up_all(&services, json),
         Response::Unhealthy {
@@ -752,8 +753,9 @@ fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<
     }
 }
 
-/// Prints the Service `up` was asked for, healthy, after the `needs` it brought up first.
-fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow::Result<ExitCode> {
+/// Prints the Service `up` was asked for, healthy, after the `needs` it brought up first. The text of a `restart` says
+/// that the Service asked for was `restarted`, its document keeps the outcome of `up`.
+fn up_reached(requested: &UpService, needs: &[UpService], restart: bool, json: bool) -> anyhow::Result<ExitCode> {
     // With `--json` the document carries the warnings, an agent that calls the MCP tool never reads stderr.
     if json {
         let services = needs
@@ -769,7 +771,11 @@ fn up_reached(requested: &UpService, needs: &[UpService], json: bool) -> anyhow:
     for need in needs {
         eprintln!("{} (needed by {})", reached_line(need), requested.service);
     }
-    println!("{}", reached_line(requested));
+    if restart {
+        println!("{}", restarted_line(requested));
+    } else {
+        println!("{}", reached_line(requested));
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -966,10 +972,23 @@ fn warn_all<'a>(warnings: impl IntoIterator<Item = &'a String>) {
 /// Where to reach a Service that is up: its name, `started` or `reused` and the Group it runs in when it is covered
 /// by one, then each of its Leases, by its URL when its scheme is known and by its Port name otherwise.
 fn reached_line(up: &UpService) -> String {
+    line_with_outcome(up, up.outcome.as_str())
+}
+
+/// As [`reached_line`], for the Service a `restart` was asked for, which reads `restarted` once it was started over.
+fn restarted_line(up: &UpService) -> String {
+    match up.outcome {
+        StartOutcome::Started => line_with_outcome(up, "restarted"),
+        StartOutcome::Reused => reached_line(up),
+    }
+}
+
+/// As [`reached_line`], with `outcome` as the word that tells how the Service turned out.
+fn line_with_outcome(up: &UpService, outcome: &str) -> String {
     let service = &up.service;
     let outcome = match &up.via {
-        Some(group) => format!("{} (via {group})", up.outcome.as_str()),
-        None => up.outcome.as_str().to_owned(),
+        Some(group) => format!("{outcome} (via {group})"),
+        None => outcome.to_owned(),
     };
     // The Lease the health check probes first, then the others by Port name.
     let (health, others): (Vec<_>, Vec<_>) = up.ports.iter().partition(|&(_, &port)| Some(port) == up.port);

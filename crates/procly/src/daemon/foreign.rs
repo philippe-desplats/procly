@@ -258,6 +258,31 @@ impl Sighting {
     }
 }
 
+/// The Foreign processes listening on TCP whose working directory is `directory`, read from the system now, with
+/// `lsof`, rather than from a [`Sighting`]. `directory` has its symbolic links resolved. What Procly runs, in `owned`,
+/// and the Daemon itself are never Foreign processes. Empty when `lsof` cannot run. Blocking.
+pub(super) fn listening_from(directory: &Path, owned: &Owned) -> Vec<listeners::Listener> {
+    let daemon = i32::try_from(std::process::id()).unwrap_or_default();
+    let daemon_group = process_group::own_group().as_raw();
+    let listening: Vec<_> = listeners::listeners(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|listener| {
+            listener.pid != daemon && listener.pgid != daemon_group && !owned.contains_group(listener.pgid)
+        })
+        .collect();
+    let pids: Vec<i32> = listening.iter().map(|listener| listener.pid).collect();
+    let directories = listeners::working_directories(&pids);
+    listening
+        .into_iter()
+        .filter(|listener| {
+            directories
+                .get(&listener.pid)
+                .is_some_and(|working| canonical(working) == directory)
+        })
+        .collect()
+}
+
 /// Whether something accepts connections on `port` of the loopback, IPv4 or IPv6. Unlike a bind, a connection
 /// left in `TIME_WAIT` by a process that has ended does not count.
 fn answers(port: u16) -> bool {

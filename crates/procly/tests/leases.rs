@@ -720,7 +720,7 @@ fn restart_of_a_service_whose_2_port_names_were_swapped_while_it_ran_moves_both_
     assert_success(&restarted);
     assert_eq!(
         stdout(&restarted),
-        format!("web started http://localhost:{second} port {second}, admin port {first}\n")
+        format!("web restarted http://localhost:{second} port {second}, admin port {first}\n")
     );
 }
 

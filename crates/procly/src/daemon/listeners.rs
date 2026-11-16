@@ -42,16 +42,89 @@ pub(super) fn listeners(port: Option<u16>) -> Option<Vec<Listener>> {
     let address = port.map_or_else(|| "-iTCP".to_owned(), |port| format!("-iTCP:{port}"));
     // `+c 0` prints the whole command name instead of its first 9 characters.
     let output = lsof(&["+c", "0", "-nP", &address, "-sTCP:LISTEN", "-Fpgcn"])?;
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(unused_mut, reason = "only the Linux build widens the names")
-    )]
     let mut listeners = parse_listeners(&String::from_utf8_lossy(&output.stdout));
-    #[cfg(target_os = "linux")]
+    let pids: Vec<i32> = listeners.iter().map(|listener| listener.pid).collect();
+    let mut programs = program_names(&pids);
     for listener in &mut listeners {
-        listener.command = widen_command(listener.pid, &listener.command);
+        match programs.remove(&listener.pid) {
+            Some(program) => listener.command = program,
+            #[cfg(target_os = "linux")]
+            None => listener.command = widen_command(listener.pid, &listener.command),
+            #[cfg(not(target_os = "linux"))]
+            None => {}
+        }
     }
     Some(listeners)
+}
+
+/// The name of the program of each of the processes `pids` whose first argument can be read: the file name of their
+/// `argv[0]`, which is the name a command was run by, such as `claude` for a CLI installed as a file named after its
+/// version, where `lsof` prints the name of the executable file. Only that word is read, never the rest of the command
+/// line, which can carry secrets. Blocking.
+fn program_names(pids: &[i32]) -> BTreeMap<i32, String> {
+    first_arguments(pids)
+        .into_iter()
+        .filter_map(|(pid, argument)| Some((pid, program_name(&argument)?.to_owned())))
+        .collect()
+}
+
+/// The file name of `argument`, the first argument of a process, `None` when it has none.
+fn program_name(argument: &str) -> Option<&str> {
+    argument
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+}
+
+/// The first argument of each of the processes `pids` that `/proc` shows, the part of its command line before the
+/// first NUL.
+#[cfg(target_os = "linux")]
+fn first_arguments(pids: &[i32]) -> BTreeMap<i32, String> {
+    pids.iter()
+        .filter_map(|&pid| {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            let first = cmdline.split(|byte| *byte == 0).next()?;
+            Some((pid, String::from_utf8_lossy(first).into_owned()))
+        })
+        .collect()
+}
+
+/// The first argument of each of the processes `pids` that `ps` shows, which on macOS prints it whole as the `comm`
+/// of a process, spaces included, and the name of its executable file when it cannot read it.
+#[cfg(not(target_os = "linux"))]
+fn first_arguments(pids: &[i32]) -> BTreeMap<i32, String> {
+    if pids.is_empty() {
+        return BTreeMap::new();
+    }
+    let pids: Vec<String> = pids.iter().map(i32::to_string).collect();
+    let mut command = Command::new("ps");
+    // `-ww` so that the column is never cut at the width of a terminal.
+    command
+        .args(["-ww", "-o", "pid=,comm=", "-p", &pids.join(",")])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    // `ps` exits with 1 when one of the processes has ended since, and still prints the others.
+    let Ok(Some(output)) = bounded_output(&mut command) else {
+        return BTreeMap::new();
+    };
+    parse_first_arguments(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The lines of `ps -o pid=,comm=`, a pid then the first argument of its process.
+#[cfg(any(not(target_os = "linux"), test))]
+fn parse_first_arguments(output: &str) -> BTreeMap<i32, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (pid, argument) = line.trim_start().split_once(char::is_whitespace)?;
+            let argument = argument.trim_start();
+            if argument.is_empty() {
+                return None;
+            }
+            Some((pid.parse().ok()?, argument.to_owned()))
+        })
+        .collect()
 }
 
 /// The kernel keeps 15 characters of the name of a command, in `comm`, which is all `lsof` reads on Linux.
@@ -214,6 +287,34 @@ mod tests {
         let output = "p4242\nf3\nn127.0.0.1:5173\nf4\nn[::1]:5173\nf5\nn*:24000\np4243\nf6\nn*:9229\n";
         assert_eq!(ports(output), [5173, 9229, 24000]);
         assert_eq!(ports(""), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn the_program_of_a_process_is_the_file_name_of_its_first_argument() {
+        assert_eq!(program_name("/Users/me/.local/bin/claude"), Some("claude"));
+        assert_eq!(program_name("next-server (v15.1.0)"), Some("next-server (v15.1.0)"));
+        assert_eq!(
+            program_name("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Some("Google Chrome")
+        );
+        assert_eq!(program_name("node"), Some("node"));
+        assert_eq!(program_name(""), None);
+    }
+
+    #[test]
+    fn reads_the_first_argument_of_each_process_ps_lists_spaces_included() {
+        let output = "  4242 /Users/me/.local/bin/claude\n 4243 /Applications/Google Chrome.app/Contents/MacOS/Google \
+                      Chrome\n4244 \n";
+        assert_eq!(
+            parse_first_arguments(output),
+            BTreeMap::from([
+                (4242, "/Users/me/.local/bin/claude".to_owned()),
+                (
+                    4243,
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_owned()
+                ),
+            ])
+        );
     }
 
     #[test]

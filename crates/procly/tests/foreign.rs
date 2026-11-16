@@ -3,11 +3,14 @@
 mod common;
 
 use std::net::TcpStream;
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{Procly, assert_success, eventually, free_port, git_repository, git_worktree_add, stdout, test_server};
+use common::{
+    Procly, assert_success, eventually, free_port, git_repository, git_worktree_add, stderr, stdout, test_server,
+};
 
 /// How long after a Foreign process starts or stops listening `procly status` shows it, as `docs/daemon.md` states.
 const SHOWN_WITHIN: Duration = Duration::from_secs(2);
@@ -24,7 +27,19 @@ impl StartedOutside {
     }
 
     fn on(dir: &Path, port: u16) -> Self {
-        let child = Command::new(test_server())
+        Self::spawn(Command::new(test_server()), dir, port)
+    }
+
+    /// Started with `program` as its `argv[0]`, as a CLI installed as a file named after its version and run through a
+    /// symbolic link of its own name is: the executable file name is not the name it was run by.
+    fn named(dir: &Path, program: &str) -> Self {
+        let mut command = Command::new(test_server());
+        command.arg0(program);
+        Self::spawn(command, dir, free_port())
+    }
+
+    fn spawn(mut command: Command, dir: &Path, port: u16) -> Self {
+        let child = command
             .args(["--port", &port.to_string()])
             .current_dir(dir)
             .stdout(Stdio::null())
@@ -243,4 +258,133 @@ fn a_service_stopped_by_down_is_no_foreign_process_in_the_next_status() {
 
     let status = stdout(&procly.procly_in(&main, &["status"]));
     assert!(!status.contains("foreign"), "{status}");
+}
+
+#[test]
+fn a_foreign_process_is_named_by_its_argv_0_and_not_by_its_executable_file_name() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let server = StartedOutside::named(&main, "my-server");
+
+    let status = stdout(&procly.procly_in(&main, &["status"]));
+    let output = procly.procly_in(&main, &["status", "--json"]);
+
+    assert!(
+        status.contains(&format!(
+            "    foreign process {} my-server port {}, started outside Procly\n",
+            server.pid(),
+            server.port
+        )),
+        "{status}"
+    );
+    assert_success(&output);
+    let json: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("the status is JSON");
+    let foreign = &json["repositories"][0]["worktrees"][0]["foreign"][0];
+    assert_eq!(foreign["pid"], server.pid(), "{json}");
+    assert_eq!(foreign["command"], "my-server", "{json}");
+}
+
+/// The declaration of a Service `web` that runs `prefix` then the test server on its Lease `port`.
+fn web_running(prefix: &str, port: u16) -> String {
+    format!(
+        "[services.web]\nrun = '{prefix}{} --port {{ports.http}}'\nports = {{ http = {port} }}\n",
+        test_server().display()
+    )
+}
+
+/// The directory `relative` of the Worktree `main`, created.
+fn directory(main: &Path, relative: &str) -> std::path::PathBuf {
+    let directory = main.join(relative);
+    std::fs::create_dir_all(&directory).expect("create the directory");
+    directory
+}
+
+/// The `procly: warning:` lines of what `up` printed on stderr.
+fn warnings(output: &std::process::Output) -> Vec<String> {
+    stderr(output)
+        .lines()
+        .filter(|line| line.starts_with("procly: warning: "))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn up_warns_of_a_foreign_process_listening_from_the_directory_the_service_cds_into_and_starts_it_anyway() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let web = directory(&main, "apps/web");
+    let port = free_port();
+    std::fs::write(main.join("procly.toml"), web_running("cd apps/web && ", port)).expect("write the config");
+    let server = StartedOutside::start(&web);
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("web started"), "{}", stdout(&output));
+    let warned = warnings(&output);
+    assert_eq!(warned.len(), 1, "{}", stderr(&output));
+    let warning = &warned[0];
+    for told in [
+        format!("foreign process {} procly-test-server", server.pid()),
+        format!("port {}", server.port),
+        format!("`kill {}`", server.pid()),
+        "`procly status`".to_owned(),
+    ] {
+        assert!(warning.contains(&told), "{told} is not in {warning}");
+    }
+
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    let output = procly.procly_in(&main, &["up", "--json", "web"]);
+
+    assert_success(&output);
+    let document = common::json_document(&output);
+    let services = document["services"].as_array().expect("the Services reached");
+    assert_eq!(services[0]["outcome"], "started", "{document}");
+    let json_warnings = services[0]["warnings"].as_array().expect("the warnings of web");
+    assert_eq!(json_warnings.len(), 1, "{document}");
+    assert_eq!(
+        json_warnings[0].as_str(),
+        warning.strip_prefix("procly: warning: "),
+        "{document}"
+    );
+    assert!(warnings(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn a_foreign_process_in_another_directory_of_the_worktree_gives_no_warning() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    directory(&main, "apps/web");
+    let api = directory(&main, "apps/api");
+    std::fs::write(main.join("procly.toml"), web_running("cd apps/web && ", free_port())).expect("write the config");
+    let _server = StartedOutside::start(&api);
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&output);
+    assert!(warnings(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn a_service_without_cd_warns_of_a_foreign_process_listening_from_the_root_of_the_worktree_but_not_once_reused() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    std::fs::write(main.join("procly.toml"), web_running("", free_port())).expect("write the config");
+    let server = StartedOutside::start(&main);
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&output);
+    let warned = warnings(&output);
+    assert_eq!(warned.len(), 1, "{}", stderr(&output));
+    assert!(
+        warned[0].contains(&format!("foreign process {}", server.pid())),
+        "{warned:?}"
+    );
+
+    let reused = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&reused);
+    assert!(stdout(&reused).starts_with("web reused"), "{}", stdout(&reused));
+    assert!(warnings(&reused).is_empty(), "{}", stderr(&reused));
 }

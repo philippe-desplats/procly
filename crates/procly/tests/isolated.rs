@@ -1315,7 +1315,7 @@ fn docker_a_restart_of_an_isolated_service_stops_its_container_and_starts_it_aga
 
     assert_success(&output);
     // Down then up: the container was stopped, then started again, with its data and on its Lease.
-    assert!(stdout(&output).starts_with("db started"), "{}", stdout(&output));
+    assert!(stdout(&output).starts_with("db restarted"), "{}", stdout(&output));
     assert_eq!(printed_port(&output), port);
     assert_ne!(started_at(&fixture.other_project), before);
     assert!(fixture.other_project.is_running());
