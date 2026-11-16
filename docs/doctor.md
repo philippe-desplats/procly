@@ -5,7 +5,7 @@
 ```console
 $ procly doctor
 passed  docker_compose: docker compose 2.29.1
-passed  daemon: the Daemon answers and runs procly 0.4.0
+passed  daemon: the Daemon answers and runs procly 0.5.0
 warning session_unit: the Session unit /home/me/.config/systemd/user/procly.service is not installed, the Daemon does not start with your session
         fix: procly unit install
 passed  state_documents: every state document can be read

@@ -9,6 +9,7 @@ web stopped
 job 3f9a1c2e stopped
 db released, 1 other Worktree still needs it
 lease web.http port 24001 released
+output directory /home/me/.local/state/procly/output/app_feature-5c2e0d6b8a41f7e3 deleted
 Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it once the Worktree is removed
 $ procly worktree release
 nothing to release
@@ -21,6 +22,7 @@ Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it on
 2. It lets go of the Compose services of the Worktree as `procly down` does: a Shared or Logical container keeps running while another Worktree needs it, then stops after its Grace period. The Isolated container of the Worktree stops at once and is printed as `<service> stopped`, kept with its volumes, see [Isolated mode](configuration.md#isolated-mode).
 3. It forgets every Job and Service of the Worktree that has ended, the ones it has just stopped included, so that `procly wait`, `procly logs` and `procly status` no longer know them.
 4. It releases the Leases of the Worktree, so that the next Worktree can be granted their ports at once, without waiting for them to expire. With `portless = true`, it removes their [Portless alias](configuration.md#portless-aliases) too.
+5. Last, once nothing of the Worktree runs any more, it deletes the output directory of the Worktree, `<state dir>/output/<slug>-<hash>`, which held the output files of its Services, and prints it as `output directory <path> deleted`. A Worktree removed after its release then leaves no output directory for [`procly gc`](gc.md) to list. The logs of its Services and Jobs go with it, so `procly logs` has nothing to print for them afterwards. When something of the Worktree still runs after the release, such as a Job started while the release was stopping the Services, or a container that keeps a Lease of the Worktree while it runs out its Grace period, the directory is kept and nothing is printed for it. A release run again once the directory is gone says nothing about it either.
 
 It also applies the [Retention policy](configuration.md#retention-policy) of the Isolated containers of the Worktrees already removed, of every Repository: those set to `"delete"` are removed, and those set to a duration are removed once it has passed. The Worktree being released still exists, so its own container is kept until a later release, or the next start of the Daemon, finds it removed. A deletion removes the container, its volumes and, once no container of its compose project is left, the networks compose created for that project (`<project>_default`), so that nothing of the project stays in Docker. A network another container is still attached to is left alone and logged by the Daemon, the deletion does not fail for it. Each policy whose deletion is due is printed with the container it applies to. A duration that has not passed yet is neither applied nor printed, the Daemon waits for it and deletes the container once it has passed:
 
@@ -30,7 +32,7 @@ web stopped
 Retention policy delete of db applied to the Isolated container of the removed Worktree /home/me/app-login
 ```
 
-It keeps the rest, and deletes no data (ADR 0004):
+It keeps the rest, and deletes no data apart from that output directory (ADR 0004):
 
 - The Leases bound to a Pinned branch, so that the branch gets the same ports when its Worktree is recreated. Each one is printed as `kept for Pinned branch <branch>`.
 - The Leases a container still runs on, which are the Leases of the Main worktree: run in the Main worktree, the release keeps them while the container runs out its Grace period. Each one is printed as `kept, its container still runs`.
@@ -49,7 +51,7 @@ $ procly worktree release ../app-feature
 
 ## Looking before releasing
 
-`procly worktree release --dry-run` prints what the release would do and changes nothing: no Service or Job is stopped, no Compose service is let go of, no Lease is released, no state file is written, and no Retention policy is applied. The lines say `would stop`, `would release` and `would apply`, the last one for each Retention policy the release would apply to the Isolated container of a Worktree already removed, which may delete its data:
+`procly worktree release --dry-run` prints what the release would do and changes nothing: no Service or Job is stopped, no Compose service is let go of, no Lease is released, no state file is written, and no Retention policy is applied. The lines say `would stop`, `would release`, `would delete` for the output directory and `would apply`, the last one for each Retention policy the release would apply to the Isolated container of a Worktree already removed, which may delete its data:
 
 ```console
 $ procly worktree release --dry-run
@@ -57,19 +59,20 @@ web would stop
 job 3f9a1c2e would stop
 db would release, 1 other Worktree still needs it
 lease web.http port 24001 would release
+output directory /home/me/.local/state/procly/output/app_feature-5c2e0d6b8a41f7e3 would delete
 Logical resource app__app_feature of db (postgres) kept, `procly gc` lists it once the Worktree is removed
 Retention policy delete of db would apply to the Isolated container of the removed Worktree /home/me/app-login
 ```
 
-A dry run followed by a real release on the same state gives the same report. The `warnings` of a dry run carry only what keeps Procly from reading the Worktree, such as a configuration it cannot parse, which hides the Logical resources. With `--json` it prints the document below.
+A dry run followed by a real release on the same state gives the same report, apart from `dry_run` in the JSON. The `warnings` of a dry run carry only what keeps Procly from reading the Worktree, such as a configuration it cannot parse, which hides the Logical resources. With `--json` it prints the document below.
 
 ## JSON
 
-With `--json`, stdout holds 1 document with the `worktree`, then what was `stopped` (`services` by name, the Isolated Compose services included, and `jobs` by identifier), what was `released` (the `compose_services` let go of, each with `service`, `others` and `grace_ms` as for [`down`](json.md#down), and the `leases`, each with `service`, `port_name` and `port`) and what was `kept`. A kept Lease carries a `reason` of `pinned_branch`, with its `branch`, or `container_running`. A kept Logical resource carries its `service`, its `driver`, the key of the `resource` in the configuration and its `name`. `warnings` lists what went wrong without failing the release, such as a [Portless alias](configuration.md#portless-aliases) that could not be removed, and is empty when nothing did. Without `--json` each warning is on stderr as `procly: warning: ...`. `retention` lists the Retention policies the release applied, or with `--dry-run` would apply, to the Isolated containers of the Worktrees already removed, each with the removed `worktree`, the `service` and the `policy` as `procly.toml` declares it, `delete` or a delay such as `7d`, and is empty when there is none. The schema version is 1, see [JSON output](json.md).
+With `--json`, stdout holds 1 document with the `worktree`, then what was `stopped` (`services` by name, the Isolated Compose services included, and `jobs` by identifier), what was `released` (the `compose_services` let go of, each with `service`, `others` and `grace_ms` as for [`down`](json.md#down), and the `leases`, each with `service`, `port_name` and `port`) and what was `kept`. A kept Lease carries a `reason` of `pinned_branch`, with its `branch`, or `container_running`. A kept Logical resource carries its `service`, its `driver`, the key of the `resource` in the configuration and its `name`. `warnings` lists what went wrong without failing the release, such as a [Portless alias](configuration.md#portless-aliases) that could not be removed, and is empty when nothing did. Without `--json` each warning is on stderr as `procly: warning: ...`. `retention` lists the Retention policies the release applied, or with `--dry-run` would apply, to the Isolated containers of the Worktrees already removed, each with the removed `worktree`, the `service` and the `policy` as `procly.toml` declares it, `delete` or a delay such as `7d`, and is empty when there is none. `deleted_output_directory` is the output directory the release deleted, or with `--dry-run` would delete, and `null` when it deleted none, because something of the Worktree still runs or the directory is already gone. `dry_run` is `true` for `--dry-run`, which changed nothing, and `false` for a release. Both keys were added without a change of the schema version. The schema version is 1, see [JSON output](json.md).
 
 ```console
 $ procly worktree release --json
-{"schema_version":1,"worktree":"/home/me/app-feature","stopped":{"services":["web"],"jobs":["3f9a1c2e"]},"released":{"compose_services":[{"service":"db","others":1,"grace_ms":600000}],"leases":[{"service":"web","port_name":"http","port":24001}]},"kept":{"leases":[],"logical_resources":[{"service":"db","driver":"postgres","resource":"dev","name":"app__app_feature"}]},"warnings":[],"retention":[{"worktree":"/home/me/app-login","service":"db","policy":"delete"}]}
+{"schema_version":1,"worktree":"/home/me/app-feature","stopped":{"services":["web"],"jobs":["3f9a1c2e"]},"released":{"compose_services":[{"service":"db","others":1,"grace_ms":600000}],"leases":[{"service":"web","port_name":"http","port":24001}]},"kept":{"leases":[],"logical_resources":[{"service":"db","driver":"postgres","resource":"dev","name":"app__app_feature"}]},"warnings":[],"retention":[{"worktree":"/home/me/app-login","service":"db","policy":"delete"}],"deleted_output_directory":"/home/me/.local/state/procly/output/app_feature-5c2e0d6b8a41f7e3","dry_run":false}
 ```
 
 ## Calling it from a worktree manager
