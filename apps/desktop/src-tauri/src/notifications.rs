@@ -296,6 +296,7 @@ pub(crate) async fn open_notification_settings() -> Result<(), NotifyError> {
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -332,6 +333,7 @@ mod tests {
             started_at,
             restartable: false,
             stale_leases: Vec::new(),
+            urls: BTreeMap::new(),
             state,
         }
     }

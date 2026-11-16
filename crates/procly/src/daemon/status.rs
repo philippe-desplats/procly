@@ -1,5 +1,6 @@
 //! The status report: Repositories and their Worktrees, with the Services and the Jobs started in each.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::{Registry, environment, foreign, foreign_cache};
@@ -28,6 +29,7 @@ pub(super) fn report(registry: &Registry, cwd: &Path, all: bool) -> anyhow::Resu
     for (topology, status) in &mut services {
         status.restartable = held.holds(&topology.worktree.path, &status.service);
         status.stale_leases = stale_leases(registry, topology, status);
+        status.urls = urls(registry, topology, status);
     }
     let containers = composes.isolated();
     // Every Worktree the Daemon ran something in.
@@ -175,6 +177,16 @@ pub(super) fn stale_leases(registry: &Registry, topology: &Topology, status: &Se
         .leases
         .stale(topology, &services, &environment::declarations(&config))
         .unwrap_or_default()
+}
+
+/// Where to reach the Leases of the running Service `status` of the Worktree of `topology`, as `up` gives them. Empty
+/// for an ended Service, and when the configuration or the Leases cannot be read, which the other checks report.
+/// Blocking: it reads the configuration.
+fn urls(registry: &Registry, topology: &Topology, status: &ServiceStatus) -> BTreeMap<String, String> {
+    if matches!(status.state, ServiceState::Ended { .. }) {
+        return BTreeMap::new();
+    }
+    super::up::reached_urls(registry, topology, &status.service).unwrap_or_default()
 }
 
 fn services_of(services: &[(Topology, ServiceStatus)], worktree: &Path) -> Vec<ServiceStatus> {

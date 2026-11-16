@@ -652,7 +652,10 @@ fn restart_refuses_a_new_declared_port_that_is_held_before_it_stops_the_service(
     // Nothing was stopped, the Service still answers on its Lease.
     assert_eq!(common::http_get(old, "/"), "ok\n");
     let status = stdout(&procly.procly_in(&main, &["status"]));
-    assert!(status.contains(&format!("service web healthy port {old}")), "{status}");
+    assert!(
+        status.contains(&format!("service web healthy http://localhost:{old} port {old}")),
+        "{status}"
+    );
     drop(foreign);
 }
 

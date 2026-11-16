@@ -334,6 +334,73 @@ fn a_port_hardcoded_in_a_dev_script_is_declared_and_replaced_by_its_placeholder(
 }
 
 #[test]
+fn a_dev_script_serving_https_gets_a_port_named_https_and_its_group_reads_port_service_https() {
+    let procly = Procly::new();
+    let main = repository(
+        &procly,
+        &[
+            (
+                "package.json",
+                r#"{"name": "acme", "workspaces": ["apps/*"], "scripts": {"dev": "turbo dev"}}"#,
+            ),
+            (
+                "apps/web/package.json",
+                r#"{"name": "web", "scripts": {"dev": "next dev --experimental-https --port 3001"}}"#,
+            ),
+            (
+                "apps/site/package.json",
+                r#"{"name": "site", "scripts": {"dev": "vite --https --port=5173"}}"#,
+            ),
+            (
+                "apps/api/package.json",
+                r#"{"name": "api", "scripts": {"dev": "next dev --port 3333"}}"#,
+            ),
+        ],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    let table: toml::Table = proposal.parse().expect("the proposal is TOML");
+    let service = |name: &str| table["services"][name].clone();
+    let bins = "export PATH=\"$PWD/node_modules/.bin:$PWD/../../node_modules/.bin:$PATH\"";
+    assert_eq!(
+        service("web")["run"].as_str(),
+        Some(format!("cd apps/web && {bins} && next dev --experimental-https --port {{ports.https}}").as_str()),
+        "{proposal}"
+    );
+    assert_eq!(
+        service("web")["ports"],
+        toml::Value::Table(toml::toml! { https = 3001 }),
+        "{proposal}"
+    );
+    assert_eq!(
+        service("site")["run"].as_str(),
+        Some(format!("cd apps/site && {bins} && vite --https --port={{ports.https}}").as_str()),
+        "{proposal}"
+    );
+    assert_eq!(
+        service("site")["ports"],
+        toml::Value::Table(toml::toml! { https = 5173 }),
+        "{proposal}"
+    );
+    // Without the flag, the port stays `http`.
+    assert_eq!(
+        service("api")["ports"],
+        toml::Value::Table(toml::toml! { http = 3333 }),
+        "{proposal}"
+    );
+    let env = procly.procly_in(&main, &["env", "dev"]);
+    assert_success(&env);
+    let env = stdout(&env);
+    for variable in ["PORT_WEB_HTTPS=", "PORT_SITE_HTTPS=", "PORT_API_HTTP="] {
+        assert!(env.contains(variable), "{variable} in\n{env}");
+    }
+    for service in ["web", "site", "api"] {
+        assert_loads(&procly, &main, service);
+    }
+}
+
+#[test]
 fn a_dev_script_naming_several_ports_or_none_keeps_running_through_the_package_manager() {
     let procly = Procly::new();
     let main = repository(

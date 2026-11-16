@@ -865,6 +865,32 @@ fn service_leases(
     Ok((leases, urls))
 }
 
+/// Where to reach each Lease the Service `name` of the Worktree of `topology` holds now, by Port name, by the rule of
+/// [`service_leases`], for the status report. Nothing is granted, so a Port name without a Lease has no URL, and a
+/// Group has none of its own. Blocking: it reads the configuration, and the compose file of a Compose service.
+pub(super) fn reached_urls(
+    registry: &Registry,
+    topology: &Topology,
+    name: &str,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let config = read_config(&topology.worktree.path)?;
+    let Some(declared) = config.services.get(name) else {
+        return Ok(BTreeMap::new());
+    };
+    if let ServiceKind::Group { .. } = declared.kind(name)? {
+        return Ok(BTreeMap::new());
+    }
+    let leases = environment::granted(registry, topology, &config, name)?;
+    let driver = scheme_driver(
+        name,
+        declared,
+        &topology.worktree.path,
+        driver::user_dir().as_deref(),
+        || Ok(topology.main()?.worktree.path),
+    )?;
+    lease_urls(name, declared, driver.as_ref(), &leases)
+}
+
 /// The Driver whose URL gives the scheme of the Leases of the Service `name`: the one it declares, else, for a
 /// Compose service, the one that ships with Procly for the image the compose file of the Main worktree `main` gives
 /// it, so that a Postgres is reached as one whether or not `procly init` gave it a Driver. A Driver found from the

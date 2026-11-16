@@ -48,6 +48,8 @@ A name that is taken gets a number, so a package called `dev` leaves `dev` to it
 
 A `dev` script that names one port, with `--port 3001`, `--port=3001`, `-p 3001` or `PORT=3001`, gives its Service a Port name `http` declared at that port, which the Main worktree keeps. The package manager would run the script with the port written in it, so the proposal runs the script itself instead, with the number replaced by `{ports.http}` and the binaries of the package and of the root put on the `PATH`, as the package manager does. The script is not run through `npm run`, so its `predev` and `postdev` hooks do not run.
 
+A script that also passes `--experimental-https` or `--https`, such as `next dev --experimental-https --port 3000` or `vite --https --port 5173`, serves HTTPS, so its Port name is `https` instead: the placeholder is `{ports.https}`, the Group that covers the Service reads `PORT_<SERVICE>_HTTPS`, and every surface gives the Lease an `https://` URL, see [Services that serve HTTPS](configuration.md#services-that-serve-https). A certificate path in the script, or the configuration file of a framework, is not read as a sign of HTTPS: name the port `https` yourself for such a server.
+
 A port below 1024, a script that names several different ports, and any other way of writing a port are not taken, the Service then runs through the package manager and declares no port. Add `ports = { http = <port> }` and the placeholder where the script reads its port, so that parallel Worktrees do not share it.
 
 ### The root script of a monorepo

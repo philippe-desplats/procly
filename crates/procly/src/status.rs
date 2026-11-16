@@ -65,7 +65,7 @@ pub(crate) fn text(report: &StatusReport) -> String {
 }
 
 fn service_line(text: &mut String, service: &ServiceStatus) {
-    let port = service.port.map(|port| format!(" port {port}")).unwrap_or_default();
+    let port = reach(service);
     let state = match &service.state {
         ServiceState::Starting => format!("starting{port}"),
         ServiceState::Healthy => format!("healthy{port}"),
@@ -85,6 +85,24 @@ fn service_line(text: &mut String, service: &ServiceStatus) {
             stale.service, stale.port_name, stale.port, stale.declared, service.service
         );
     }
+}
+
+/// Where a running Service is reached, as `up` names its Leases: ` <url> port <n>` for the Lease its health check
+/// probes, ` port <n>` when the scheme of that Lease is not known, then `, <url>` for each other Lease whose scheme
+/// is. Empty for a Service without a Lease to probe.
+fn reach(service: &ServiceStatus) -> String {
+    let Some(port) = service.port else {
+        return String::new();
+    };
+    let probed = |url: &&String| url.rsplit_once(':').and_then(|(_, lease)| lease.parse::<u16>().ok()) == Some(port);
+    let mut reach = match service.urls.values().find(probed) {
+        Some(url) => format!(" {url} port {port}"),
+        None => format!(" port {port}"),
+    };
+    for url in service.urls.values().filter(|url| !probed(url)) {
+        let _ = write!(reach, ", {url}");
+    }
+    reach
 }
 
 /// An Isolated container of the Worktree, with the Lease its health check probes.
@@ -383,6 +401,45 @@ mod tests {
     #[test]
     fn text_says_so_when_there_is_nothing_to_report() {
         assert_eq!(text(&StatusReport::default()), "no jobs\n");
+    }
+
+    fn running(port: Option<u16>, urls: &[(&str, &str)]) -> ServiceStatus {
+        ServiceStatus {
+            service: "mailpit".to_owned(),
+            port,
+            reattached: false,
+            started_at: 0,
+            restartable: false,
+            stale_leases: Vec::new(),
+            urls: urls
+                .iter()
+                .map(|&(port_name, url)| (port_name.to_owned(), url.to_owned()))
+                .collect(),
+            state: ServiceState::Healthy,
+        }
+    }
+
+    #[test]
+    fn a_running_service_shows_the_url_of_its_probed_lease_then_the_urls_of_the_others() {
+        let line = |service: &ServiceStatus| {
+            let mut text = String::new();
+            service_line(&mut text, service);
+            text
+        };
+
+        let mailpit = running(
+            Some(1025),
+            &[("http", "http://localhost:8025"), ("smtp", "smtp://localhost:1025")],
+        );
+        assert_eq!(
+            line(&mailpit),
+            "    service mailpit healthy smtp://localhost:1025 port 1025, http://localhost:8025\n"
+        );
+        assert_eq!(
+            line(&running(Some(4000), &[])),
+            "    service mailpit healthy port 4000\n"
+        );
+        assert_eq!(line(&running(None, &[])), "    service mailpit healthy\n");
     }
 
     fn ports_of(service: &str, leased: u16, seen: &[u16]) -> ServicePorts {

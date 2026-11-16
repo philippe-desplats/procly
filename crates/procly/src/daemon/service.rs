@@ -1,6 +1,6 @@
 //! Services: declared Process services, run with pipes in a process group of their own and health-checked.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -562,6 +562,7 @@ impl Services {
                     // The Services know nothing of the held environments, the status report tells.
                     restartable: false,
                     stale_leases: Vec::new(),
+                    urls: BTreeMap::new(),
                     state,
                 };
                 ((worktree.clone(), name.clone()), service.topology.clone(), status)

@@ -527,6 +527,32 @@ fn grant(
     Ok(granted)
 }
 
+/// The Leases the Service `service` holds now, by Port name, found where [`grant`] would grant them from the Worktree
+/// of `topology`, the Main worktree for a Shared or Logical Compose service. Nothing is granted, dated nor stored, so
+/// that reading them leaves their expiry as it was. Blocking: it reads the branch of a Repository with Pinned branches.
+pub(super) fn granted(
+    registry: &Registry,
+    topology: &Topology,
+    config: &Config,
+    service: &str,
+) -> Result<BTreeMap<String, u16>, EnvironmentError> {
+    let Some(declared) = config.services.get(service) else {
+        return Ok(BTreeMap::new());
+    };
+    let branch = pinned_branch(topology, config)?;
+    Ok(with_lease_request(
+        registry,
+        topology,
+        config,
+        branch,
+        service,
+        &declared.ports,
+        Leasing::AsGranted,
+        &[],
+        |request| registry.leases.granted(request),
+    )??)
+}
+
 /// Checks that starting `services` in turn, in the Worktree of `topology`, would not be refused for a declared port,
 /// once the Services of `stopping` are stopped, which they still run. Nothing is granted nor stored. A Group stands
 /// for the Services it covers. Run before a Restart stops anything, and before a Group grants the Leases of the

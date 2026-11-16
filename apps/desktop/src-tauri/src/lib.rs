@@ -428,6 +428,7 @@ mod stand_in;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use procly_client::protocol::{
@@ -471,6 +472,7 @@ mod tests {
             started_at: 1_000,
             restartable: true,
             stale_leases: Vec::new(),
+            urls: BTreeMap::new(),
             state: ServiceState::Ended {
                 end: ServiceEnd::Exited { code: 1 },
             },

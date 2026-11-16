@@ -425,6 +425,27 @@ impl Leases {
         })
     }
 
+    /// The Leases `request` would keep, by Port name, as they are granted now: nothing is granted, dated nor stored,
+    /// and a Port name without a Lease is left out. Blocking: it reads the document on the first request.
+    pub(crate) fn granted(&self, request: &LeaseRequest<'_>) -> Result<BTreeMap<String, u16>, StoreError> {
+        let scope = scope_of(request);
+        self.with_table(|table| {
+            request
+                .ports
+                .keys()
+                .filter_map(|port_name| {
+                    let key = LeaseKey {
+                        repository: request.topology.git_common_dir.clone(),
+                        scope: scope.clone(),
+                        service: request.service.to_owned(),
+                        port_name: port_name.clone(),
+                    };
+                    table.get(&key).map(|granted| (port_name.clone(), granted.port))
+                })
+                .collect()
+        })
+    }
+
     /// Whether the Lease `key` is granted `port` right now. Blocking: it reads the document on the first request.
     pub(super) fn holds(&self, key: &LeaseKey, port: u16) -> Result<bool, StoreError> {
         self.with_table(|table| table.get(key).map(|granted| granted.port) == Some(port))
@@ -749,6 +770,14 @@ fn declaration_changed(previous: Option<Granted>, declared: u16) -> bool {
         .is_some_and(|declared_then| declared_then != declared)
 }
 
+/// What the Leases of `request` are bound to: its Pinned branch, else its Worktree.
+fn scope_of(request: &LeaseRequest<'_>) -> Scope {
+    match request.pinned {
+        Some(pinned) => Scope::Branch(pinned.name.to_owned()),
+        None => Scope::Worktree(request.topology.worktree.path.clone()),
+    }
+}
+
 /// Grants the Leases of `request` in `table`, dated `now`, where `is_free` tells whether nothing outside Procly
 /// holds a port, and returns them with the Leases that yielded their port.
 ///
@@ -769,10 +798,7 @@ fn grant_in(
     now: Duration,
     is_free: impl Fn(u16) -> bool,
 ) -> Result<(BTreeMap<String, u16>, Vec<Yielded>), LeaseError> {
-    let scope = match request.pinned {
-        Some(pinned) => Scope::Branch(pinned.name.to_owned()),
-        None => Scope::Worktree(request.topology.worktree.path.clone()),
-    };
+    let scope = scope_of(request);
     let worktree = &request.topology.worktree.path;
     // The Main worktree never takes branch-scoped Leases, so this is the Main worktree with Leases of its own.
     let follows_declaration = request.pinned.is_none() && request.topology.worktree.main;

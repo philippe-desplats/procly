@@ -40,6 +40,11 @@ pub(crate) enum ConfigError {
     UnknownHealthPort { service: String, name: String },
     #[error("health.path of service {service} is {path:?}, which is neither a path nor an http:// URL with a host")]
     HealthUrl { service: String, path: String },
+    #[error(
+        "the health check of service {service} probes its Port {port_name} over HTTP, which does not speak TLS: drop \
+         health.path and health.status to keep the TCP check"
+    )]
+    HttpHealthOverTls { service: String, port_name: String },
     #[error("service {service} needs {need}, which is not declared")]
     UnknownNeed { service: String, need: String },
     #[error("services need each other in a loop: {}", .cycle.join(" -> "))]
@@ -760,6 +765,9 @@ pub(crate) struct HttpProbe {
 /// What `health.path` holds an `http://` URL after.
 const HTTP_SCHEME: &str = "http://";
 
+/// The Port name of a port that speaks HTTPS, which the HTTP health check cannot probe.
+pub(crate) const TLS_PORT_NAME: &str = "https";
+
 impl HealthConfig {
     /// The HTTP request of the check, `None` when the TCP connection alone makes the Service healthy.
     pub(crate) fn http(&self) -> Option<HttpProbe> {
@@ -1001,10 +1009,19 @@ impl Config {
 
     /// Fails on the first Service whose keys disagree, so that no `up` starts anything from a configuration that
     /// cannot be run. A Retention policy is refused on a Shared or Logical Service, whose container holds the data of
-    /// every Worktree.
+    /// every Worktree. An HTTP health check is refused on a Port named `https`, since the check sends its `GET` in
+    /// plain text and would wait out the whole health timeout against a TLS server.
     fn validate(&self) -> Result<(), ConfigError> {
         self.services.iter().try_for_each(|(name, service)| {
             service.kind(name)?;
+            if service.health.http().is_some()
+                && let Ok(Some(port_name @ TLS_PORT_NAME)) = service.health_port_name(name)
+            {
+                return Err(ConfigError::HttpHealthOverTls {
+                    service: name.clone(),
+                    port_name: port_name.to_owned(),
+                });
+            }
             let isolation = self.isolation(service);
             if service.retention.is_some() && isolation != IsolationMode::Isolated {
                 return Err(ConfigError::RetentionNotIsolated {

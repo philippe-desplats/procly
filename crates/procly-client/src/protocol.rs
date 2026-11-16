@@ -752,6 +752,11 @@ pub struct ServiceStatus {
     /// when empty, so that the status of a Service on its declared ports reads as it did before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale_leases: Vec<StaleLease>,
+    /// Where to reach each Lease of the running Service whose scheme Procly knows, by Port name, as the `urls` of
+    /// [`UpService`] give them. Left out when empty: for an ended Service, a Group, a port of no known scheme, and in
+    /// the status of a Daemon older than the key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub urls: BTreeMap<String, String>,
     #[serde(flatten)]
     pub state: ServiceState,
 }
@@ -1382,6 +1387,7 @@ mod tests {
                 started_at: 1_793_900_000_123,
                 restartable: true,
                 stale_leases: Vec::new(),
+                urls: BTreeMap::new(),
                 state: ServiceState::Healthy,
             }],
             jobs: Vec::new(),

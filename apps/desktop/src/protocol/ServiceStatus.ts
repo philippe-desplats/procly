@@ -22,4 +22,10 @@ restartable: boolean,
  * the Main worktree. A running Service keeps its Lease, which moves to the declared port once it stops. Left out
  * when empty, so that the status of a Service on its declared ports reads as it did before.
  */
-stale_leases?: Array<StaleLease>, } & ({ "state": "starting" } | { "state": "healthy" } | { "state": "restarting" } | { "state": "ended", end: ServiceEnd, });
+stale_leases?: Array<StaleLease>, 
+/**
+ * Where to reach each Lease of the running Service whose scheme Procly knows, by Port name, as the `urls` of
+ * [`UpService`] give them. Left out when empty: for an ended Service, a Group, a port of no known scheme, and in
+ * the status of a Daemon older than the key.
+ */
+urls?: { [key in string]: string }, } & ({ "state": "starting" } | { "state": "healthy" } | { "state": "restarting" } | { "state": "ended", end: ServiceEnd, });

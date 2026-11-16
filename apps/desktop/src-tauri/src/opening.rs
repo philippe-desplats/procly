@@ -2,7 +2,7 @@
 //! Service in the browser.
 //!
 //! Rust opens, so that the window holds no `opener` permission and cannot open anything but a Worktree, or
-//! `http://localhost:<port>`, through the commands of the app (`docs/rules/tauri.md`).
+//! `http://localhost:<port>` and `https://localhost:<port>`, through the commands of the app (`docs/rules/tauri.md`).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -76,6 +76,8 @@ pub(crate) enum OpenError {
     Task(String),
     #[error("port 0 is no address to open")]
     NoPort,
+    #[error("{url} is not an http:// or https:// address of localhost with a port, so it is not opened")]
+    NotLocalhost { url: String },
     #[error("cannot open {url} in the browser: {source}")]
     Browser {
         url: String,
@@ -94,7 +96,9 @@ impl OpenError {
         match self {
             Self::NoEditor => AppFailureKind::NoEditor,
             Self::Missing { .. } => AppFailureKind::Missing,
-            Self::Launch { .. } | Self::Browser { .. } | Self::NoPort => AppFailureKind::Launch,
+            Self::Launch { .. } | Self::Browser { .. } | Self::NoPort | Self::NotLocalhost { .. } => {
+                AppFailureKind::Launch
+            }
             Self::Reveal { .. } => AppFailureKind::Reveal,
             Self::Task(_) => AppFailureKind::Task,
         }
@@ -153,20 +157,31 @@ pub(crate) fn reveal(launcher: &impl Launcher, path: &Path) -> Result<(), OpenEr
     })
 }
 
-/// Opens `http://localhost:<port>` in the default browser. `Status` carries the port alone, so the scheme is `http`.
-/// The address is built here from the port, so the window cannot make the app open anything else.
+/// The schemes the app opens a Lease with, the ones of a Port named `http` or `https`.
+const LOCALHOST_SCHEMES: [&str; 2] = ["http://", "https://"];
+
+/// Opens `url` in the default browser, the URL `Status` gives a Lease, such as `https://localhost:24004` for a Port
+/// named `https`. Only `http://localhost:<port>` and `https://localhost:<port>` are opened, written exactly so, so
+/// that the window cannot make the app open anything else.
 ///
 /// # Errors
 ///
-/// When the port is 0, or the browser does not open.
-pub(crate) fn open_port(launcher: &impl Launcher, port: u16) -> Result<(), OpenError> {
+/// When `url` is any other address or names port 0, or the browser does not open.
+pub(crate) fn open_localhost_url(launcher: &impl Launcher, url: &str) -> Result<(), OpenError> {
+    let port = LOCALHOST_SCHEMES
+        .iter()
+        .find_map(|scheme| url.strip_prefix(scheme))
+        .and_then(|rest| rest.strip_prefix("localhost:"))
+        .filter(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|port| port.parse::<u16>().ok())
+        .ok_or_else(|| OpenError::NotLocalhost { url: url.to_owned() })?;
     if port == 0 {
         return Err(OpenError::NoPort);
     }
-    let url = format!("http://localhost:{port}");
-    launcher
-        .open_url(&url)
-        .map_err(|source| OpenError::Browser { url, source })
+    launcher.open_url(url).map_err(|source| OpenError::Browser {
+        url: url.to_owned(),
+        source,
+    })
 }
 
 /// Opens the Worktree at `path` in the editor or the terminal of the settings.
@@ -199,14 +214,14 @@ pub(crate) async fn reveal_worktree(path: PathBuf) -> Result<(), OpenError> {
         .map_err(|error| OpenError::task(&error))?
 }
 
-/// Opens `http://localhost:<port>` in the default browser.
+/// Opens `url`, an `http://localhost:<port>` or `https://localhost:<port>` address, in the default browser.
 ///
 /// # Errors
 ///
 /// An [`OpenError`], which the window shows.
 #[tauri::command]
-pub(crate) async fn open_localhost(port: u16) -> Result<(), OpenError> {
-    tauri::async_runtime::spawn_blocking(move || open_port(&Opener, port))
+pub(crate) async fn open_localhost(url: String) -> Result<(), OpenError> {
+    tauri::async_runtime::spawn_blocking(move || open_localhost_url(&Opener, &url))
         .await
         .map_err(|error| OpenError::task(&error))?
 }
@@ -217,7 +232,7 @@ mod tests {
     use std::io;
     use std::path::{Path, PathBuf};
 
-    use super::{Launcher, OpenError, OpenWith, open, open_port, reveal};
+    use super::{Launcher, OpenError, OpenWith, open, open_localhost_url, reveal};
     use crate::settings::Settings;
 
     /// Stands for the system: what it was asked to launch is kept, and it can refuse.
@@ -383,19 +398,53 @@ mod tests {
     }
 
     #[test]
-    fn localhost_opens_http_on_the_port_and_nothing_else() {
+    fn localhost_opens_over_http_or_https_on_the_port() {
         let launcher = Fake::default();
 
-        open_port(&launcher, 18731).expect("it opens");
+        open_localhost_url(&launcher, "http://localhost:18731").expect("http opens");
+        open_localhost_url(&launcher, "https://localhost:24004").expect("https opens");
 
-        assert_eq!(*launcher.urls.borrow(), ["http://localhost:18731".to_owned()]);
+        assert_eq!(
+            *launcher.urls.borrow(),
+            [
+                "http://localhost:18731".to_owned(),
+                "https://localhost:24004".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn any_other_scheme_host_or_shape_of_address_is_refused_and_opens_nothing() {
+        let launcher = Fake::default();
+
+        for url in [
+            "ftp://localhost:21",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "http://example.com:80",
+            "https://localhost.example.com:443",
+            "http://user@localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost",
+            "http://localhost:",
+            "http://localhost:3000/admin",
+            "http://localhost:3000?next=elsewhere",
+            "http://localhost:99999",
+            "http://localhost:+3000",
+            "HTTP://localhost:3000",
+        ] {
+            let error = open_localhost_url(&launcher, url).expect_err(url);
+
+            assert!(error.to_string().contains(url), "{url}: {error}");
+        }
+        assert!(launcher.urls.borrow().is_empty());
     }
 
     #[test]
     fn port_zero_is_no_address_and_opens_nothing() {
         let launcher = Fake::default();
 
-        let error = open_port(&launcher, 0).expect_err("0 is not a port to open");
+        let error = open_localhost_url(&launcher, "https://localhost:0").expect_err("0 is not a port to open");
 
         assert!(error.to_string().contains("port 0"), "{error}");
         assert!(launcher.urls.borrow().is_empty());
@@ -408,7 +457,7 @@ mod tests {
             ..Fake::default()
         };
 
-        let error = open_port(&launcher, 3000).expect_err("the browser does not open");
+        let error = open_localhost_url(&launcher, "http://localhost:3000").expect_err("the browser does not open");
 
         let message = error.to_string();
         assert!(message.contains("http://localhost:3000"), "{message}");
