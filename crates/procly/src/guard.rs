@@ -441,14 +441,9 @@ pub(crate) fn recognize(command_line: &str) -> Option<Recognized> {
             moved_to = Some(to.trim_start_matches("./").trim_end_matches('/').to_owned());
             return None;
         }
-        // A shell given a command line to run: `bash -c 'npm run dev'`.
-        if let [shell, flag, inner, ..] = words
-            && matches!(basename(shell), "sh" | "bash" | "zsh" | "dash")
-            && flag.starts_with('-')
-            && !flag.starts_with("--")
-            && flag.contains('c')
-        {
-            return recognize(inner).map(|recognized| Recognized {
+        // A shell given a command line to run: `bash -c 'npm run dev'`, `cross-env-shell NODE_ENV=dev "next dev"`.
+        if let Some(inner) = shell::inner_command_line(&segment.words) {
+            return recognize(&inner).map(|recognized| Recognized {
                 moved_to: recognized.moved_to.or_else(|| moved_to.clone()),
                 ..recognized
             });
@@ -782,6 +777,41 @@ mod tests {
         ] {
             assert_eq!(kind(command), Some(expected), "{command}");
         }
+    }
+
+    #[test]
+    fn a_wrapper_that_loads_variables_does_not_hide_the_dev_command_it_runs() {
+        for command in [
+            "cross-env FORCE_COLOR=1 turbo run dev --parallel",
+            "npx cross-env FORCE_COLOR=1 turbo run dev",
+            "cross-env PORT=3000 bun run dev",
+            "dotenv -e .env -- next dev",
+            "NODE_EXTRA_CA_CERTS=./ca.pem dotenv -e .env -- next dev --experimental-https",
+            "dotenv -e .env next dev",
+            "bunx dotenv -- next dev",
+            "cross-env-shell NODE_ENV=dev \"next dev\"",
+            "cross-env-shell NODE_ENV=dev next dev",
+            "dotenvx run -f .env -- next dev",
+            "env-cmd -f .env next dev",
+            "env-cmd -- next dev",
+        ] {
+            assert_eq!(kind(command), Some(Kind::DevServer), "{command}");
+        }
+        for command in [
+            "cross-env NODE_ENV=production bun run build",
+            "dotenv -e .env -- bun run build",
+            "cross-env-shell NODE_ENV=production \"bun run build\"",
+            "env-cmd -f .env bun run build",
+        ] {
+            assert_eq!(kind(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn the_command_line_cross_env_shell_hands_to_a_shell_is_read_as_the_guard_reads_its_own() {
+        let recognized = recognize("cross-env-shell NODE_ENV=dev \"cd apps/web && next dev\"").unwrap();
+        assert_eq!(recognized.command, "next dev");
+        assert_eq!(recognized.moved_to.as_deref(), Some("apps/web"));
     }
 
     #[test]

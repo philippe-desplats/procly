@@ -530,6 +530,84 @@ fn the_guard_moves_a_dev_command_by_its_directory_option_and_by_an_absolute_cd()
     }
 }
 
+/// The reason the Guard gives for `command` run from `dir`, with the command itself left out, so that a command and
+/// the same command behind a wrapper can be compared by what the Guard tells the agent to run.
+fn instead(procly: &Procly, dir: &Path, command: &str) -> String {
+    let reason = denial(&guard(procly, dir, command)).unwrap_or_else(|| panic!("{command} went through"));
+    let quoted = reason.find("` ").map_or(0, |end| end + 2);
+    reason[quoted..].to_owned()
+}
+
+#[test]
+fn the_guard_answers_a_dev_command_behind_a_wrapper_as_it_answers_it_without() {
+    // The Group `dev` at the root runs the script its root `package.json` runs, here with turbo, there with bun.
+    for (group_run, commands) in [
+        (
+            "turbo run dev",
+            &[
+                (
+                    "",
+                    "cross-env FORCE_COLOR=1 turbo run dev --parallel",
+                    "FORCE_COLOR=1 turbo run dev --parallel",
+                    "`procly up dev`",
+                ),
+                (
+                    "",
+                    "npx cross-env FORCE_COLOR=1 turbo run dev",
+                    "FORCE_COLOR=1 turbo run dev",
+                    "`procly up dev`",
+                ),
+                ("apps/web", "dotenv -e .env -- next dev", "next dev", "`procly up web`"),
+                (
+                    "apps/web",
+                    "NODE_EXTRA_CA_CERTS=./ca.pem dotenv -e .env -- next dev --experimental-https",
+                    "NODE_EXTRA_CA_CERTS=./ca.pem next dev --experimental-https",
+                    "`procly up web`",
+                ),
+            ][..],
+        ),
+        (
+            "bun run dev",
+            &[(
+                "",
+                "cross-env PORT=3000 bun run dev",
+                "PORT=3000 bun run dev",
+                "`procly up dev`",
+            )][..],
+        ),
+    ] {
+        let procly = Procly::new();
+        let main = repository_with_instructions(&procly);
+        write(
+            &main.join("procly.toml"),
+            &format!(
+                "[services.web]\nrun = 'cd apps/web && next dev'\n[services.api]\nrun = 'cd apps/api && bun run dev'\n\
+                 [services.dev]\nrun = '{group_run}'\ncovers = ['web', 'api']\n"
+            ),
+        );
+        std::fs::create_dir_all(main.join("apps/web")).unwrap();
+        std::fs::create_dir_all(main.join("apps/api")).unwrap();
+
+        for (dir, wrapped, unwrapped, expected) in commands {
+            let dir = main.join(dir);
+            let without = instead(&procly, &dir, unwrapped);
+            assert!(
+                without.contains(&format!("Run {expected} instead.")),
+                "{unwrapped}: {without}"
+            );
+            assert_eq!(instead(&procly, &dir, wrapped), without, "{wrapped}");
+        }
+
+        // A wrapper in front of a command that starts no dev server hides nothing either.
+        for command in [
+            "cross-env NODE_ENV=production bun run build",
+            "dotenv -e .env -- bun run build",
+        ] {
+            assert_eq!(denial(&guard(&procly, &main, command)), None, "{command}");
+        }
+    }
+}
+
 #[test]
 fn the_guard_sends_a_root_dev_command_run_below_the_root_to_the_service_to_pick() {
     let procly = Procly::new();
