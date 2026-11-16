@@ -351,7 +351,9 @@ impl Block {
                 let services = places
                     .worktrees
                     .iter()
-                    .find(|worktree| file.starts_with(&worktree.path))
+                    .filter(|worktree| file.starts_with(&worktree.path))
+                    // The deepest one, since a Worktree may sit inside another one.
+                    .max_by_key(|worktree| worktree.path.components().count())
                     .and_then(|worktree| services_line(&worktree.path));
                 let known = [
                     managed::joined(&rules(false, services.as_deref())),

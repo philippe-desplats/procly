@@ -225,7 +225,11 @@ pub(super) fn switch(registry: &Registry, cwd: &Path, off: bool) -> Result<Switc
     let worktrees = topology::worktrees(&topology.git_common_dir)?;
     let mut reports = Vec::new();
     for file in registry.managed.files_holding(RULES)? {
-        let ours = worktrees.iter().find(|worktree| file.starts_with(&worktree.path));
+        // The deepest Worktree holding the file, since a Worktree may sit inside another one.
+        let ours = worktrees
+            .iter()
+            .filter(|worktree| file.starts_with(&worktree.path))
+            .max_by_key(|worktree| worktree.path.components().count());
         if let Some(worktree) = ours
             && ManagedBlocks::holds(&file, RULES)?
         {
