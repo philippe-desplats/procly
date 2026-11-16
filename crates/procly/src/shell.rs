@@ -348,6 +348,8 @@ mod tests {
             ),
             ("bunx dotenv -- next dev", "next dev"),
             ("dotenvx run -f .env -- next dev", "next dev"),
+            // An option this reading does not know, whose value the `--` still leaves out.
+            ("dotenvx run --convention nextjs -- next dev", "next dev"),
             ("dotenvx run --env-file .env next dev", "next dev"),
             ("dotenvx run --env-file=.env next dev", "next dev"),
             ("env-cmd -f .env next dev", "next dev"),
