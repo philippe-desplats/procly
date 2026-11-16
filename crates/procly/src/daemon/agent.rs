@@ -11,6 +11,7 @@ use super::hook::{self, HookError};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use super::store::StoreError;
 use super::{Registry, blocking, read_config};
+use crate::config::{self, ServiceConfig};
 use crate::protocol::{BlockOutcome, BlockReport, GuardService, InstallReport, Request, Response, SwitchReport};
 use crate::topology::{self, Topology, TopologyError};
 
@@ -72,9 +73,10 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
 }
 
 /// The Rules block, one line per element. When the Repository is Off it says so, and tells agents to leave Procly be.
-pub(super) fn rules(off: bool) -> &'static [&'static str] {
+/// Otherwise it names the declared Services with `services`, the line [`services_line`] gives, when there is one.
+pub(super) fn rules(off: bool, services: Option<&str>) -> Vec<&str> {
     if off {
-        &[
+        vec![
             "## Procly (off)",
             "",
             "Procly is off for this repository. Start dev servers and containers with their usual commands, and do not run `procly up`.",
@@ -82,17 +84,100 @@ pub(super) fn rules(off: bool) -> &'static [&'static str] {
             "The developer turns it back on with `procly on`.",
         ]
     } else {
-        &[
+        let mut lines = vec![
             "## Procly",
             "",
             "Dev servers, queue workers and containers of this repository run under Procly, so that parallel worktrees never start the same process twice or fight over a port.",
             "",
+        ];
+        lines.extend(services);
+        lines.extend([
             "- Start a service with `procly up <service>`. It answers `started` or `reused`, with each of its ports and, when known, its URL.",
             "- Stop one with `procly down <service>`, or all of them with `procly down`. See what runs with `procly status`.",
             "- Run a one-off command with `procly run \"<command>\"`, then read its result with `procly wait <job>`.",
             "- Never start a dev server or `docker compose up` yourself. A hook blocks the known commands and names the Procly command to run instead.",
-        ]
+        ]);
+        lines
     }
+}
+
+/// The line of the Rules block naming the Services the configuration of `worktree` declares, in the order of its
+/// files, the Groups last with the Services each one covers. `None` when it declares no Service, or when it cannot be
+/// read: the Rules block is still written, without the line. Blocking, it reads the configuration.
+pub(super) fn services_line(worktree: &Path) -> Option<String> {
+    let config = read_config(worktree).ok()?;
+    let order = declaration_order(worktree);
+    let position = |name: &str| order.iter().position(|declared| declared == name).unwrap_or(usize::MAX);
+    let mut declared: Vec<(&str, Option<&[String]>)> = config
+        .services
+        .iter()
+        .map(|(name, service): (&String, &ServiceConfig)| (name.as_str(), service.covers.as_deref()))
+        .collect();
+    // Stable, so that a Service no file places, which cannot happen once the configuration is read, stays sorted.
+    declared.sort_by_key(|(name, _)| position(name));
+    naming(&declared)
+}
+
+/// The line naming the `declared` Services, in their order, each with the Services it covers when it is a Group.
+fn naming(declared: &[(&str, Option<&[String]>)]) -> Option<String> {
+    let quoted = |name: &str| format!("`{name}`");
+    let mut items: Vec<String> = declared
+        .iter()
+        .filter(|(_, covers)| covers.is_none())
+        .map(|(name, _)| quoted(name))
+        .collect();
+    items.extend(declared.iter().filter_map(|(name, covers)| {
+        let covered: Vec<String> = (*covers)?.iter().map(|name| quoted(name)).collect();
+        Some(format!(
+            "the Group {} covering {}",
+            quoted(name),
+            listed(&covered, false)
+        ))
+    }));
+    (!items.is_empty()).then(|| format!("- The services of this repository: {}.", listed(&items, true)))
+}
+
+/// `items` as a list in a sentence, the last one after `and`, with a comma before it in a list of 3 or more when
+/// `serial`.
+fn listed(items: &[String], serial: bool) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => {
+            let comma = if serial { "," } else { "" };
+            format!("{}{comma} and {last}", rest.join(", "))
+        }
+    }
+}
+
+/// The names of the Services declared in the configuration files of `worktree`, in the order they first appear, the
+/// versioned file first. A file that cannot be read or parsed places none.
+fn declaration_order(worktree: &Path) -> Vec<String> {
+    let mut order: Vec<String> = Vec::new();
+    for file in [config::VERSIONED_FILE, config::LOCAL_FILE] {
+        let Ok(text) = std::fs::read_to_string(worktree.join(file)) else {
+            continue;
+        };
+        let Ok(document) = toml::de::DeTable::parse(&text) else {
+            continue;
+        };
+        let Some(toml::de::DeValue::Table(services)) = document.get_ref().get("services").map(|value| value.get_ref())
+        else {
+            continue;
+        };
+        let mut names: Vec<_> = services
+            .keys()
+            .map(|name| (name.span().start, name.get_ref().to_string()))
+            .collect();
+        names.sort();
+        for (_, name) in names {
+            if !order.contains(&name) {
+                order.push(name);
+            }
+        }
+    }
+    order
 }
 
 /// Writes the Rules block into the instruction file and the Guard into the Claude Code settings of the Worktree
@@ -111,7 +196,10 @@ pub(super) fn install(registry: &Registry, cwd: &Path, file: Option<&Path>) -> R
     // The settings first, since a file that is not JSON is the likelier failure and nothing is written then.
     let settings = contained(worktree, &worktree.join(SETTINGS))?;
     let guard = hook::install(&registry.managed, &settings)?;
-    let rules = registry.managed.write(&instructions, RULES, rules(off))?;
+    let services = services_line(worktree);
+    let rules = registry
+        .managed
+        .write_apart(&instructions, RULES, &rules(off, services.as_deref()))?;
     Ok(InstallReport {
         rules: BlockReport {
             file: instructions,
@@ -137,9 +225,15 @@ pub(super) fn switch(registry: &Registry, cwd: &Path, off: bool) -> Result<Switc
     let worktrees = topology::worktrees(&topology.git_common_dir)?;
     let mut reports = Vec::new();
     for file in registry.managed.files_holding(RULES)? {
-        let ours = worktrees.iter().any(|worktree| file.starts_with(&worktree.path));
-        if ours && ManagedBlocks::holds(&file, RULES)? {
-            let outcome = registry.managed.write(&file, RULES, rules(off))?;
+        let ours = worktrees.iter().find(|worktree| file.starts_with(&worktree.path));
+        if let Some(worktree) = ours
+            && ManagedBlocks::holds(&file, RULES)?
+        {
+            // The Services are read again, from the Worktree of the file, as `agent install` would.
+            let services = services_line(&worktree.path);
+            let outcome = registry
+                .managed
+                .write_apart(&file, RULES, &rules(off, services.as_deref()))?;
             reports.push(BlockReport {
                 file,
                 outcome: outcome.into(),
@@ -220,4 +314,71 @@ pub(super) fn contained(worktree: &Path, requested: &Path) -> Result<PathBuf, Ag
 pub(super) fn topology_in(cwd: &Path) -> Result<Topology, AgentError> {
     let cwd = topology::canonicalize(cwd)?;
     topology::resolve(&cwd)?.ok_or(AgentError::Topology(TopologyError::NotARepository { dir: cwd }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn one_service_is_named_alone() {
+        assert_eq!(
+            naming(&[("web", None)]).as_deref(),
+            Some("- The services of this repository: `web`.")
+        );
+    }
+
+    #[test]
+    fn two_services_are_joined_by_and() {
+        assert_eq!(
+            naming(&[("web", None), ("api", None)]).as_deref(),
+            Some("- The services of this repository: `web` and `api`.")
+        );
+    }
+
+    #[test]
+    fn the_groups_come_last_with_the_services_they_cover() {
+        let (front, all) = (names(&["web", "api"]), names(&["web", "api", "worker"]));
+        assert_eq!(
+            naming(&[
+                ("full", Some(&all)),
+                ("web", None),
+                ("api", None),
+                ("worker", None),
+                ("dev", Some(&front)),
+            ])
+            .as_deref(),
+            Some(
+                "- The services of this repository: `web`, `api`, `worker`, the Group `full` covering `web`, `api` \
+                 and `worker`, and the Group `dev` covering `web` and `api`."
+            )
+        );
+    }
+
+    #[test]
+    fn no_declared_service_gives_no_line() {
+        assert_eq!(naming(&[]), None);
+    }
+
+    #[test]
+    fn the_services_are_placed_in_the_order_the_files_declare_them() {
+        let worktree = tempfile::tempdir().expect("a temporary directory");
+        std::fs::write(
+            worktree.path().join(config::VERSIONED_FILE),
+            "[services.web]\nrun = 'y'\n[services.api]\nrun = 'x'\n[services.web.health]\npath = '/'\n\
+             [settings]\nservices.zeta.run = 'z'\n",
+        )
+        .expect("write the configuration");
+        std::fs::write(
+            worktree.path().join(config::LOCAL_FILE),
+            "services.local.run = 'l'\nservices.api.run = 'x2'\n",
+        )
+        .expect("write the local configuration");
+
+        assert_eq!(declaration_order(worktree.path()), names(&["web", "api", "local"]));
+    }
 }

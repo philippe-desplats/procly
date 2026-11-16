@@ -105,6 +105,9 @@ pub(crate) struct Origin {
     /// Whether the file lacked a final line break, so that Procly added one before its block.
     #[serde(default)]
     pub(crate) newline_added: bool,
+    /// Whether Procly added a blank line before its block, to set it apart from the text of the file.
+    #[serde(default)]
+    pub(crate) blank_line_added: bool,
     /// The text of a file Procly writes again as a whole, such as a JSON settings file, whose layout cannot be
     /// rebuilt from what it holds now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +145,27 @@ impl ManagedBlocks {
     /// Makes `file` hold the block `block` with `content`, one line per element, creating the file and its directory
     /// when they are missing. The rest of the file is kept byte for byte. A block the user edited is left alone.
     pub(crate) fn write(&self, file: &Path, block: &str, content: &[impl AsRef<str>]) -> Result<Outcome, ManagedError> {
+        self.write_with(file, block, content, Placement::Joined)
+    }
+
+    /// Like [`ManagedBlocks::write`], except that a block appended to a file that already holds text starts after a
+    /// blank line, as a section of an instruction file does.
+    pub(crate) fn write_apart(
+        &self,
+        file: &Path,
+        block: &str,
+        content: &[impl AsRef<str>],
+    ) -> Result<Outcome, ManagedError> {
+        self.write_with(file, block, content, Placement::Apart)
+    }
+
+    fn write_with(
+        &self,
+        file: &Path,
+        block: &str,
+        content: &[impl AsRef<str>],
+        placement: Placement,
+    ) -> Result<Outcome, ManagedError> {
         self.with_table(|table| {
             let content = joined(content);
             let existing = read_existing(file)?;
@@ -149,12 +173,14 @@ impl ManagedBlocks {
             let key = (file.to_owned(), block.to_owned());
             let syntax = Syntax::of(file);
             let appended = matches!(locate(syntax, &text, block), Located::Absent);
+            let apart = appended && syntax != Syntax::Toml && placement.blank_line_needed(&text);
             let (change, new_text) = plan(
                 syntax,
                 &text,
                 block,
                 &content,
                 table.get(&key).map(|entry| entry.fingerprint.as_str()),
+                apart,
             );
             if let Some(new_text) = new_text {
                 write_text(file, &new_text)?;
@@ -165,6 +191,7 @@ impl ManagedBlocks {
                     existed: existing.is_some(),
                     // A block put first leaves the end of the file as it was.
                     newline_added: syntax != Syntax::Toml && !text.is_empty() && !text.ends_with('\n'),
+                    blank_line_added: apart,
                     original: None,
                 });
                 self.remember(table, key, fingerprint(&content), origin)?;
@@ -179,6 +206,23 @@ impl ManagedBlocks {
     /// `known` lists the contents that count as Procly's even without a fingerprint, such as the one a Procly whose
     /// state was lost would write. A block the user edited, or one that never closes, is left alone.
     pub(crate) fn remove(&self, file: &Path, block: &str, known: &[String]) -> Result<Removal, ManagedError> {
+        self.remove_with(file, block, known, Placement::Joined)
+    }
+
+    /// Like [`ManagedBlocks::remove`], for a block [`ManagedBlocks::write_apart`] wrote. When how the file looked
+    /// before the block is unknown, as after the state directory was lost, a blank line just before a block that ends
+    /// the file is taken as the one Procly added, and goes with the block.
+    pub(crate) fn remove_apart(&self, file: &Path, block: &str, known: &[String]) -> Result<Removal, ManagedError> {
+        self.remove_with(file, block, known, Placement::Apart)
+    }
+
+    fn remove_with(
+        &self,
+        file: &Path,
+        block: &str,
+        known: &[String],
+        placement: Placement,
+    ) -> Result<Removal, ManagedError> {
         self.with_table(|table| {
             let key = (file.to_owned(), block.to_owned());
             let text = read_text(file)?;
@@ -191,6 +235,7 @@ impl ManagedBlocks {
                 known,
                 entry.map(|entry| entry.fingerprint.as_str()),
                 origin,
+                placement,
             ) {
                 Planned::Edited => return Ok(Removal::Edited),
                 Planned::Absent => Removal::Absent,
@@ -411,9 +456,33 @@ pub(super) fn write_text(file: &Path, text: &str) -> Result<(), ManagedError> {
     atomic_file::replace(file, text.as_bytes(), Mode::Kept).map_err(write_error)
 }
 
+/// Where a block appended to a file goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// On the line after the text of the file.
+    Joined,
+    /// After a blank line, unless the file is empty or already ends with one.
+    Apart,
+}
+
+impl Placement {
+    /// Whether a block appended to `text` needs a blank line before it.
+    fn blank_line_needed(self, text: &str) -> bool {
+        self == Self::Apart && !text.is_empty() && text != "\n" && !text.ends_with("\n\n")
+    }
+}
+
 /// What to do with `text` to make it hold the block `block` with `content`, and the text to write, if any.
-/// `recorded` is the fingerprint stored for the block when Procly last wrote it.
-fn plan(syntax: Syntax, text: &str, block: &str, content: &str, recorded: Option<&str>) -> (Outcome, Option<String>) {
+/// `recorded` is the fingerprint stored for the block when Procly last wrote it, and `apart` whether a block appended
+/// goes after a blank line.
+fn plan(
+    syntax: Syntax,
+    text: &str,
+    block: &str,
+    content: &str,
+    recorded: Option<&str>,
+    apart: bool,
+) -> (Outcome, Option<String>) {
     match locate(syntax, text, block) {
         Located::Absent if syntax == Syntax::Toml => (
             Outcome::Written,
@@ -422,6 +491,9 @@ fn plan(syntax: Syntax, text: &str, block: &str, content: &str, recorded: Option
         Located::Absent => {
             let mut appended = text.to_owned();
             if !appended.is_empty() && !appended.ends_with('\n') {
+                appended.push('\n');
+            }
+            if apart {
                 appended.push('\n');
             }
             appended.push_str(&render(syntax, block, content));
@@ -447,7 +519,8 @@ enum Planned {
 }
 
 /// `recorded` is the fingerprint stored for the block when Procly last wrote it, `known` the contents that are
-/// Procly's whatever the record says, and `origin` how the file looked before the block.
+/// Procly's whatever the record says, `origin` how the file looked before the block, and `placement` where the block
+/// was appended.
 fn plan_removal(
     syntax: Syntax,
     text: &str,
@@ -455,6 +528,7 @@ fn plan_removal(
     known: &[String],
     recorded: Option<&str>,
     origin: Option<&Origin>,
+    placement: Placement,
 ) -> Planned {
     match locate(syntax, text, block) {
         Located::Absent => Planned::Absent,
@@ -464,9 +538,18 @@ fn plan_removal(
             let at_end = range.end == text.len();
             let mut rest = text.to_owned();
             rest.replace_range(range, "");
-            // The line break Procly put before the block goes with it, unless something was written after the block.
-            if at_end && origin.is_some_and(|origin| origin.newline_added) && rest.ends_with('\n') {
-                rest.pop();
+            // The line breaks Procly put before the block go with it, unless something was written after the block.
+            if at_end {
+                let blank_line_added = origin
+                    .map_or(placement == Placement::Apart && rest.ends_with("\n\n"), |origin| {
+                        origin.blank_line_added
+                    });
+                if blank_line_added && rest.ends_with('\n') {
+                    rest.pop();
+                }
+                if origin.is_some_and(|origin| origin.newline_added) && rest.ends_with('\n') {
+                    rest.pop();
+                }
             }
             Planned::Remove(rest)
         }
@@ -596,14 +679,21 @@ mod tests {
 
     #[test]
     fn a_missing_block_is_appended_after_the_rest_of_the_file() {
-        let (change, text) = plan(Syntax::Hash, "node_modules\n", "exclusions", "/a\n", None);
+        let (change, text) = plan(Syntax::Hash, "node_modules\n", "exclusions", "/a\n", None, false);
         assert_eq!(change, Outcome::Written);
         assert_eq!(text.unwrap(), format!("node_modules\n{}", block("/a\n")));
     }
 
     #[test]
     fn a_block_of_a_toml_file_goes_first_so_that_its_keys_stay_at_the_root() {
-        let (change, text) = plan(Syntax::Toml, "a = 1\n[table]\nb = 2", "worktrunk", "c = 3\n", None);
+        let (change, text) = plan(
+            Syntax::Toml,
+            "a = 1\n[table]\nb = 2",
+            "worktrunk",
+            "c = 3\n",
+            None,
+            false,
+        );
         assert_eq!(change, Outcome::Written);
         assert_eq!(
             text.unwrap(),
@@ -615,11 +705,12 @@ mod tests {
     #[test]
     fn a_toml_block_is_removed_and_the_file_comes_back_byte_for_byte() {
         let original = "a = 1\n[table]\nb = 2";
-        let (_, written) = plan(Syntax::Toml, original, "worktrunk", "c = 3\n", None);
+        let (_, written) = plan(Syntax::Toml, original, "worktrunk", "c = 3\n", None, false);
         let recorded = fingerprint("c = 3\n");
         let origin = Origin {
             existed: true,
             newline_added: false,
+            blank_line_added: false,
             original: None,
         };
 
@@ -630,6 +721,7 @@ mod tests {
             &[],
             Some(&recorded),
             Some(&origin),
+            Placement::Joined,
         );
 
         assert_eq!(planned, Planned::Remove(original.to_owned()));
@@ -657,9 +749,9 @@ mod tests {
 
     #[test]
     fn a_file_without_a_final_line_break_gets_one_and_nothing_else_changes() {
-        let (_, text) = plan(Syntax::Hash, "a\nb", "exclusions", "/a\n", None);
+        let (_, text) = plan(Syntax::Hash, "a\nb", "exclusions", "/a\n", None, false);
         assert_eq!(text.unwrap(), format!("a\nb\n{}", block("/a\n")));
-        let (_, text) = plan(Syntax::Hash, "", "exclusions", "/a\n", None);
+        let (_, text) = plan(Syntax::Hash, "", "exclusions", "/a\n", None, false);
         assert_eq!(text.unwrap(), block("/a\n"));
     }
 
@@ -667,7 +759,7 @@ mod tests {
     fn a_block_with_the_same_content_is_left_alone() {
         let text = format!("above\n{}below", block("/a\n"));
         assert_eq!(
-            plan(Syntax::Hash, &text, "exclusions", "/a\n", None),
+            plan(Syntax::Hash, &text, "exclusions", "/a\n", None, false),
             (Outcome::Unchanged, None)
         );
     }
@@ -676,7 +768,7 @@ mod tests {
     fn an_intact_block_is_updated_in_place_between_the_lines_around_it() {
         let text = format!("above\n{}below", block("/a\n"));
         let recorded = fingerprint("/a\n");
-        let (change, updated) = plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", Some(&recorded));
+        let (change, updated) = plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", Some(&recorded), false);
         assert_eq!(change, Outcome::Written);
         assert_eq!(updated.unwrap(), format!("above\n{}below", block("/a\n/b\n")));
     }
@@ -686,12 +778,12 @@ mod tests {
         let text = format!("above\n{}below", block("/a\n/mine\n"));
         let recorded = fingerprint("/a\n");
         assert_eq!(
-            plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", Some(&recorded)),
+            plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", Some(&recorded), false),
             (Outcome::Edited, None)
         );
         // A block whose fingerprint was never recorded is no block of ours to rewrite either.
         assert_eq!(
-            plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", None),
+            plan(Syntax::Hash, &text, "exclusions", "/a\n/b\n", None, false),
             (Outcome::Edited, None)
         );
     }
@@ -700,7 +792,7 @@ mod tests {
     fn a_block_that_never_closes_is_left_alone() {
         let text = format!("{}\n/a\n", open_marker(Syntax::Hash, "exclusions"));
         assert_eq!(
-            plan(Syntax::Hash, &text, "exclusions", "/a\n", None),
+            plan(Syntax::Hash, &text, "exclusions", "/a\n", None, false),
             (Outcome::Edited, None)
         );
     }
@@ -710,7 +802,7 @@ mod tests {
         let text = render(Syntax::Hash, "rules", "x\n");
         assert_eq!(locate(Syntax::Hash, &text, "exclusions"), Located::Absent);
         assert_eq!(
-            plan(Syntax::Hash, &text, "exclusions", "/a\n", None).0,
+            plan(Syntax::Hash, &text, "exclusions", "/a\n", None, false).0,
             Outcome::Written
         );
     }
@@ -801,7 +893,15 @@ mod tests {
         let text = format!("above\n{}below", block("/a\n"));
         let recorded = fingerprint("/a\n");
         assert_eq!(
-            plan_removal(Syntax::Hash, &text, "exclusions", &[], Some(&recorded), None),
+            plan_removal(
+                Syntax::Hash,
+                &text,
+                "exclusions",
+                &[],
+                Some(&recorded),
+                None,
+                Placement::Joined
+            ),
             Planned::Remove("above\nbelow".to_owned())
         );
     }
@@ -811,7 +911,7 @@ mod tests {
         let text = block("/a\n");
         let known = ["/b\n".to_owned(), "/a\n".to_owned()];
         assert_eq!(
-            plan_removal(Syntax::Hash, &text, "exclusions", &known, None, None),
+            plan_removal(Syntax::Hash, &text, "exclusions", &known, None, None, Placement::Joined),
             Planned::Remove(String::new())
         );
     }
@@ -827,17 +927,34 @@ mod tests {
                 "exclusions",
                 &["/a\n".to_owned()],
                 Some(&recorded),
-                None
+                None,
+                Placement::Joined
             ),
             Planned::Edited
         );
         let open = format!("{}\n/a\n", open_marker(Syntax::Hash, "exclusions"));
         assert_eq!(
-            plan_removal(Syntax::Hash, &open, "exclusions", &["/a\n".to_owned()], None, None),
+            plan_removal(
+                Syntax::Hash,
+                &open,
+                "exclusions",
+                &["/a\n".to_owned()],
+                None,
+                None,
+                Placement::Joined
+            ),
             Planned::Edited
         );
         assert_eq!(
-            plan_removal(Syntax::Hash, "other\n", "exclusions", &[], None, None),
+            plan_removal(
+                Syntax::Hash,
+                "other\n",
+                "exclusions",
+                &[],
+                None,
+                None,
+                Placement::Joined
+            ),
             Planned::Absent
         );
     }
@@ -948,6 +1065,7 @@ mod tests {
             Some(Origin {
                 existed: true,
                 newline_added: true,
+                blank_line_added: false,
                 original: None
             })
         );

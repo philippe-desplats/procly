@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use super::agent::{INSTRUCTION_FILES, RULES, SETTINGS, contained, rules};
+use super::agent::{INSTRUCTION_FILES, RULES, SETTINGS, contained, rules, services_line};
 use super::compose::ComposeError;
 use super::environment::{ENV_BLOCK, ENV_FILE, EXCLUDE_FILE, EXCLUSIONS, GITIGNORE_FILE, exclusion_lines};
 use super::hook::{self, HookError, Standing};
@@ -343,14 +343,23 @@ impl Block {
     }
 
     /// Takes the block out of `file` when nobody edited it.
-    fn remove(self, managed: &ManagedBlocks, file: &Path) -> Result<Removal, EjectError> {
+    fn remove(self, places: &Places, managed: &ManagedBlocks, file: &Path) -> Result<Removal, EjectError> {
         // The contents Procly writes today count as its own even when the fingerprint was lost with the state directory.
         Ok(match self {
-            Self::Rules => managed.remove(
-                file,
-                RULES,
-                &[managed::joined(rules(false)), managed::joined(rules(true))],
-            )?,
+            Self::Rules => {
+                // The On block names the Services of the Worktree of the file as they are declared now.
+                let services = places
+                    .worktrees
+                    .iter()
+                    .find(|worktree| file.starts_with(&worktree.path))
+                    .and_then(|worktree| services_line(&worktree.path));
+                let known = [
+                    managed::joined(&rules(false, services.as_deref())),
+                    managed::joined(&rules(false, None)),
+                    managed::joined(&rules(true, None)),
+                ];
+                managed.remove_apart(file, RULES, &known)?
+            }
             Self::Guard => hook::remove(managed, file)?,
             Self::WorktrunkHooks => managed.remove(file, worktrunk::BLOCK, &worktrunk::known())?,
             Self::Exclusions => managed.remove(file, EXCLUSIONS, &[managed::joined(&exclusion_lines())])?,
@@ -493,7 +502,7 @@ impl Outcome {
     ) -> Result<(), EjectError> {
         match places.reach(&file) {
             Reach::Own => {
-                let removal = block.remove(managed, &file)?;
+                let removal = block.remove(places, managed, &file)?;
                 self.record(places, block.written(), file, removal);
             }
             reach => {
