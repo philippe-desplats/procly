@@ -4,6 +4,7 @@ import { CopyBox } from "./CopyBox";
 import { failureMessage } from "./daemon";
 import {
   composeLine,
+  deletedDirectory,
   endedWords,
   foreignLine,
   holdsNothing,
@@ -38,6 +39,7 @@ function keptLeaseLine(kept: KeptLease): string {
 /** The effects of a release, one list per kind, each drawn only when it holds something. */
 function Effects({ report, tense }: { report: ReleaseReport; tense: Tense }) {
   const preview = tense === "preview";
+  const deleted = deletedDirectory(report);
   return (
     <>
       {report.services.length + report.jobs.length > 0 ? (
@@ -81,6 +83,21 @@ function Effects({ report, tense }: { report: ReleaseReport; tense: Tense }) {
           </ul>
         </>
       ) : null}
+      {deleted === null ? null : (
+        <>
+          <h3 className="caption">{preview ? "Will delete" : "Deleted"}</h3>
+          <ul className="list">
+            <li className="item item-block">
+              <span className="item-name">{`Output directory ${deleted}`}</span>
+              <span className="loss">
+                {preview
+                  ? "With the logs of the Services and Jobs of this Worktree, which cannot be brought back."
+                  : "With the logs of the Services and Jobs of this Worktree."}
+              </span>
+            </li>
+          </ul>
+        </>
+      )}
       {report.kept_leases.length + report.logical_resources.length > 0 ? (
         <>
           <h3 className="caption">Kept</h3>
@@ -262,7 +279,9 @@ export function ReleaseSheet({
                 {`The release forgets ${forgotten} of this Worktree, so procly wait, procly logs and procly status no longer know them.`}
               </p>
             )}
-            {nothing || report.retention.length > 0 ? null : <p>No data is deleted.</p>}
+            {nothing || report.retention.length > 0 || deletedDirectory(report) !== null ? null : (
+              <p>No data is deleted.</p>
+            )}
             <p className="caption">From a terminal, in the Worktree:</p>
             <CopyBox text={releaseCommand(path)} />
           </>

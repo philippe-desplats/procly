@@ -168,6 +168,8 @@ async function openSheet(): Promise<HTMLElement> {
   return screen.findByRole("dialog");
 }
 
+const OUTPUT_DIRECTORY = "/state/output/web_fix-5c2e0d6b8a41f7e3";
+
 const emptyReport = {
   response: "worktree_release",
   worktree: PATH,
@@ -522,6 +524,34 @@ describe("the Worktree release sheet", () => {
     expect(sheet.queryByText(/Procly holds nothing/)).not.toBeInTheDocument();
     expect(sheet.queryByText("No data is deleted.")).not.toBeInTheDocument();
     expect(sheet.getByRole("button", { name: "Release" })).toBeEnabled();
+  });
+
+  it("names the output directory a release deletes with its logs, and does not say no data is deleted", async () => {
+    app({
+      previewing: () => ({ ...emptyReport, deleted_output_directory: OUTPUT_DIRECTORY }),
+    });
+
+    const sheet = within(await openSheet());
+
+    expect(await sheet.findByRole("heading", { name: "Will delete" })).toBeInTheDocument();
+    expect(sheet.getByText(`Output directory ${OUTPUT_DIRECTORY}`)).toBeInTheDocument();
+    expect(sheet.getByText(/the logs of the Services and Jobs of this Worktree/)).toHaveClass("loss");
+    expect(sheet.queryByText("No data is deleted.")).not.toBeInTheDocument();
+    // A Worktree left with only its output directory still has something to release.
+    expect(sheet.queryByText(/Procly holds nothing/)).not.toBeInTheDocument();
+    expect(sheet.getByRole("button", { name: "Release" })).toBeEnabled();
+  });
+
+  it("says the result deleted the output directory", async () => {
+    app({ releasing: () => ({ ...emptyReport, deleted_output_directory: OUTPUT_DIRECTORY }) });
+    const sheet = within(await openSheet());
+    fireEvent.click(await sheet.findByRole("button", { name: "Release" }));
+
+    const result = within(await screen.findByRole("dialog", { name: "Released web-fix" }));
+
+    expect(result.getByRole("heading", { name: "Deleted" })).toBeInTheDocument();
+    expect(result.getByText(`Output directory ${OUTPUT_DIRECTORY}`)).toBeInTheDocument();
+    expect(result.queryByText(/nothing was released/)).not.toBeInTheDocument();
   });
 
   it("sends nothing when cancelled", async () => {

@@ -14,5 +14,6 @@
   ],
   "logical_resources": [{ "service": "db", "driver": "postgres", "resource": "dev", "name": "web__web_fix" }],
   "retention": [],
+  "deleted_output_directory": null,
   "warnings": []
 }

@@ -71,4 +71,18 @@ describe("a release that holds nothing", () => {
       }),
     ).toBe(false);
   });
+
+  it("does not hold nothing when it only deletes the output directory, which holds the logs", () => {
+    expect(
+      holdsNothing({
+        ...empty,
+        deleted_output_directory: "/state/output/app_idle-5c2e0d6b8a41f7e3",
+      }),
+    ).toBe(false);
+  });
+
+  it("holds nothing from an older Daemon that leaves the output directory out of its report", () => {
+    const { deleted_output_directory: _left_out, ...older } = empty;
+    expect(holdsNothing(older as ReleaseReport)).toBe(true);
+  });
 });
