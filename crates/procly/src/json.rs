@@ -169,6 +169,10 @@ pub(crate) struct WorktreeRelease<'a> {
     warnings: &'a [String],
     /// The Retention policies it applied to the Isolated containers of the Worktrees already removed.
     retention: &'a [AppliedRetention],
+    /// The output directory of the Worktree it deleted, or would delete, `None` when none.
+    deleted_output_directory: Option<&'a Path>,
+    /// Whether it was a dry run, which changed nothing.
+    dry_run: bool,
 }
 
 /// The Services and Jobs a Worktree release stopped.
@@ -193,7 +197,7 @@ struct ReleaseKept<'a> {
 }
 
 impl<'a> WorktreeRelease<'a> {
-    pub(crate) fn new(report: &'a ReleaseReport) -> Self {
+    pub(crate) fn new(report: &'a ReleaseReport, dry_run: bool) -> Self {
         Self {
             worktree: &report.worktree,
             stopped: ReleaseStopped {
@@ -210,6 +214,8 @@ impl<'a> WorktreeRelease<'a> {
             },
             warnings: &report.warnings,
             retention: &report.retention,
+            deleted_output_directory: report.deleted_output_directory.as_deref(),
+            dry_run,
         }
     }
 }

@@ -50,6 +50,7 @@ describe("a release that holds nothing", () => {
     kept_leases: [],
     logical_resources: [],
     retention: [],
+    deleted_output_directory: null,
     warnings: [],
   };
 

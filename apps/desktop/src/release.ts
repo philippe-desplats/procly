@@ -37,8 +37,9 @@ export async function releaseWorktree(path: string): Promise<ReleaseReport> {
 /**
  * Whether Procly holds nothing in the Worktree: no Service or Job to stop, no Compose service to let go of, no Lease to
  * release, and no Retention policy to apply, since one may delete the data of an Isolated container. A Lease or a
- * Logical resource the release keeps is not held, so it does not count. This is the test
- * `ReleaseReport::released_nothing` makes in Rust, written over the same fields because the window only has the JSON.
+ * Logical resource the release keeps is not held, so it does not count, nor does the output directory a release deletes,
+ * which holds only logs. This is the test `ReleaseReport::released_nothing` makes in Rust, that directory aside, written
+ * over the same fields because the window only has the JSON.
  */
 export function holdsNothing(report: ReleaseReport): boolean {
   return (

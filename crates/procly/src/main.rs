@@ -412,15 +412,16 @@ enum WorktreeCommand {
     /// Run the Worktree release, before the Worktree is removed: stop its Services and Jobs with their whole process
     /// trees, let go of its Compose services as `down` does, and release its Leases so that another Worktree can be
     /// granted their ports at once. The Leases of a Pinned branch are kept, and so is every Logical resource, which
-    /// `procly gc` lists once the Worktree is removed. No data of the Worktree is deleted. It then applies the Retention
-    /// policy of the Isolated containers of the Worktrees already removed, which deletes a container and its volumes
-    /// once its policy says so. The Daemon logs who asked. With `--dry-run`, print what the release would stop, let go
-    /// of, release and apply, and change nothing.
+    /// `procly gc` lists once the Worktree is removed. No data of the Worktree is deleted, only the output directory of
+    /// its Services once nothing of it runs any more, which holds their logs. It then applies the Retention policy of
+    /// the Isolated containers of the Worktrees already removed, which deletes a container and its volumes once its
+    /// policy says so. The Daemon logs who asked. With `--dry-run`, print what the release would stop, let go of,
+    /// release, apply and delete, and change nothing.
     #[command(
         after_help = "Run it from the pre-remove hook of a worktree manager. Running it again, or in a Worktree Procly \
                       never saw, prints `nothing to release`. `--dry-run` prints the same report with `would stop`, \
-                      `would release` and `would apply`, and stops, releases and deletes nothing. Exit codes: 0 when \
-                      the Worktree is released, also when \
+                      `would release`, `would apply` and `would delete`, and stops, releases and deletes nothing. \
+                      Exit codes: 0 when the Worktree is released, also when \
                       there was nothing to release, 125 when Procly itself fails, such as for a directory that is not \
                       in a git Repository. See docs/worktree-release.md and docs/exit-codes.md."
     )]
@@ -1620,7 +1621,7 @@ fn worktree_release(state: &StateDir, path: Option<PathBuf>, dry_run: bool, json
     let path = path.map_or(cwd.clone(), |path| cwd.join(path));
     match client::send(state, &Request::WorktreeRelease { path, dry_run })? {
         Response::WorktreeRelease(report) if json => {
-            json::print(&json::WorktreeRelease::new(&report))?;
+            json::print(&json::WorktreeRelease::new(&report, dry_run))?;
             Ok(ExitCode::SUCCESS)
         }
         Response::WorktreeRelease(report) => {
@@ -1708,6 +1709,10 @@ fn release_summary(report: &ReleaseReport, dry_run: bool) -> String {
     } in &report.leases
     {
         let _ = writeln!(text, "lease {service}.{port_name} port {port} {released}");
+    }
+    if let Some(directory) = &report.deleted_output_directory {
+        let deleted = if dry_run { "would delete" } else { "deleted" };
+        let _ = writeln!(text, "output directory {} {deleted}", directory.display());
     }
     for KeptLease { lease, reason } in &report.kept_leases {
         let LeaseHeld {

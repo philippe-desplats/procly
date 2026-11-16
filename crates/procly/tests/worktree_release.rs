@@ -82,6 +82,7 @@ fn worktree_release_stops_every_service_and_job_of_the_worktree_with_their_trees
     assert_success(&job);
     let job = stdout(&job).trim().to_owned();
     let leftover = common::read_pid(&leftover);
+    let directory = output_directory_of(&procly, &other);
 
     let release = procly
         .command()
@@ -97,7 +98,10 @@ fn worktree_release_stops_every_service_and_job_of_the_worktree_with_their_trees
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        format!("web stopped\njob {job} stopped\nlease web.http port {in_other} released\n")
+        format!(
+            "web stopped\njob {job} stopped\nlease web.http port {in_other} released\noutput directory {} deleted\n",
+            directory.display()
+        )
     );
     common::wait_until_gone(sleeper);
     common::wait_until_gone(leftover);
@@ -142,13 +146,17 @@ fn the_leases_of_a_pinned_branch_are_kept_and_its_recreated_worktree_gets_the_sa
     let develop = worktree_on(&main, "app-develop", "develop", true);
     write(&develop, "procly.toml", &config);
     let leased = port_of(&procly.procly_in(&develop, &["up", "web"]));
+    let directory = output_directory_of(&procly, &develop);
 
     let output = procly.procly_in(&develop, &["worktree", "release"]);
 
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        format!("web stopped\nlease web.http port {leased} kept for Pinned branch develop\n")
+        format!(
+            "web stopped\noutput directory {} deleted\nlease web.http port {leased} kept for Pinned branch develop\n",
+            directory.display()
+        )
     );
     git(&main, &["worktree", "remove", "--force", &develop.to_string_lossy()]);
     // Another Worktree asks in between, it would get the port of a Lease the release had let go of.
@@ -258,6 +266,7 @@ fn worktree_release_json_reports_what_was_stopped_released_and_kept() {
     write(&develop, "procly.toml", &config);
     let in_develop = port_of(&procly.procly_in(&develop, &["up", "web"]));
 
+    let directory = output_directory_of(&procly, &other);
     let released = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--json"]));
     let kept = json_succeeded(&procly.procly_in(&develop, &["worktree", "release", "--json"]));
 
@@ -279,6 +288,8 @@ fn worktree_release_json_reports_what_was_stopped_released_and_kept() {
             },
             "warnings": [],
             "retention": [],
+            "deleted_output_directory": directory,
+            "dry_run": false,
         })
     );
     assert_eq!(kept["released"]["leases"], serde_json::json!([]));
@@ -305,6 +316,15 @@ fn documents(procly: &Procly) -> Vec<(&'static str, Option<Vec<u8>>)> {
     .into_iter()
     .map(|name| (name, std::fs::read(procly.state_dir().join(name)).ok()))
     .collect()
+}
+
+/// The document of a release without its `dry_run` key, the one key a dry run and the release after it tell apart.
+fn released_as(mut document: serde_json::Value) -> serde_json::Value {
+    document
+        .as_object_mut()
+        .expect("the document is an object")
+        .remove("dry_run");
+    document
 }
 
 #[test]
@@ -351,6 +371,9 @@ fn a_dry_run_changes_nothing_and_a_real_release_then_gives_the_same_report() {
         Some(1)
     );
     assert_eq!(planned_develop["kept"]["leases"].as_array().map(Vec::len), Some(1));
+    let directory = output_directory_of(&procly, &other);
+    assert_eq!(planned_other["deleted_output_directory"], serde_json::json!(directory));
+    assert!(directory.is_dir(), "a dry run deleted the output directory");
 
     // Asking again changes nothing either, and the real release then does what the dry run said.
     assert_eq!(
@@ -359,8 +382,10 @@ fn a_dry_run_changes_nothing_and_a_real_release_then_gives_the_same_report() {
     );
     let released_other = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--json"]));
     let released_develop = json_succeeded(&procly.procly_in(&develop, &["worktree", "release", "--json"]));
-    assert_eq!(released_other, planned_other);
-    assert_eq!(released_develop, planned_develop);
+    assert_eq!(planned_other["dry_run"], serde_json::json!(true));
+    assert_eq!(released_other["dry_run"], serde_json::json!(false));
+    assert_eq!(released_as(released_other), released_as(planned_other));
+    assert_eq!(released_as(released_develop), released_as(planned_develop));
     assert!(!listens(in_other));
     common::wait_until_gone(leftover);
 }
@@ -375,6 +400,7 @@ fn a_dry_run_says_what_it_would_stop_and_would_release() {
     let leased = port_of(&procly.procly_in(&other, &["up", "web"]));
     let job = procly.procly_in(&other, &["run", "sleep 60"]);
     assert_success(&job);
+    let directory = output_directory_of(&procly, &other).display().to_string();
     let job = stdout(&job).trim().to_owned();
 
     let output = procly.procly_in(&other, &["worktree", "release", "--dry-run"]);
@@ -382,12 +408,16 @@ fn a_dry_run_says_what_it_would_stop_and_would_release() {
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        format!("web would stop\njob {job} would stop\nlease web.http port {leased} would release\n")
+        format!(
+            "web would stop\njob {job} would stop\nlease web.http port {leased} would release\noutput directory {directory} would delete\n"
+        )
     );
     let output = procly.procly_in(&other, &["worktree", "release"]);
     assert_eq!(
         stdout(&output),
-        format!("web stopped\njob {job} stopped\nlease web.http port {leased} released\n")
+        format!(
+            "web stopped\njob {job} stopped\nlease web.http port {leased} released\noutput directory {directory} deleted\n"
+        )
     );
     // Once released there is nothing left to say it would do.
     let again = procly.procly_in(&other, &["worktree", "release", "--dry-run"]);
@@ -534,6 +564,165 @@ fn a_worktree_with_no_isolated_container_to_sweep_reports_no_retention_policy() 
     assert_eq!(released["retention"], serde_json::json!([]), "{released}");
 }
 
+/// The output directories of the Worktree `worktree` in the state directory, the ones `procly gc` lists once git no
+/// longer lists the Worktree: each records its Worktree in its `worktree.json`.
+fn output_directories_of(procly: &Procly, worktree: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(procly.state_dir().join("output")) else {
+        return Vec::new();
+    };
+    let named = serde_json::to_string(worktree).expect("a path serializes");
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| std::fs::read_to_string(path.join("worktree.json")).is_ok_and(|record| record.contains(&named)))
+        .collect()
+}
+
+/// The single output directory of the Worktree `worktree`, which `procly up` created.
+fn output_directory_of(procly: &Procly, worktree: &Path) -> PathBuf {
+    let found = output_directories_of(procly, worktree);
+    assert_eq!(
+        found.len(),
+        1,
+        "one output directory of {}: {found:?}",
+        worktree.display()
+    );
+    found[0].clone()
+}
+
+#[test]
+fn worktree_release_deletes_the_output_directory_of_the_worktree_and_leaves_no_orphan_of_it() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&main, "procly.toml", &web_declaring(free_port()));
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    port_of(&procly.procly_in(&main, &["up", "web"]));
+    let leased = port_of(&procly.procly_in(&other, &["up", "web"]));
+    let (kept, deleted) = (
+        output_directory_of(&procly, &main),
+        output_directory_of(&procly, &other),
+    );
+
+    let output = procly.procly_in(&other, &["worktree", "release"]);
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "web stopped\nlease web.http port {leased} released\noutput directory {} deleted\n",
+            deleted.display()
+        )
+    );
+    assert!(!deleted.exists(), "{} is still there", deleted.display());
+    assert!(kept.is_dir(), "the output directory of another Worktree went too");
+    // Released again, the directory already gone is not named.
+    assert_eq!(
+        stdout(&procly.procly_in(&other, &["worktree", "release"])),
+        "nothing to release\n"
+    );
+    git(&main, &["worktree", "remove", "--force", &other.to_string_lossy()]);
+    let gc = json_succeeded(&procly.procly_in(&main, &["gc", "--json"]));
+    let orphans = gc["orphans"].as_array().expect("a list of Orphans");
+    assert!(
+        !orphans.iter().any(|orphan| orphan["kind"] == "output_directory"),
+        "{gc}"
+    );
+}
+
+#[test]
+fn a_dry_run_names_the_output_directory_it_would_delete_and_leaves_it() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    write(&other, "procly.toml", &web_declaring(free_port()));
+    let leased = port_of(&procly.procly_in(&other, &["up", "web"]));
+    let directory = output_directory_of(&procly, &other);
+
+    let output = procly.procly_in(&other, &["worktree", "release", "--dry-run"]);
+    let planned = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--dry-run", "--json"]));
+
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "web would stop\nlease web.http port {leased} would release\noutput directory {} would delete\n",
+            directory.display()
+        )
+    );
+    assert_eq!(planned["deleted_output_directory"], serde_json::json!(directory));
+    assert_eq!(planned["dry_run"], serde_json::json!(true));
+    assert!(directory.is_dir(), "a dry run deleted the output directory");
+
+    let released = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--json"]));
+
+    assert_eq!(released["deleted_output_directory"], serde_json::json!(directory));
+    assert_eq!(released["dry_run"], serde_json::json!(false));
+    assert!(!directory.exists());
+    let again = json_succeeded(&procly.procly_in(&other, &["worktree", "release", "--dry-run", "--json"]));
+    assert_eq!(again["deleted_output_directory"], serde_json::Value::Null, "{again}");
+}
+
+/// Waits until `path` exists, for at most 10 seconds.
+fn wait_for_file(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_worktree_with_something_still_running_after_the_release_keeps_its_output_directory() {
+    let procly = Procly::new();
+    procly.narrow_range();
+    let main = git_repository(procly.scratch(), "app");
+    let other = git_worktree_add(&main, "app-other");
+    let (terminated, go) = (procly.scratch().join("terminated"), procly.scratch().join("go"));
+    // `web` takes its time to stop: it waits for the test to say so once the release has asked it to.
+    let config = format!(
+        "[services.web]\nrun = 'trap \"touch {}; while [ ! -f {} ]; do sleep 0.05; done; exit 0\" TERM; {} --port {{ports.http}} & wait'\nports = {{ http = {} }}\n",
+        terminated.display(),
+        go.display(),
+        test_server().display(),
+        free_port()
+    );
+    write(&other, "procly.toml", &config);
+    port_of(&procly.procly_in(&other, &["up", "web"]));
+    let directory = output_directory_of(&procly, &other);
+    let release = procly
+        .command()
+        .current_dir(&other)
+        .args(["worktree", "release", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("procly worktree release starts");
+
+    // A Job starts in the Worktree while the release waits for `web` to stop, so it still runs once the release is done.
+    wait_for_file(&terminated);
+    let job = procly.procly_in(&other, &["run", "sleep 60"]);
+    assert_success(&job);
+    std::fs::write(&go, "").expect("let web stop");
+    let released = json_succeeded(&release.wait_with_output().expect("procly worktree release ends"));
+
+    assert_eq!(
+        released["deleted_output_directory"],
+        serde_json::Value::Null,
+        "{released}"
+    );
+    assert!(
+        directory.is_dir(),
+        "the output directory went while a Job of the Worktree runs"
+    );
+}
+
 /// A compose project of a Docker test, whose containers, network and volumes are removed when the test ends.
 struct Project(String);
 
@@ -669,7 +858,7 @@ fn docker_a_dry_run_then_a_real_release_give_the_same_report_retention_policy_in
     let planned = json_succeeded(&release(&["worktree", "release", "--dry-run", "--json"]));
     let released = json_succeeded(&release(&["worktree", "release", "--json"]));
 
-    assert_eq!(released, planned);
+    assert_eq!(released_as(released.clone()), released_as(planned));
     assert_eq!(released["retention"].as_array().map(Vec::len), Some(1), "{released}");
     assert!(
         removed.other_project.container().is_empty(),

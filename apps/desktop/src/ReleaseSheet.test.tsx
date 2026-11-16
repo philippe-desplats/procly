@@ -178,6 +178,7 @@ const emptyReport = {
   kept_leases: [],
   logical_resources: [],
   retention: [],
+  deleted_output_directory: null,
   warnings: [],
 };
 
