@@ -145,7 +145,7 @@ Setting up a Repository and its Worktrees:
 ```sh
 procly init                # propose a procly.toml from the dev scripts and the compose file
 procly worktree init       # prepare a fresh Worktree: copy untracked files, run setup commands
-procly worktree release    # before removing a Worktree: stop its work, release its Leases, keep its data
+procly worktree release    # before removing a Worktree: stop its work, release its Leases, delete its output directory (its logs), keep the rest of its data
 procly worktree release --dry-run   # print what the release would do, change nothing
 procly worktree hooks      # make Worktrunk run worktree init and release, in .config/wt.toml
 procly agent install       # write the Rules block and the Guard, nothing is written without it

@@ -163,7 +163,7 @@ The one-time, idempotent preparation of a new Worktree: copying untracked files 
 _Avoid_: bootstrap, setup script, provisioning
 
 **Worktree release**:
-The idempotent undoing of what a Worktree holds in Procly before the Worktree is removed: stopping its Services and Jobs and releasing its Leases, except those of a Pinned branch.
+The idempotent undoing of what a Worktree holds in Procly before the Worktree is removed: stopping its Services and Jobs and releasing its Leases, except those of a Pinned branch, then, once nothing of the Worktree runs, deleting its output directory, which holds the logs of its Services and Jobs.
 _Avoid_: teardown, cleanup, worktree remove
 
 ### Agent integration and reversibility
