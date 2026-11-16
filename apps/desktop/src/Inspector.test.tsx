@@ -30,6 +30,17 @@ function withCompose(): StatusReport & { response: "status" } {
   return copy;
 }
 
+/** The recorded answer with the `urls` a Daemon gives the Leases of `api`, which the recorded Daemon predates. */
+function withUrls(urls: Record<string, string>): StatusReport & { response: "status" } {
+  const copy = structuredClone(status);
+  const api = copy.repositories[0]?.worktrees[0]?.services[0];
+  if (api === undefined) {
+    throw new Error("the recorded answer has api in its main Worktree");
+  }
+  api.urls = urls;
+  return copy;
+}
+
 /** A command the window sent to the Rust side. */
 interface Sent {
   command: string;
@@ -519,7 +530,7 @@ describe("the inspector of a Service", () => {
     expect(name.nextElementSibling).toHaveTextContent("Process service in web");
   });
 
-  it("offers to open localhost on the port of a Service that runs, and asks Rust to, with the port alone", async () => {
+  it("offers to open localhost on the port of a Service that runs, over http when the status gives no URL", async () => {
     const rust = new Rust(answered(status));
     await open(rust);
     fireEvent.click(screen.getByRole("button", { name: /^api/ }));
@@ -527,7 +538,22 @@ describe("the inspector of a Service", () => {
     fireEvent.click(await within(inspector()).findByRole("button", { name: "Open localhost:18731" }));
 
     await waitFor(() => {
-      expect(rust.last("open_localhost")?.args).toEqual({ port: 18731 });
+      expect(rust.last("open_localhost")?.args).toEqual({ url: "http://localhost:18731" });
+    });
+  });
+
+  it.each([
+    ["https", "https://localhost:18731"],
+    ["http", "http://localhost:18731"],
+  ])("asks Rust to open the URL the status gives the Lease of a Port named %s", async (portName, url) => {
+    const rust = new Rust(answered(withUrls({ [portName]: url, smtp: "smtp://localhost:1025" })));
+    await open(rust);
+    fireEvent.click(screen.getByRole("button", { name: /^api/ }));
+
+    fireEvent.click(await within(inspector()).findByRole("button", { name: "Open localhost:18731" }));
+
+    await waitFor(() => {
+      expect(rust.last("open_localhost")?.args).toEqual({ url });
     });
   });
 

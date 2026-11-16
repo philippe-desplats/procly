@@ -15,6 +15,7 @@ import { MENU_CHOICE, stopCommand } from "./menu";
 import { isSeen, useFailed } from "./needs-you";
 import type { ForeignProcess } from "./protocol/ForeignProcess";
 import type { MenuChoice } from "./protocol/MenuChoice";
+import type { ServiceStatus } from "./protocol/ServiceStatus";
 import type { WorktreeStatus } from "./protocol/WorktreeStatus";
 import { useOutput, type OutputTarget, type OutputView } from "./output";
 import { PortPill, PortPills } from "./PortPill";
@@ -314,10 +315,18 @@ function ForeignPanel({ worktree, process }: { worktree: WorktreeStatus; process
 }
 
 /**
- * Opens the port of a Service in the browser. `Status` carries the port only, so the address assumes `http`. A failure
- * of Rust to open it stays under the button.
+ * The address of the Lease on `port` of `service`: the URL `Status` gives it, with the scheme of its Port name such as
+ * `https://localhost:<port>` for a Port named `https`, else `http://localhost:<port>`, for a port of no known scheme
+ * and for a Daemon older than the `urls` of `Status`.
  */
-function OpenLocalhost({ port }: { port: number }) {
+function leaseUrl(service: ServiceStatus, port: number): string {
+  const address = `localhost:${String(port)}`;
+  const urls = Object.values(service.urls ?? {});
+  return urls.find((url) => url.endsWith(`://${address}`)) ?? `http://${address}`;
+}
+
+/** Opens the Lease of a Service in the browser at `url`. A failure of Rust to open it stays under the button. */
+function OpenLocalhost({ port, url }: { port: number; url: string }) {
   const [error, setError] = useState<string | null>(null);
   return (
     <>
@@ -326,7 +335,7 @@ function OpenLocalhost({ port }: { port: number }) {
         className="button"
         onClick={() => {
           setError(null);
-          openLocalhost(port).catch((reason: unknown) => {
+          openLocalhost(url).catch((reason: unknown) => {
             setError(failureOf(reason).message);
           });
         }}
@@ -359,7 +368,7 @@ function Facts({ selected, at }: { selected: Followed; at: number }) {
               <dt>Port</dt>
               <dd className="port-line">
                 <PortPill port={selected.service.port} />
-                {selected.service.state === "ended" ? null : <OpenLocalhost port={selected.service.port} />}
+                {selected.service.state === "ended" ? null : <OpenLocalhost port={selected.service.port} url={leaseUrl(selected.service, selected.service.port)} />}
               </dd>
             </>
           )}
