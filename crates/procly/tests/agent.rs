@@ -719,6 +719,27 @@ fn the_rules_block_names_the_declared_services_and_groups_in_the_order_of_the_fi
 }
 
 #[test]
+fn the_rules_block_names_only_what_the_versioned_file_declares_never_the_local_one() {
+    let procly = Procly::new();
+    let main = repository_with_a_group(&procly);
+    // A personal file, excluded from git, that declares a Service of its own and widens the Group.
+    write(
+        &main.join("procly.local.toml"),
+        "[services.mine]\nrun = 'node mine.js'\n[services.dev]\ncovers = ['web', 'api', 'mine']\n",
+    );
+    let versioned = Some(
+        "- The services of this repository: `worker`, `web`, `api`, and the Group `dev` covering `web` and `api`.",
+    );
+
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+    assert_eq!(services_line(&read(&main.join("AGENTS.md"))), versioned);
+
+    assert_success(&procly.procly_in(&main, &["off"]));
+    assert_success(&procly.procly_in(&main, &["on"]));
+    assert_eq!(services_line(&read(&main.join("AGENTS.md"))), versioned);
+}
+
+#[test]
 fn the_rules_block_of_a_repository_with_no_declared_service_names_none() {
     let procly = Procly::new();
     let main = repository_with_instructions(&procly);

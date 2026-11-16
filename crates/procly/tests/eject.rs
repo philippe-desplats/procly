@@ -244,6 +244,24 @@ fn blocks_are_removed_even_when_the_state_of_the_daemon_was_lost() {
 }
 
 #[test]
+fn a_rules_block_is_recognised_after_a_lost_state_whatever_the_local_file_declares() {
+    let procly = Procly::new();
+    let (main, _, before) = repository(&procly);
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+    // A personal file written after the install, declaring a Service the Rules block never named.
+    write(
+        &main.join("procly.local.toml"),
+        "[services.mine]\nrun = 'node mine.js'\n",
+    );
+    procly.stop_daemon();
+    fs::remove_file(procly.state_dir().join("managed-blocks.json")).expect("remove the fingerprints");
+
+    eject(&procly, &main);
+
+    assert_eq!(read(&main.join("AGENTS.md")), before.instructions);
+}
+
+#[test]
 fn the_hooks_and_settings_of_the_developer_stay_when_the_guard_goes() {
     let procly = Procly::new();
     let (main, _, _) = repository(&procly);

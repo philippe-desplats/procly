@@ -11,7 +11,7 @@ use super::hook::{self, HookError};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use super::store::StoreError;
 use super::{Registry, blocking, read_config};
-use crate::config::{self, ServiceConfig};
+use crate::config;
 use crate::protocol::{BlockOutcome, BlockReport, GuardService, InstallReport, Request, Response, SwitchReport};
 use crate::topology::{self, Topology, TopologyError};
 
@@ -101,21 +101,21 @@ pub(super) fn rules(off: bool, services: Option<&str>) -> Vec<&str> {
     }
 }
 
-/// The line of the Rules block naming the Services the configuration of `worktree` declares, in the order of its
-/// files, the Groups last with the Services each one covers. `None` when it declares no Service, or when it cannot be
-/// read: the Rules block is still written, without the line. Blocking, it reads the configuration.
+/// The line of the Rules block naming the Services the versioned `procly.toml` of `worktree` declares, in the order
+/// of the file, the Groups last with the Services each one covers there. The local file is personal and excluded from
+/// git, so what it declares never ends in an instruction file that is committed. `None` when the versioned file
+/// declares no Service, or when the configuration cannot be read: the Rules block is still written, without the line.
+/// Blocking, it reads the configuration.
 pub(super) fn services_line(worktree: &Path) -> Option<String> {
-    let config = read_config(worktree).ok()?;
-    let order = declaration_order(worktree);
-    let position = |name: &str| order.iter().position(|declared| declared == name).unwrap_or(usize::MAX);
-    let mut declared: Vec<(&str, Option<&[String]>)> = config
-        .services
+    // A configuration that is not valid names nothing, as `procly up` would refuse it.
+    read_config(worktree).ok()?;
+    let text = std::fs::read_to_string(worktree.join(config::VERSIONED_FILE)).ok()?;
+    let declared = versioned_services(&text);
+    let borrowed: Vec<(&str, Option<&[String]>)> = declared
         .iter()
-        .map(|(name, service): (&String, &ServiceConfig)| (name.as_str(), service.covers.as_deref()))
+        .map(|(name, covers)| (name.as_str(), covers.as_deref()))
         .collect();
-    // Stable, so that a Service no file places, which cannot happen once the configuration is read, stays sorted.
-    declared.sort_by_key(|(name, _)| position(name));
-    naming(&declared)
+    naming(&borrowed)
 }
 
 /// The line naming the `declared` Services, in their order, each with the Services it covers when it is a Group.
@@ -151,33 +151,38 @@ fn listed(items: &[String], serial: bool) -> String {
     }
 }
 
-/// The names of the Services declared in the configuration files of `worktree`, in the order they first appear, the
-/// versioned file first. A file that cannot be read or parsed places none.
-fn declaration_order(worktree: &Path) -> Vec<String> {
-    let mut order: Vec<String> = Vec::new();
-    for file in [config::VERSIONED_FILE, config::LOCAL_FILE] {
-        let Ok(text) = std::fs::read_to_string(worktree.join(file)) else {
-            continue;
-        };
-        let Ok(document) = toml::de::DeTable::parse(&text) else {
-            continue;
-        };
-        let Some(toml::de::DeValue::Table(services)) = document.get_ref().get("services").map(toml::Spanned::get_ref)
-        else {
-            continue;
-        };
-        let mut names: Vec<_> = services
-            .keys()
-            .map(|name| (name.span().start, name.get_ref().to_string()))
-            .collect();
-        names.sort();
-        for (_, name) in names {
-            if !order.contains(&name) {
-                order.push(name);
-            }
-        }
-    }
-    order
+/// The Services `text`, a versioned `procly.toml`, declares, in the order of the file, each with the Services it covers
+/// when it is a Group. A file that cannot be parsed declares none.
+fn versioned_services(text: &str) -> Vec<(String, Option<Vec<String>>)> {
+    let Ok(document) = toml::de::DeTable::parse(text) else {
+        return Vec::new();
+    };
+    let Some(services) = document
+        .get_ref()
+        .get("services")
+        .and_then(|services| services.get_ref().as_table())
+    else {
+        return Vec::new();
+    };
+    let mut declared: Vec<_> = services
+        .iter()
+        .map(|(name, service)| {
+            let covers = service
+                .get_ref()
+                .as_table()
+                .and_then(|service| service.get("covers"))
+                .and_then(|covers| covers.get_ref().as_array())
+                .map(|covers| {
+                    covers
+                        .iter()
+                        .filter_map(|covered| covered.get_ref().as_str().map(str::to_owned))
+                        .collect()
+                });
+            (name.span().start, name.get_ref().to_string(), covers)
+        })
+        .collect();
+    declared.sort_by_key(|(start, _, _)| *start);
+    declared.into_iter().map(|(_, name, covers)| (name, covers)).collect()
 }
 
 /// Writes the Rules block into the instruction file and the Guard into the Claude Code settings of the Worktree
@@ -369,20 +374,24 @@ mod tests {
     }
 
     #[test]
-    fn the_services_are_placed_in_the_order_the_files_declare_them() {
-        let worktree = tempfile::tempdir().expect("a temporary directory");
-        std::fs::write(
-            worktree.path().join(config::VERSIONED_FILE),
-            "[services.web]\nrun = 'y'\n[services.api]\nrun = 'x'\n[services.web.health]\npath = '/'\n\
-             [settings]\nservices.zeta.run = 'z'\n",
-        )
-        .expect("write the configuration");
-        std::fs::write(
-            worktree.path().join(config::LOCAL_FILE),
-            "services.local.run = 'l'\nservices.api.run = 'x2'\n",
-        )
-        .expect("write the local configuration");
+    fn the_services_are_placed_in_the_order_the_versioned_file_declares_them() {
+        let declared = versioned_services(
+            "[services.web]\nrun = 'y'\n[services.dev]\ncovers = ['web', 'api']\n[services.api]\nrun = 'x'\n\
+             [services.web.health]\npath = '/'\n[settings]\nservices.zeta.run = 'z'\n",
+        );
 
-        assert_eq!(declaration_order(worktree.path()), names(&["web", "api", "local"]));
+        assert_eq!(
+            declared,
+            vec![
+                ("web".to_owned(), None),
+                ("dev".to_owned(), Some(names(&["web", "api"]))),
+                ("api".to_owned(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_versioned_file_that_cannot_be_parsed_declares_no_service() {
+        assert_eq!(versioned_services("[services.web"), Vec::new());
     }
 }

@@ -44,7 +44,7 @@ The Rules block is a Managed block. In Markdown its markers are HTML comments, s
 
 A block added to a file that already holds text starts after a blank line, so that its heading stands apart from your last section. In an empty file, or one Procly creates, it starts on the first line.
 
-The block names the Services the `procly.toml` of the Worktree declares, so that an agent knows what to start without reading the configuration first. They come in the order of the file, the Groups last with the Services each one covers:
+The block names the Services the `procly.toml` of the Worktree declares, so that an agent knows what to start without reading the configuration first. They come in the order of the file, the Groups last with the Services each one covers there. Only the versioned file counts, since your `procly.local.toml` is personal and excluded from git, and what it declares or changes must not end in an instruction file you commit:
 
 ```markdown
 - The services of this repository: `api`, `web`, `worker`, and the Group `dev` covering `api` and `web`.
