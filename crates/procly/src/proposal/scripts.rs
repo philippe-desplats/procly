@@ -11,6 +11,7 @@ use serde_json::Value;
 use super::cover::{self, Member};
 use super::group::{self, Narrowed};
 use super::{Proposal, ProposalError, ServiceEntry, service_name};
+use crate::config::TLS_PORT_NAME;
 
 /// The JavaScript package manager a Worktree installs with, which runs its scripts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +101,7 @@ impl Package {
         let (run, ports) = match bind_port(&self.script) {
             Some((port, script)) => (
                 self.in_dir(&format!("{} && {script}", self.bins())),
-                BTreeMap::from([(PORT_NAME.to_owned(), port)]),
+                BTreeMap::from([(port_name(&self.script).to_owned(), port)]),
             ),
             None => (self.in_dir(&manager.run("dev")), BTreeMap::new()),
         };
@@ -130,8 +131,21 @@ impl Package {
     }
 }
 
-/// The Port name of the port a dev script names.
+/// The Port name of the port a dev script names, unless the script serves HTTPS.
 const PORT_NAME: &str = "http";
+/// The flags with which a dev server serves HTTPS, such as `next dev --experimental-https` and `vite --https`.
+const HTTPS_FLAGS: [&str; 2] = ["--experimental-https", "--https"];
+
+/// The Port name of the port `script` names: `https` when the script passes one of [`HTTPS_FLAGS`], so that every
+/// surface reaches the port over HTTPS and the Group reads `PORT_<SERVICE>_HTTPS`, else `http`. A certificate path is
+/// not read as a sign of HTTPS.
+fn port_name(script: &str) -> &'static str {
+    if script.split_whitespace().any(|word| HTTPS_FLAGS.contains(&word)) {
+        TLS_PORT_NAME
+    } else {
+        PORT_NAME
+    }
+}
 /// The lowest port taken for a dev server's, so that a small number after `-p` is not read as one.
 const LOWEST_PORT: u16 = 1024;
 
@@ -175,7 +189,7 @@ fn bind_port(script: &str) -> Option<(u16, String)> {
     }
     let mut replaced = script.to_owned();
     for (range, _) in found.into_iter().rev() {
-        replaced.replace_range(range, &format!("{{ports.{PORT_NAME}}}"));
+        replaced.replace_range(range, &format!("{{ports.{}}}", port_name(script)));
     }
     Some((port, replaced))
 }
@@ -493,6 +507,27 @@ mod tests {
             ),
         ] {
             assert_eq!(bound(script), Some((port, replaced.to_owned())), "{script}");
+        }
+    }
+
+    #[test]
+    fn a_script_serving_https_names_its_port_https_and_nothing_else_does() {
+        for (script, replaced) in [
+            (
+                "next dev --experimental-https --port 3001",
+                "next dev --experimental-https --port {ports.https}",
+            ),
+            ("vite --https --port=5173", "vite --https --port={ports.https}"),
+            (
+                "next dev --port 3001 --experimental-https-key ./key.pem",
+                "next dev --port {ports.http} --experimental-https-key ./key.pem",
+            ),
+            (
+                "node ace serve --port 3333 --cert ./https/cert.pem",
+                "node ace serve --port {ports.http} --cert ./https/cert.pem",
+            ),
+        ] {
+            assert_eq!(bound(script).map(|(_, script)| script).as_deref(), Some(replaced), "{script}");
         }
     }
 
