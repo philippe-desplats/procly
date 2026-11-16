@@ -130,6 +130,7 @@ pub(super) fn install(managed: &ManagedBlocks, file: &Path) -> Result<Outcome, H
             origin = Some(Origin {
                 existed,
                 newline_added: false,
+                blank_line_added: false,
                 original: existed.then_some(text),
             });
             Outcome::Written

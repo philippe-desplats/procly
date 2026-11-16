@@ -39,6 +39,12 @@ logical_resources: Array<KeptResource>,
  */
 retention: Array<AppliedRetention>, 
 /**
+ * The output directory of the Worktree it deleted, or for a dry run would delete, once nothing of the Worktree
+ * runs any more: the one `procly gc` would list once the Worktree is removed. `None` when it is kept, already
+ * gone, or from a Daemon that does not delete it.
+ */
+deleted_output_directory: string | null, 
+/**
  * What went wrong without failing the release, such as a Portless alias that could not be removed.
  */
 warnings: Array<string>, };

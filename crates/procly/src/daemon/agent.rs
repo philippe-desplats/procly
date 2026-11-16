@@ -11,6 +11,7 @@ use super::hook::{self, HookError};
 use super::managed::{ManagedBlocks, ManagedError, Outcome};
 use super::store::StoreError;
 use super::{Registry, blocking, read_config};
+use crate::config;
 use crate::protocol::{BlockOutcome, BlockReport, GuardService, InstallReport, Request, Response, SwitchReport};
 use crate::topology::{self, Topology, TopologyError};
 
@@ -72,9 +73,10 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
 }
 
 /// The Rules block, one line per element. When the Repository is Off it says so, and tells agents to leave Procly be.
-pub(super) fn rules(off: bool) -> &'static [&'static str] {
+/// Otherwise it names the declared Services with `services`, the line [`services_line`] gives, when there is one.
+pub(super) fn rules(off: bool, services: Option<&str>) -> Vec<&str> {
     if off {
-        &[
+        vec![
             "## Procly (off)",
             "",
             "Procly is off for this repository. Start dev servers and containers with their usual commands, and do not run `procly up`.",
@@ -82,17 +84,105 @@ pub(super) fn rules(off: bool) -> &'static [&'static str] {
             "The developer turns it back on with `procly on`.",
         ]
     } else {
-        &[
+        let mut lines = vec![
             "## Procly",
             "",
             "Dev servers, queue workers and containers of this repository run under Procly, so that parallel worktrees never start the same process twice or fight over a port.",
             "",
+        ];
+        lines.extend(services);
+        lines.extend([
             "- Start a service with `procly up <service>`. It answers `started` or `reused`, with each of its ports and, when known, its URL.",
             "- Stop one with `procly down <service>`, or all of them with `procly down`. See what runs with `procly status`.",
             "- Run a one-off command with `procly run \"<command>\"`, then read its result with `procly wait <job>`.",
             "- Never start a dev server or `docker compose up` yourself. A hook blocks the known commands and names the Procly command to run instead.",
-        ]
+        ]);
+        lines
     }
+}
+
+/// The line of the Rules block naming the Services the versioned `procly.toml` of `worktree` declares, in the order
+/// of the file, the Groups last with the Services each one covers there. The local file is personal and excluded from
+/// git, so what it declares never ends in an instruction file that is committed. `None` when the versioned file
+/// declares no Service, or when the configuration cannot be read: the Rules block is still written, without the line.
+/// Blocking, it reads the configuration.
+pub(super) fn services_line(worktree: &Path) -> Option<String> {
+    // A configuration that is not valid names nothing, as `procly up` would refuse it.
+    read_config(worktree).ok()?;
+    let text = std::fs::read_to_string(worktree.join(config::VERSIONED_FILE)).ok()?;
+    let declared = versioned_services(&text);
+    let borrowed: Vec<(&str, Option<&[String]>)> = declared
+        .iter()
+        .map(|(name, covers)| (name.as_str(), covers.as_deref()))
+        .collect();
+    naming(&borrowed)
+}
+
+/// The line naming the `declared` Services, in their order, each with the Services it covers when it is a Group.
+fn naming(declared: &[(&str, Option<&[String]>)]) -> Option<String> {
+    let quoted = |name: &str| format!("`{name}`");
+    let mut items: Vec<String> = declared
+        .iter()
+        .filter(|(_, covers)| covers.is_none())
+        .map(|(name, _)| quoted(name))
+        .collect();
+    items.extend(declared.iter().filter_map(|(name, covers)| {
+        let covered: Vec<String> = (*covers)?.iter().map(|name| quoted(name)).collect();
+        Some(format!(
+            "the Group {} covering {}",
+            quoted(name),
+            listed(&covered, false)
+        ))
+    }));
+    (!items.is_empty()).then(|| format!("- The services of this repository: {}.", listed(&items, true)))
+}
+
+/// `items` as a list in a sentence, the last one after `and`, with a comma before it in a list of 3 or more when
+/// `serial`.
+fn listed(items: &[String], serial: bool) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => {
+            let comma = if serial { "," } else { "" };
+            format!("{}{comma} and {last}", rest.join(", "))
+        }
+    }
+}
+
+/// The Services `text`, a versioned `procly.toml`, declares, in the order of the file, each with the Services it covers
+/// when it is a Group. A file that cannot be parsed declares none.
+fn versioned_services(text: &str) -> Vec<(String, Option<Vec<String>>)> {
+    let Ok(document) = toml::de::DeTable::parse(text) else {
+        return Vec::new();
+    };
+    let Some(services) = document
+        .get_ref()
+        .get("services")
+        .and_then(|services| services.get_ref().as_table())
+    else {
+        return Vec::new();
+    };
+    let mut declared: Vec<_> = services
+        .iter()
+        .map(|(name, service)| {
+            let covers = service
+                .get_ref()
+                .as_table()
+                .and_then(|service| service.get("covers"))
+                .and_then(|covers| covers.get_ref().as_array())
+                .map(|covers| {
+                    covers
+                        .iter()
+                        .filter_map(|covered| covered.get_ref().as_str().map(str::to_owned))
+                        .collect()
+                });
+            (name.span().start, name.get_ref().to_string(), covers)
+        })
+        .collect();
+    declared.sort_by_key(|(start, _, _)| *start);
+    declared.into_iter().map(|(_, name, covers)| (name, covers)).collect()
 }
 
 /// Writes the Rules block into the instruction file and the Guard into the Claude Code settings of the Worktree
@@ -111,7 +201,10 @@ pub(super) fn install(registry: &Registry, cwd: &Path, file: Option<&Path>) -> R
     // The settings first, since a file that is not JSON is the likelier failure and nothing is written then.
     let settings = contained(worktree, &worktree.join(SETTINGS))?;
     let guard = hook::install(&registry.managed, &settings)?;
-    let rules = registry.managed.write(&instructions, RULES, rules(off))?;
+    let services = services_line(worktree);
+    let rules = registry
+        .managed
+        .write_apart(&instructions, RULES, &rules(off, services.as_deref()))?;
     Ok(InstallReport {
         rules: BlockReport {
             file: instructions,
@@ -137,9 +230,19 @@ pub(super) fn switch(registry: &Registry, cwd: &Path, off: bool) -> Result<Switc
     let worktrees = topology::worktrees(&topology.git_common_dir)?;
     let mut reports = Vec::new();
     for file in registry.managed.files_holding(RULES)? {
-        let ours = worktrees.iter().any(|worktree| file.starts_with(&worktree.path));
-        if ours && ManagedBlocks::holds(&file, RULES)? {
-            let outcome = registry.managed.write(&file, RULES, rules(off))?;
+        // The deepest Worktree holding the file, since a Worktree may sit inside another one.
+        let ours = worktrees
+            .iter()
+            .filter(|worktree| file.starts_with(&worktree.path))
+            .max_by_key(|worktree| worktree.path.components().count());
+        if let Some(worktree) = ours
+            && ManagedBlocks::holds(&file, RULES)?
+        {
+            // The Services are read again, from the Worktree of the file, as `agent install` would.
+            let services = services_line(&worktree.path);
+            let outcome = registry
+                .managed
+                .write_apart(&file, RULES, &rules(off, services.as_deref()))?;
             reports.push(BlockReport {
                 file,
                 outcome: outcome.into(),
@@ -220,4 +323,75 @@ pub(super) fn contained(worktree: &Path, requested: &Path) -> Result<PathBuf, Ag
 pub(super) fn topology_in(cwd: &Path) -> Result<Topology, AgentError> {
     let cwd = topology::canonicalize(cwd)?;
     topology::resolve(&cwd)?.ok_or(AgentError::Topology(TopologyError::NotARepository { dir: cwd }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn one_service_is_named_alone() {
+        assert_eq!(
+            naming(&[("web", None)]).as_deref(),
+            Some("- The services of this repository: `web`.")
+        );
+    }
+
+    #[test]
+    fn two_services_are_joined_by_and() {
+        assert_eq!(
+            naming(&[("web", None), ("api", None)]).as_deref(),
+            Some("- The services of this repository: `web` and `api`.")
+        );
+    }
+
+    #[test]
+    fn the_groups_come_last_with_the_services_they_cover() {
+        let (front, all) = (names(&["web", "api"]), names(&["web", "api", "worker"]));
+        assert_eq!(
+            naming(&[
+                ("full", Some(&all)),
+                ("web", None),
+                ("api", None),
+                ("worker", None),
+                ("dev", Some(&front)),
+            ])
+            .as_deref(),
+            Some(
+                "- The services of this repository: `web`, `api`, `worker`, the Group `full` covering `web`, `api` \
+                 and `worker`, and the Group `dev` covering `web` and `api`."
+            )
+        );
+    }
+
+    #[test]
+    fn no_declared_service_gives_no_line() {
+        assert_eq!(naming(&[]), None);
+    }
+
+    #[test]
+    fn the_services_are_placed_in_the_order_the_versioned_file_declares_them() {
+        let declared = versioned_services(
+            "[services.web]\nrun = 'y'\n[services.dev]\ncovers = ['web', 'api']\n[services.api]\nrun = 'x'\n\
+             [services.web.health]\npath = '/'\n[settings]\nservices.zeta.run = 'z'\n",
+        );
+
+        assert_eq!(
+            declared,
+            vec![
+                ("web".to_owned(), None),
+                ("dev".to_owned(), Some(names(&["web", "api"]))),
+                ("api".to_owned(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_versioned_file_that_cannot_be_parsed_declares_no_service() {
+        assert_eq!(versioned_services("[services.web"), Vec::new());
+    }
 }

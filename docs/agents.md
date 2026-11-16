@@ -31,7 +31,7 @@ $ procly on --json
 It runs in the Worktree holding the current directory and writes 2 things, both inside that Worktree. Commit them like any other file, so that every Worktree of the Repository gets them.
 
 1. The Rules block goes into `AGENTS.md`, or into `CLAUDE.md` when that is the only instruction file you have. When there is neither, it creates `AGENTS.md`. Pass `--file <path>` to name another file. The file must sit inside the Worktree, and a path that resolves outside it, through `..` or a symlink, is refused. Procly never writes into a global instruction file such as `~/.claude/CLAUDE.md`.
-2. The Guard goes into `.claude/settings.json`, as a `PreToolUse` hook group on the `Bash` tool whose command is `procly guard`. The rest of the file is kept, with its keys in the same order, but the file is written again in JSON with 2 spaces of indentation, so a different layout of yours is lost.
+2. The Guard goes into `.claude/settings.json`, as a `PreToolUse` hook group on the `Bash` tool whose command is `procly guard`. That hook group is all Procly adds: the rest of the file keeps its keys and values in the same order. Of its layout, Procly keeps the indentation of one level, tabs or spaces, and whether the file ends with a line break, then writes the whole file back one value per line at that indentation. A file already laid out that way, as most editors and Claude Code write it, gets a diff of the lines of the group plus a comma after the entry before it. An array or an object you wrote on one line is unfolded over several lines, and spacing inside a line, such as `"a":1`, becomes `"a": 1`. A file with no indented line gets two spaces and a final line break.
 
 The Rules block is a Managed block. In Markdown its markers are HTML comments, so the instruction file renders as before:
 
@@ -41,6 +41,16 @@ The Rules block is a Managed block. In Markdown its markers are HTML comments, s
 (the instructions)
 <!-- <<< procly managed block: rules <<< -->
 ```
+
+A block added to a file that already holds text starts after a blank line, so that its heading stands apart from your last section. In an empty file, or one Procly creates, it starts on the first line.
+
+The block names the Services the `procly.toml` of the Worktree declares, so that an agent knows what to start without reading the configuration first. They come in the order of the file, the Groups last with the Services each one covers there. Only the versioned file counts, since your `procly.local.toml` is personal and excluded from git, and what it declares or changes must not end in an instruction file you commit:
+
+```markdown
+- The services of this repository: `api`, `web`, `worker`, and the Group `dev` covering `api` and `web`.
+```
+
+The names are read when `procly agent install` runs. After you declare, rename or remove a Service, run the command again and the block is rewritten with the new names, unless you edited it. A Repository that declares no Service gets no such line.
 
 Running the command again changes nothing when the blocks are intact. Procly records the fingerprint of what it wrote, so it can tell a block it wrote from one you edited. A block you edited is left as it is, `edited` is printed on stdout in place of `written`, and a note goes to stderr. Delete the edited block and run the command again to get the current one.
 
@@ -93,7 +103,7 @@ The list is code, in `crates/procly/src/guard.rs`. Adding a command to it is a c
 - Every Rules block Procly wrote in a Worktree of the Repository is rewritten to say that Procly is off and that agents should start servers as usual. This shows in `git diff`, since the instruction file is tracked.
 - Nothing is removed. The Guard stays in `.claude/settings.json`, and Services, Leases and containers are untouched.
 
-`procly on` reverses it, and writes the Rules block back. Both commands are idempotent. A Rules block you edited is left as it is, and a Rules block whose file lost it is not written back. `procly agent install` run while the Repository is off writes the block that says so.
+`procly on` reverses it, and writes the Rules block back, with the Services the `procly.toml` of its Worktree declares at that moment, as `procly agent install` would. The block that says Procly is off names none. Both commands are idempotent. A Rules block you edited is left as it is, and a Rules block whose file lost it is not written back. `procly agent install` run while the Repository is off writes the block that says so.
 
 The Rules block of a Worktree is rewritten only where Procly wrote it. Another Worktree holds the committed text until you commit the new one and merge it, but its Guard stands aside right away since the state is the Repository's.
 

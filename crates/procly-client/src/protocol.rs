@@ -520,6 +520,11 @@ pub struct ReleaseReport {
     /// already removed. Empty from a Daemon that does not report them.
     #[serde(default)]
     pub retention: Vec<AppliedRetention>,
+    /// The output directory of the Worktree it deleted, or for a dry run would delete, once nothing of the Worktree
+    /// runs any more: the one `procly gc` would list once the Worktree is removed. `None` when it is kept, already
+    /// gone, or from a Daemon that does not delete it.
+    #[serde(default)]
+    pub deleted_output_directory: Option<PathBuf>,
     /// What went wrong without failing the release, such as a Portless alias that could not be removed.
     pub warnings: Vec<String>,
 }
@@ -539,8 +544,9 @@ pub struct AppliedRetention {
 }
 
 impl ReleaseReport {
-    /// Whether nothing was stopped, let go of nor released, and no Retention policy applied, as for a second release or
-    /// a Worktree Procly never saw. A policy may delete an Isolated container and its volumes, which is not nothing.
+    /// Whether nothing was stopped, let go of nor released, no Retention policy applied and no output directory deleted,
+    /// as for a second release or a Worktree Procly never saw. A policy may delete an Isolated container and its
+    /// volumes, which is not nothing.
     #[must_use]
     pub fn released_nothing(&self) -> bool {
         self.services.is_empty()
@@ -548,6 +554,7 @@ impl ReleaseReport {
             && self.compose_services.is_empty()
             && self.leases.is_empty()
             && self.retention.is_empty()
+            && self.deleted_output_directory.is_none()
     }
 }
 

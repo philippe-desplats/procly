@@ -627,6 +627,17 @@ A name must be letters, digits and underscores, not starting with a digit. `PORT
 
 The variables are injected into the environment of the Service, so they win over the same name in the environment of the caller and over the `.env` of the Repository, which no step of Procly reads or writes. This holds for AdonisJS, Next.js and `dotenv-cli`, see ADR 0007.
 
+### Keeping a shared resource apart between Worktrees
+
+A resource every Worktree reaches by the same name, such as the queues of a shared Redis or a message broker that no Logical resource gives each Worktree, is shared by every Worktree unless its name differs. The queue worker of each Worktree then takes the jobs of the others. A Derived variable built on `{worktree.slug}` gives each Worktree its own names, as `SESSION_COOKIE` does for cookies:
+
+```toml
+[services.worker.env]
+QUEUE_NAMESPACE = "{worktree.slug}"
+```
+
+Declare it on every Service that uses the queues, the one that pushes jobs as well as the worker, and read it where the application names its queues, as a prefix of every queue name. Each Worktree then has queues of its own on the same broker. A database is the same case, and a [Logical resource](#logical-resources-and-drivers) gives each Worktree its own one by its Driver.
+
 ## `procly env`
 
 `procly env <service>` prints the variables Procly injects into the Service, as `export NAME='value'` lines sorted by name: the Leases (`PORT`, `PORT_<NAME>`), the Derived variables, `PROCLY` and `PROCLY_SERVICE`. It does not start the Service and prints nothing of the environment of the caller. It grants the Leases the Service needs, so the values are the ones `procly up` injects.

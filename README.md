@@ -80,7 +80,7 @@ Each [release](https://github.com/philippe-desplats/procly/releases) carries one
 | Linux, x86_64 | `procly-<version>-x86_64-unknown-linux-gnu.tar.gz` |
 
 ```sh
-version=0.4.0
+version=0.5.0
 target=aarch64-apple-darwin
 base=https://github.com/philippe-desplats/procly/releases/download/v$version
 curl -fsSLO $base/procly-$version-$target.tar.gz
@@ -97,7 +97,7 @@ On Linux, `sha256sum --check` replaces `shasum -a 256 --check`. The Linux archiv
 `cargo install` needs Rust 1.99 or newer, the `rust-version` of the crate, and refuses an older compiler.
 
 ```sh
-cargo install --locked --git https://github.com/philippe-desplats/procly --tag v0.4.0 --bin procly
+cargo install --locked --git https://github.com/philippe-desplats/procly --tag v0.5.0 --bin procly
 ```
 
 Leave out `--tag` to install the head of `main`. From a clone, `rustup` uses the toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml), and `cargo install --locked --path crates/procly --bin procly` does the same. See [Installing Procly](docs/install.md) for the details.
@@ -145,7 +145,7 @@ Setting up a Repository and its Worktrees:
 ```sh
 procly init                # propose a procly.toml from the dev scripts and the compose file
 procly worktree init       # prepare a fresh Worktree: copy untracked files, run setup commands
-procly worktree release    # before removing a Worktree: stop its work, release its Leases, keep its data
+procly worktree release    # before removing a Worktree: stop its work, release its Leases, delete its output directory (its logs), keep the rest of its data
 procly worktree release --dry-run   # print what the release would do, change nothing
 procly worktree hooks      # make Worktrunk run worktree init and release, in .config/wt.toml
 procly agent install       # write the Rules block and the Guard, nothing is written without it

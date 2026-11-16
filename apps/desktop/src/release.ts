@@ -36,9 +36,10 @@ export async function releaseWorktree(path: string): Promise<ReleaseReport> {
 
 /**
  * Whether Procly holds nothing in the Worktree: no Service or Job to stop, no Compose service to let go of, no Lease to
- * release, and no Retention policy to apply, since one may delete the data of an Isolated container. A Lease or a
- * Logical resource the release keeps is not held, so it does not count. This is the test
- * `ReleaseReport::released_nothing` makes in Rust, written over the same fields because the window only has the JSON.
+ * release, no Retention policy to apply, since one may delete the data of an Isolated container, and no output
+ * directory to delete, since it holds the logs of the Worktree. A Lease or a Logical resource the release keeps is not
+ * held, so it does not count. This is the test `ReleaseReport::released_nothing` makes in Rust, written over the same
+ * fields because the window only has the JSON.
  */
 export function holdsNothing(report: ReleaseReport): boolean {
   return (
@@ -46,8 +47,17 @@ export function holdsNothing(report: ReleaseReport): boolean {
     report.jobs.length === 0 &&
     report.compose_services.length === 0 &&
     report.leases.length === 0 &&
-    report.retention.length === 0
+    report.retention.length === 0 &&
+    deletedDirectory(report) === null
   );
+}
+
+/**
+ * The output directory of the Worktree the release deletes, or would delete, with the logs of its Services and Jobs.
+ * Null when it keeps it, and when the Daemon is an older build of protocol 23 that leaves the key out.
+ */
+export function deletedDirectory(report: ReleaseReport): string | null {
+  return report.deleted_output_directory ?? null;
 }
 
 /**

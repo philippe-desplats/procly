@@ -682,3 +682,129 @@ fn the_rules_block_installed_while_off_says_so() {
     assert_success(&procly.procly_in(&main, &["on"]));
     assert!(rules_block(&read(&main.join("AGENTS.md"))).contains("`procly up <service>`"));
 }
+
+/// The line of the Rules block naming the declared Services, `None` when the block has none.
+fn services_line(text: &str) -> Option<&str> {
+    rules_block(text)
+        .lines()
+        .find(|line| line.starts_with("- The services of this repository"))
+}
+
+/// A Repository whose `procly.toml` declares Services out of alphabetical order and a Group covering 2 of them.
+fn repository_with_a_group(procly: &Procly) -> PathBuf {
+    let main = repository_with_instructions(procly);
+    write(
+        &main.join("procly.toml"),
+        "[services.worker]\nrun = 'node worker.js'\n\
+         [services.dev]\nrun = 'turbo dev'\ncovers = ['web', 'api']\n\
+         [services.web]\nrun = 'npm run dev'\n\
+         [services.api]\nrun = 'node api.js'\n",
+    );
+    main
+}
+
+#[test]
+fn the_rules_block_names_the_declared_services_and_groups_in_the_order_of_the_file() {
+    let procly = Procly::new();
+    let main = repository_with_a_group(&procly);
+
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+
+    assert_eq!(
+        services_line(&read(&main.join("AGENTS.md"))),
+        Some(
+            "- The services of this repository: `worker`, `web`, `api`, and the Group `dev` covering `web` and `api`."
+        )
+    );
+}
+
+#[test]
+fn the_rules_block_names_only_what_the_versioned_file_declares_never_the_local_one() {
+    let procly = Procly::new();
+    let main = repository_with_a_group(&procly);
+    // A personal file, excluded from git, that declares a Service of its own and widens the Group.
+    write(
+        &main.join("procly.local.toml"),
+        "[services.mine]\nrun = 'node mine.js'\n[services.dev]\ncovers = ['web', 'api', 'mine']\n",
+    );
+    let versioned = Some(
+        "- The services of this repository: `worker`, `web`, `api`, and the Group `dev` covering `web` and `api`.",
+    );
+
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+    assert_eq!(services_line(&read(&main.join("AGENTS.md"))), versioned);
+
+    assert_success(&procly.procly_in(&main, &["off"]));
+    assert_success(&procly.procly_in(&main, &["on"]));
+    assert_eq!(services_line(&read(&main.join("AGENTS.md"))), versioned);
+}
+
+#[test]
+fn the_rules_block_of_a_repository_with_no_declared_service_names_none() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+
+    let text = read(&main.join("AGENTS.md"));
+    assert!(rules_block(&text).contains("`procly up <service>`"), "{text}");
+    assert_eq!(services_line(&text), None, "{text}");
+}
+
+#[test]
+fn the_off_rules_block_names_no_service_and_on_names_them_again() {
+    let procly = Procly::new();
+    let main = repository_with_a_group(&procly);
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+    let on_rules = read(&main.join("AGENTS.md"));
+
+    assert_success(&procly.procly_in(&main, &["off"]));
+
+    let off_rules = read(&main.join("AGENTS.md"));
+    assert_eq!(
+        rules_block(&off_rules),
+        "\n## Procly (off)\n\nProcly is off for this repository. Start dev servers and containers with their usual \
+         commands, and do not run `procly up`.\n\nThe developer turns it back on with `procly on`.\n"
+    );
+    assert_success(&procly.procly_in(&main, &["on"]));
+    assert_eq!(read(&main.join("AGENTS.md")), on_rules);
+    assert!(services_line(&on_rules).is_some(), "{on_rules}");
+}
+
+#[test]
+fn the_rules_block_starts_after_a_blank_line_whatever_the_end_of_the_file() {
+    for (before, separator) in [
+        ("# App\n\nBuild with make.\n", "\n"),
+        ("# App\n\nBuild with make.", "\n\n"),
+        ("# App\n\nBuild with make.\n\n", ""),
+    ] {
+        let procly = Procly::new();
+        let main = git_repository(procly.scratch(), "app");
+        write(&main.join("CLAUDE.md"), before);
+
+        assert_success(&procly.procly_in(&main, &["agent", "install"]));
+
+        let text = read(&main.join("CLAUDE.md"));
+        assert!(
+            text.starts_with(&format!("{before}{separator}{RULES_OPEN}\n")),
+            "{before:?} became {text:?}"
+        );
+        // A second install leaves the file as it is, with no blank line added on each run.
+        assert_success(&procly.procly_in(&main, &["agent", "install"]));
+        assert_eq!(read(&main.join("CLAUDE.md")), text);
+    }
+}
+
+#[test]
+fn a_rules_block_in_an_empty_or_absent_file_starts_on_its_first_line() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    write(&main.join("CLAUDE.md"), "");
+    let other = git_worktree_add(&main, "app-other");
+
+    assert_success(&procly.procly_in(&main, &["agent", "install"]));
+    assert_success(&procly.procly_in(&other, &["agent", "install"]));
+
+    assert!(read(&main.join("CLAUDE.md")).starts_with(RULES_OPEN));
+    assert!(read(&other.join("AGENTS.md")).starts_with(RULES_OPEN));
+}

@@ -1,11 +1,12 @@
-//! Worktree release: what a Worktree holds in Procly undone before it is removed, its data kept (ADR 0004).
+//! Worktree release: what a Worktree holds in Procly undone before it is removed, its data kept (ADR 0004) apart from
+//! the output files of its Services, whose directory goes once nothing of the Worktree runs.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
 
-use super::{Registry, read_config, requester, retention, topology_of};
+use super::{Registry, read_config, requester, retention, topology_of, worktree_dir};
 use crate::config::IsolationMode;
 use crate::driver::{self, Driver};
 use crate::protocol::{KeptResource, ReleaseReport};
@@ -16,10 +17,11 @@ use crate::topology::{self, Topology};
 /// from those of its Pinned branch and those a container still runs on. The Daemon then forgets every ended Job and
 /// ended Service of the Worktree. Its Logical resources are kept and named. Running it again, or in a Worktree Procly
 /// never saw, releases nothing. It then applies the Retention policy of the Isolated containers of the Worktrees
-/// already removed.
+/// already removed. Last, once nothing of the Worktree runs any more, it deletes its output directory.
 ///
 /// With `dry_run` it answers with the report the same release would give and changes nothing, so it forgets no Job or
-/// Service, and names the Retention policies it would apply without applying them.
+/// Service, and names the Retention policies it would apply without applying them, and the output directory it would
+/// delete.
 pub(super) async fn run(
     registry: Arc<Registry>,
     path: PathBuf,
@@ -104,36 +106,45 @@ pub(super) async fn run(
     registry.services.remove_ended_in(&worktree);
 
     // Once the Services are gone, so that only a container still running keeps a Lease of the Worktree.
-    let (leases, kept_leases, logical_resources, warning) = {
+    let report = {
         let registry = Arc::clone(&registry);
-        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let running = registry.running();
-            let (leases, kept) = registry.leases.release_worktree(
-                &topology.git_common_dir,
-                &topology.worktree.path,
-                branch.as_deref(),
-                &running,
-            )?;
-            // The aliases of the Leases just released go with them.
-            let warning = registry.portless.prune(&registry.leases);
-            // The Leases are released whatever the configuration says, a broken one only hides the resources.
-            let resources = logical_resources(&registry, &topology).unwrap_or_else(|error| {
-                eprintln!(
-                    "cannot name the Logical resources of {}, they are kept: {error:#}",
-                    topology.worktree.path.display()
-                );
-                Vec::new()
-            });
-            Ok((leases, kept, resources, warning))
-        })
-        .await
-        .context("the leases could not be released")??
+        tokio::task::spawn_blocking(move || release_leases(&registry, &topology, branch.as_deref(), report))
+            .await
+            .context("the leases could not be released")??
     };
-    report.leases = leases;
-    report.kept_leases = kept_leases;
-    report.logical_resources = logical_resources;
-    report.warnings.extend(warning);
     log(&report);
+    Ok(report)
+}
+
+/// Releases the Leases of the Worktree of `topology` once its Services are gone, names its Logical resources, then
+/// deletes its output directory, and returns `report` with what it did. Blocking, it writes the state directory.
+fn release_leases(
+    registry: &Registry,
+    topology: &Topology,
+    branch: Option<&str>,
+    mut report: ReleaseReport,
+) -> anyhow::Result<ReleaseReport> {
+    let running = registry.running();
+    let (leases, kept) =
+        registry
+            .leases
+            .release_worktree(&topology.git_common_dir, &topology.worktree.path, branch, &running)?;
+    report.leases = leases;
+    report.kept_leases = kept;
+    // The aliases of the Leases just released go with them.
+    report.warnings.extend(registry.portless.prune(&registry.leases));
+    // The Leases are released whatever the configuration says, a broken one only hides the resources.
+    report.logical_resources = logical_resources(registry, topology).unwrap_or_else(|error| {
+        eprintln!(
+            "cannot name the Logical resources of {}, they are kept: {error:#}",
+            topology.worktree.path.display()
+        );
+        Vec::new()
+    });
+    // Last, once nothing the release stopped runs, so that no output file of the Worktree is written any more.
+    let (deleted, not_deleted) = delete_output_directory(registry, topology);
+    report.deleted_output_directory = deleted;
+    report.warnings.extend(not_deleted);
     Ok(report)
 }
 
@@ -190,6 +201,10 @@ fn dry_run_of(registry: &Registry, topology: &Topology, branch: Option<&str>) ->
         .would_release_worktree(repository, worktree, branch, &running)?;
     report.leases = leases;
     report.kept_leases = kept_leases;
+    // A container left to its Grace period would still run, and keep the directory as it keeps a Lease.
+    if !running.iter().any(|(path, _)| path == worktree) {
+        report.deleted_output_directory = output_directory(registry, topology);
+    }
     // A record that cannot be read leaves the policies out of the report and is only logged, as the release does.
     match retention::would_apply(registry, running_at_sweep) {
         Ok(applied) => report.retention = applied,
@@ -204,6 +219,59 @@ fn dry_run_of(registry: &Registry, topology: &Topology, branch: Option<&str>) ->
         )),
     }
     Ok(report)
+}
+
+/// The output directory of the Worktree of `topology`, the one `procly gc` lists once git no longer lists the
+/// Worktree, when it exists. Blocking, it reads the state directory.
+fn output_directory(registry: &Registry, topology: &Topology) -> Option<PathBuf> {
+    worktree_dir::list(registry.services.outputs().dir())
+        .into_iter()
+        .find(|dir| {
+            dir.owner.as_ref().is_some_and(|owner| {
+                owner.repository == topology.git_common_dir && owner.worktree == topology.worktree.path
+            })
+        })
+        .map(|dir| dir.path)
+}
+
+/// Deletes the output directory of the Worktree of `topology` once nothing of the Worktree runs any more, and returns
+/// it. When the deletion fails, possibly once part of it is gone, it returns no directory and a warning naming it and
+/// the error, which the Daemon logs too. A Service, a Job or a container of the Worktree that still runs keeps it, as
+/// does a directory already gone. Blocking, it deletes from the state directory.
+fn delete_output_directory(registry: &Registry, topology: &Topology) -> (Option<PathBuf>, Option<String>) {
+    let worktree = &topology.worktree.path;
+    let runs =
+        registry.running().iter().any(|(path, _)| path == worktree) || !registry.jobs.running_in(worktree).is_empty();
+    let Some(directory) = output_directory(registry, topology).filter(|_| !runs) else {
+        return (None, None);
+    };
+    let before = entries_in(&directory);
+    match worktree_dir::remove(&directory) {
+        Ok(()) => {
+            eprintln!(
+                "worktree release of {} deleted the output directory {}",
+                worktree.display(),
+                directory.display()
+            );
+            (Some(directory), None)
+        }
+        Err(error) => {
+            // Files may already be gone, so the warning says whether the logs of the Worktree are partly lost.
+            let how = if entries_in(&directory) < before {
+                "was only partly deleted"
+            } else {
+                "was not deleted"
+            };
+            let warning = format!("output directory {} {how}: {error}", directory.display());
+            eprintln!("worktree release of {}: {warning}", worktree.display());
+            (None, Some(warning))
+        }
+    }
+}
+
+/// How many entries the directory at `path` holds, 0 when it cannot be read. Blocking.
+fn entries_in(path: &Path) -> usize {
+    std::fs::read_dir(path).map_or(0, Iterator::count)
 }
 
 /// The Logical resources the configuration gives the Worktree, which a Worktree release keeps: the named ones of each

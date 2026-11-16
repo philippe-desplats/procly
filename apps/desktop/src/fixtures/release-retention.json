@@ -8,5 +8,6 @@
   "kept_leases": [],
   "logical_resources": [],
   "retention": [{ "worktree": "/p/work/acme/web-old", "service": "db", "policy": "delete" }],
+  "deleted_output_directory": null,
   "warnings": []
 }
