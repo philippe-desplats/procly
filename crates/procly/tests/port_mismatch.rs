@@ -581,7 +581,8 @@ fn a_covered_app_that_listened_then_exited_during_the_grace_is_named_with_its_po
 
     let mut up = spawn_up(&procly, &secondary, &["dev"]);
     first_listened(&mut up, api);
-    std::thread::sleep(Duration::from_millis(1500));
+    // Long enough for the Daemon to take the reading that decides on a loaded machine, well within the grace.
+    std::thread::sleep(Duration::from_secs(3));
     http_get(api, "/exit/0");
     let output = up.wait_with_output().expect("procly up ends");
 
@@ -605,6 +606,56 @@ fn a_covered_app_that_listened_then_exited_during_the_grace_is_named_with_its_po
     assert_eq!(
         (end["leased"].clone(), end["actual"].clone()),
         (json!(api_lease), json!(api))
+    );
+}
+
+#[test]
+fn the_wait_stops_once_each_covered_app_has_listened_even_one_that_exited_since() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    // `web` binds once the test creates `go`, from a shell that outlives `api`, and the leader of the Group lives on.
+    let go = procly.scratch().join("go");
+    let run = format!(
+        "(while [ ! -e {go} ]; do sleep 0.05; done; exec {server} --port {web}) & {server} --port {api} & exec sleep 60",
+        go = go.display()
+    );
+    let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let mut up = spawn_up(&procly, &secondary, &["dev"]);
+    let seen = first_listened(&mut up, api);
+    std::thread::sleep(Duration::from_millis(1500));
+    http_get(api, "/exit/0");
+    std::thread::sleep(Duration::from_secs(4).saturating_sub(seen.elapsed()));
+    std::fs::write(&go, "").expect("let web bind");
+    let output = up.wait_with_output().expect("procly up ends");
+    let took = seen.elapsed();
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    // `api` listened earlier in the wait, so it ends once `web` listens, not at the end of the grace.
+    assert!(
+        took < Duration::from_secs(8),
+        "reported {took:?} after api listened\n{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "api on port {api} instead of its Lease, port {api_lease}, web on port {web} instead of its Lease, port \
+             {web_lease}"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        status_row(&procly, &secondary, "dev")["end"]["services"],
+        json!([
+            { "service": "api", "leased": api_lease, "seen": [api] },
+            { "service": "web", "leased": web_lease, "seen": [web] },
+        ])
     );
 }
 

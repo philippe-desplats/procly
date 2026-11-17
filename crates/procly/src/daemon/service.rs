@@ -1469,4 +1469,45 @@ mod tests {
         assert_eq!(ownership_of(24000, &[24000], &[]), Ownership::Pending);
         assert_eq!(ownership_of(24000, &[24000, 24001], &[24001]), Ownership::Pending);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_seen_only_in_the_reading_that_decided_the_mismatch_is_named_on_its_port() {
+        let plan = |service: &str, leased: u16, declared: u16| super::super::mismatch::PortPlan {
+            service: service.to_owned(),
+            leased,
+            health_declared: declared,
+            leases: vec![leased],
+            declared: vec![declared],
+        };
+        let ports = Expectation {
+            plans: vec![plan("api", 24004, 3000), plan("web", 24005, 3001)],
+            worktree_leases: vec![24004, 24005],
+        };
+        let (_starting, mut state) = watch::channel(ServiceState::Starting);
+        // A tree whose processes all ended: every reading after the one that decided is empty.
+        let tree = Tree::default();
+        let started = tokio::time::Instant::now();
+
+        let seen = settle(&mut state, &tree, &ports, vec![3000])
+            .await
+            .expect("the Service is still starting");
+
+        assert!(
+            started.elapsed() >= REPORT_GRACE,
+            "web never listens, the whole grace is waited"
+        );
+        assert_eq!(seen, vec![3000]);
+        let ServiceEnd::PortMismatch {
+            leased,
+            actual,
+            services,
+            ..
+        } = ports.port_mismatch(&seen, 24004, 3000)
+        else {
+            unreachable!("a Port mismatch is built")
+        };
+        assert_eq!((leased, actual), (24004, 3000));
+        assert_eq!(services[0].seen, vec![actual], "api is named on its port");
+        assert!(services[1].seen.is_empty(), "web did not listen");
+    }
 }
