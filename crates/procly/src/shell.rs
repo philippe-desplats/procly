@@ -108,35 +108,155 @@ pub(crate) fn is_assignment(word: &str) -> bool {
 }
 
 /// The words of a command without what only launches it: variables set for it, `nohup`, `exec`, `time`, `npx`,
-/// `pnpm exec`, `bundle exec` and the like.
+/// `pnpm exec`, `bundle exec`, the wrappers that load variables for it such as `cross-env` and `dotenv`, and the like.
 pub(crate) fn strip_launchers(mut words: &[String]) -> &[String] {
-    loop {
-        let Some(first) = words.first() else {
-            return words;
-        };
-        let second = words.get(1).map(String::as_str);
-        let skip = match (basename(first), second) {
-            _ if is_assignment(first) => 1,
-            // `command -v vite` asks where a program is and starts nothing.
-            ("command", Some("-v" | "-V")) => return words,
-            // Also the keywords that open a command in a shell script: `if ready; then npm run dev; fi`.
-            (
-                "env" | "nohup" | "exec" | "time" | "command" | "setsid" | "npx" | "bunx" | "pnpx" | "then" | "do"
-                | "else" | "!" | "{",
-                _,
-            ) => 1,
-            ("pnpm" | "yarn", Some("exec" | "dlx"))
-            | ("bun", Some("x"))
-            | ("npm" | "bundle", Some("exec"))
-            | ("poetry" | "uv", Some("run")) => 2,
-            _ => return words,
-        };
-        words = &words[skip..];
-        // The options of the wrapper, such as `npx -y`.
-        while words.first().is_some_and(|word| word.starts_with('-')) {
-            words = &words[1..];
-        }
+    while let Some(rest) = after_launcher(words) {
+        words = rest;
     }
+    words
+}
+
+/// `words` after the launcher they start with and its options, `None` when they start with none.
+fn after_launcher(words: &[String]) -> Option<&[String]> {
+    let first = words.first()?;
+    let second = words.get(1).map(String::as_str);
+    let skip = match (basename(first), second) {
+        _ if is_assignment(first) => 1,
+        // `command -v vite` asks where a program is and starts nothing.
+        ("command", Some("-v" | "-V")) => return None,
+        // Also the keywords that open a command in a shell script: `if ready; then npm run dev; fi`. The variables of
+        // `cross-env` are assignments, stripped as such.
+        (
+            "env" | "nohup" | "exec" | "time" | "command" | "setsid" | "npx" | "bunx" | "pnpx" | "cross-env"
+            | "cross-env-shell" | "then" | "do" | "else" | "!" | "{",
+            _,
+        ) => 1,
+        ("pnpm" | "yarn", Some("exec" | "dlx"))
+        | ("bun", Some("x"))
+        | ("npm" | "bundle", Some("exec"))
+        | ("poetry" | "uv", Some("run")) => 2,
+        ("dotenv", _) => return Some(after_env_file_options(&words[1..], &DOTENV_OPTIONS_WITH_VALUE)),
+        ("dotenvx", Some("run")) => return Some(after_env_file_options(&words[2..], &DOTENVX_RUN_OPTIONS_WITH_VALUE)),
+        ("env-cmd", _) => return Some(after_env_file_options(&words[1..], &ENV_CMD_OPTIONS_WITH_VALUE)),
+        _ => return None,
+    };
+    let mut words = &words[skip..];
+    // The options of the wrapper, such as `npx -y`.
+    while words.first().is_some_and(|word| word.starts_with('-')) {
+        words = &words[1..];
+    }
+    Some(words)
+}
+
+// The options of the wrappers that load env files for a command which take a value, read from the help and the
+// argument parser of each tool, with how they take it. Any other option, such as `--debug`, takes none, and one written
+// `--opt=value` is a single word.
+//
+// dotenv-cli 11.1.0, `dotenv --help`. Take none: `--help`, `--debug`, `--quiet`, `-q`, `--no-expand`, `-o`,
+// `--override`.
+const DOTENV_OPTIONS_WITH_VALUE: [(&str, Value); 4] = [
+    ("-e", Value::Required),
+    ("-c", Value::Optional),
+    ("-v", Value::Required),
+    ("-p", Value::Required),
+];
+// @dotenvx/dotenvx 2.38.2, `dotenvx run --help`, and `-l` and `--log-level`, which its README documents for `run`.
+// Take none: `-o`, `--overload`, `--strict`, `--redact`, `--no-armor`, `--no-native`, `--no-1password`,
+// `--no-bitwarden`, `--help`. The options of `dotenvx` before `run` are not read.
+const DOTENVX_RUN_OPTIONS_WITH_VALUE: [(&str, Value); 13] = [
+    ("-l", Value::Required),
+    ("--log-level", Value::Required),
+    ("-e", Value::Required),
+    ("--env", Value::Required),
+    ("-f", Value::Required),
+    ("--env-file", Value::Required),
+    ("-fk", Value::Required),
+    ("--env-keys-file", Value::Required),
+    ("--profile", Value::Required),
+    ("--convention", Value::Required),
+    ("--ignore", Value::Required),
+    ("--token", Value::Required),
+    ("--mask", Value::Optional),
+];
+// env-cmd 11.0.0, `env-cmd --help`. Take none: `-x`, `--expand-envs`, `--recursive`, `--fallback`, `--no-override`,
+// `--silent`, `--use-shell`, `--verbose`, `--help`.
+const ENV_CMD_OPTIONS_WITH_VALUE: [(&str, Value); 6] = [
+    ("-f", Value::Optional),
+    ("--file", Value::Optional),
+    ("-e", Value::Optional),
+    ("--environments", Value::Optional),
+    ("-r", Value::Optional),
+    ("--rc-file", Value::Optional),
+];
+
+/// How an option of a wrapper takes the word after it as its value.
+#[derive(Clone, Copy)]
+enum Value {
+    /// Whatever the word, as `-e <path>` of `dotenv`.
+    Required,
+    /// Only a word that does not start with `-`, as `-c [environment]` of `dotenv`: the parsers of these tools,
+    /// minimist and commander, read such a word as the next option.
+    Optional,
+}
+
+/// The words of the command a wrapper that loads env files runs, its own words being `words`: what follows its
+/// options, the value of those of `with_value` included, and one `--` right after them. A `--` further on belongs to
+/// the command.
+fn after_env_file_options<'a>(mut words: &'a [String], with_value: &[(&str, Value)]) -> &'a [String] {
+    while let Some(option) = words.first().filter(|word| word.starts_with('-') && *word != "--") {
+        let value = with_value
+            .iter()
+            .find(|(name, _)| name == option)
+            .map(|&(_, value)| value);
+        // An option given no value before the `--` of the wrapper, as `dotenv -c -- next dev`, leaves the `--` alone.
+        let takes_value = match (value, words.get(1)) {
+            (Some(Value::Required), Some(next)) => next != "--",
+            (Some(Value::Optional), Some(next)) => !next.starts_with('-'),
+            _ => false,
+        };
+        words = words.get(if takes_value { 2 } else { 1 }..).unwrap_or_default();
+    }
+    match words.split_first() {
+        Some((dashes, command)) if dashes == "--" => command,
+        _ => words,
+    }
+}
+
+/// The command line `words` hand to a shell to run, behind their launchers: the `npm run dev` of
+/// `bash -c 'npm run dev'` and of `cross-env-shell NODE_ENV=dev "npm run dev"`. `None` when they hand none.
+pub(crate) fn inner_command_line(words: &[String]) -> Option<String> {
+    if let Some(line) = cross_env_shell_line(words) {
+        return Some(line);
+    }
+    match strip_launchers(words) {
+        [shell, flag, line, ..]
+            if matches!(basename(shell), "sh" | "bash" | "zsh" | "dash")
+                && flag.starts_with('-')
+                && !flag.starts_with("--")
+                && flag.contains('c') =>
+        {
+            Some(line.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The command line `cross-env-shell` hands to a shell in `words`, behind their launchers: the `cd apps/web && next dev`
+/// of `cross-env-shell NODE_ENV=dev "cd apps/web && next dev"`. `None` when `words` do not run `cross-env-shell` or
+/// give it no command. It hands the words after its variables to a shell joined by spaces, as one command line.
+pub(crate) fn cross_env_shell_line(mut words: &[String]) -> Option<String> {
+    while let Some(rest) = after_launcher(words) {
+        if basename(&words[0]) == "cross-env-shell" {
+            let command: Vec<&str> = rest
+                .iter()
+                .map(String::as_str)
+                .skip_while(|word| is_assignment(word))
+                .collect();
+            return (!command.is_empty()).then(|| command.join(" "));
+        }
+        words = rest;
+    }
+    None
 }
 
 /// The words after the program that are not options, skipping the value of an option that takes one.
@@ -274,6 +394,142 @@ mod tests {
             assert_eq!(strip_launchers(&all), words(expected), "{command}");
         }
         assert_eq!(strip_launchers(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_wrapper_that_loads_variables_is_stripped_with_its_variables_and_options() {
+        for (command, expected) in [
+            (
+                "cross-env FORCE_COLOR=1 turbo run dev --parallel",
+                "turbo run dev --parallel",
+            ),
+            ("npx cross-env PORT=3000 bun run dev", "bun run dev"),
+            ("./node_modules/.bin/cross-env A=1 B=2 vite", "vite"),
+            ("cross-env-shell NODE_ENV=dev next dev", "next dev"),
+            ("dotenv -e .env -- next dev", "next dev"),
+            ("dotenv -e .env next dev", "next dev"),
+            ("dotenv -c development -v PORT=3000 -e .env next dev", "next dev"),
+            (
+                "NODE_EXTRA_CA_CERTS=./ca.pem dotenv -e .env -- next dev --experimental-https",
+                "next dev --experimental-https",
+            ),
+            ("bunx dotenv -- next dev", "next dev"),
+            ("dotenvx run -f .env -- next dev", "next dev"),
+            ("dotenvx run --convention nextjs -- next dev", "next dev"),
+            ("dotenvx run -f .env --log-level error -- next dev", "next dev"),
+            ("dotenvx run -f .env -l debug -- next dev", "next dev"),
+            ("dotenvx run -f .env --log-level=error -- next dev", "next dev"),
+            // An option whose value is optional takes no word that starts with `-`.
+            ("dotenv -c -e .env -- next dev", "next dev"),
+            ("dotenv -c dev -- next dev", "next dev"),
+            ("dotenvx run --mask -f .env -- next dev", "next dev"),
+            ("env-cmd -f -e dev -- next dev", "next dev"),
+            ("env-cmd -e -f .env -- next dev", "next dev"),
+            // A `--` further on belongs to the command, not to the wrapper.
+            (
+                "dotenv -e .env npm run dev -- --port 3001",
+                "npm run dev -- --port 3001",
+            ),
+            ("env-cmd -f .env pnpm dev -- --port 3001", "pnpm dev -- --port 3001"),
+            ("dotenvx run -f .env next dev -- --turbo", "next dev -- --turbo"),
+            ("dotenv -e .env npm run build -- next dev", "npm run build -- next dev"),
+            // A valued option right before the `--` of the wrapper takes no value.
+            ("dotenv -c -- next dev", "next dev"),
+            ("dotenvx run --env-file .env next dev", "next dev"),
+            ("dotenvx run --env-file=.env next dev", "next dev"),
+            ("env-cmd -f .env next dev", "next dev"),
+            ("env-cmd -- next dev", "next dev"),
+            ("env-cmd --environments dev -r .env-cmdrc --silent next dev", "next dev"),
+            ("cross-env NODE_ENV=production bun run build", "bun run build"),
+            // `dotenvx` runs a command through `run` only.
+            ("dotenvx get PORT", "dotenvx get PORT"),
+        ] {
+            let all = words(command);
+            assert_eq!(strip_launchers(&all), words(expected), "{command}");
+        }
+    }
+
+    #[test]
+    fn every_option_of_a_wrapper_that_takes_a_value_is_skipped_with_it_and_one_written_with_an_equals_sign_alone() {
+        // The options whose value is required, those whose value is optional, and one more option with its value.
+        for (wrapper, required, optional, valued) in [
+            ("dotenv", &["-e", "-v", "-p"][..], &["-c"][..], "-e .env"),
+            (
+                "dotenvx run",
+                &[
+                    "-e",
+                    "--env",
+                    "-f",
+                    "--env-file",
+                    "-fk",
+                    "--env-keys-file",
+                    "--profile",
+                    "--convention",
+                    "--ignore",
+                    "--token",
+                    "-l",
+                    "--log-level",
+                ][..],
+                &["--mask"][..],
+                "-f .env",
+            ),
+            (
+                "env-cmd",
+                &[][..],
+                &["-f", "--file", "-e", "--environments", "-r", "--rc-file"][..],
+                "-f .env",
+            ),
+        ] {
+            for option in required.iter().chain(optional) {
+                let all = words(&format!("{wrapper} {option} value next dev"));
+                assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option} value");
+                let all = words(&format!("{wrapper} {option}=value next dev"));
+                assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option}=value");
+            }
+            // A required value is the next word whatever it is.
+            for option in required {
+                let all = words(&format!("{wrapper} {option} -value next dev"));
+                assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option} -value");
+            }
+            // An optional value is never a word that starts with `-`.
+            for option in optional {
+                let all = words(&format!("{wrapper} {option} {valued} next dev"));
+                assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option} {valued}");
+            }
+        }
+        // And the options that take none.
+        for command in [
+            "dotenv --debug --quiet -q --no-expand -o --override next dev",
+            "dotenvx run -o --overload --strict --redact --no-armor --no-native --no-1password --no-bitwarden next dev",
+            "env-cmd -x --expand-envs --recursive --fallback --no-override --silent --use-shell --verbose next dev",
+        ] {
+            assert_eq!(strip_launchers(&words(command)), words("next dev"), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_command_line_handed_to_a_shell_is_read_out_of_its_words() {
+        for (command, expected) in [
+            ("cross-env-shell NODE_ENV=dev \"next dev\"", Some("next dev")),
+            (
+                "npx cross-env-shell NODE_ENV=dev \"cd apps/web && next dev\"",
+                Some("cd apps/web && next dev"),
+            ),
+            ("cross-env-shell NODE_ENV=dev next dev", Some("next dev")),
+            (
+                "./node_modules/.bin/cross-env-shell NODE_ENV=dev \"next dev\"",
+                Some("next dev"),
+            ),
+            ("bash -c 'npm run dev'", Some("npm run dev")),
+            ("PORT=3000 sh -lc \"cd web && pnpm dev\"", Some("cd web && pnpm dev")),
+            ("cross-env NODE_ENV=dev next dev", None),
+            ("cross-env-shell NODE_ENV=dev", None),
+            ("bash --norc script.sh", None),
+            ("npm run dev", None),
+        ] {
+            let [segment] = segments(command).try_into().expect("one segment");
+            assert_eq!(inner_command_line(&segment.words).as_deref(), expected, "{command}");
+        }
     }
 
     #[test]

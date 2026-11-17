@@ -530,6 +530,153 @@ fn the_guard_moves_a_dev_command_by_its_directory_option_and_by_an_absolute_cd()
     }
 }
 
+/// The reason the Guard gives for `command` run from `dir`, with the command itself left out, so that a command and
+/// the same command behind a wrapper can be compared by what the Guard tells the agent to run.
+fn instead(procly: &Procly, dir: &Path, command: &str) -> String {
+    let reason = denial(&guard(procly, dir, command)).unwrap_or_else(|| panic!("{command} went through"));
+    let quoted = reason.find("` ").map_or(0, |end| end + 2);
+    reason[quoted..].to_owned()
+}
+
+#[test]
+fn the_guard_answers_a_dev_command_behind_a_wrapper_as_it_answers_it_without() {
+    // The Group `dev` at the root runs the script its root `package.json` runs, here with turbo, there with bun.
+    for (group_run, commands) in [
+        (
+            "turbo run dev",
+            &[
+                (
+                    "",
+                    "cross-env FORCE_COLOR=1 turbo run dev --parallel",
+                    "FORCE_COLOR=1 turbo run dev --parallel",
+                    "`procly up dev`",
+                ),
+                (
+                    "",
+                    "npx cross-env FORCE_COLOR=1 turbo run dev",
+                    "FORCE_COLOR=1 turbo run dev",
+                    "`procly up dev`",
+                ),
+                ("apps/web", "dotenv -e .env -- next dev", "next dev", "`procly up web`"),
+                (
+                    "apps/web",
+                    "NODE_EXTRA_CA_CERTS=./ca.pem dotenv -e .env -- next dev --experimental-https",
+                    "NODE_EXTRA_CA_CERTS=./ca.pem next dev --experimental-https",
+                    "`procly up web`",
+                ),
+                // A `--` further on belongs to the command behind the wrapper.
+                (
+                    "apps/web",
+                    "dotenv -e .env npm run dev -- --port 3001",
+                    "npm run dev -- --port 3001",
+                    "`procly up <service>`",
+                ),
+                (
+                    "apps/web",
+                    "env-cmd -f .env pnpm dev -- --port 3001",
+                    "pnpm dev -- --port 3001",
+                    "`procly up <service>`",
+                ),
+                (
+                    "apps/web",
+                    "dotenvx run -f .env next dev -- --turbo",
+                    "next dev -- --turbo",
+                    "`procly up web`",
+                ),
+                (
+                    "apps/web",
+                    "dotenvx run --convention nextjs -- next dev",
+                    "next dev",
+                    "`procly up web`",
+                ),
+                // The command line `cross-env-shell` hands to a shell, by path and after a `cd`.
+                (
+                    "apps/web",
+                    "./node_modules/.bin/cross-env-shell NODE_ENV=dev \"next dev\"",
+                    "next dev",
+                    "`procly up web`",
+                ),
+                (
+                    "",
+                    "cd apps/web && cross-env-shell NODE_ENV=dev \"next dev\"",
+                    "cd apps/web && next dev",
+                    "`procly up web`",
+                ),
+            ][..],
+        ),
+        (
+            "bun run dev",
+            &[(
+                "",
+                "cross-env PORT=3000 bun run dev",
+                "PORT=3000 bun run dev",
+                "`procly up dev`",
+            )][..],
+        ),
+    ] {
+        let (procly, main) = repository_with_a_wrapped_group(group_run);
+
+        for (dir, wrapped, unwrapped, expected) in commands {
+            let dir = main.join(dir);
+            let without = instead(&procly, &dir, unwrapped);
+            assert!(
+                without.contains(&format!("Run {expected} instead.")),
+                "{unwrapped}: {without}"
+            );
+            assert_eq!(instead(&procly, &dir, wrapped), without, "{wrapped}");
+        }
+
+        // A wrapper in front of a command that starts no dev server hides nothing either.
+        for command in [
+            "cross-env NODE_ENV=production bun run build",
+            "dotenv -e .env -- bun run build",
+            "dotenv -e .env npm run build -- next dev",
+        ] {
+            assert_eq!(denial(&guard(&procly, &main, command)), None, "{command}");
+        }
+    }
+}
+
+/// A repository whose Services `web` and `api` run from `apps/web` and `apps/api`, and whose Group `dev` runs
+/// `group_run` and covers both.
+fn repository_with_a_wrapped_group(group_run: &str) -> (Procly, PathBuf) {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join("procly.toml"),
+        &format!(
+            "[services.web]\nrun = 'cd apps/web && next dev'\n[services.api]\nrun = 'cd apps/api && bun run dev'\n\
+             [services.dev]\nrun = '{group_run}'\ncovers = ['web', 'api']\n"
+        ),
+    );
+    fs::create_dir_all(main.join("apps/web")).expect("create apps/web");
+    fs::create_dir_all(main.join("apps/api")).expect("create apps/api");
+    (procly, main)
+}
+
+#[test]
+fn the_guard_reads_the_value_of_an_option_of_a_wrapper_as_the_wrapper_reads_it() {
+    let (procly, main) = repository_with_a_wrapped_group("turbo run dev");
+    let web = main.join("apps/web");
+    let without = instead(&procly, &web, "next dev");
+    assert!(without.contains("Run `procly up web` instead."), "{without}");
+
+    for wrapped in [
+        // `--log-level` of `dotenvx run` takes a value.
+        "dotenvx run -f .env --log-level error -- next dev",
+        "dotenvx run -f .env -l debug -- next dev",
+        "dotenvx run -f .env --log-level=error -- next dev",
+        // An option whose value is optional takes no word that starts with `-`, and still takes a plain one.
+        "dotenv -c -e .env -- next dev",
+        "dotenv -c dev -- next dev",
+        "dotenvx run --mask -f .env -- next dev",
+        "env-cmd -f -e dev -- next dev",
+        "env-cmd -e -f .env -- next dev",
+    ] {
+        assert_eq!(instead(&procly, &web, wrapped), without, "{wrapped}");
+    }
+}
+
 #[test]
 fn the_guard_sends_a_root_dev_command_run_below_the_root_to_the_service_to_pick() {
     let procly = Procly::new();

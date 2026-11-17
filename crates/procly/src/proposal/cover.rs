@@ -53,9 +53,19 @@ fn tie(command: &Command, members: &[Member]) -> Result<Vec<usize>, String> {
         place = place.and_then(|place| resolve(&place, directory));
     }
     let mut tied = Vec::new();
-    for segment in shell::segments(&command.text) {
+    tie_line(&command.text, place, members, &mut tied)?;
+    Ok(tied)
+}
+
+/// Adds to `tied` the members the commands of `line` start when it runs from `place`, which its `cd` commands move.
+/// The command line `cross-env-shell` hands to a shell is tied the same way, from where it runs.
+fn tie_line(line: &str, mut place: Option<PathBuf>, members: &[Member], tied: &mut Vec<usize>) -> Result<(), String> {
+    for segment in shell::segments(line) {
         if let Some(directory) = group::changes_to(&segment) {
             place = place.and_then(|place| resolve(&place, &directory));
+        } else if let Some(inner) = shell::cross_env_shell_line(&segment.words) {
+            // The shell runs it apart, so a `cd` inside it moves nothing after it.
+            tie_line(&inner, place.clone(), members, tied)?;
         } else if !group::sets_the_scene(&segment) {
             let place = place
                 .as_deref()
@@ -63,7 +73,7 @@ fn tie(command: &Command, members: &[Member]) -> Result<Vec<usize>, String> {
             tied.extend(tie_segment(shell::strip_launchers(&segment.words), place, members)?);
         }
     }
-    Ok(tied)
+    Ok(())
 }
 
 /// The members the command `words` starts when it runs from `place`.
