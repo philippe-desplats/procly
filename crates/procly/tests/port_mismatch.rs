@@ -678,7 +678,8 @@ fn a_service_alone_listening_on_no_port_of_its_own_is_reported_at_once() {
     // A Foreign process answers the health check, so that the tree is judged as soon as it listens.
     let foreign = TcpListener::bind(("127.0.0.1", web)).expect("hold the Lease of web");
 
-    let (output, took) = up_after_listening(&procly, &main, &["web"], extra);
+    // Timed from the start of `up`: the report may come before a test sees the port, and it stops the tree.
+    let (output, took) = timed_up(&procly, &main, &["web"]);
     drop(foreign);
 
     assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
@@ -689,8 +690,9 @@ fn a_service_alone_listening_on_no_port_of_its_own_is_reported_at_once() {
         "{}",
         stderr(&output)
     );
+    // Waiting for other apps would take the whole grace after the start.
     assert!(
-        took < Duration::from_secs(5),
+        took < Duration::from_secs(8),
         "a Service alone waits for no other app, it took {took:?}"
     );
 }
