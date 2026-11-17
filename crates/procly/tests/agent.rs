@@ -564,6 +564,44 @@ fn the_guard_answers_a_dev_command_behind_a_wrapper_as_it_answers_it_without() {
                     "NODE_EXTRA_CA_CERTS=./ca.pem next dev --experimental-https",
                     "`procly up web`",
                 ),
+                // A `--` further on belongs to the command behind the wrapper.
+                (
+                    "apps/web",
+                    "dotenv -e .env npm run dev -- --port 3001",
+                    "npm run dev -- --port 3001",
+                    "`procly up <service>`",
+                ),
+                (
+                    "apps/web",
+                    "env-cmd -f .env pnpm dev -- --port 3001",
+                    "pnpm dev -- --port 3001",
+                    "`procly up <service>`",
+                ),
+                (
+                    "apps/web",
+                    "dotenvx run -f .env next dev -- --turbo",
+                    "next dev -- --turbo",
+                    "`procly up web`",
+                ),
+                (
+                    "apps/web",
+                    "dotenvx run --convention nextjs -- next dev",
+                    "next dev",
+                    "`procly up web`",
+                ),
+                // The command line `cross-env-shell` hands to a shell, by path and after a `cd`.
+                (
+                    "apps/web",
+                    "./node_modules/.bin/cross-env-shell NODE_ENV=dev \"next dev\"",
+                    "next dev",
+                    "`procly up web`",
+                ),
+                (
+                    "",
+                    "cd apps/web && cross-env-shell NODE_ENV=dev \"next dev\"",
+                    "cd apps/web && next dev",
+                    "`procly up web`",
+                ),
             ][..],
         ),
         (
@@ -602,6 +640,7 @@ fn the_guard_answers_a_dev_command_behind_a_wrapper_as_it_answers_it_without() {
         for command in [
             "cross-env NODE_ENV=production bun run build",
             "dotenv -e .env -- bun run build",
+            "dotenv -e .env npm run build -- next dev",
         ] {
             assert_eq!(denial(&guard(&procly, &main, command)), None, "{command}");
         }

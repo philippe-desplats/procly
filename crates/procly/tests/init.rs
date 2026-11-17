@@ -935,6 +935,53 @@ fn a_root_dev_script_that_starts_commands_init_did_not_map_yields_a_group_withou
     assert_loads(&procly, &main, "dev");
 }
 
+/// What `procly init` proposes for the Group `dev` of a monorepo whose root `dev` script is `script`: its run and what
+/// it covers, `None` without a Group, and the notes it prints.
+fn group_proposal(script: &str) -> (Option<String>, Option<String>, Vec<String>) {
+    let procly = Procly::new();
+    let main = monorepo_with_root_script(&procly, script);
+    let output = init(&procly, &main);
+    let table: toml::Table = stdout(&output).parse().expect("the proposal is TOML");
+    let group = table["services"].get("dev");
+    let notes = stderr(&output)
+        .lines()
+        .filter(|line| !line.starts_with("procly: wrote"))
+        .map(str::to_owned)
+        .collect();
+    (
+        group.and_then(|group| group["run"].as_str()).map(str::to_owned),
+        group.and_then(|group| group.get("covers")).map(ToString::to_string),
+        notes,
+    )
+}
+
+#[test]
+fn a_root_dev_script_behind_a_wrapper_gets_the_proposal_of_its_unwrapped_form() {
+    // A `--` of the command behind the wrapper, and the command line `cross-env-shell` hands to a shell.
+    for (wrapped, unwrapped, kept) in [
+        (
+            "env-cmd -f .env turbo dev -- --concurrency 20 & stripe listen",
+            "turbo dev -- --concurrency 20 & stripe listen",
+            "env-cmd -f .env turbo dev -- --concurrency 20",
+        ),
+        (
+            r#"cross-env-shell NODE_ENV=dev "cd apps/web && next dev" & stripe listen"#,
+            "cd apps/web && next dev & stripe listen",
+            r#"cross-env-shell NODE_ENV=dev "cd apps/web && next dev""#,
+        ),
+    ] {
+        let (run, covers, notes) = group_proposal(unwrapped);
+        assert!(covers.is_some(), "{unwrapped}: {run:?} {notes:?}");
+        let (wrapped_run, wrapped_covers, wrapped_notes) = group_proposal(wrapped);
+        assert_eq!(
+            (&wrapped_covers, &wrapped_notes),
+            (&covers, &notes),
+            "{wrapped}: {wrapped_run:?}, unwrapped {run:?}"
+        );
+        assert_eq!(wrapped_run.as_deref(), Some(kept), "{wrapped}");
+    }
+}
+
 #[test]
 fn a_root_dev_script_with_no_recognised_command_gets_no_group_and_stderr_says_so() {
     let procly = Procly::new();
