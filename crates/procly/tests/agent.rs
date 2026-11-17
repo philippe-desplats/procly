@@ -614,17 +614,7 @@ fn the_guard_answers_a_dev_command_behind_a_wrapper_as_it_answers_it_without() {
             )][..],
         ),
     ] {
-        let procly = Procly::new();
-        let main = repository_with_instructions(&procly);
-        write(
-            &main.join("procly.toml"),
-            &format!(
-                "[services.web]\nrun = 'cd apps/web && next dev'\n[services.api]\nrun = 'cd apps/api && bun run dev'\n\
-                 [services.dev]\nrun = '{group_run}'\ncovers = ['web', 'api']\n"
-            ),
-        );
-        std::fs::create_dir_all(main.join("apps/web")).unwrap();
-        std::fs::create_dir_all(main.join("apps/api")).unwrap();
+        let (procly, main) = repository_with_a_wrapped_group(group_run);
 
         for (dir, wrapped, unwrapped, expected) in commands {
             let dir = main.join(dir);
@@ -644,6 +634,46 @@ fn the_guard_answers_a_dev_command_behind_a_wrapper_as_it_answers_it_without() {
         ] {
             assert_eq!(denial(&guard(&procly, &main, command)), None, "{command}");
         }
+    }
+}
+
+/// A repository whose Services `web` and `api` run from `apps/web` and `apps/api`, and whose Group `dev` runs
+/// `group_run` and covers both.
+fn repository_with_a_wrapped_group(group_run: &str) -> (Procly, PathBuf) {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    write(
+        &main.join("procly.toml"),
+        &format!(
+            "[services.web]\nrun = 'cd apps/web && next dev'\n[services.api]\nrun = 'cd apps/api && bun run dev'\n\
+             [services.dev]\nrun = '{group_run}'\ncovers = ['web', 'api']\n"
+        ),
+    );
+    fs::create_dir_all(main.join("apps/web")).expect("create apps/web");
+    fs::create_dir_all(main.join("apps/api")).expect("create apps/api");
+    (procly, main)
+}
+
+#[test]
+fn the_guard_reads_the_value_of_an_option_of_a_wrapper_as_the_wrapper_reads_it() {
+    let (procly, main) = repository_with_a_wrapped_group("turbo run dev");
+    let web = main.join("apps/web");
+    let without = instead(&procly, &web, "next dev");
+    assert!(without.contains("Run `procly up web` instead."), "{without}");
+
+    for wrapped in [
+        // `--log-level` of `dotenvx run` takes a value.
+        "dotenvx run -f .env --log-level error -- next dev",
+        "dotenvx run -f .env -l debug -- next dev",
+        "dotenvx run -f .env --log-level=error -- next dev",
+        // An option whose value is optional takes no word that starts with `-`, and still takes a plain one.
+        "dotenv -c -e .env -- next dev",
+        "dotenv -c dev -- next dev",
+        "dotenvx run --mask -f .env -- next dev",
+        "env-cmd -f -e dev -- next dev",
+        "env-cmd -e -f .env -- next dev",
+    ] {
+        assert_eq!(instead(&procly, &web, wrapped), without, "{wrapped}");
     }
 }
 

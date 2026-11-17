@@ -149,38 +149,71 @@ fn after_launcher(words: &[String]) -> Option<&[String]> {
 }
 
 // The options of the wrappers that load env files for a command which take a value, read from the help and the
-// argument parser of each tool. Any other option, such as `--debug`, takes none, and one written `--opt=value` is a
-// single word.
+// argument parser of each tool, with how they take it. Any other option, such as `--debug`, takes none, and one written
+// `--opt=value` is a single word.
 //
 // dotenv-cli 11.1.0, `dotenv --help`. Take none: `--help`, `--debug`, `--quiet`, `-q`, `--no-expand`, `-o`,
 // `--override`.
-const DOTENV_OPTIONS_WITH_VALUE: [&str; 4] = ["-e", "-c", "-v", "-p"];
-// @dotenvx/dotenvx 2.38.2, `dotenvx run --help`. Take none: `-o`, `--overload`, `--strict`, `--redact`, `--no-armor`,
-// `--no-native`, `--no-1password`, `--no-bitwarden`, `--help`. The options of `dotenvx` before `run` are not read.
-const DOTENVX_RUN_OPTIONS_WITH_VALUE: [&str; 11] = [
-    "-e",
-    "--env",
-    "-f",
-    "--env-file",
-    "-fk",
-    "--env-keys-file",
-    "--profile",
-    "--convention",
-    "--ignore",
-    "--token",
-    "--mask",
+const DOTENV_OPTIONS_WITH_VALUE: [(&str, Value); 4] = [
+    ("-e", Value::Required),
+    ("-c", Value::Optional),
+    ("-v", Value::Required),
+    ("-p", Value::Required),
+];
+// @dotenvx/dotenvx 2.38.2, `dotenvx run --help`, and `-l` and `--log-level`, which its README documents for `run`.
+// Take none: `-o`, `--overload`, `--strict`, `--redact`, `--no-armor`, `--no-native`, `--no-1password`,
+// `--no-bitwarden`, `--help`. The options of `dotenvx` before `run` are not read.
+const DOTENVX_RUN_OPTIONS_WITH_VALUE: [(&str, Value); 13] = [
+    ("-l", Value::Required),
+    ("--log-level", Value::Required),
+    ("-e", Value::Required),
+    ("--env", Value::Required),
+    ("-f", Value::Required),
+    ("--env-file", Value::Required),
+    ("-fk", Value::Required),
+    ("--env-keys-file", Value::Required),
+    ("--profile", Value::Required),
+    ("--convention", Value::Required),
+    ("--ignore", Value::Required),
+    ("--token", Value::Required),
+    ("--mask", Value::Optional),
 ];
 // env-cmd 11.0.0, `env-cmd --help`. Take none: `-x`, `--expand-envs`, `--recursive`, `--fallback`, `--no-override`,
 // `--silent`, `--use-shell`, `--verbose`, `--help`.
-const ENV_CMD_OPTIONS_WITH_VALUE: [&str; 6] = ["-f", "--file", "-e", "--environments", "-r", "--rc-file"];
+const ENV_CMD_OPTIONS_WITH_VALUE: [(&str, Value); 6] = [
+    ("-f", Value::Optional),
+    ("--file", Value::Optional),
+    ("-e", Value::Optional),
+    ("--environments", Value::Optional),
+    ("-r", Value::Optional),
+    ("--rc-file", Value::Optional),
+];
+
+/// How an option of a wrapper takes the word after it as its value.
+#[derive(Clone, Copy)]
+enum Value {
+    /// Whatever the word, as `-e <path>` of `dotenv`.
+    Required,
+    /// Only a word that does not start with `-`, as `-c [environment]` of `dotenv`: the parsers of these tools,
+    /// minimist and commander, read such a word as the next option.
+    Optional,
+}
 
 /// The words of the command a wrapper that loads env files runs, its own words being `words`: what follows its
 /// options, the value of those of `with_value` included, and one `--` right after them. A `--` further on belongs to
 /// the command.
-fn after_env_file_options<'a>(mut words: &'a [String], with_value: &[&str]) -> &'a [String] {
+fn after_env_file_options<'a>(mut words: &'a [String], with_value: &[(&str, Value)]) -> &'a [String] {
     while let Some(option) = words.first().filter(|word| word.starts_with('-') && *word != "--") {
+        let value = with_value
+            .iter()
+            .find(|(name, _)| name == option)
+            .map(|&(_, value)| value);
         // An option given no value before the `--` of the wrapper, as `dotenv -c -- next dev`, leaves the `--` alone.
-        let takes_value = with_value.contains(&option.as_str()) && words.get(1).is_some_and(|value| value != "--");
+        let takes_value = match (value, words.get(1)) {
+            (Some(Value::Required), Some(next)) => next != "--",
+            (Some(Value::Optional), Some(next)) => !next.starts_with('-'),
+            _ => false,
+        };
         words = words.get(if takes_value { 2 } else { 1 }..).unwrap_or_default();
     }
     match words.split_first() {
@@ -383,6 +416,15 @@ mod tests {
             ("bunx dotenv -- next dev", "next dev"),
             ("dotenvx run -f .env -- next dev", "next dev"),
             ("dotenvx run --convention nextjs -- next dev", "next dev"),
+            ("dotenvx run -f .env --log-level error -- next dev", "next dev"),
+            ("dotenvx run -f .env -l debug -- next dev", "next dev"),
+            ("dotenvx run -f .env --log-level=error -- next dev", "next dev"),
+            // An option whose value is optional takes no word that starts with `-`.
+            ("dotenv -c -e .env -- next dev", "next dev"),
+            ("dotenv -c dev -- next dev", "next dev"),
+            ("dotenvx run --mask -f .env -- next dev", "next dev"),
+            ("env-cmd -f -e dev -- next dev", "next dev"),
+            ("env-cmd -e -f .env -- next dev", "next dev"),
             // A `--` further on belongs to the command, not to the wrapper.
             (
                 "dotenv -e .env npm run dev -- --port 3001",
@@ -409,8 +451,9 @@ mod tests {
 
     #[test]
     fn every_option_of_a_wrapper_that_takes_a_value_is_skipped_with_it_and_one_written_with_an_equals_sign_alone() {
-        for (wrapper, options) in [
-            ("dotenv", &["-e", "-c", "-v", "-p"][..]),
+        // The options whose value is required, those whose value is optional, and one more option with its value.
+        for (wrapper, required, optional, valued) in [
+            ("dotenv", &["-e", "-v", "-p"][..], &["-c"][..], "-e .env"),
             (
                 "dotenvx run",
                 &[
@@ -424,19 +467,34 @@ mod tests {
                     "--convention",
                     "--ignore",
                     "--token",
-                    "--mask",
+                    "-l",
+                    "--log-level",
                 ][..],
+                &["--mask"][..],
+                "-f .env",
             ),
             (
                 "env-cmd",
+                &[][..],
                 &["-f", "--file", "-e", "--environments", "-r", "--rc-file"][..],
+                "-f .env",
             ),
         ] {
-            for option in options {
+            for option in required.iter().chain(optional) {
                 let all = words(&format!("{wrapper} {option} value next dev"));
                 assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option} value");
                 let all = words(&format!("{wrapper} {option}=value next dev"));
                 assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option}=value");
+            }
+            // A required value is the next word whatever it is.
+            for option in required {
+                let all = words(&format!("{wrapper} {option} -value next dev"));
+                assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option} -value");
+            }
+            // An optional value is never a word that starts with `-`.
+            for option in optional {
+                let all = words(&format!("{wrapper} {option} {valued} next dev"));
+                assert_eq!(strip_launchers(&all), words("next dev"), "{wrapper} {option} {valued}");
             }
         }
         // And the options that take none.

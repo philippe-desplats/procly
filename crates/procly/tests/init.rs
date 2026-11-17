@@ -969,6 +969,12 @@ fn a_root_dev_script_behind_a_wrapper_gets_the_proposal_of_its_unwrapped_form() 
             "cd apps/web && next dev & stripe listen",
             r#"cross-env-shell NODE_ENV=dev "cd apps/web && next dev""#,
         ),
+        // The line runs from where `cross-env-shell` runs, here `apps`.
+        (
+            r#"cd apps && cross-env-shell X=1 "cd web && next dev" & stripe listen"#,
+            "cd apps && cd web && next dev & stripe listen",
+            r#"cd apps && cross-env-shell X=1 "cd web && next dev""#,
+        ),
     ] {
         let (run, covers, notes) = group_proposal(unwrapped);
         assert!(covers.is_some(), "{unwrapped}: {run:?} {notes:?}");
