@@ -1205,8 +1205,8 @@ async fn check_health(
 }
 
 /// Stops the Service on the Port mismatch of `leased` and `actual` that the reading `read` of its tree showed, named
-/// per Service of `ports`. A Group is stopped once [`settle`] has let each Service it covers bind, from the last
-/// reading, and a Service alone at once, as it waits for no other app.
+/// per Service of `ports`. A Group is stopped once [`settle`] has let each Service it covers bind, from every port
+/// read meanwhile, and a Service alone at once, as it waits for no other app.
 async fn stop_on_mismatch(
     service: &Service,
     state: &mut watch::Receiver<ServiceState>,
@@ -1228,19 +1228,19 @@ async fn stop_on_mismatch(
     service.request_stop(ports.port_mismatch(&read, leased, actual));
 }
 
-/// Reads the ports the tree listens on again, from `read`, until every Service of `ports` listens on a port tied to
-/// it or for [`REPORT_GRACE`], whatever is left of the health timeout, the Port mismatch being decided already: the
-/// apps of a Group that bind seconds apart are all named in the report, and a Service still on no port of its own is
-/// one that did not bind within the grace. Returns the last reading, or `None` once the Service is no longer
-/// starting, its end then being another one.
+/// Reads the ports the tree listens on again, from the reading `seen`, until every Service of `ports` has listened on
+/// a port tied to it or for [`REPORT_GRACE`], whatever is left of the health timeout, the Port mismatch being decided
+/// already: the apps of a Group that bind seconds apart are all named in the report, and a Service still on no port
+/// of its own is one that did not bind within the grace. An app that listened then exited counts as having listened.
+/// Returns every port read, sorted, or `None` once the Service is no longer starting, its end then being another one.
 async fn settle(
     state: &mut watch::Receiver<ServiceState>,
     tree: &Tree,
     ports: &Expectation,
-    mut read: Vec<u16>,
+    mut seen: Vec<u16>,
 ) -> Option<Vec<u16>> {
     let until = tokio::time::Instant::now() + REPORT_GRACE;
-    while !ports.all_seen(&read) && tokio::time::Instant::now() < until {
+    while !ports.all_seen(&seen) && tokio::time::Instant::now() < until {
         tokio::select! {
             () = tokio::time::sleep_until(until.min(tokio::time::Instant::now() + OWNERSHIP_RETRY)) => {}
             _ = state.changed() => {}
@@ -1249,10 +1249,12 @@ async fn settle(
             return None;
         }
         if let Some(again) = listening(tree).await {
-            read = again;
+            seen.extend(again);
+            seen.sort_unstable();
+            seen.dedup();
         }
     }
-    Some(read)
+    Some(seen)
 }
 
 /// Stops the Service once it has printed nothing and used almost no CPU for `timeout`, counted from the reading

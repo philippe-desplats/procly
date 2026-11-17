@@ -5,10 +5,12 @@ mod common;
 
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::{Child, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Procly, assert_success, free_port, git_repository, json_document, stderr, stdout, test_server};
+use common::{Procly, assert_success, free_port, git_repository, http_get, json_document, stderr, stdout, test_server};
 use serde_json::{Value, json};
 
 /// Far below the health timeout of 60 s the Services of these tests declare.
@@ -75,37 +77,90 @@ fn timed_up(procly: &Procly, dir: &Path, args: &[&str]) -> (Output, Duration) {
     (output, started.elapsed())
 }
 
-/// Runs `procly up` with `args` in `dir`, and how long it took from the moment `port` first accepted a connection,
-/// which is when the tree of the Service listens there.
-fn up_after_listening(procly: &Procly, dir: &Path, args: &[&str], port: u16) -> (Output, Duration) {
-    let mut child = procly
+/// Starts `procly up` with `args` in `dir`, without waiting for it.
+fn spawn_up(procly: &Procly, dir: &Path, args: &[&str]) -> Child {
+    procly
         .command()
         .current_dir(dir)
         .args([&["up"], args].concat())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("the procly binary runs");
+        .expect("the procly binary runs")
+}
+
+/// The moment `port` first accepts a connection while `up` runs, which is when the tree of the Service listens there.
+fn first_listened(up: &mut Child, port: u16) -> Instant {
     let started = Instant::now();
-    let seen = loop {
+    loop {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            break Instant::now();
+            return Instant::now();
         }
-        if child.try_wait().expect("procly up can be waited for").is_some() {
-            let output = child.wait_with_output().expect("procly up ends");
-            panic!(
-                "procly up ended before port {port} was listened on: {}",
-                stderr(&output)
-            );
-        }
+        assert!(
+            up.try_wait().expect("procly up can be waited for").is_none(),
+            "procly up ended before port {port} was listened on"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(60),
             "nothing listened on port {port}"
         );
         std::thread::sleep(Duration::from_millis(20));
-    };
-    let output = child.wait_with_output().expect("procly up ends");
+    }
+}
+
+/// Runs `procly up` with `args` in `dir`, and how long it took from the moment `port` first accepted a connection,
+/// which is when the tree of the Service listens there.
+fn up_after_listening(procly: &Procly, dir: &Path, args: &[&str], port: u16) -> (Output, Duration) {
+    let mut up = spawn_up(procly, dir, args);
+    let seen = first_listened(&mut up, port);
+    let output = up.wait_with_output().expect("procly up ends");
     (output, seen.elapsed())
+}
+
+/// A listener on `port` that accepts every connection, as a Foreign process would, and records when it last
+/// accepted one, which tells when the health check of the Lease on `port` last probed it.
+struct Probed {
+    last: Arc<Mutex<Option<Instant>>>,
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Probed {
+    fn on(port: u16) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("hold the Lease");
+        listener.set_nonblocking(true).expect("a listener that does not block");
+        let (last, done) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
+        let thread = {
+            let (last, done) = (Arc::clone(&last), Arc::clone(&done));
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok(_) => *last.lock().expect("the probe time") = Some(Instant::now()),
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            })
+        };
+        Self {
+            last,
+            done,
+            thread: Some(thread),
+        }
+    }
+
+    /// When the last probe came, if any did.
+    fn last(&self) -> Option<Instant> {
+        *self.last.lock().expect("the probe time")
+    }
+}
+
+impl Drop for Probed {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// Asserts that `up` exited with 4 once it had read the tree for the whole grace since the Port mismatch was seen,
@@ -353,16 +408,23 @@ fn an_app_binding_its_declared_port_4_s_after_the_other_is_named_with_its_port()
     let procly = Procly::new();
     let (api, web) = (free_port(), free_port());
     let server = test_server().display().to_string();
-    let run = format!("{server} --port {api} & sleep 4; exec {server} --port {web}");
+    // The 4 s count from the moment `api` listens, whatever its own start took.
+    let run = format!("{server} --port {api} --then sh -c 'sleep 4; exec {server} --port {web}'");
     let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
     let (api_lease, web_lease) = (
         lease_of(&procly, &secondary, "api"),
         lease_of(&procly, &secondary, "web"),
     );
 
-    let (output, took) = timed_up(&procly, &secondary, &["dev"]);
+    let (output, took) = up_after_listening(&procly, &secondary, &["dev"], api);
 
-    assert_fast_mismatch(&output, took);
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    // The wait stops once `web` listens, well before the grace is over.
+    assert!(
+        took < Duration::from_secs(8),
+        "reported {took:?} after api listened\n{}",
+        stderr(&output)
+    );
     assert!(
         stderr(&output).contains(&format!(
             "api on port {api} instead of its Lease, port {api_lease}, web on port {web} instead of its Lease, port \
@@ -484,13 +546,17 @@ fn a_group_at_its_health_deadline_reads_its_tree_for_the_whole_grace() {
     let config = group_config(api, web, &run).replace("timeout = '60s'", "timeout = '8s'");
     let main = git_repository(procly.scratch(), "app");
     write(&main, "procly.toml", &config);
+    assert_eq!(lease_of(&procly, &main, "api"), api);
+    // The health check probes the Lease of `api` until its deadline, the moment the Port mismatch is first seen.
+    let probed = Probed::on(api);
 
-    let started = Instant::now();
-    let output = procly.procly_in(&main, &["up", "dev"]);
-    let took = started.elapsed();
+    let output = spawn_up(&procly, &main, &["dev"])
+        .wait_with_output()
+        .expect("procly up ends");
+    let ended = Instant::now();
 
-    // Seen at the deadline of 8 s at the earliest.
-    assert_mismatch_after_the_grace(&output, took.saturating_sub(Duration::from_secs(8)));
+    let deadline = probed.last().expect("the health check probed the Lease of api");
+    assert_mismatch_after_the_grace(&output, ended - deadline);
     assert!(
         stderr(&output).contains(&format!(
             "api did not listen on a port of its own within 10 s, its Lease is port {api}, web on its Lease, port \
@@ -498,6 +564,47 @@ fn a_group_at_its_health_deadline_reads_its_tree_for_the_whole_grace() {
         )),
         "{}",
         stderr(&output)
+    );
+}
+
+#[test]
+fn a_covered_app_that_listened_then_exited_during_the_grace_is_named_with_its_port() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    // The leader of the Group lives on once `api` exits, and `web` never binds.
+    let run = format!("{} --port {api} & exec sleep 60", test_server().display());
+    let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let mut up = spawn_up(&procly, &secondary, &["dev"]);
+    first_listened(&mut up, api);
+    std::thread::sleep(Duration::from_millis(1500));
+    http_get(api, "/exit/0");
+    let output = up.wait_with_output().expect("procly up ends");
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!(
+            "api on port {api} instead of its Lease, port {api_lease}, web did not listen on a port of its own within \
+             10 s, its Lease is port {web_lease}"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    let end = &status_row(&procly, &secondary, "dev")["end"];
+    assert_eq!(
+        end["services"],
+        json!([
+            { "service": "api", "leased": api_lease, "seen": [api] },
+            { "service": "web", "leased": web_lease, "seen": [] },
+        ])
+    );
+    assert_eq!(
+        (end["leased"].clone(), end["actual"].clone()),
+        (json!(api_lease), json!(api))
     );
 }
 
