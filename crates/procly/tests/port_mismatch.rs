@@ -628,8 +628,12 @@ fn the_wait_stops_once_each_covered_app_has_listened_even_one_that_exited_since(
 
     let mut up = spawn_up(&procly, &secondary, &["dev"]);
     let seen = first_listened(&mut up, api);
-    std::thread::sleep(Duration::from_millis(1500));
+    // Long enough for the Daemon to take the reading that decides on a loaded machine, before `web` binds.
+    std::thread::sleep(Duration::from_secs(3));
     http_get(api, "/exit/0");
+    while TcpStream::connect(("127.0.0.1", api)).is_ok() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     std::thread::sleep(Duration::from_secs(4).saturating_sub(seen.elapsed()));
     std::fs::write(&go, "").expect("let web bind");
     let output = up.wait_with_output().expect("procly up ends");

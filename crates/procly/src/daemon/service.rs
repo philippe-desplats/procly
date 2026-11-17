@@ -1407,6 +1407,11 @@ mod tests {
 
     /// A Service of the Worktree `/p/repo` in `state`, with no process behind it.
     fn service_in(state: ServiceState) -> Arc<Service> {
+        group_in(state, &[])
+    }
+
+    /// Like [`service_in`], a Group covering `covers`, or a Service alone when it covers none.
+    fn group_in(state: ServiceState, covers: &[&str]) -> Arc<Service> {
         Arc::new(Service {
             port: None,
             topology: Topology {
@@ -1417,7 +1422,7 @@ mod tests {
                     main: true,
                 },
             },
-            covers: Vec::new(),
+            covers: covers.iter().map(|&covered| covered.to_owned()).collect(),
             reattached: false,
             started_at: AtomicU64::new(0),
             output: Arc::new(Mutex::new(OutputBuffer::new(output::CAPACITY))),
@@ -1471,7 +1476,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_service_seen_only_in_the_reading_that_decided_the_mismatch_is_named_on_its_port() {
+    async fn a_group_whose_service_was_seen_only_in_the_reading_that_decided_ends_naming_it_on_its_port() {
         let plan = |service: &str, leased: u16, declared: u16| super::super::mismatch::PortPlan {
             service: service.to_owned(),
             leased,
@@ -1483,31 +1488,33 @@ mod tests {
             plans: vec![plan("api", 24004, 3000), plan("web", 24005, 3001)],
             worktree_leases: vec![24004, 24005],
         };
-        let (_starting, mut state) = watch::channel(ServiceState::Starting);
-        // A tree whose processes all ended: every reading after the one that decided is empty.
-        let tree = Tree::default();
+        // A Group with no process behind it: every reading after the one that decided is empty.
+        let group = group_in(ServiceState::Starting, &["api", "web"]);
+        let mut state = group.state.subscribe();
         let started = tokio::time::Instant::now();
 
-        let seen = settle(&mut state, &tree, &ports, vec![3000])
-            .await
-            .expect("the Service is still starting");
+        stop_on_mismatch(&group, &mut state, &group.tree, &ports, vec![3000], 24004, 3000).await;
 
         assert!(
             started.elapsed() >= REPORT_GRACE,
             "web never listens, the whole grace is waited"
         );
-        assert_eq!(seen, vec![3000]);
-        let ServiceEnd::PortMismatch {
+        let Some(ServiceEnd::PortMismatch {
             leased,
             actual,
             services,
             ..
-        } = ports.port_mismatch(&seen, 24004, 3000)
+        }) = group.stop.borrow().clone()
         else {
-            unreachable!("a Port mismatch is built")
+            panic!("the Group is stopped on a Port mismatch, not {:?}", group.stop.borrow())
         };
         assert_eq!((leased, actual), (24004, 3000));
-        assert_eq!(services[0].seen, vec![actual], "api is named on its port");
+        assert_eq!(
+            services[0].seen,
+            vec![3000],
+            "api is named on its port, seen only in the reading that decided"
+        );
+        assert!(services[0].seen.contains(&actual));
         assert!(services[1].seen.is_empty(), "web did not listen");
     }
 }
