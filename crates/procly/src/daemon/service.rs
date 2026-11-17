@@ -16,7 +16,7 @@ use super::cpu::groups_cpu;
 use super::health::HealthCheck;
 use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
-use super::mismatch::Expectation;
+use super::mismatch::{Expectation, REPORT_GRACE};
 use super::output_file::{self, OutputFiles, Tail};
 use super::process_group::{self, Pid, Tree, kill_tree, stop_detached, stop_tree};
 use super::record::{ServiceRecord, ServiceRecords};
@@ -32,9 +32,6 @@ const HEALTH_INTERVAL: Duration = Duration::from_millis(50);
 /// the tree costs a listing of the processes of the system and an `lsof`, which at [`HEALTH_INTERVAL`] would run 20
 /// times a second for a minute.
 const OWNERSHIP_RETRY: Duration = Duration::from_millis(250);
-/// How long a Port mismatch seen early waits for the other apps of the tree to bind before it is reported, far below
-/// any health timeout.
-const REPORT_GRACE: Duration = Duration::from_secs(2);
 /// How often the Daemon looks at a Service to tell whether it is idle.
 const IDLE_INTERVAL: Duration = Duration::from_secs(10);
 /// How old a reading of the processes may be for a look at idleness, which tells 10 seconds apart: the Services that
@@ -1136,8 +1133,9 @@ struct Expected<'a> {
 /// Marks the Service healthy once its health check passes and its process tree listens on the Lease the check
 /// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. A tree listening on the
 /// declared health port of a Service instead of its Lease is one at once, read at most every [`OWNERSHIP_RETRY`]
-/// while it starts, and reported once [`settle`] has let the other apps of the tree bind. Returns the reading of
-/// `clock` taken as the Service turned healthy, before anyone could hear of it, or `None` when it did not.
+/// while it starts. Every Port mismatch is reported through [`stop_on_mismatch`], which lets the other apps of a
+/// Group bind first. Returns the reading of `clock` taken as the Service turned healthy, before anyone could hear of
+/// it, or `None` when it did not.
 async fn check_health(
     service: &Service,
     check: &HealthCheck,
@@ -1160,9 +1158,7 @@ async fn check_health(
             if let Some(read) = listening(tree).await
                 && let Some((leased, actual)) = expected.ports.decided(&read)
             {
-                // A Service that stopped starting meanwhile ended in another way, which its supervisor reports.
-                let read = settle(&mut state, tree, expected.ports, read, deadline).await?;
-                service.request_stop(expected.ports.port_mismatch(&read, leased, actual));
+                stop_on_mismatch(service, &mut state, tree, expected.ports, read, leased, actual).await;
                 return None;
             }
         }
@@ -1170,7 +1166,7 @@ async fn check_health(
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
             match ownership_all(tree, check, expected).await {
-                Ownership::Listening => {
+                Verdict::Listening => {
                     let healthy_at = clock.now();
                     // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
                     let healthy = service.state.send_if_modified(|state| {
@@ -1182,22 +1178,23 @@ async fn check_health(
                     });
                     return healthy.then_some(healthy_at);
                 }
-                Ownership::Elsewhere(mismatch) => {
-                    service.request_stop(mismatch);
+                Verdict::Elsewhere { read, leased, actual } => {
+                    stop_on_mismatch(service, &mut state, tree, expected.ports, read, leased, actual).await;
                     return None;
                 }
-                Ownership::Pending => wait = OWNERSHIP_RETRY,
+                Verdict::Pending => wait = OWNERSHIP_RETRY,
             }
         }
         if tokio::time::Instant::now() >= deadline {
             // Only now when nothing answers, a Service may open another port, such as a debugger, long before its Lease.
-            let end = match ownership_all(tree, check, expected).await {
-                Ownership::Elsewhere(mismatch) => mismatch,
-                Ownership::Listening | Ownership::Pending => ServiceEnd::HealthTimeout {
+            match ownership_all(tree, check, expected).await {
+                Verdict::Elsewhere { read, leased, actual } => {
+                    stop_on_mismatch(service, &mut state, tree, expected.ports, read, leased, actual).await;
+                }
+                Verdict::Listening | Verdict::Pending => service.request_stop(ServiceEnd::HealthTimeout {
                     timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                },
-            };
-            service.request_stop(end);
+                }),
+            }
             return None;
         }
         tokio::select! {
@@ -1207,18 +1204,42 @@ async fn check_health(
     }
 }
 
-/// Reads the ports the tree listens on again, from `read`, for at most [`REPORT_GRACE`] and never past `deadline`,
-/// until every Service of `ports` listens on a port tied to it, so that the apps of a Group that bind seconds apart
-/// are all named in the report. Returns the last reading, or `None` once the Service is no longer starting, its end
-/// then being another one.
+/// Stops the Service on the Port mismatch of `leased` and `actual` that the reading `read` of its tree showed, named
+/// per Service of `ports`. A Group is stopped once [`settle`] has let each Service it covers bind, from the last
+/// reading, and a Service alone at once, as it waits for no other app.
+async fn stop_on_mismatch(
+    service: &Service,
+    state: &mut watch::Receiver<ServiceState>,
+    tree: &Tree,
+    ports: &Expectation,
+    read: Vec<u16>,
+    leased: u16,
+    actual: u16,
+) {
+    let read = if service.covers.is_empty() {
+        read
+    } else {
+        // A Service that stopped starting meanwhile ended in another way, which its supervisor reports.
+        let Some(read) = settle(state, tree, ports, read).await else {
+            return;
+        };
+        read
+    };
+    service.request_stop(ports.port_mismatch(&read, leased, actual));
+}
+
+/// Reads the ports the tree listens on again, from `read`, until every Service of `ports` listens on a port tied to
+/// it or for [`REPORT_GRACE`], whatever is left of the health timeout, the Port mismatch being decided already: the
+/// apps of a Group that bind seconds apart are all named in the report, and a Service still on no port of its own is
+/// one that did not bind within the grace. Returns the last reading, or `None` once the Service is no longer
+/// starting, its end then being another one.
 async fn settle(
     state: &mut watch::Receiver<ServiceState>,
     tree: &Tree,
     ports: &Expectation,
     mut read: Vec<u16>,
-    deadline: tokio::time::Instant,
 ) -> Option<Vec<u16>> {
-    let until = deadline.min(tokio::time::Instant::now() + REPORT_GRACE);
+    let until = tokio::time::Instant::now() + REPORT_GRACE;
     while !ports.all_seen(&read) && tokio::time::Instant::now() < until {
         tokio::select! {
             () = tokio::time::sleep_until(until.min(tokio::time::Instant::now() + OWNERSHIP_RETRY)) => {}
@@ -1298,27 +1319,43 @@ enum Ownership {
     Pending,
 }
 
+/// Whether the tree of a Service listens on every Lease its health check probes, as [`ownership_all`] judges it.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// It listens on each, or there is no Lease to probe, or its listeners cannot be read.
+    Listening,
+    /// It listens elsewhere than the Lease `leased`, on `actual`, in the reading `read` of the ports it listens on.
+    Elsewhere { read: Vec<u16>, leased: u16, actual: u16 },
+    /// It listens on no port yet, or only on other Leases.
+    Pending,
+}
+
 /// The verdict on every port the check probes, the first that is not `Listening` deciding: a Group listens on the
-/// Lease of each Service it covers. A Port mismatch names each Service of the plans.
-async fn ownership_all(tree: &Tree, check: &HealthCheck, expected: Expected<'_>) -> Ownership {
+/// Lease of each Service it covers.
+async fn ownership_all(tree: &Tree, check: &HealthCheck, expected: Expected<'_>) -> Verdict {
     let ports = check.ports();
     if ports.is_empty() {
-        return Ownership::Listening;
+        return Verdict::Listening;
     }
     // Without `lsof`, the answer on the Lease is all there is to go by.
     let Some(listening) = listening(tree).await else {
-        return Ownership::Listening;
+        return Verdict::Listening;
     };
     for port in ports {
         match ownership_of(port, expected.lease_ports, &listening) {
             Ownership::Listening => {}
             Ownership::Elsewhere(ServiceEnd::PortMismatch { leased, actual, .. }) => {
-                return Ownership::Elsewhere(expected.ports.port_mismatch(&listening, leased, actual));
+                return Verdict::Elsewhere {
+                    read: listening,
+                    leased,
+                    actual,
+                };
             }
-            other => return other,
+            // `ownership_of` tells nothing but a Port mismatch of a tree listening elsewhere.
+            Ownership::Elsewhere(_) | Ownership::Pending => return Verdict::Pending,
         }
     }
-    Ownership::Listening
+    Verdict::Listening
 }
 
 async fn ownership(tree: &Tree, leased: Option<u16>, lease_ports: &[u16]) -> Ownership {

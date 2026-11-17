@@ -4,7 +4,14 @@
 //! A port the tree listens on is tied to a Service only when it is one of the Leases or one of the declared ports of
 //! that Service. Nothing else tells which process of a Group's tree belongs to which covered Service.
 
+use std::time::Duration;
+
 use crate::protocol::{ServiceEnd, ServicePorts};
+
+/// How long the Port mismatch of a Group waits, once seen, for each Service it covers to listen on a port of its own
+/// before it is reported, whatever is left of the health timeout: a Service still on no port of its own then is told
+/// as having not listened within it.
+pub(crate) const REPORT_GRACE: Duration = Duration::from_secs(10);
 
 /// The ports of one Service with a Lease to probe, as the Daemon granted and as the configuration declares them.
 #[derive(Debug, Clone, PartialEq, Eq)]
