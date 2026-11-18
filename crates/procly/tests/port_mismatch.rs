@@ -120,7 +120,8 @@ fn up_after_listening(procly: &Procly, dir: &Path, args: &[&str], port: u16) -> 
 /// A listener on `port` that accepts every connection, as a Foreign process would, and records when it last
 /// accepted one, which tells when the health check of the Lease on `port` last probed it.
 struct Probed {
-    last: Arc<Mutex<Option<Instant>>>,
+    /// When the first and the last probe came, if any did.
+    probes: Arc<Mutex<Option<(Instant, Instant)>>>,
     done: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -129,28 +130,38 @@ impl Probed {
     fn on(port: u16) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", port)).expect("hold the Lease");
         listener.set_nonblocking(true).expect("a listener that does not block");
-        let (last, done) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
+        let (probes, done) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
         let thread = {
-            let (last, done) = (Arc::clone(&last), Arc::clone(&done));
+            let (probes, done) = (Arc::clone(&probes), Arc::clone(&done));
             std::thread::spawn(move || {
                 while !done.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok(_) => *last.lock().expect("the probe time") = Some(Instant::now()),
+                        Ok(_) => {
+                            let now = Instant::now();
+                            let mut probes = probes.lock().expect("the probe times");
+                            let first = probes.map_or(now, |(first, _)| first);
+                            *probes = Some((first, now));
+                        }
                         Err(_) => std::thread::sleep(Duration::from_millis(5)),
                     }
                 }
             })
         };
         Self {
-            last,
+            probes,
             done,
             thread: Some(thread),
         }
     }
 
+    /// When the first probe came, if any did.
+    fn first(&self) -> Option<Instant> {
+        self.probes.lock().expect("the probe times").map(|(first, _)| first)
+    }
+
     /// When the last probe came, if any did.
     fn last(&self) -> Option<Instant> {
-        *self.last.lock().expect("the probe time")
+        self.probes.lock().expect("the probe times").map(|(_, last)| last)
     }
 }
 
@@ -680,8 +691,17 @@ fn a_service_alone_listening_on_no_port_of_its_own_is_reported_at_once() {
     // its queue never fills with the probes of the health check and turns them down.
     let foreign = Probed::on(web);
 
-    // Timed from the start of `up`: the report may come before a test sees the port, and it stops the tree.
-    let (output, took) = timed_up(&procly, &main, &["web"]);
+    let output = spawn_up(&procly, &main, &["web"])
+        .wait_with_output()
+        .expect("procly up ends");
+    let ended = Instant::now();
+    // Timed from the first probe of the health check, once the Service started: the start of the Daemon and of the
+    // Service, which a loaded machine stretches, does not count. The port the tree listens on may be closed before a
+    // test sees it, the report stopping the tree, so it cannot be the start.
+    let first_probe = foreign
+        .first()
+        .expect("the health check probed the Lease of web before the Port mismatch was reported");
+    let took = ended - first_probe;
     drop(foreign);
 
     assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
@@ -692,8 +712,11 @@ fn a_service_alone_listening_on_no_port_of_its_own_is_reported_at_once() {
         "{}",
         stderr(&output)
     );
-    // Waiting for other apps would take the whole grace after the start, the start of the Daemon counting too.
-    assert!(took < GRACE, "a Service alone waits for no other app, it took {took:?}");
+    // Waiting for other apps would take the whole grace after the reading that decided, which follows the first probe.
+    assert!(
+        took < GRACE,
+        "a Service alone waits for no other app, it took {took:?} from the first probe"
+    );
     // The reading that decided is the one reported, with no later reading to stand in for it.
     let end = &status_row(&procly, &main, "web")["end"];
     assert_eq!(end["unattributed"], json!([extra]), "{end}");
