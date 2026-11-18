@@ -518,8 +518,9 @@ fn a_group_healthy_on_a_foreign_lease_while_a_covered_app_is_silent_reads_its_tr
         (lease_of(&procly, &main, "api"), lease_of(&procly, &main, "web")),
         (api, web)
     );
-    // A Foreign process answers the health check of `api`, whose app listens on no port of its own.
-    let foreign = TcpListener::bind(("127.0.0.1", api)).expect("hold the Lease of api");
+    // A Foreign process answers the health check of `api`, whose app listens on no port of its own. It accepts, so that
+    // its queue never fills with the probes of the health check and turns them down.
+    let foreign = Probed::on(api);
 
     let (output, took) = up_after_listening(&procly, &main, &["dev"], web);
 
@@ -675,11 +676,22 @@ fn a_service_alone_listening_on_no_port_of_its_own_is_reported_at_once() {
         &web_config(web, &format!("{server} --port {extra}")),
     );
     assert_eq!(lease_of(&procly, &main, "web"), web);
-    // A Foreign process answers the health check, so that the tree is judged as soon as it listens.
-    let foreign = TcpListener::bind(("127.0.0.1", web)).expect("hold the Lease of web");
+    // A Foreign process answers the health check, so that the tree is judged as soon as it listens. It accepts, so that
+    // its queue never fills with the probes of the health check and turns them down.
+    let foreign = Probed::on(web);
 
-    // Timed from the start of `up`: the report may come before a test sees the port, and it stops the tree.
-    let (output, took) = timed_up(&procly, &main, &["web"]);
+    let output = spawn_up(&procly, &main, &["web"])
+        .wait_with_output()
+        .expect("procly up ends");
+    let ended = Instant::now();
+    // Timed from the last probe of the health check, the one right before the reading that decides: the start of the
+    // Service and the `Pending` phase before it, while the tree listens on no port yet, do not count, a loaded machine
+    // stretching both. The port the tree listens on may be closed before a test sees it, the report stopping the tree,
+    // so it cannot be the start.
+    let last_probe = foreign
+        .last()
+        .expect("the health check probed the Lease of web before the Port mismatch was reported");
+    let took = ended - last_probe;
     drop(foreign);
 
     assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
@@ -690,9 +702,16 @@ fn a_service_alone_listening_on_no_port_of_its_own_is_reported_at_once() {
         "{}",
         stderr(&output)
     );
-    // Waiting for other apps would take the whole grace after the start.
+    // Waiting for other apps would take the whole grace after the reading that decided, which follows the last probe.
     assert!(
-        took < Duration::from_secs(8),
-        "a Service alone waits for no other app, it took {took:?}"
+        took < GRACE,
+        "a Service alone waits for no other app, it took {took:?} from the last probe"
+    );
+    // The reading that decided is the one reported, with no later reading to stand in for it.
+    let end = &status_row(&procly, &main, "web")["end"];
+    assert_eq!(end["unattributed"], json!([extra]), "{end}");
+    assert_eq!(
+        end["services"],
+        json!([{ "service": "web", "leased": web, "seen": [] }])
     );
 }

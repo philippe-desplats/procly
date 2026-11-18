@@ -228,6 +228,13 @@ fn a_service_listening_on_another_port_is_a_port_mismatch_exiting_4() {
         common::stderr(&output)
     );
     assert!(std::net::TcpStream::connect(("127.0.0.1", actual)).is_err());
+    // Seen at the health deadline, from the one reading that decided it.
+    let status = procly.procly_in(&main, &["status", "--json"]);
+    assert_success(&status);
+    let document = common::json_document(&status);
+    let end = document["repositories"][0]["worktrees"][0]["services"][0]["end"].clone();
+    assert_eq!(end["kind"], "port_mismatch", "{document}");
+    assert_eq!(end["unattributed"], serde_json::json!([actual]), "{end}");
 }
 
 #[test]
