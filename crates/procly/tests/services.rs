@@ -2,6 +2,7 @@ mod common;
 
 use std::net::TcpStream;
 use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
 use common::{Procly, assert_success, free_port, git_repository, stdout, test_server};
 
@@ -724,5 +725,154 @@ fn status_gives_each_running_service_the_url_of_its_lease_with_the_scheme_of_its
         services[1]["urls"],
         serde_json::json!({ "https": format!("https://localhost:{secure}") }),
         "{json}"
+    );
+}
+
+/// How long a Service whose health check probes no port must stay alive before it is healthy.
+const ALIVE_BEFORE_HEALTHY: Duration = Duration::from_secs(2);
+
+/// A `procly.toml` declaring one Service `worker` without ports, which runs `run`.
+fn worker_running(run: &str) -> String {
+    format!("[services.worker]\nrun = '{run}'\n")
+}
+
+#[test]
+fn a_service_without_ports_that_exits_within_2_s_makes_up_exit_3_with_its_last_line() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    // What a dev server on a fixed port that another Worktree holds already does.
+    write(
+        &main,
+        "procly.toml",
+        &worker_running("sleep 0.2; echo Port 1420 is already in use >&2; exit 1"),
+    );
+
+    let output = procly.procly_in(&main, &["up", "worker"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stdout: {} stderr: {}",
+        stdout(&output),
+        common::stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        common::stderr(&output),
+        "procly: service worker exited with code 1 before it became healthy, its recent output:\n\
+         Port 1420 is already in use\n"
+    );
+
+    let output = procly.procly_in(&main, &["up", "worker", "--json"]);
+
+    assert_eq!(output.status.code(), Some(3), "stderr: {}", common::stderr(&output));
+    assert_eq!(
+        common::json_document(&output),
+        serde_json::json!({
+            "schema_version": 1,
+            "result": "unhealthy",
+            "service": "worker",
+            "needed_by": null,
+            "end": { "kind": "exited", "code": 1 },
+            "output": "Port 1420 is already in use\n",
+        })
+    );
+}
+
+#[test]
+fn a_service_without_ports_that_keeps_running_is_started_once_it_has_stayed_alive_for_2_s() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    write(&main, "procly.toml", &worker_running("exec sleep 600"));
+    // The Daemon runs already, so that its start, which takes over a second on a loaded machine, is not timed.
+    assert_success(&procly.procly_in(&main, &["status"]));
+
+    let start = Instant::now();
+    let output = procly.procly_in(&main, &["up", "worker"]);
+    let took = start.elapsed();
+
+    assert_success(&output);
+    assert_eq!(stdout(&output), "worker started\n");
+    assert!(took >= ALIVE_BEFORE_HEALTHY, "up answered after {took:?}");
+    assert!(
+        took < Duration::from_secs(30),
+        "up took {took:?}, the health timeout is 1 minute"
+    );
+}
+
+/// When the file at `path` was last modified.
+fn modified(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|error| panic!("cannot read when {} was modified: {error}", path.display()))
+}
+
+#[test]
+fn a_service_that_needs_one_without_ports_starts_only_once_that_one_has_stayed_alive_for_2_s() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let (asked, worker_ran, web_ran) = (
+        procly.scratch().join("asked"),
+        procly.scratch().join("worker"),
+        procly.scratch().join("web"),
+    );
+    let config = format!(
+        "[services.web]\nrun = 'touch {web_ran}; exec {server} --port {port}'\nports = {{ http = {port} }}\n\
+         needs = ['worker']\n\
+         [services.worker]\nrun = 'touch {worker_ran}; exec sleep 600'\n",
+        web_ran = web_ran.display(),
+        worker_ran = worker_ran.display(),
+        server = test_server().display()
+    );
+    write(&main, "procly.toml", &config);
+    // The Daemon runs already, so that its start, which takes over a second on a loaded machine, is not timed.
+    assert_success(&procly.procly_in(&main, &["status"]));
+    // Dated by the file system, as the marks of the 2 Services are, before the worker can start.
+    std::fs::write(&asked, "").expect("write the mark of the request");
+
+    let output = procly.procly_in(&main, &["up", "web"]);
+
+    assert_success(&output);
+    assert_eq!(common::stderr(&output), "worker started (needed by web)\n");
+    let (asked, worker_ran, web_ran) = (modified(&asked), modified(&worker_ran), modified(&web_ran));
+    assert!(worker_ran < web_ran, "web started before the worker it needs");
+    let waited = web_ran.duration_since(asked).expect("web started after up was asked");
+    assert!(
+        waited >= ALIVE_BEFORE_HEALTHY,
+        "web started {waited:?} after up was asked, before the worker had stayed alive for 2 s"
+    );
+}
+
+#[test]
+fn a_service_with_a_port_is_not_delayed_by_the_2_s_a_service_without_ports_waits() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    write(&main, "procly.toml", &web_on(port));
+    // The Daemon runs already, so that its start, which takes over a second on a loaded machine, is not timed.
+    assert_success(&procly.procly_in(&main, &["status"]));
+
+    // The fastest of 3 runs, so that one slowed by the load of the machine does not decide. A wait of 2 s would
+    // delay each of them.
+    let fastest = (0..3)
+        .map(|_| {
+            let start = Instant::now();
+            let output = procly.procly_in(&main, &["up", "web"]);
+            let took = start.elapsed();
+            assert_success(&output);
+            assert_eq!(
+                stdout(&output),
+                format!("web started http://localhost:{port} port {port}\n")
+            );
+            assert_success(&procly.procly_in(&main, &["down", "web"]));
+            took
+        })
+        .min()
+        .expect("3 runs");
+
+    assert!(
+        fastest < ALIVE_BEFORE_HEALTHY,
+        "the fastest up of a Service with a port took {fastest:?}"
     );
 }

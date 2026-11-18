@@ -168,7 +168,13 @@ fn a_task_started_late_whose_parent_ends_at_once_is_still_stopped_with_the_servi
     );
     write(&main, "procly.toml", &config);
     start_daemon(&procly, &main);
-    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    // A Service without ports whose leader ends within 2 s never became healthy, `up` says how it ended.
+    let output = procly.procly_in(&main, &["up", "web"]);
+    assert_eq!(
+        common::stderr(&output),
+        "procly: service web exited with code 0 before it became healthy, it printed nothing\n"
+    );
+    assert_eq!(output.status.code(), Some(3));
     let task = read_pid(&dir.join("task.pid"));
 
     // The leader ended on its own, nothing of its tree may outlive it.

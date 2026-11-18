@@ -13,7 +13,7 @@ use tokio::sync::watch;
 
 use super::clock::Clock;
 use super::cpu::groups_cpu;
-use super::health::HealthCheck;
+use super::health::{ALIVE_BEFORE_HEALTHY, HealthCheck};
 use super::idle::{IdleTracker, Sample};
 use super::listeners::listening_ports;
 use super::mismatch::{Expectation, REPORT_GRACE};
@@ -1131,7 +1131,9 @@ struct Expected<'a> {
 }
 
 /// Marks the Service healthy once its health check passes and its process tree listens on the Lease the check
-/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. A tree listening on the
+/// probes, and stops it once `timeout` has passed without, or once it shows a Port mismatch. A check that probes no
+/// port passes at once, so such a Service turns healthy only once it has stayed alive for [`ALIVE_BEFORE_HEALTHY`],
+/// and one that ends before never does, its supervisor reporting how it ended. A tree listening on the
 /// declared health port of a Service instead of its Lease is one at once, read at most every [`OWNERSHIP_RETRY`]
 /// while it starts. Every Port mismatch is reported through [`stop_on_mismatch`], which lets the other apps of a
 /// Group bind first. Returns the reading of `clock` taken as the Service turned healthy, before anyone could hear of
@@ -1145,7 +1147,11 @@ async fn check_health(
     clock: &Clock,
 ) -> Option<Duration> {
     let mut state = service.state.subscribe();
-    let deadline = tokio::time::Instant::now() + timeout;
+    let began = tokio::time::Instant::now();
+    let deadline = began + timeout;
+    // A Service with no port to probe is healthy only once it has stayed alive this long: one that dies on its first
+    // error ends before, and is reported as a Service that ended before it became healthy.
+    let alive_from = check.probes_no_port().then_some(began + ALIVE_BEFORE_HEALTHY);
     let early = expected.ports.judged_early();
     let mut read_at: Option<tokio::time::Instant> = None;
     loop {
@@ -1166,6 +1172,9 @@ async fn check_health(
         if tokio::time::timeout_at(deadline, check.passes()).await == Ok(true) {
             // What answered may be a Foreign process holding the Lease while the Service listens elsewhere, or not yet.
             match ownership_all(tree, check, expected).await {
+                Verdict::Listening if let Some(alive) = alive_from.filter(|&at| tokio::time::Instant::now() < at) => {
+                    wait = alive.saturating_duration_since(tokio::time::Instant::now());
+                }
                 Verdict::Listening => {
                     let healthy_at = clock.now();
                     // A Service being stopped never turns healthy, `up` would answer with a Service about to vanish.
@@ -1516,5 +1525,76 @@ mod tests {
         );
         assert!(services[0].seen.contains(&actual));
         assert!(services[1].seen.is_empty(), "web did not listen");
+    }
+
+    /// The check of a Service declaring no port, or of a Group covering only such Services.
+    fn no_port(covered: usize) -> HealthCheck {
+        let check = HealthCheck {
+            port: None,
+            http: None,
+            covered: Vec::new(),
+        };
+        HealthCheck {
+            covered: vec![check.clone(); covered],
+            ..check
+        }
+    }
+
+    /// Runs the health check of `service` against `check` in a task of its own, with the health timeout of 1 minute.
+    fn checking(service: &Arc<Service>, check: HealthCheck) -> tokio::task::JoinHandle<Option<Duration>> {
+        let service = Arc::clone(service);
+        tokio::spawn(async move {
+            let ports = Expectation {
+                plans: Vec::new(),
+                worktree_leases: Vec::new(),
+            };
+            let expected = Expected {
+                lease_ports: &[],
+                ports: &ports,
+            };
+            let tree = Tree::default();
+            check_health(
+                &service,
+                &check,
+                expected,
+                &tree,
+                Duration::from_mins(1),
+                &Clock::real(),
+            )
+            .await
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_whose_check_probes_no_port_turns_healthy_once_it_has_stayed_alive_for_2_s() {
+        for covered in [0, 2] {
+            let service = service_in(ServiceState::Starting);
+            let check = checking(&service, no_port(covered));
+
+            // The 2 s the owner decided, written out so that a change of the constant shows here.
+            tokio::time::sleep(Duration::from_millis(1999)).await;
+            assert_eq!(
+                *service.state.borrow(),
+                ServiceState::Starting,
+                "healthy before 2 s alive, covering {covered}"
+            );
+
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert!(check.await.expect("the check ends").is_some(), "covering {covered}");
+            assert_eq!(*service.state.borrow(), ServiceState::Healthy, "covering {covered}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_whose_check_probes_no_port_and_that_ends_within_the_2_s_never_turns_healthy() {
+        let service = service_in(ServiceState::Starting);
+        let check = checking(&service, no_port(0));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let ended = ServiceState::Ended(ServiceEnd::Exited { code: 1 });
+        service.state.send_replace(ended.clone());
+
+        assert_eq!(check.await.expect("the check ends"), None);
+        assert_eq!(*service.state.borrow(), ended);
     }
 }

@@ -1,6 +1,7 @@
 //! Health checks: a TCP connection to the port of a Service, optionally followed by an HTTP request.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
@@ -10,10 +11,16 @@ use crate::config::{HealthConfig, HttpProbe};
 /// A dev server may listen on IPv4, on IPv6 only (Vite on macOS binds `::1`), or on both.
 const LOOPBACKS: [IpAddr; 2] = [IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)];
 
+/// How long a Service whose health check probes no port must stay alive after it started before it is healthy. With
+/// no port to answer, staying alive is all that tells a Service that runs from one that died on its first error,
+/// such as a dev server on a fixed port that another Worktree holds already, which `up` then reports with exit 3.
+pub(crate) const ALIVE_BEFORE_HEALTHY: Duration = Duration::from_secs(2);
+
 /// What makes a Service healthy.
 #[derive(Debug, Clone)]
 pub(crate) struct HealthCheck {
-    /// The port that must accept connections, `None` for a Service that listens on none and is healthy once started.
+    /// The port that must accept connections, `None` for a Service that listens on none and is healthy once it has
+    /// stayed alive for [`ALIVE_BEFORE_HEALTHY`].
     pub(crate) port: Option<u16>,
     pub(crate) http: Option<HttpProbe>,
     /// The checks of the Services a Group covers, which all must pass for the Group to be healthy.
@@ -36,6 +43,12 @@ impl HealthCheck {
             .into_iter()
             .chain(self.covered.iter().filter_map(|covered| covered.port))
             .collect()
+    }
+
+    /// Whether the check probes no port at all, neither its own nor that of a Service it covers, which makes it pass
+    /// at once: the Service is healthy only once it has stayed alive for [`ALIVE_BEFORE_HEALTHY`].
+    pub(crate) fn probes_no_port(&self) -> bool {
+        self.ports().is_empty()
     }
 
     /// Probes the Service once, and the Services it covers.
