@@ -257,6 +257,61 @@ fn a_crashed_service_restarts_with_increasing_delays_then_ends_failed() {
 }
 
 #[test]
+fn a_restarted_service_without_ports_that_exits_within_2_s_never_becomes_healthy() {
+    let procly = Procly::with_clock();
+    let main = git_repository(procly.scratch(), "app");
+    let (starts, crash) = (procly.scratch().join("starts"), procly.scratch().join("crash"));
+    // The first run lives until the test makes it crash. Every later one dies 0.5 s in, well within the 2 s a Service
+    // without ports must stay alive, as a dev server that finds its fixed port taken does.
+    write(
+        &main,
+        "procly.toml",
+        &format!(
+            "[services.worker]\nrun = '''echo start >> {starts}; \
+             if [ -e {crash} ]; then sleep 0.5; echo port taken >&2; exit 1; fi; \
+             while [ ! -e {crash} ]; do sleep 0.1; done; exit 1'''\n\
+             [services.worker.restart]\nattempts = 1\ndelay = '1s'\n",
+            starts = starts.display(),
+            crash = crash.display()
+        ),
+    );
+    assert_success(&procly.procly_in(&main, &["up", "worker"]));
+
+    std::fs::write(&crash, "").expect("make the first run crash");
+    common::eventually("the daemon to plan the restart", || {
+        procly.daemon_log().contains("restarting in 1s (restart 1 of 1)")
+    });
+    // An `up` asked during the backoff waits for the restarted run, and answers once it is healthy or ended.
+    let up = procly
+        .command()
+        .current_dir(&main)
+        .args(["up", "worker"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("procly up starts");
+    // The restart waits for the clock of the Daemon, which stands still until `up` has had the time to ask.
+    std::thread::sleep(Duration::from_secs(1));
+    procly.advance_clock(Duration::from_secs(1));
+
+    let output = up.wait_with_output().expect("procly up ends");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "the restarted run was shown healthy, stdout: {} stderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output)
+            .contains("procly: service worker kept crashing, it was restarted 1 times and is not restarted again"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(start_count(&starts), 2);
+}
+
+#[test]
 fn down_during_a_backoff_cancels_the_restart() {
     let procly = Procly::with_clock();
     let main = git_repository(procly.scratch(), "app");

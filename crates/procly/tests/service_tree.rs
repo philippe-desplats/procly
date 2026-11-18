@@ -141,8 +141,9 @@ fn a_service_whose_leader_ends_on_its_own_leaves_no_task_of_its_tree_behind() {
     let dir = procly.scratch();
     write_cleaning_task(dir);
     // The leader starts the task in a group of its own, lives long enough for the Daemon to see the task, then ends.
+    // It outlives the 2 s a Service without ports must stay alive, so that `up` answers once it is healthy.
     let config = format!(
-        "[services.web]\nrun = '''perl -e 'setpgrp(0,0); exec @ARGV' sh {} & sleep 2'''\n",
+        "[services.web]\nrun = '''perl -e 'setpgrp(0,0); exec @ARGV' sh {} & sleep 3'''\n",
         dir.join("task.sh").display()
     );
     write(&main, "procly.toml", &config);

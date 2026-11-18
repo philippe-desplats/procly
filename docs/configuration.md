@@ -685,7 +685,7 @@ The HTTP check does not speak TLS. A health check that probes a Port named `http
 | `port` | the only Port name | The Port name to probe, required when the Service declares several. |
 | `path` | none | The path of the HTTP check, such as `/api/health`, or an `http://` URL such as `http://app.localhost/api/health`. Setting `path` or `status` turns the HTTP check on, with `/` as the default path. |
 | `status` | `200` | The status the HTTP check must answer. |
-| `timeout` | `settings.health_timeout` | The health timeout of this Service. |
+| `timeout` | `settings.health_timeout` | The health timeout of this Service. A Service without ports needs 2 s alive to become healthy, so with a `timeout` under 2 s it can never become healthy and `up` ends with exit 124. |
 
 ## `[services.<name>.restart]`
 
