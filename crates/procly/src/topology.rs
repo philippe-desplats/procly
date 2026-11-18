@@ -115,6 +115,22 @@ pub(crate) fn branch(worktree: &Path) -> Result<Option<String>, TopologyError> {
     Ok((!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned()))
 }
 
+/// The files git tracks in the Worktree rooted at `worktree` that `pathspec` matches, relative to that root, as
+/// `git ls-files` lists them. An ignored or untracked file is never listed. A directory outside any Repository tracks
+/// none.
+pub(crate) fn tracked(worktree: &Path, pathspec: &str) -> Result<Vec<PathBuf>, TopologyError> {
+    let output = match git(worktree, &["ls-files", "-z", "--", pathspec]) {
+        Ok(output) => output,
+        Err(TopologyError::NotARepository { .. }) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(OsStr::from_bytes(path)))
+        .collect())
+}
+
 /// Every Worktree of a Repository, in the order of `git worktree list`.
 ///
 /// The first entry of a bare Repository is the bare directory itself, which is no Worktree and is skipped, so no

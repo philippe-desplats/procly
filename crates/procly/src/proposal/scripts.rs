@@ -1,6 +1,7 @@
 //! The Services proposed from the `dev` scripts of the `package.json` files of a Worktree.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::ops::Range;
@@ -11,7 +12,8 @@ use serde_json::Value;
 use super::cover::{self, Member};
 use super::group::{self, Narrowed};
 use super::{Proposal, ProposalError, ServiceEntry, service_name};
-use crate::config::TLS_PORT_NAME;
+use crate::config::{TLS_PORT_NAME, VERSIONED_FILE};
+use crate::topology;
 
 /// The JavaScript package manager a Worktree installs with, which runs its scripts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,11 @@ enum Manager {
 impl Manager {
     /// Read from the lockfile the Worktree holds, `npm` when it holds none.
     fn of(worktree: &Path) -> Self {
+        Self::locked(worktree).unwrap_or(Self::Npm)
+    }
+
+    /// Read from the lockfile `dir` holds, `None` when it holds none.
+    fn locked(dir: &Path) -> Option<Self> {
         [
             ("pnpm-lock.yaml", Self::Pnpm),
             ("bun.lock", Self::Bun),
@@ -32,8 +39,8 @@ impl Manager {
             ("yarn.lock", Self::Yarn),
         ]
         .into_iter()
-        .find(|(lockfile, _)| worktree.join(lockfile).exists())
-        .map_or(Self::Npm, |(_, manager)| manager)
+        .find(|(lockfile, _)| dir.join(lockfile).exists())
+        .map(|(_, manager)| manager)
     }
 
     /// The command that runs the script `script`.
@@ -332,15 +339,74 @@ fn workspace_packages(worktree: &Path, root: &Value) -> Result<Vec<Package>, Pro
     Ok(packages)
 }
 
+/// The packages with a `dev` script whose `package.json` git tracks below the root of the Worktree, in the order of
+/// their directories.
+fn tracked_packages(worktree: &Path) -> Result<Vec<Package>, ProposalError> {
+    let manifests = topology::tracked(worktree, "*package.json").map_err(|source| ProposalError::Tracked {
+        dir: worktree.to_owned(),
+        source,
+    })?;
+    let mut packages = Vec::new();
+    for manifest in manifests {
+        if manifest.file_name() != Some(OsStr::new("package.json")) {
+            continue;
+        }
+        let Some(dir) = manifest.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
+            continue;
+        };
+        packages.extend(Package::read(worktree, dir.to_owned())?);
+    }
+    packages.sort_by(|a, b| a.dir.cmp(&b.dir));
+    Ok(packages)
+}
+
+/// Adds one Service per package with a `dev` script below the root of a Worktree that has no root `package.json`, each
+/// run through the package manager of its own lockfile, else of the root's. Run from the directory `from` of such a
+/// package, init proposes that package alone.
+fn propose_nested(worktree: &Path, from: &Path, proposal: &mut Proposal) -> Result<(), ProposalError> {
+    let root_manager = Manager::locked(worktree);
+    // A package whose directory holds its own `procly.toml` is a separate project, which that file declares.
+    let (separate, mut packages): (Vec<Package>, Vec<Package>) = tracked_packages(worktree)?
+        .into_iter()
+        .partition(|package| worktree.join(&package.dir).join(VERSIONED_FILE).exists());
+    let from = from.strip_prefix(worktree).unwrap_or(Path::new(""));
+    if let Some(at) = packages.iter().position(|package| package.dir == from) {
+        packages = vec![packages.swap_remove(at)];
+    } else {
+        proposal.notes.extend(separate.iter().map(|package| {
+            let dir = package.dir.display();
+            format!(
+                "{dir}/package.json has a dev script, but {dir} holds its own {VERSIONED_FILE}, so it is a separate \
+                 project and is not proposed."
+            )
+        }));
+    }
+    for package in packages {
+        let manager = Manager::locked(&worktree.join(&package.dir))
+            .or(root_manager)
+            .unwrap_or(Manager::Npm);
+        proposal.add(&package.name, package.service(manager));
+    }
+    Ok(())
+}
+
 /// Adds the Services the `dev` scripts of the Worktree rooted at `worktree` call for: one per workspace package with
 /// a `dev` script, and a Group for the `dev` script of the root that covers them, or, without workspaces, one for the
-/// root package.
-pub(super) fn propose(worktree: &Path, proposal: &mut Proposal) -> Result<(), ProposalError> {
+/// root package. A Worktree with no root `package.json` gets one per package below its root instead, see
+/// [`propose_nested`]. Tells whether the Worktree has a root `package.json`.
+pub(super) fn propose(worktree: &Path, from: &Path, proposal: &mut Proposal) -> Result<bool, ProposalError> {
     let Some(root) = read_package(worktree)? else {
-        return Ok(());
+        propose_nested(worktree, from, proposal)?;
+        return Ok(false);
     };
+    propose_root(worktree, &root, proposal)?;
+    Ok(true)
+}
+
+/// Adds the Services the root `package.json` `root` of the Worktree and its workspaces call for, see [`propose`].
+fn propose_root(worktree: &Path, root: &Value, proposal: &mut Proposal) -> Result<(), ProposalError> {
     let manager = Manager::of(worktree);
-    let packages = workspace_packages(worktree, &root)?;
+    let packages = workspace_packages(worktree, root)?;
     let root_package = Package::read(worktree, PathBuf::new())?;
     if packages.is_empty() {
         if let Some(package) = root_package {

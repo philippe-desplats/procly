@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::topology::TopologyError;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProposalError {
     #[error("cannot read {path}")]
@@ -40,6 +42,17 @@ pub(crate) enum ProposalError {
     NoComposeServices { path: PathBuf },
     #[error("{dir} has no dev script in a package.json and no compose file, so there is nothing to propose")]
     Nothing { dir: PathBuf },
+    #[error(
+        "{dir} has no package.json with a dev script at its root nor among the files git tracks, and no compose file, \
+         so there is nothing to propose"
+    )]
+    NothingTracked { dir: PathBuf },
+    #[error("cannot list the package.json files git tracks in {dir}")]
+    Tracked {
+        dir: PathBuf,
+        #[source]
+        source: TopologyError,
+    },
 }
 
 /// One `[services.<name>]` table of the proposal. The fields are written in the order they are declared here, the keys
@@ -156,15 +169,18 @@ pub(crate) struct Proposed {
     pub(crate) notes: Vec<String>,
 }
 
-/// The `procly.toml` proposed for the Worktree rooted at `worktree`, in the Repository called `repository`, which
-/// names what the Worktree does not.
-pub(crate) fn propose(worktree: &Path, repository: &str) -> Result<Proposed, ProposalError> {
+/// The `procly.toml` proposed for the Worktree rooted at `worktree`, when init runs from the directory `from`, in the
+/// Repository called `repository`, which names what the Worktree does not.
+pub(crate) fn propose(worktree: &Path, from: &Path, repository: &str) -> Result<Proposed, ProposalError> {
     let mut proposal = Proposal::default();
-    scripts::propose(worktree, &mut proposal)?;
+    let has_root = scripts::propose(worktree, from, &mut proposal)?;
     compose::propose(worktree, repository, &mut proposal)?;
     if proposal.services.is_empty() {
-        return Err(ProposalError::Nothing {
-            dir: worktree.to_owned(),
+        let dir = worktree.to_owned();
+        return Err(if has_root {
+            ProposalError::Nothing { dir }
+        } else {
+            ProposalError::NothingTracked { dir }
         });
     }
     let body = toml::to_string(&proposal).expect("a proposal holds only strings, numbers and tables, which serialize");

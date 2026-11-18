@@ -1108,7 +1108,8 @@ mod tests {
                 ),
             )
             .unwrap();
-            let config: Config = toml::from_str(&crate::proposal::propose(dir.path(), "acme").unwrap().toml).unwrap();
+            let config: Config =
+                toml::from_str(&crate::proposal::propose(dir.path(), dir.path(), "acme").unwrap().toml).unwrap();
             let db = &config.services["db"];
             assert_eq!(db.driver.is_some(), bundled, "{credentials} credentials");
 

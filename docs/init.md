@@ -32,7 +32,24 @@ $ procly init --json
 
 When the Worktree has a `.config/wt.toml`, the Worktrunk config, that holds no Procly block yet, stderr also suggests `procly worktree hooks`, which makes Worktrunk run `procly worktree init` and `procly worktree release`, see [Worktrunk](worktree-init.md#worktrunk). Init writes nothing into that file.
 
-A `procly.toml` that exists is never overwritten. The proposal is still printed, stderr says that the file was left as it is, and the command exits with 0. The file is created exclusively, so even one that appears while the proposal is made is kept. A Worktree with no `dev` script and no compose file gets nothing written and exits with 125, see [exit codes](exit-codes.md).
+A `procly.toml` that exists is never overwritten. The proposal is still printed, stderr says that the file was left as it is, and the command exits with 0. The file is created exclusively, so even one that appears while the proposal is made is kept. A Worktree with no `dev` script and no compose file gets nothing written and exits with 125, see [exit codes](exit-codes.md). Without a root `package.json`, stderr then says that no `package.json` with a `dev` script was found at the root nor among the files git tracks.
+
+## Where init looks
+
+Init reads the `package.json` at the root of the Worktree first. When there is one, init reads it and the workspaces it declares, as [Package scripts](#package-scripts) describes, and looks at no other `package.json`.
+
+When the Worktree has no root `package.json`, such as a Rust workspace with a JavaScript app in `apps/desktop`, init looks below the root instead:
+
+- Run from a directory whose `package.json` has a `dev` script, init proposes a Service for that package alone.
+- Run from the root, or from a directory with no such `package.json`, init proposes a Service for every `package.json` with a `dev` script that git tracks, in the order of their directories. The list comes from `git ls-files`, so a `package.json` that is untracked or ignored, and everything under `node_modules`, is never read.
+
+Each of these packages becomes a Service the way a workspace package does: named after its package, run from its own directory, through the package manager of the lockfile in that directory, else of the one at the root, else npm. An `apps/desktop` with its own `bun.lock` gets `cd apps/desktop && bun run dev`.
+
+A `package.json` in a directory that holds its own `procly.toml` belongs to a separate project, which that file declares. Init proposes no Service for it and says so on stderr:
+
+```text
+procly: sample/project/package.json has a dev script, but sample/project holds its own procly.toml, so it is a separate project and is not proposed.
+```
 
 The proposal declares what the Worktree states and leaves out what it would have to invent. Read it, then run `procly up`. Procly reads nothing else, so a Repository that starts its servers through a `Procfile` or a `Makefile` gets no proposal for them.
 
