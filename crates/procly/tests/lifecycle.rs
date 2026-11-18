@@ -435,11 +435,14 @@ fn a_service_that_prints_or_uses_cpu_is_not_idle_while_a_silent_one_stops() {
         assert_success(&procly.procly_in(&main, &["up", service]));
     }
     let busy = common::read_pid(&busy_pid);
+    // Read once `up busy` answered, so after the first look of the Daemon, taken as the Service turned healthy. Having
+    // no port, it turned healthy only after 2 s of busy loops, which that first look counts already.
+    let used_when_healthy = group_cpu(busy.as_raw());
     wait_for_first_line(&procly, &main, "quiet", quiet);
     // The busy loops must have used more than one step of the CPU clock of `ps`, a whole second on Linux, since the
-    // first look of the Daemon, taken as the Service turned healthy, whatever share of a CPU the machine gives them.
+    // first look of the Daemon, whatever share of a CPU the machine gives them.
     common::eventually("the busy service to use 3 s of CPU", || {
-        group_cpu(busy.as_raw()) >= Duration::from_secs(3)
+        group_cpu(busy.as_raw()) >= used_when_healthy + Duration::from_secs(3)
     });
 
     procly.advance_clock(Duration::from_mins(5));
