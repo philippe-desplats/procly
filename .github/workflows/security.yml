@@ -57,7 +57,9 @@ jobs:
           bun-version-file: apps/desktop/package.json
       # WebdriverIO (ADR 0016) pulls `extract-zip` through `@puppeteer/browsers`, and no release of it fixes these 2
       # advisories. It only unpacks browser downloads, which the end-to-end tests never ask for since they drive the
-      # app itself. Drop the flags once a fixed release exists.
+      # app itself. Drop the flags once a fixed release exists. `picomatch` (GHSA-fc5q-39xc-vjpf) comes only through the
+      # development tooling, Vite, Vitest, WebdriverIO and their glob helpers, and matches globs of the repository, never
+      # input from a user of the app. Drop its flag once a fixed release of `picomatch` exists.
       - name: Audit apps/desktop/bun.lock
-        run: bun audit --audit-level=high --ignore GHSA-7pqw-9j4j-h8q3 --ignore GHSA-jmr9-qjv8-65gv
+        run: bun audit --audit-level=high --ignore GHSA-7pqw-9j4j-h8q3 --ignore GHSA-jmr9-qjv8-65gv --ignore GHSA-fc5q-39xc-vjpf
         working-directory: apps/desktop
