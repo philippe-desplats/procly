@@ -52,7 +52,7 @@ pub(crate) fn propose(cwd: &Path) -> Result<ProposalReport, InitError> {
     let repository = repository_name(&topology)?;
     let worktree = topology.worktree.path;
     let file = worktree.join(VERSIONED_FILE);
-    let proposed = proposal::propose(&worktree, &repository)?;
+    let proposed = proposal::propose(&worktree, &cwd, &repository)?;
     let written = write_new(&file, &proposed.toml)?;
     let mut notes = proposed.notes;
     notes.extend(worktrunk::suggestion(&worktree));

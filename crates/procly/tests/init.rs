@@ -1315,3 +1315,254 @@ fn a_dot_env_file_is_never_read() {
 
     assert_eq!(group_warning(&output), format!("procly: {GROUP_WARNING}."));
 }
+
+/// A Repository with no root `package.json`, such as a Rust workspace, and a JavaScript app with its own lockfile in a
+/// subdirectory, every file of it tracked by git.
+const NESTED_APP: [(&str, &str); 3] = [
+    ("Cargo.toml", "[workspace]\n"),
+    (
+        "apps/desktop/package.json",
+        r#"{"name": "procly-desktop", "scripts": {"dev": "vite", "build": "vite build"}}"#,
+    ),
+    ("apps/desktop/bun.lock", ""),
+];
+
+/// A Repository whose Main worktree holds the given files, all of them added to git.
+fn tracked_repository(procly: &Procly, files: &[(&str, &str)]) -> PathBuf {
+    let main = repository(procly, files);
+    common::git(&main, &["add", "--all"]);
+    main
+}
+
+/// The names of the Services of a proposal.
+fn service_names(proposal: &str) -> Vec<String> {
+    let table: toml::Table = proposal.parse().expect("the proposal is TOML");
+    table["services"]
+        .as_table()
+        .expect("the proposal has a services table")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn without_a_root_package_json_init_from_the_root_proposes_the_tracked_package_with_a_dev_script() {
+    let procly = Procly::new();
+    let main = tracked_repository(&procly, &NESTED_APP);
+
+    let output = init(&procly, &main);
+
+    let proposal = stdout(&output);
+    assert_eq!(service_names(&proposal), ["procly-desktop"], "{proposal}");
+    assert_eq!(
+        run_and_port(&proposal, "procly-desktop"),
+        ("cd apps/desktop && bun run dev".to_owned(), None)
+    );
+    assert_loads(&procly, &main, "procly-desktop");
+}
+
+#[test]
+fn without_a_root_package_json_init_from_a_package_directory_proposes_that_package_only() {
+    let procly = Procly::new();
+    let mut files = NESTED_APP.to_vec();
+    files.push((
+        "site/package.json",
+        r#"{"name": "site", "scripts": {"dev": "astro dev"}}"#,
+    ));
+    let main = tracked_repository(&procly, &files);
+
+    let output = init(&procly, &main.join("apps/desktop"));
+
+    let proposal = stdout(&output);
+    assert_eq!(service_names(&proposal), ["procly-desktop"], "{proposal}");
+    assert_eq!(
+        run_and_port(&proposal, "procly-desktop"),
+        ("cd apps/desktop && bun run dev".to_owned(), None)
+    );
+    assert_eq!(fs::read_to_string(main.join("procly.toml")).unwrap(), proposal);
+}
+
+#[test]
+fn without_a_root_package_json_init_from_the_root_proposes_every_tracked_package_in_the_order_of_their_directories() {
+    let procly = Procly::new();
+    let mut files = NESTED_APP.to_vec();
+    files.push((
+        "site/package.json",
+        r#"{"name": "site", "scripts": {"dev": "astro dev"}}"#,
+    ));
+    files.push(("apps/web/package.json", r#"{"scripts": {"dev": "next dev"}}"#));
+    files.push((
+        "apps/lib/package.json",
+        r#"{"name": "lib", "scripts": {"build": "tsc"}}"#,
+    ));
+    files.push(("pnpm-lock.yaml", ""));
+    let main = tracked_repository(&procly, &files);
+    fs::create_dir(main.join("docs")).unwrap();
+
+    let output = init(&procly, &main.join("docs"));
+
+    let proposal = stdout(&output);
+    let table: toml::Table = proposal.parse().unwrap();
+    let runs: Vec<&str> = ["procly-desktop", "web", "site"]
+        .iter()
+        .map(|service| table["services"][*service]["run"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            "cd apps/desktop && bun run dev",
+            "cd apps/web && pnpm run dev",
+            "cd site && pnpm run dev"
+        ],
+        "a lockfile of the package wins over the one at the root: {proposal}"
+    );
+    assert_eq!(service_names(&proposal).len(), 3, "{proposal}");
+}
+
+#[test]
+fn an_untracked_or_ignored_package_json_is_never_proposed() {
+    let procly = Procly::new();
+    let mut files = NESTED_APP.to_vec();
+    files.push((".gitignore", "vendor/\n"));
+    let main = tracked_repository(&procly, &files);
+    let dev = r#"{"name": "stray", "scripts": {"dev": "vite"}}"#;
+    write(&main.join("apps/new/package.json"), dev);
+    write(&main.join("vendor/tool/package.json"), dev);
+    write(&main.join("apps/desktop/node_modules/vite/package.json"), dev);
+
+    for from in [main.clone(), main.join("apps/new"), main.join("vendor/tool")] {
+        let output = init(&procly, &from);
+        assert_eq!(
+            service_names(&stdout(&output)),
+            ["procly-desktop"],
+            "from {}",
+            from.display()
+        );
+        fs::remove_file(main.join("procly.toml")).unwrap();
+    }
+}
+
+#[test]
+fn a_tracked_package_in_a_directory_with_its_own_procly_toml_is_a_separate_project_skipped_with_a_note() {
+    let procly = Procly::new();
+    let mut files = NESTED_APP.to_vec();
+    files.push((
+        "sample/project/package.json",
+        r#"{"name": "acme-shop", "scripts": {"dev": "python3 -m http.server 24080"}}"#,
+    ));
+    files.push(("sample/project/procly.toml", "[services.web]\nrun = 'sleep 1000'\n"));
+    let main = tracked_repository(&procly, &files);
+
+    let output = init(&procly, &main);
+
+    assert_eq!(
+        service_names(&stdout(&output)),
+        ["procly-desktop"],
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains(
+            "procly: sample/project/package.json has a dev script, but sample/project holds its own procly.toml, so it \
+             is a separate project and is not proposed."
+        ),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn without_a_root_package_json_nor_a_tracked_one_with_a_dev_script_init_says_where_it_looked() {
+    let procly = Procly::new();
+    let main = tracked_repository(
+        &procly,
+        &[
+            ("Cargo.toml", "[workspace]\n"),
+            (
+                "tools/package.json",
+                r#"{"name": "tools", "scripts": {"build": "tsc"}}"#,
+            ),
+        ],
+    );
+    write(&main.join("untracked/package.json"), r#"{"scripts": {"dev": "vite"}}"#);
+
+    let output = procly.procly_in(&main, &["init"]);
+
+    assert_eq!(output.status.code(), Some(125));
+    assert!(
+        stderr(&output).contains(
+            "has no package.json with a dev script at its root nor among the files git tracks, and no compose file, \
+             so there is nothing to propose"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!main.join("procly.toml").exists());
+}
+
+/// Merges `branch` into the branch checked out in `dir`, which leaves the conflicts of the merge in the index, and
+/// asserts that git stopped on one.
+fn merge_with_a_conflict(dir: &Path, branch: &str) {
+    let mut command = std::process::Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "user.name=Procly Test", "-c", "user.email=test@example.com"])
+        .args(["-c", "commit.gpgsign=false", "merge", "--no-edit", branch])
+        .output()
+        .expect("git runs");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the merge stops on a conflict: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_package_json_in_a_merge_conflict_is_proposed_once() {
+    let procly = Procly::new();
+    let package = |script: &str| format!(r#"{{"name": "a", "scripts": {{"dev": "{script}"}}}}"#);
+    let main = tracked_repository(&procly, &[("a/package.json", &package("vite"))]);
+    common::git(&main, &["commit", "--quiet", "--message", "add the package"]);
+    common::git(&main, &["checkout", "--quiet", "-b", "other"]);
+    write(&main.join("a/package.json"), &package("vite --host"));
+    common::git(&main, &["commit", "--quiet", "--all", "--message", "on other"]);
+    common::git(&main, &["checkout", "--quiet", "main"]);
+    write(&main.join("a/package.json"), &package("vite --open"));
+    common::git(&main, &["commit", "--quiet", "--all", "--message", "on main"]);
+    merge_with_a_conflict(&main, "other");
+    // The conflict markers are resolved in the file, which is not added: the index still holds its 3 stages.
+    write(&main.join("a/package.json"), &package("vite"));
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert_eq!(service_names(&proposal), ["a"], "{proposal}");
+}
+
+#[test]
+fn packages_found_below_the_root_are_named_in_the_order_of_their_directories() {
+    let procly = Procly::new();
+    // git lists `x-y/package.json` before `x/y/package.json`, a directory comes before the ones next to it.
+    let main = tracked_repository(
+        &procly,
+        &[
+            ("x-y/package.json", r#"{"name": "app", "scripts": {"dev": "vite"}}"#),
+            ("x/y/package.json", r#"{"name": "app", "scripts": {"dev": "vite"}}"#),
+        ],
+    );
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert_eq!(
+        [run_and_port(&proposal, "app").0, run_and_port(&proposal, "app-2").0],
+        ["cd x/y && npm run dev", "cd x-y && npm run dev"],
+        "{proposal}"
+    );
+}
