@@ -3,15 +3,22 @@
 
 mod common;
 
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Child, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Procly, assert_success, free_port, git_repository, json_document, stderr, stdout, test_server};
+use common::{Procly, assert_success, free_port, git_repository, http_get, json_document, stderr, stdout, test_server};
 use serde_json::{Value, json};
 
 /// Far below the health timeout of 60 s the Services of these tests declare.
 const FAST: Duration = Duration::from_secs(15);
+/// How long the Daemon reads the tree of a Group again, once its Port mismatch is seen, for its other apps to bind.
+const GRACE: Duration = Duration::from_secs(10);
+/// What [`up_after_listening`] may see later than the Daemon does, a connection being tried every 20 ms.
+const SEEN_LATE: Duration = Duration::from_millis(100);
 
 fn write(dir: &Path, name: &str, content: &str) {
     std::fs::write(dir.join(name), content).expect("write the config file");
@@ -68,6 +75,103 @@ fn timed_up(procly: &Procly, dir: &Path, args: &[&str]) -> (Output, Duration) {
     let started = Instant::now();
     let output = procly.procly_in(dir, &[&["up"], args].concat());
     (output, started.elapsed())
+}
+
+/// Starts `procly up` with `args` in `dir`, without waiting for it.
+fn spawn_up(procly: &Procly, dir: &Path, args: &[&str]) -> Child {
+    procly
+        .command()
+        .current_dir(dir)
+        .args([&["up"], args].concat())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the procly binary runs")
+}
+
+/// The moment `port` first accepts a connection while `up` runs, which is when the tree of the Service listens there.
+fn first_listened(up: &mut Child, port: u16) -> Instant {
+    let started = Instant::now();
+    loop {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return Instant::now();
+        }
+        assert!(
+            up.try_wait().expect("procly up can be waited for").is_none(),
+            "procly up ended before port {port} was listened on"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "nothing listened on port {port}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Runs `procly up` with `args` in `dir`, and how long it took from the moment `port` first accepted a connection,
+/// which is when the tree of the Service listens there.
+fn up_after_listening(procly: &Procly, dir: &Path, args: &[&str], port: u16) -> (Output, Duration) {
+    let mut up = spawn_up(procly, dir, args);
+    let seen = first_listened(&mut up, port);
+    let output = up.wait_with_output().expect("procly up ends");
+    (output, seen.elapsed())
+}
+
+/// A listener on `port` that accepts every connection, as a Foreign process would, and records when it last
+/// accepted one, which tells when the health check of the Lease on `port` last probed it.
+struct Probed {
+    last: Arc<Mutex<Option<Instant>>>,
+    done: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Probed {
+    fn on(port: u16) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", port)).expect("hold the Lease");
+        listener.set_nonblocking(true).expect("a listener that does not block");
+        let (last, done) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
+        let thread = {
+            let (last, done) = (Arc::clone(&last), Arc::clone(&done));
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok(_) => *last.lock().expect("the probe time") = Some(Instant::now()),
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            })
+        };
+        Self {
+            last,
+            done,
+            thread: Some(thread),
+        }
+    }
+
+    /// When the last probe came, if any did.
+    fn last(&self) -> Option<Instant> {
+        *self.last.lock().expect("the probe time")
+    }
+}
+
+impl Drop for Probed {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Asserts that `up` exited with 4 once it had read the tree for the whole grace since the Port mismatch was seen,
+/// `took` after it.
+fn assert_mismatch_after_the_grace(output: &Output, took: Duration) {
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(output));
+    assert!(
+        took + SEEN_LATE >= GRACE,
+        "the report says 10 s passed, it took {took:?}\n{}",
+        stderr(output)
+    );
 }
 
 fn assert_fast_mismatch(output: &Output, took: Duration) {
@@ -296,5 +400,299 @@ fn apps_binding_their_declared_ports_seconds_apart_are_both_named() {
              {web_lease}"
         )),
         "{message}"
+    );
+}
+
+#[test]
+fn an_app_binding_its_declared_port_4_s_after_the_other_is_named_with_its_port() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    // The 4 s count from the moment `api` listens, whatever its own start took.
+    let run = format!("{server} --port {api} --then sh -c 'sleep 4; exec {server} --port {web}'");
+    let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let (output, took) = up_after_listening(&procly, &secondary, &["dev"], api);
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    // The wait stops once `web` listens, well before the grace is over.
+    assert!(
+        took < Duration::from_secs(8),
+        "reported {took:?} after api listened\n{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "api on port {api} instead of its Lease, port {api_lease}, web on port {web} instead of its Lease, port \
+             {web_lease}, its process tree was stopped"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        status_row(&procly, &secondary, "dev")["end"]["services"],
+        json!([
+            { "service": "api", "leased": api_lease, "seen": [api] },
+            { "service": "web", "leased": web_lease, "seen": [web] },
+        ])
+    );
+}
+
+#[test]
+fn a_covered_app_that_never_binds_is_told_as_silent_for_the_whole_grace() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    let run = format!("exec {} --port {api}", test_server().display());
+    let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let (output, took) = up_after_listening(&procly, &secondary, &["dev"], api);
+
+    assert_mismatch_after_the_grace(&output, took);
+    // The Daemon sees the mismatch once `api` listens, not before.
+    assert!(took < FAST, "it took {took:?}\n{}", stderr(&output));
+    let told = format!(
+        "api on port {api} instead of its Lease, port {api_lease}, web did not listen on a port of its own within 10 \
+         s, its Lease is port {web_lease}, its process tree was stopped"
+    );
+    assert!(stderr(&output).contains(&told), "{}", stderr(&output));
+    let status = stdout(&procly.procly_in(&secondary, &["status"]));
+    assert!(
+        status.contains(&format!(
+            "web did not listen on a port of its own within 10 s, its Lease is port {web_lease}"
+        )),
+        "{status}"
+    );
+    assert_eq!(
+        status_row(&procly, &secondary, "dev")["end"]["services"],
+        json!([
+            { "service": "api", "leased": api_lease, "seen": [api] },
+            { "service": "web", "leased": web_lease, "seen": [] },
+        ])
+    );
+}
+
+#[test]
+fn the_health_deadline_does_not_cut_the_wait_for_the_other_apps_of_a_group() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    // `web` binds 7 s after `api` listens, after the deadline and within the grace that started then.
+    let run = format!("{server} --port {api} --then sh -c 'sleep 7; exec {server} --port {web}'");
+    let config = group_config(api, web, &run).replace("timeout = '60s'", "timeout = '6s'");
+    let (_, secondary) = worktrees(&procly, &config);
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let (output, took) = timed_up(&procly, &secondary, &["dev"]);
+
+    assert_fast_mismatch(&output, took);
+    assert!(
+        stderr(&output).contains(&format!(
+            "api on port {api} instead of its Lease, port {api_lease}, web on port {web} instead of its Lease, port \
+             {web_lease}"
+        )),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_group_healthy_on_a_foreign_lease_while_a_covered_app_is_silent_reads_its_tree_for_the_whole_grace() {
+    let procly = Procly::new();
+    let (api, web, extra) = (free_port(), free_port(), free_port());
+    // Nothing is judged early in the Main worktree, where each Lease is the declared port.
+    let run = format!("exec {} --port $PORT_WEB_HTTP --also {extra}", test_server().display());
+    let main = git_repository(procly.scratch(), "app");
+    write(&main, "procly.toml", &group_config(api, web, &run));
+    assert_eq!(
+        (lease_of(&procly, &main, "api"), lease_of(&procly, &main, "web")),
+        (api, web)
+    );
+    // A Foreign process answers the health check of `api`, whose app listens on no port of its own.
+    let foreign = TcpListener::bind(("127.0.0.1", api)).expect("hold the Lease of api");
+
+    let (output, took) = up_after_listening(&procly, &main, &["dev"], web);
+
+    assert_mismatch_after_the_grace(&output, took);
+    assert!(took < FAST, "it took {took:?}\n{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!(
+            "api did not listen on a port of its own within 10 s, its Lease is port {api}, web on its Lease, port \
+             {web}, and port {extra} that no Service declares"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    drop(foreign);
+}
+
+#[test]
+fn a_group_at_its_health_deadline_reads_its_tree_for_the_whole_grace() {
+    let procly = Procly::new();
+    let (api, web, extra) = (free_port(), free_port(), free_port());
+    let server = test_server().display().to_string();
+    // `web` binds its Lease 10 s after the tree first listens, after the deadline, `api` never does.
+    let run = format!("{server} --port {extra} --then sh -c 'sleep 10; exec {server} --port $PORT_WEB_HTTP'");
+    let config = group_config(api, web, &run).replace("timeout = '60s'", "timeout = '8s'");
+    let main = git_repository(procly.scratch(), "app");
+    write(&main, "procly.toml", &config);
+    assert_eq!(lease_of(&procly, &main, "api"), api);
+    // The health check probes the Lease of `api` until its deadline, the moment the Port mismatch is first seen.
+    let probed = Probed::on(api);
+
+    let output = spawn_up(&procly, &main, &["dev"])
+        .wait_with_output()
+        .expect("procly up ends");
+    let ended = Instant::now();
+
+    let deadline = probed.last().expect("the health check probed the Lease of api");
+    assert_mismatch_after_the_grace(&output, ended - deadline);
+    assert!(
+        stderr(&output).contains(&format!(
+            "api did not listen on a port of its own within 10 s, its Lease is port {api}, web on its Lease, port \
+             {web}, and port {extra} that no Service declares"
+        )),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_covered_app_that_listened_then_exited_during_the_grace_is_named_with_its_port() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    // The leader of the Group lives on once `api` exits, and `web` never binds.
+    let run = format!("{} --port {api} & exec sleep 60", test_server().display());
+    let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let mut up = spawn_up(&procly, &secondary, &["dev"]);
+    first_listened(&mut up, api);
+    // Long enough for the Daemon to take the reading that decides on a loaded machine, well within the grace.
+    std::thread::sleep(Duration::from_secs(3));
+    http_get(api, "/exit/0");
+    let output = up.wait_with_output().expect("procly up ends");
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!(
+            "api on port {api} instead of its Lease, port {api_lease}, web did not listen on a port of its own within \
+             10 s, its Lease is port {web_lease}"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    let end = &status_row(&procly, &secondary, "dev")["end"];
+    assert_eq!(
+        end["services"],
+        json!([
+            { "service": "api", "leased": api_lease, "seen": [api] },
+            { "service": "web", "leased": web_lease, "seen": [] },
+        ])
+    );
+    assert_eq!(
+        (end["leased"].clone(), end["actual"].clone()),
+        (json!(api_lease), json!(api))
+    );
+}
+
+#[test]
+fn the_wait_stops_once_each_covered_app_has_listened_even_one_that_exited_since() {
+    let procly = Procly::new();
+    let (api, web) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    // `web` binds once the test creates `go`, from a shell that outlives `api`, and the leader of the Group lives on.
+    let go = procly.scratch().join("go");
+    let run = format!(
+        "(while [ ! -e {go} ]; do sleep 0.05; done; exec {server} --port {web}) & {server} --port {api} & exec sleep 60",
+        go = go.display()
+    );
+    let (_, secondary) = worktrees(&procly, &group_config(api, web, &run));
+    let (api_lease, web_lease) = (
+        lease_of(&procly, &secondary, "api"),
+        lease_of(&procly, &secondary, "web"),
+    );
+
+    let mut up = spawn_up(&procly, &secondary, &["dev"]);
+    let seen = first_listened(&mut up, api);
+    // Long enough for the Daemon to take the reading that decides on a loaded machine, before `web` binds.
+    std::thread::sleep(Duration::from_secs(3));
+    http_get(api, "/exit/0");
+    while TcpStream::connect(("127.0.0.1", api)).is_ok() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_secs(4).saturating_sub(seen.elapsed()));
+    std::fs::write(&go, "").expect("let web bind");
+    let output = up.wait_with_output().expect("procly up ends");
+    let took = seen.elapsed();
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    // `api` listened earlier in the wait, so it ends once `web` listens, not at the end of the grace.
+    assert!(
+        took < Duration::from_secs(8),
+        "reported {took:?} after api listened\n{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "api on port {api} instead of its Lease, port {api_lease}, web on port {web} instead of its Lease, port \
+             {web_lease}"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        status_row(&procly, &secondary, "dev")["end"]["services"],
+        json!([
+            { "service": "api", "leased": api_lease, "seen": [api] },
+            { "service": "web", "leased": web_lease, "seen": [web] },
+        ])
+    );
+}
+
+#[test]
+fn a_service_alone_listening_on_no_port_of_its_own_is_reported_at_once() {
+    let procly = Procly::new();
+    let (web, extra) = (free_port(), free_port());
+    let server = test_server().display().to_string();
+    let main = git_repository(procly.scratch(), "app");
+    write(
+        &main,
+        "procly.toml",
+        &web_config(web, &format!("{server} --port {extra}")),
+    );
+    assert_eq!(lease_of(&procly, &main, "web"), web);
+    // A Foreign process answers the health check, so that the tree is judged as soon as it listens.
+    let foreign = TcpListener::bind(("127.0.0.1", web)).expect("hold the Lease of web");
+
+    // Timed from the start of `up`: the report may come before a test sees the port, and it stops the tree.
+    let (output, took) = timed_up(&procly, &main, &["web"]);
+    drop(foreign);
+
+    assert_eq!(output.status.code(), Some(4), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).starts_with(&format!(
+            "procly: service web listens on port {extra} instead of its Lease, port {web} (Port mismatch)"
+        )),
+        "{}",
+        stderr(&output)
+    );
+    // Waiting for other apps would take the whole grace after the start.
+    assert!(
+        took < Duration::from_secs(8),
+        "a Service alone waits for no other app, it took {took:?}"
     );
 }

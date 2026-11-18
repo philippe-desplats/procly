@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::daemon::mismatch::REPORT_GRACE;
 use crate::duration;
 use crate::protocol::{
     ContainerStatus, ForeignProcess, JobEnd, JobState, JobStatus, ServiceEnd, ServicePorts, ServiceState,
@@ -150,8 +151,8 @@ pub(crate) fn ports_text(ports: &[u16]) -> String {
 }
 
 /// The Port mismatch of the Group `group` told per Service it covers, with its Lease and the ports seen for it, then
-/// the ports no Service declares. `None` for the Port mismatch of a Service alone, whose pair says it all, or of a
-/// Daemon that named no Service.
+/// the ports no Service declares. A Service seen on no port of its own is one the Daemon waited [`REPORT_GRACE`] for.
+/// `None` for the Port mismatch of a Service alone, whose pair says it all, or of a Daemon that named no Service.
 pub(crate) fn by_service(group: &str, services: &[ServicePorts], unattributed: &[u16]) -> Option<String> {
     if services.iter().all(|service| service.service == group) {
         return None;
@@ -163,7 +164,10 @@ pub(crate) fn by_service(group: &str, services: &[ServicePorts], unattributed: &
             if seen.contains(leased) {
                 format!("{service} on its Lease, port {leased}")
             } else if elsewhere.is_empty() {
-                format!("{service} on no port of its own, its Lease is port {leased}")
+                format!(
+                    "{service} did not listen on a port of its own within {} s, its Lease is port {leased}",
+                    REPORT_GRACE.as_secs()
+                )
             } else {
                 format!("{service} on {} instead of its Lease, port {leased}", ports(&elsewhere))
             }
@@ -461,8 +465,9 @@ mod tests {
         assert_eq!(
             by_service("dev", &services, &[9229]).as_deref(),
             Some(
-                "api on ports 3000 and 3002 instead of its Lease, port 24004, web on its Lease, port 24005, docs on \
-                 no port of its own, its Lease is port 24006, and port 9229 that no Service declares"
+                "api on ports 3000 and 3002 instead of its Lease, port 24004, web on its Lease, port 24005, docs did \
+                 not listen on a port of its own within 10 s, its Lease is port 24006, and port 9229 that no Service \
+                 declares"
             )
         );
     }
