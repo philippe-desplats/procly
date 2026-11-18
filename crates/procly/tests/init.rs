@@ -1500,6 +1500,52 @@ fn without_a_root_package_json_nor_a_tracked_one_with_a_dev_script_init_says_whe
     assert!(!main.join("procly.toml").exists());
 }
 
+/// Merges `branch` into the branch checked out in `dir`, which leaves the conflicts of the merge in the index, and
+/// asserts that git stopped on one.
+fn merge_with_a_conflict(dir: &Path, branch: &str) {
+    let mut command = std::process::Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let output = command
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "user.name=Procly Test", "-c", "user.email=test@example.com"])
+        .args(["-c", "commit.gpgsign=false", "merge", "--no-edit", branch])
+        .output()
+        .expect("git runs");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the merge stops on a conflict: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_package_json_in_a_merge_conflict_is_proposed_once() {
+    let procly = Procly::new();
+    let package = |script: &str| format!(r#"{{"name": "a", "scripts": {{"dev": "{script}"}}}}"#);
+    let main = tracked_repository(&procly, &[("a/package.json", &package("vite"))]);
+    common::git(&main, &["commit", "--quiet", "--message", "add the package"]);
+    common::git(&main, &["checkout", "--quiet", "-b", "other"]);
+    write(&main.join("a/package.json"), &package("vite --host"));
+    common::git(&main, &["commit", "--quiet", "--all", "--message", "on other"]);
+    common::git(&main, &["checkout", "--quiet", "main"]);
+    write(&main.join("a/package.json"), &package("vite --open"));
+    common::git(&main, &["commit", "--quiet", "--all", "--message", "on main"]);
+    merge_with_a_conflict(&main, "other");
+    // The conflict markers are resolved in the file, which is not added: the index still holds its 3 stages.
+    write(&main.join("a/package.json"), &package("vite"));
+
+    let proposal = stdout(&init(&procly, &main));
+
+    assert_eq!(service_names(&proposal), ["a"], "{proposal}");
+}
+
 #[test]
 fn packages_found_below_the_root_are_named_in_the_order_of_their_directories() {
     let procly = Procly::new();

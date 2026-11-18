@@ -116,17 +116,21 @@ pub(crate) fn branch(worktree: &Path) -> Result<Option<String>, TopologyError> {
 }
 
 /// The files git tracks in the Worktree rooted at `worktree` that `pathspec` matches, relative to that root, as
-/// `git ls-files` lists them. An ignored or untracked file is never listed. A directory outside any Repository tracks
-/// none.
+/// `git ls-files` lists them, each once and in byte order. An ignored or untracked file is never listed. A directory
+/// outside any Repository tracks none.
 pub(crate) fn tracked(worktree: &Path, pathspec: &str) -> Result<Vec<PathBuf>, TopologyError> {
     let output = match git(worktree, &["ls-files", "-z", "--", pathspec]) {
         Ok(output) => output,
         Err(TopologyError::NotARepository { .. }) => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
-    Ok(output
+    // A path in a merge conflict is listed once per stage of the index.
+    let paths: BTreeSet<&[u8]> = output
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
+        .collect();
+    Ok(paths
+        .into_iter()
         .map(|path| PathBuf::from(OsStr::from_bytes(path)))
         .collect())
 }
