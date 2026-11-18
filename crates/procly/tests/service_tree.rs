@@ -141,8 +141,9 @@ fn a_service_whose_leader_ends_on_its_own_leaves_no_task_of_its_tree_behind() {
     let dir = procly.scratch();
     write_cleaning_task(dir);
     // The leader starts the task in a group of its own, lives long enough for the Daemon to see the task, then ends.
+    // It outlives the 2 s a Service without ports must stay alive, so that `up` answers once it is healthy.
     let config = format!(
-        "[services.web]\nrun = '''perl -e 'setpgrp(0,0); exec @ARGV' sh {} & sleep 2'''\n",
+        "[services.web]\nrun = '''perl -e 'setpgrp(0,0); exec @ARGV' sh {} & sleep 3'''\n",
         dir.join("task.sh").display()
     );
     write(&main, "procly.toml", &config);
@@ -168,7 +169,13 @@ fn a_task_started_late_whose_parent_ends_at_once_is_still_stopped_with_the_servi
     );
     write(&main, "procly.toml", &config);
     start_daemon(&procly, &main);
-    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    // A Service without ports whose leader ends within 2 s never became healthy, `up` says how it ended.
+    let output = procly.procly_in(&main, &["up", "web"]);
+    assert_eq!(
+        common::stderr(&output),
+        "procly: service web exited with code 0 before it became healthy, it printed nothing\n"
+    );
+    assert_eq!(output.status.code(), Some(3));
     let task = read_pid(&dir.join("task.pid"));
 
     // The leader ended on its own, nothing of its tree may outlive it.

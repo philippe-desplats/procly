@@ -89,7 +89,7 @@ A Process service (`run`) or a Compose service (`compose`). The name is the one 
 | --- | --- | --- |
 | `run` | one of `run` and `compose` | The command, run by `/bin/sh -c` at the root of the Worktree, in its own process group, with the environment of the `procly up` that started it. Each `{ports.<name>}` in it is replaced with the leased port of that Port name, for tools that ignore `PORT`. |
 | `compose` | one of `run` and `compose` | The service of the compose file of the Repository this Service maps to, see [Compose services](#compose-services). |
-| `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`, or a table with the declared port and a Pool, such as `{ http = { port = 3000, pool = [3100, 3101] } }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy as soon as it has started. |
+| `ports` | no | The declared port of each Port name, such as `{ http = 3000, test = 3001 }`, or a table with the declared port and a Pool, such as `{ http = { port = 3000, pool = [3100, 3101] } }`. A Port name is made of lowercase letters, digits and underscores. A Service without ports, such as a queue worker, is healthy once it has stayed alive for 2 s after it started. With no port to answer, staying alive is what tells it from a Service that died on its first error, such as a dev server on a fixed port that another Worktree holds already: one that exits within those 2 s makes `up` exit with 3 and its recent output. So `up` of such a Service, and of a Service that needs it, takes 2 s more. |
 | `env` | no | The Derived variables of the Service, see [Derived variables](#derived-variables). |
 | `needs` | no | The names of the Services to start first, such as `["db", "api"]`. See below. |
 | `covers` | no | The names of the Services this Process service covers, which makes it a Group. See [Groups](#groups). |
@@ -131,7 +131,7 @@ covers = ["web", "api"]
 - Its Derived variables, such as `WEB_URL`.
 - `PROCLY=1` and `PROCLY_SERVICE`, the name of the Group.
 
-The Group is healthy once every covered Service answers its health check on its Lease, as it would on its own. If one never does, `up` stops the tree of the Group and exits with 124. A Port mismatch on any Lease is reported as for a Service, and names each covered Service with its own Lease and the ports seen for it. A port is tied to a covered Service when it is one of its Leases or its declared port, and a port that is neither for any of them is named apart:
+The Group is healthy once every covered Service answers its health check on its Lease, as it would on its own. If one never does, `up` stops the tree of the Group and exits with 124. A Group whose covered Services declare no port has nothing to probe, and is healthy once it has stayed alive for 2 s, as a Service without ports. A Port mismatch on any Lease is reported as for a Service, and names each covered Service with its own Lease and the ports seen for it. A port is tied to a covered Service when it is one of its Leases or its declared port, and a port that is neither for any of them is named apart:
 
 ```text
 procly: service dev listens on ports other than the Leases of the Services it covers (Port mismatch): api on port 3000 instead of its Lease, port 24004, web on port 3001 instead of its Lease, port 24005, its process tree was stopped
@@ -685,7 +685,7 @@ The HTTP check does not speak TLS. A health check that probes a Port named `http
 | `port` | the only Port name | The Port name to probe, required when the Service declares several. |
 | `path` | none | The path of the HTTP check, such as `/api/health`, or an `http://` URL such as `http://app.localhost/api/health`. Setting `path` or `status` turns the HTTP check on, with `/` as the default path. |
 | `status` | `200` | The status the HTTP check must answer. |
-| `timeout` | `settings.health_timeout` | The health timeout of this Service. |
+| `timeout` | `settings.health_timeout` | The health timeout of this Service. A Service without ports needs 2 s alive to become healthy, so with a `timeout` under 2 s it can never become healthy and `up` ends with exit 124. |
 
 ## `[services.<name>.restart]`
 
