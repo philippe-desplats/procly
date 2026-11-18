@@ -40,8 +40,8 @@ Init reads the `package.json` at the root of the Worktree first. When there is o
 
 When the Worktree has no root `package.json`, such as a Rust workspace with a JavaScript app in `apps/desktop`, init looks below the root instead:
 
-- Run from a directory whose `package.json` has a `dev` script, init proposes a Service for that package alone.
-- Run from the root, or from a directory with no such `package.json`, init proposes a Service for every `package.json` with a `dev` script that git tracks, in the order of their directories. The list comes from `git ls-files`, so a `package.json` that is untracked or ignored, and everything under `node_modules`, is never read.
+- Run from a directory whose tracked `package.json` has a `dev` script, init proposes a Service for that package alone.
+- Run from the root, or from any other directory, init proposes a Service for every `package.json` with a `dev` script that git tracks, in the order of their directories. The list comes from `git ls-files`, so a `package.json` that is untracked or ignored, and everything under `node_modules`, is never read.
 
 Each of these packages becomes a Service the way a workspace package does: named after its package, run from its own directory, through the package manager of the lockfile in that directory, else of the one at the root, else npm. An `apps/desktop` with its own `bun.lock` gets `cd apps/desktop && bun run dev`.
 
