@@ -750,16 +750,22 @@ fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<
             }
             Ok(conflicted(service, &conflicts, needed_by))
         }
-        // A Group refused over the Services it covers that run on their own: the message names the commands that free
-        // them, and there is no document, as for a failure.
-        Response::Error {
-            message,
-            kind: Some(ErrorKind::Conflict),
-        } => {
+        // The message is on stderr whatever the kind, such as a Group refused over the Services it covers that run on
+        // their own, whose message names the commands that free them, and there is no document, as for a failure.
+        Response::Error { message, kind } => {
             eprintln!("procly: {message}");
-            Ok(ExitCode::from(EXIT_CONFLICT))
+            Ok(ExitCode::from(error_exit(kind)))
         }
         other => unexpected(other),
+    }
+}
+
+/// The exit code of an error answer to `up` or a Restart, by its kind: 5 for a Conflict the caller resolves, 125 for a
+/// failure of Procly, which an error without a kind is, and one of a kind this procly does not know.
+fn error_exit(kind: Option<ErrorKind>) -> u8 {
+    match kind {
+        Some(ErrorKind::Conflict) => EXIT_CONFLICT,
+        Some(ErrorKind::Unknown) | None => EXIT_PROCLY_FAILURE,
     }
 }
 
@@ -1836,6 +1842,24 @@ fn unexpected(response: Response) -> anyhow::Result<ExitCode> {
 mod tests {
     use super::*;
     use crate::protocol::StartOutcome;
+
+    #[test]
+    fn an_error_of_a_kind_this_procly_does_not_know_keeps_its_message_and_exits_with_125() {
+        let line = format!(
+            "{{\"version\":{},\"response\":\"error\",\"message\":\"cannot start group dev\",\"kind\":\"some_future_kind\"}}",
+            crate::protocol::PROTOCOL_VERSION
+        );
+
+        let Ok(Response::Error { message, kind }) = crate::protocol::decode::<Response>(&line) else {
+            panic!("an error of an unknown kind decodes: {line}");
+        };
+
+        assert_eq!(message, "cannot start group dev");
+        assert_eq!(kind, Some(ErrorKind::Unknown));
+        assert_eq!(error_exit(kind), EXIT_PROCLY_FAILURE);
+        assert_eq!(error_exit(None), EXIT_PROCLY_FAILURE);
+        assert_eq!(error_exit(Some(ErrorKind::Conflict)), EXIT_CONFLICT);
+    }
 
     #[test]
     fn the_tail_keeps_the_last_lines_with_their_newlines() {

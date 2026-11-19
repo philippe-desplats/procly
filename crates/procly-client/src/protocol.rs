@@ -266,6 +266,10 @@ pub enum ErrorKind {
     /// A Conflict the caller resolves with the commands the message names, nothing being started or stopped: a Group
     /// asked to start over a Service it covers that runs on its own.
     Conflict,
+    /// A kind this side does not know, sent by a newer peer, read as a failure of Procly with its message kept. Thanks
+    /// to it, a new kind needs no bump of [`PROTOCOL_VERSION`].
+    #[serde(other)]
+    Unknown,
 }
 
 /// Something started outside Procly that holds what a Service needs.

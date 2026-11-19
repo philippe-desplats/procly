@@ -3,4 +3,4 @@
 /**
  * What kind of refusal a [`Response::Error`] carries, which `procly` exits with its own code for.
  */
-export type ErrorKind = "conflict";
+export type ErrorKind = "conflict" | "unknown";
