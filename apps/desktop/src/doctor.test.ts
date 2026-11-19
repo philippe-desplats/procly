@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { daemonVersion, fixCommands, problemCount, type DoctorDocument } from "./doctor";
+import {
+  daemonVersion,
+  fixCommands,
+  machineChecks,
+  problemCount,
+  worktreeChecks,
+  type DoctorDocument,
+} from "./doctor";
 import machine from "./fixtures/doctor.json";
 import noDaemon from "./fixtures/doctor-no-daemon.json";
 import reworded from "./fixtures/doctor-daemon-reworded.json";
@@ -106,5 +113,22 @@ describe("the commands of a fix", () => {
     expect(fixCommands("cd '/p/work/acme/my web' && procly env web", null)).toEqual([
       "(cd '/p/work/acme/my web' && procly env web)",
     ]);
+  });
+});
+
+describe("the checks of a Worktree", () => {
+  it("hold the compose file of the Compose services, which the machine checks leave out", () => {
+    const checks = [
+      { name: "docker_compose", status: "passed", message: "docker compose 2.29.1", fix: null },
+      {
+        name: "compose_file",
+        status: "failed",
+        message: "/p/work/acme/apps/api/docker-compose.yml does not exist",
+        fix: null,
+      },
+    ] as DoctorDocument["checks"];
+
+    expect(worktreeChecks(checks).map((check) => check.name)).toEqual(["compose_file"]);
+    expect(machineChecks(checks).map((check) => check.name)).toEqual(["docker_compose"]);
   });
 });

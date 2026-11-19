@@ -123,6 +123,22 @@ impl Setup {
         );
     }
 
+    /// Declares the Compose service `db`, of the compose file at the root of the Repository.
+    fn declare_db(&self) {
+        let file = self.main_worktree.join("procly.toml");
+        let declared = std::fs::read_to_string(&file).expect("read the configuration");
+        write(
+            &self.main_worktree,
+            "procly.toml",
+            &format!("{declared}[services.db]\ncompose = 'postgres'\n"),
+        );
+        write(
+            &self.main_worktree,
+            "compose.yaml",
+            "services:\n  postgres:\n    image: postgres\n",
+        );
+    }
+
     /// Installs the Session unit, which the fake session manager loads, and the Guard in the Repository.
     fn install_unit_and_guard(&self) {
         assert_success(&self.run(&self.main_worktree, &["unit", "install"]));
@@ -133,6 +149,7 @@ impl Setup {
     fn healthy() -> Self {
         let setup = Self::new();
         setup.declare_web(free_port());
+        setup.declare_db();
         setup.turn_portless_on();
         setup.install_unit_and_guard();
         assert_success(&setup.run(&setup.main_worktree, &["worktree", "hooks"]));
@@ -186,12 +203,13 @@ fn problems(output: &Output) -> Value {
     document
 }
 
-const ALL_CHECKS: [&str; 11] = [
+const ALL_CHECKS: [&str; 12] = [
     "docker_compose",
     "daemon",
     "session_unit",
     "state_documents",
     "configuration",
+    "compose_file",
     "guard",
     "portless",
     "worktrunk_hooks",
@@ -1078,4 +1096,45 @@ fn an_unknown_agent_is_a_usage_error() {
     let output = setup.run(&setup.main_worktree, &["doctor", "--agent", "emacs"]);
 
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+#[test]
+fn a_compose_service_whose_compose_file_cannot_be_found_is_a_problem_naming_the_path_and_the_setting() {
+    let setup = Setup::healthy();
+    std::fs::remove_file(setup.main_worktree.join("compose.yaml")).expect("remove the compose file");
+    let api = setup.main_worktree.join("apps/api");
+    std::fs::create_dir_all(&api).expect("create the directory of the compose file");
+    write(
+        &api,
+        "docker-compose.yml",
+        "services:\n  postgres:\n    image: postgres\n",
+    );
+    let root = setup.main_worktree.canonicalize().expect("the Worktree exists");
+
+    let document = problems(&setup.doctor());
+
+    assert_eq!(status(&document, "compose_file"), "failed");
+    let text = message(&document, "compose_file");
+    assert!(
+        text.contains(&format!("{} holds none of compose.yaml", root.display()))
+            && text.contains("`compose_file = \"apps/api/docker-compose.yml\"` in the [settings] of procly.toml"),
+        "{text}"
+    );
+    assert_eq!(
+        check(&document, "compose_file")["fix"],
+        json!(format!("${{EDITOR:-vi}} {}", root.join("procly.toml").display()))
+    );
+
+    let declared = std::fs::read_to_string(setup.main_worktree.join("procly.toml")).expect("read the configuration");
+    write(
+        &setup.main_worktree,
+        "procly.toml",
+        &declared.replacen(
+            "[settings]\n",
+            "[settings]\ncompose_file = 'apps/api/docker-compose.yml'\n",
+            1,
+        ),
+    );
+    let document = json_succeeded(&setup.doctor());
+    assert_eq!(status(&document, "compose_file"), "passed", "{document}");
 }
