@@ -315,6 +315,7 @@ async fn handle(stream: UnixStream, registry: Arc<Registry>) {
             }
             Err(error) => Response::Error {
                 message: error.to_string(),
+                kind: None,
             },
         },
         Err(error) => {
@@ -335,6 +336,7 @@ async fn send(writer: &mut OwnedWriteHalf, response: Response) {
     let line = protocol::encode(response).unwrap_or_else(|error| {
         protocol::encode(Response::Error {
             message: format!("cannot send the answer, a path in it is not valid UTF-8: {error}"),
+            kind: None,
         })
         .expect("an error answer holds only a string, which always serializes")
     });
@@ -361,7 +363,7 @@ async fn dispatch(
             | Request::Restart { .. }
     ) && let Err(message) = registry.reconciled().await
     {
-        return Response::Error { message };
+        return Response::Error { message, kind: None };
     }
     match request {
         Request::Run {
@@ -580,10 +582,11 @@ fn declared<'a>(config: &'a config::Config, worktree: &Path, name: &str) -> anyh
 /// of the Service, else in `env`, the one of the caller, and never in a `PATH` completed with guessed directories.
 async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<(String, String)>) -> Response {
     if let Err(message) = registry.reconciled().await {
-        return Response::Error { message };
+        return Response::Error { message, kind: None };
     }
     let unknown = || Response::Error {
         message: format!("no job or service {name}"),
+        kind: None,
     };
     // Outside a git Repository there is no Service, and the name is simply unknown.
     let Ok(Ok(topology)) = tokio::task::spawn_blocking(move || topology_of(&cwd)).await else {
@@ -607,7 +610,7 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
             .await
             .map_or_else(failure, |output| Response::Logs { output }),
         Ok(None) => unknown(),
-        Err(message) => Response::Error { message },
+        Err(message) => Response::Error { message, kind: None },
     }
 }
 
@@ -654,13 +657,14 @@ async fn blocking<T: Send + 'static>(
 
 /// The answer to a request that went through, or the error answer carrying the message it failed with.
 fn answer<T>(result: Result<T, String>, answer: impl FnOnce(T) -> Response) -> Response {
-    result.map_or_else(|message| Response::Error { message }, answer)
+    result.map_or_else(|message| Response::Error { message, kind: None }, answer)
 }
 
 /// The error answer telling `error` with its causes.
 fn failure(error: impl Into<anyhow::Error>) -> Response {
     Response::Error {
         message: message(error),
+        kind: None,
     }
 }
 
@@ -672,6 +676,7 @@ fn message(error: impl Into<anyhow::Error>) -> String {
 fn unknown_job(id: &str) -> Response {
     Response::Error {
         message: format!("no job {id}"),
+        kind: None,
     }
 }
 

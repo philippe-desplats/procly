@@ -250,7 +250,7 @@ fn a_group_and_a_service_it_covers_never_run_side_by_side() {
 
     let refused = procly.procly_in(&main, &["up", "dev"]);
 
-    assert_eq!(refused.status.code(), Some(125), "stderr: {}", stderr(&refused));
+    assert_eq!(refused.status.code(), Some(5), "stderr: {}", stderr(&refused));
     let message = stderr(&refused);
     assert!(
         message.contains("dev") && message.contains("web") && message.contains("procly down"),
@@ -263,6 +263,169 @@ fn a_group_and_a_service_it_covers_never_run_side_by_side() {
     assert_success(&procly.procly_in(&main, &["down", "web"]));
     assert_success(&procly.procly_in(&main, &["up", "dev"]));
     assert_eq!(start_count(&starts), 1);
+}
+
+/// Each Service `procly status --json` lists for the Worktree `dir`, with the time it last started and its state, so
+/// that a Service stopped and started again shows as changed.
+fn service_rows(procly: &Procly, dir: &Path) -> Vec<(String, u64, String)> {
+    let output = procly.procly_in(dir, &["status", "--json"]);
+    assert_success(&output);
+    let status: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("a JSON status");
+    status["repositories"][0]["worktrees"][0]["services"]
+        .as_array()
+        .expect("a list of Services")
+        .iter()
+        .map(|service| {
+            (
+                service["service"].as_str().expect("a Service name").to_owned(),
+                service["started_at"].as_u64().expect("a start time"),
+                service["state"].as_str().expect("a state").to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn up_of_a_group_whose_covered_services_run_on_their_own_is_a_conflict_that_starts_and_stops_nothing() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_success(&procly.procly_in(&main, &["up", "api"]));
+    let running = service_rows(&procly, &main);
+    let expected = "procly: cannot start group dev, the services it covers run on their own: web, api, stop them first \
+                    with `procly down web` and `procly down api`\n";
+
+    for args in [&["up", "dev"][..], &["up", "dev", "--json"], &["up"], &["up", "--json"]] {
+        let refused = procly.procly_in(&main, args);
+
+        assert_eq!(refused.status.code(), Some(5), "{args:?}, stderr: {}", stderr(&refused));
+        assert_eq!(stderr(&refused), expected, "{args:?}");
+        assert_eq!(stdout(&refused), "", "{args:?}");
+    }
+    assert_eq!(start_count(&starts), 0, "the Group was never started");
+    assert_eq!(
+        service_rows(&procly, &main),
+        running,
+        "the covered Services kept running, none was stopped or started again"
+    );
+}
+
+#[test]
+fn restart_of_a_stopped_covered_service_while_another_runs_on_its_own_is_a_conflict_that_starts_and_stops_nothing() {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    assert_success(&procly.procly_in(&main, &["up", "api"]));
+    assert_success(&procly.procly_in(&main, &["down", "web"]));
+    let before = service_rows(&procly, &main);
+
+    // `web` is restarted through its Group, which cannot start over `api`.
+    for args in [&["restart", "web"][..], &["restart", "web", "--json"]] {
+        let refused = procly.procly_in(&main, args);
+
+        assert_eq!(refused.status.code(), Some(5), "{args:?}, stderr: {}", stderr(&refused));
+        assert_eq!(
+            stderr(&refused),
+            "procly: cannot start group dev, the services it covers run on their own: api, stop them first with \
+             `procly down api`\n",
+            "{args:?}"
+        );
+        assert_eq!(stdout(&refused), "", "{args:?}");
+    }
+    assert_eq!(start_count(&starts), 0, "the Group was never started");
+    assert_eq!(
+        service_rows(&procly, &main),
+        before,
+        "api kept running and web stayed stopped, nothing was started or stopped"
+    );
+}
+
+#[test]
+fn restart_of_a_group_started_once_while_a_service_it_covers_runs_on_its_own_is_a_conflict_that_starts_and_stops_nothing()
+ {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
+    // Once the Group was started, the Daemon holds its environment, which a Restart replays.
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    assert_success(&procly.procly_in(&main, &["down", "dev"]));
+    assert_success(&procly.procly_in(&main, &["up", "api"]));
+    let before = service_rows(&procly, &main);
+
+    for args in [&["restart", "dev"][..], &["restart", "dev", "--json"]] {
+        let refused = procly.procly_in(&main, args);
+
+        assert_eq!(refused.status.code(), Some(5), "{args:?}, stderr: {}", stderr(&refused));
+        assert_eq!(
+            stderr(&refused),
+            "procly: cannot start group dev, the services it covers run on their own: api, stop them first with \
+             `procly down api`\n",
+            "{args:?}"
+        );
+        assert_eq!(stdout(&refused), "", "{args:?}");
+    }
+    assert_eq!(
+        start_count(&starts),
+        1,
+        "the Group was started once, before it was stopped, and never again"
+    );
+    assert_eq!(
+        service_rows(&procly, &main),
+        before,
+        "api kept running and the Group stayed stopped, nothing was started or stopped"
+    );
+}
+
+#[test]
+fn up_of_a_service_that_needs_a_group_whose_covered_services_run_on_their_own_is_a_conflict_that_starts_and_stops_nothing()
+ {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api, e2e) = (free_port(), free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    let e2e_starts = procly.scratch().join("e2e-starts");
+    let needing = format!(
+        "{}[services.e2e]\nrun = \"echo start >> {e2e_starts}; exec {server} --port {{ports.http}}\"\n\
+         ports = {{ http = {e2e} }}\nneeds = ['dev']\n",
+        monorepo(web, api, &starts, &seen),
+        e2e_starts = e2e_starts.display(),
+        server = test_server().display(),
+    );
+    write(&main, "procly.toml", &needing);
+    assert_success(&procly.procly_in(&main, &["up", "web"]));
+    let running = service_rows(&procly, &main);
+
+    for args in [&["up", "e2e"][..], &["up", "e2e", "--json"]] {
+        let refused = procly.procly_in(&main, args);
+
+        assert_eq!(refused.status.code(), Some(5), "{args:?}, stderr: {}", stderr(&refused));
+        assert_eq!(
+            stderr(&refused),
+            "procly: cannot start group dev, the services it covers run on their own: web, stop them first with \
+             `procly down web`\n",
+            "{args:?}"
+        );
+        assert_eq!(stdout(&refused), "", "{args:?}");
+    }
+    assert_eq!(start_count(&starts), 0, "the Group was never started");
+    assert_eq!(
+        start_count(&e2e_starts),
+        0,
+        "the Service that needs the Group was never started"
+    );
+    assert_eq!(
+        service_rows(&procly, &main),
+        running,
+        "web kept running, nothing was started or stopped"
+    );
 }
 
 /// The names of the Services `procly status --json` lists for the Worktree `dir`, in the order it lists them.

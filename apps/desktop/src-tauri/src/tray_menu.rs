@@ -561,6 +561,7 @@ mod tests {
             at_ms: 1,
             answer: Answer::Response(Response::Error {
                 message: "no".to_owned(),
+                kind: None,
             }),
         };
 

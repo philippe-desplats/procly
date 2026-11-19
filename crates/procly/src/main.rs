@@ -35,9 +35,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use procly_client::{protocol, state_dir};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
-    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared, StartOutcome,
-    Stopped, UpService, Written,
+    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, ErrorKind, Held, HooksOutcome, InitReport, JobEnd,
+    KeptBecause, KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared,
+    StartOutcome, Stopped, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -51,7 +51,8 @@ const EXIT_SERVICE_ENDED: u8 = 3;
 /// The exit code of `up` for a Service whose process listened on another port than its Lease.
 const EXIT_PORT_MISMATCH: u8 = 4;
 /// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly,
-/// and of `worktree hooks` for a hook the Worktrunk config sets already.
+/// or for a Group asked to start over a Service it covers that runs on its own, and of `worktree hooks` for a hook the
+/// Worktrunk config sets already.
 const EXIT_CONFLICT: u8 = 5;
 /// The exit code of `gc --apply` when some Orphan could not be deleted.
 const EXIT_GC_FAILED: u8 = 6;
@@ -92,7 +93,8 @@ struct JsonFlag {
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` or `restart` finds the Service ended \
                   before it was healthy, 4 when `up` or `restart` finds a Port mismatch, 5 when `up` or `restart` finds \
-                  a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
+                  a conflict, with what runs outside Procly or because a Group is asked to start over a Service it \
+                  covers that runs on its own, 6 when `gc --apply` could not delete \
                   every Orphan, 7 when `doctor` found a problem, 124 when `wait` finds the Job timed out or `up` or `restart` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
@@ -125,8 +127,10 @@ enum Command {
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
                             (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
                             until Procly gave up restarting it), 4 when it listened on another port than its Lease \
-                            (Port mismatch) and its process tree was stopped, 5 when what it needs is held outside \
-                            Procly (a conflict, with the command that stops it, which Procly never runs), 124 when it \
+                            (Port mismatch) and its process tree was stopped, 5 on a conflict, when what it needs is held \
+                            outside Procly or a Group is asked to start over a Service it covers that runs on its own, \
+                            with the command that frees it, which Procly never runs, and the Group and the Services it \
+                            covers are not started or stopped, 124 when it \
                             did not become healthy \
                             within its health timeout and its process tree was stopped, 125 when Procly itself \
                             fails. See docs/exit-codes.md."
@@ -750,7 +754,22 @@ fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<
             }
             Ok(conflicted(service, &conflicts, needed_by))
         }
+        // The message is on stderr whatever the kind, such as a Group refused over the Services it covers that run on
+        // their own, whose message names the commands that free them, and there is no document, as for a failure.
+        Response::Error { message, kind } => {
+            eprintln!("procly: {message}");
+            Ok(ExitCode::from(error_exit(kind)))
+        }
         other => unexpected(other),
+    }
+}
+
+/// The exit code of an error answer to `up` or a Restart, by its kind: 5 for a Conflict the caller resolves, 125 for a
+/// failure of Procly, which an error without a kind is, and one of a kind this procly does not know.
+fn error_exit(kind: Option<ErrorKind>) -> u8 {
+    match kind {
+        Some(ErrorKind::Conflict) => EXIT_CONFLICT,
+        Some(ErrorKind::Unknown) | None => EXIT_PROCLY_FAILURE,
     }
 }
 
@@ -1540,7 +1559,7 @@ fn guard_hook() -> ExitCode {
             )
         ),
         Ok(Response::Guard { off: true, .. }) => {}
-        Ok(Response::Error { message }) => eprintln!("procly guard: {message}, letting the command through"),
+        Ok(Response::Error { message, .. }) => eprintln!("procly guard: {message}, letting the command through"),
         Ok(other) => eprintln!("procly guard: unexpected answer {other:?}, letting the command through"),
         Err(error) => eprintln!("procly guard: {error:#}, letting the command through"),
     }
@@ -1818,7 +1837,7 @@ fn print(output: &str) -> anyhow::Result<()> {
 
 fn unexpected(response: Response) -> anyhow::Result<ExitCode> {
     match response {
-        Response::Error { message } => Err(anyhow::anyhow!(message)),
+        Response::Error { message, .. } => Err(anyhow::anyhow!(message)),
         other => Err(anyhow::anyhow!("unexpected answer from the daemon: {other:?}")),
     }
 }
@@ -1827,6 +1846,24 @@ fn unexpected(response: Response) -> anyhow::Result<ExitCode> {
 mod tests {
     use super::*;
     use crate::protocol::StartOutcome;
+
+    #[test]
+    fn an_error_of_a_kind_this_procly_does_not_know_keeps_its_message_and_exits_with_125() {
+        let line = format!(
+            "{{\"version\":{},\"response\":\"error\",\"message\":\"cannot start group dev\",\"kind\":\"some_future_kind\"}}",
+            crate::protocol::PROTOCOL_VERSION
+        );
+
+        let Ok(Response::Error { message, kind }) = crate::protocol::decode::<Response>(&line) else {
+            panic!("an error of an unknown kind decodes: {line}");
+        };
+
+        assert_eq!(message, "cannot start group dev");
+        assert_eq!(kind, Some(ErrorKind::Unknown));
+        assert_eq!(error_exit(kind), EXIT_PROCLY_FAILURE);
+        assert_eq!(error_exit(None), EXIT_PROCLY_FAILURE);
+        assert_eq!(error_exit(Some(ErrorKind::Conflict)), EXIT_CONFLICT);
+    }
 
     #[test]
     fn the_tail_keeps_the_last_lines_with_their_newlines() {

@@ -52,7 +52,7 @@ pub(super) async fn run(registry: &Arc<Registry>) -> Response {
             procly_version: env!("CARGO_PKG_VERSION").to_owned(),
             checks,
         }),
-        Err(message) => Response::Error { message },
+        Err(message) => Response::Error { message, kind: None },
     }
 }
 

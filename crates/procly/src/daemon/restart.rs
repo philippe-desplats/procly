@@ -38,7 +38,7 @@ pub(super) async fn run(registry: &Arc<Registry>, service: String, cwd: PathBuf,
     };
     let (Planned { scope, target, order }, who) = match planned {
         Ok(planned) => planned,
-        Err(message) => return Response::Error { message },
+        Err(message) => return Response::Error { message, kind: None },
     };
     let worktree = scope.worktree().to_owned();
     // A Service the running Group was found covering by an `up` holds the environment of that `up`, the Group may hold
@@ -52,6 +52,7 @@ pub(super) async fn run(registry: &Arc<Registry>, service: String, cwd: PathBuf,
             message: format!(
                 "{service} has no environment to restart with, run procly up {service} from a shell in the Worktree"
             ),
+            kind: None,
         };
     };
     eprintln!("restart {target} of {} requested by {who}", worktree.display());
@@ -83,6 +84,7 @@ pub(super) async fn run(registry: &Arc<Registry>, service: String, cwd: PathBuf,
 pub(super) fn refused(admission: &Admission, target: &str) -> Response {
     Response::Error {
         message: admission.refusal(target),
+        kind: None,
     }
 }
 

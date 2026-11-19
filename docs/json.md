@@ -119,6 +119,8 @@ A Service whose Leases or container name are held outside Procly has a `result` 
 {"schema_version":1,"result":"conflict","service":"db","needed_by":null,"conflicts":[{"held":{"kind":"port","port":5432},"occupant":{"kind":"container","name":"old-db","project":null,"service":null},"stop":"docker stop old-db"}]}
 ```
 
+A Group asked to start over a Service it covers that runs on its own, see [Groups](configuration.md#groups), also exits with 5, with or without a Service named, but prints no document: what keeps the Group from starting and the `procly down` command of each Service it covers that runs are on stderr, as without `--json`. Up to v0.5.0 it exited with 125.
+
 ## `down`
 
 ```console

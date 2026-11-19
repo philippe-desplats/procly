@@ -64,7 +64,7 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
     };
     blocking("the agent request could not be answered", move || Ok(work()?))
         .await
-        .unwrap_or_else(|message| Response::Error { message })
+        .unwrap_or_else(|message| Response::Error { message, kind: None })
 }
 
 /// The Rules block, one line per element. When the Repository is Off it says so, and tells agents to leave Procly be.

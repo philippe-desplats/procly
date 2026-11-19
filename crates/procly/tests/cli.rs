@@ -58,6 +58,7 @@ fn the_help_of_up_lists_its_exit_codes() {
     assert!(
         help.contains("3 when it stopped before it became healthy")
             && help.contains("4 when it listened on another port than its Lease")
+            && help.contains("a Group is asked to start over a Service it covers that runs on its own")
             && help.contains("124 when it did not"),
         "{help}"
     );
@@ -87,7 +88,8 @@ fn the_help_lists_every_exit_code() {
 
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(
-        help.contains("4 when `up` or `restart` finds a Port mismatch"),
+        help.contains("4 when `up` or `restart` finds a Port mismatch")
+            && help.contains("a Group is asked to start over a Service it covers that runs on its own"),
         "{help}"
     );
 }

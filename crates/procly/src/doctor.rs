@@ -144,7 +144,7 @@ fn daemon_checks(state: &StateDir, answer: Result<Response, ClientError>) -> (Ch
             ),
             skipped("the Daemon speaks another protocol version"),
         ),
-        Ok(Response::Error { message }) => (
+        Ok(Response::Error { message, .. }) => (
             Check::failed(DAEMON, format!("the Daemon failed: {message}"), None),
             skipped("the Daemon failed"),
         ),

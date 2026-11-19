@@ -926,6 +926,7 @@ mod tests {
             at_ms: 2,
             answer: Answer::Response(Response::Error {
                 message: "no".to_owned(),
+                kind: None,
             }),
         });
         let (presented, saved) = attention.on_answer(gone);

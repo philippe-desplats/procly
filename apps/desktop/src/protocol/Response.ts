@@ -2,6 +2,7 @@
 import type { Conflict } from "./Conflict";
 import type { DaemonChecks } from "./DaemonChecks";
 import type { EjectReport } from "./EjectReport";
+import type { ErrorKind } from "./ErrorKind";
 import type { GcReport } from "./GcReport";
 import type { GuardService } from "./GuardService";
 import type { HooksReport } from "./HooksReport";
@@ -70,7 +71,13 @@ root: string, services: Array<GuardService>,
  * The compose file `settings.compose_file` declares, relative to `root`, `None` when the Worktree declares
  * none and Procly runs the compose file at its root.
  */
-compose_file?: string | null, } | { "response": "eject" } & EjectReport | { "response": "gc" } & GcReport | { "response": "worktree_release" } & ReleaseReport | { "response": "doctor" } & DaemonChecks | { "response": "worktree_hooks" } & HooksReport | { "response": "error", message: string, } | { "response": "conflict", service: string, conflicts: Array<Conflict>, 
+compose_file?: string | null, } | { "response": "eject" } & EjectReport | { "response": "gc" } & GcReport | { "response": "worktree_release" } & ReleaseReport | { "response": "doctor" } & DaemonChecks | { "response": "worktree_hooks" } & HooksReport | { "response": "error", message: string, 
+/**
+ * What kind of refusal the error is, when the caller can act on it rather than Procly having failed. Left out
+ * for a failure of Procly itself, and absent from the answers of a Daemon that predates it, which read the
+ * same.
+ */
+kind?: ErrorKind | null, } | { "response": "conflict", service: string, conflicts: Array<Conflict>, 
 /**
  * The Service that needs this one, when `up` was asked for that one instead.
  */

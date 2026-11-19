@@ -145,7 +145,7 @@ A limit of Groups: Procly cannot tell which covered Service listens on which Lea
 A Group and the Services it covers never run side by side in one Worktree:
 
 - `procly up web` while `dev` runs starts nothing and answers `web reused (via dev) http://localhost:3000 port 3000`, with the Lease of `web`.
-- `procly up dev` while `web` or `api` runs on its own is refused with exit code 125, and starts nothing. Stop them with `procly down web` first.
+- `procly up dev` while `web` or `api` runs on its own is refused with exit code 5, a Conflict, and the Group and the Services it covers are not started or stopped. The message names the command that stops each of them, such as `procly down web`, to run first. Up to v0.5.0 it exited with 125, see [exit codes](exit-codes.md).
 - `procly down web` while `dev` runs is refused with exit code 125 and points to `procly down dev`, since `web` is not a process of its own.
 - `procly up dev` forgets the ended rows of the Services it covers, since the Group now stands for them. `procly status` then lists `dev` and no row of `web` or `api`, so that no ended row offers a Restart that would restart the whole Group. The ended rows of the Services it does not cover stay.
 
