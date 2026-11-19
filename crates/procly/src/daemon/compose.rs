@@ -1105,6 +1105,7 @@ impl Ledger {
             volumes: Vec::new(),
             retention: isolated.retention,
             removed_ms: None,
+            compose_file: docker.compose_file.clone(),
         };
         let records = Arc::clone(&self.isolated);
         tokio::task::spawn_blocking(move || records.record(record))

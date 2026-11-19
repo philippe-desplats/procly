@@ -547,8 +547,8 @@ fn find(record: IsolatedRecord) -> Found {
 }
 
 /// The containers Docker lists, running or not, as the one of the compose service of `record` in its project, and
-/// whose working directory is the Worktree of `record`, so that a project of another Repository under the same name
-/// is never touched. `None` when Docker did not answer. Blocking.
+/// whose working directory is the directory of its compose file in the Worktree of `record`, so that a project of
+/// another Repository under the same name is never touched. `None` when Docker did not answer. Blocking.
 fn owned_containers(record: &IsolatedRecord) -> Option<Vec<foreign::Container>> {
     let labels = [
         format!("label=com.docker.compose.project={}", record.project),
@@ -558,7 +558,11 @@ fn owned_containers(record: &IsolatedRecord) -> Option<Vec<foreign::Container>> 
         &["--all", "--filter", &labels[0], "--filter", &labels[1]],
         Some(&record.env),
     )?;
-    let worktree = resolved(&record.worktree);
+    // The Worktree is resolved on its own, since the directory of the compose file goes with a removed Worktree.
+    let project_dir = match record.project_dir().strip_prefix(&record.worktree) {
+        Ok(below) => resolved(&record.worktree).join(below),
+        Err(_) => resolved(&record.project_dir()),
+    };
     Some(
         listed
             .into_iter()
@@ -567,7 +571,7 @@ fn owned_containers(record: &IsolatedRecord) -> Option<Vec<foreign::Container>> 
                     && container
                         .working_dir
                         .as_deref()
-                        .is_some_and(|dir| resolved(dir) == worktree)
+                        .is_some_and(|dir| resolved(dir) == project_dir)
             })
             .collect(),
     )

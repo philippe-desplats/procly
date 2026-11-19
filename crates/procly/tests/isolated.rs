@@ -1467,3 +1467,63 @@ fn docker_a_declared_compose_file_in_a_subdirectory_runs_one_container_per_workt
     assert_eq!(fixture.other_project.container(), container);
     assert!(fixture.main_project.is_running());
 }
+
+#[test]
+fn docker_gc_finds_and_removes_the_container_and_volume_of_a_declared_compose_file_in_a_subdirectory() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = subdirectory_fixture();
+    leave_behind_the_other_container(&fixture);
+    let project = &fixture.other_project.name;
+    let worktree = fixture.other.display();
+
+    let listed = fixture.procly.procly(&["gc"]);
+
+    assert_success(&listed);
+    assert_eq!(
+        isolated_lines(&stdout(&listed)),
+        [
+            format!("isolated container db (compose project {project}, service db) of {worktree}"),
+            format!("isolated volume {project}_data (compose project {project}) of {worktree}"),
+        ],
+        "{}",
+        stdout(&listed)
+    );
+
+    let applied = fixture.procly.procly(&["gc", "--apply"]);
+
+    assert_success(&applied);
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+    assert!(
+        stdout(&fixture.procly.procly(&["gc"])).contains("no Orphans"),
+        "the record outlived gc --apply"
+    );
+    assert!(!fixture.main_project.container().is_empty() && fixture.main_project.volume_exists());
+}
+
+#[test]
+fn docker_a_retention_delete_removes_the_container_of_a_declared_compose_file_in_a_subdirectory() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = subdirectory_fixture();
+    std::fs::write(
+        fixture.other.join("procly.toml"),
+        format!(
+            "[settings]\ncompose_file = \"apps/api/docker-compose.yml\"\n{}retention = \"delete\"\n",
+            config(fixture.port)
+        ),
+    )
+    .expect("write the config");
+    leave_behind_the_other_container(&fixture);
+    assert!(!fixture.other_project.container().is_empty());
+
+    let released = fixture.procly.procly_in(&fixture.main, &["worktree", "release"]);
+
+    assert_success(&released);
+    assert!(fixture.other_project.container().is_empty(), "the container is left");
+    assert!(!fixture.other_project.volume_exists(), "the volume is left");
+    assert!(!fixture.main_project.container().is_empty() && fixture.main_project.volume_exists());
+}
