@@ -748,6 +748,9 @@ mod without_the_process_list {
     /// every `LOOK_EVERY` of 1 s for `KEEP_LOOKING` of 3 s after it (`daemon/foreign_cache.rs`), so the last look
     /// begins at most 3 s after, and each look reads the processes twice within about 50 ms: 3.5 s covers it.
     const FOREIGN_LOOKS_FOR: Duration = Duration::from_millis(3500);
+    /// How long the test waits for the Daemon to try to judge a kept Service while the listing is refused: it tries
+    /// about once a second, 5 s leaves room for a loaded machine.
+    const JUDGED_EVERY_WITHIN: Duration = Duration::from_secs(5);
     /// The part of the 2 s health wait of a Service that cannot turn healthy in which the test counts the readings of
     /// the processes. It ends about 500 ms before the deadline, at which the Daemon reads them once more to judge the
     /// ports, then again to stop the Service, so that a loaded machine late on the window still counts none of those.
@@ -795,6 +798,18 @@ mod without_the_process_list {
         // No Foreign look reads the processes in the window counted below: they run out while the listing is still
         // refused, so that `up` comes right after the restore, before the Daemon judges the Service by itself.
         std::thread::sleep(FOREIGN_LOOKS_FOR.saturating_sub(asked.elapsed()));
+        // The Daemon judges the kept Service by itself every `PROVE_EVERY` looks of `LIVENESS_INTERVAL`, about once a
+        // second, and once it has, `up` no longer judges it. Restoring the listing right after one of those refused
+        // readings leaves `up` about 1 s to judge it first, whatever the phase of the Daemon.
+        let seen = listing.count();
+        let since = Instant::now();
+        while listing.count() == seen {
+            assert!(
+                since.elapsed() < JUDGED_EVERY_WITHIN,
+                "the Daemon did not try to judge the kept service within {JUDGED_EVERY_WITHIN:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
 
         listing.restore();
         if wait_for_the_judgement {
@@ -821,7 +836,7 @@ mod without_the_process_list {
         // instance starts, then at most once every `OWNERSHIP_RETRY` of 250 ms: 1 + 1500 / 250, so 7 at most in the
         // window, 9 leaves a margin of 2. Each reading also costs a `ps` of every process, a session and a group asked
         // for each, and an `lsof`, which spaces them further: macOS read 4 to 5 times. Reading again with no pause
-        // after each answer read 15 to 16 times, and a retry of 50 ms 10 to 11 times.
+        // after each answer read 15 to 16 times. A retry of 50 ms read 9 to 11 times, so it is caught only sometimes.
         assert!(
             listings <= 9,
             "up read the processes {listings} times for its ownership while a stranger held the port for 2 s"
