@@ -106,6 +106,14 @@ pub(crate) enum ConfigError {
         resource: String,
         name: String,
     },
+    #[error(
+        "settings.compose_file is {path:?}, which is not the path of a file inside the Worktree, relative to its root"
+    )]
+    ComposeFilePath { path: PathBuf },
+    #[error(
+        "the user settings {path} set settings.{key}, which names a file of one Repository, set it in the procly.toml of that Repository"
+    )]
+    RepositorySetting { path: PathBuf, key: String },
     #[error("invalid configuration merged from {}", .files.iter().map(|file| file.display().to_string()).collect::<Vec<_>>().join(", "))]
     Invalid {
         files: Vec<PathBuf>,
@@ -194,6 +202,10 @@ pub(crate) struct Settings {
     /// Whether each Lease `up` prints as an `http://` URL is aliased to a stable Portless name.
     #[serde(default)]
     pub(crate) portless: bool,
+    /// The compose file of the Repository, relative to the root of the Worktree, which every Compose service runs
+    /// from in place of the one `docker compose` finds at the root. Set in `procly.toml`, never in the user settings.
+    #[serde(default)]
+    pub(crate) compose_file: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -212,8 +224,35 @@ impl Default for Settings {
             setup_progress_interval: default_setup_progress_interval(),
             driver_timeout: default_driver_timeout(),
             portless: false,
+            compose_file: None,
         }
     }
+}
+
+impl Settings {
+    /// The keys of `[settings]` that name a file of one Repository, which the user settings may not set.
+    const REPOSITORY_KEYS: [&str; 1] = ["compose_file"];
+
+    /// Fails on a `compose_file` that is not a relative path inside the Worktree, so that no Compose service runs a
+    /// compose file found elsewhere than in the Worktree.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let Some(path) = &self.compose_file else {
+            return Ok(());
+        };
+        if !is_inside(path) {
+            return Err(ConfigError::ComposeFilePath { path: path.clone() });
+        }
+        Ok(())
+    }
+}
+
+/// Whether `path` is relative, names something below the root it is relative to and never climbs out of it.
+fn is_inside(path: &Path) -> bool {
+    let components = path.components();
+    components
+        .clone()
+        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+        && components.into_iter().any(|part| matches!(part, Component::Normal(_)))
 }
 
 /// A Process service, or a Compose service.
@@ -588,11 +627,7 @@ impl WorktreeConfig {
     /// write elsewhere than the Main worktree and the Worktree.
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         for path in &self.copy {
-            let components = Path::new(path).components();
-            let inside = components
-                .clone()
-                .all(|part| matches!(part, Component::Normal(_) | Component::CurDir));
-            if !inside || !components.into_iter().any(|part| matches!(part, Component::Normal(_))) {
+            if !is_inside(Path::new(path)) {
                 return Err(ConfigError::WorktreeCopyPath { path: path.clone() });
             }
         }
@@ -1154,6 +1189,17 @@ pub(crate) fn load(user_settings: Option<&Path>, worktree: &Path) -> Result<Conf
                 key: key.clone(),
             });
         }
+        // A file of one Repository: set here, it would be looked for in every Repository.
+        if let Some(Value::Table(settings)) = table.get("settings")
+            && let Some(key) = Settings::REPOSITORY_KEYS
+                .iter()
+                .find(|key| settings.contains_key(**key))
+        {
+            return Err(ConfigError::RepositorySetting {
+                path: path.to_owned(),
+                key: (*key).to_owned(),
+            });
+        }
         merge(&mut merged, table);
         files.push(path.to_owned());
     }
@@ -1167,6 +1213,7 @@ pub(crate) fn load(user_settings: Option<&Path>, worktree: &Path) -> Result<Conf
         .try_into()
         .map_err(|source| ConfigError::Invalid { files, source })?;
     config.worktree.validate()?;
+    config.settings.validate()?;
     config.validate()?;
     config.validate_groups()?;
     config.validate_pinned()?;
@@ -1674,6 +1721,49 @@ mod tests {
                 .kind("db")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn the_compose_file_of_the_repository_is_a_path_inside_the_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |compose_file: &str| {
+            std::fs::write(
+                dir.path().join(VERSIONED_FILE),
+                format!("[settings]\ncompose_file = {compose_file:?}\n[services.db]\ncompose = 'postgres'\n"),
+            )
+            .unwrap();
+        };
+        write("apps/api/docker-compose.yml");
+        assert_eq!(
+            load(None, dir.path()).unwrap().settings.compose_file.as_deref(),
+            Some(Path::new("apps/api/docker-compose.yml"))
+        );
+        for path in [
+            "/srv/compose.yaml",
+            "../compose.yaml",
+            "apps/../../compose.yaml",
+            "",
+            ".",
+        ] {
+            write(path);
+            assert!(
+                matches!(load(None, dir.path()), Err(ConfigError::ComposeFilePath { path: bad }) if bad == Path::new(path)),
+                "{path:?} was accepted"
+            );
+        }
+        std::fs::write(dir.path().join(VERSIONED_FILE), "[services.db]\ncompose = 'postgres'\n").unwrap();
+        assert_eq!(load(None, dir.path()).unwrap().settings.compose_file, None);
+    }
+
+    #[test]
+    fn the_user_settings_cannot_name_the_compose_file_of_every_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("config.toml");
+        std::fs::write(&user, "[settings]\ncompose_file = 'docker/compose.yaml'\n").unwrap();
+        assert!(matches!(
+            load(Some(&user), dir.path()),
+            Err(ConfigError::RepositorySetting { path, key }) if path == user && key == "compose_file"
+        ));
     }
 
     #[test]

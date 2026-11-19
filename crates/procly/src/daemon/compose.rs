@@ -14,6 +14,7 @@
 //! needs it, there is nobody else to wait for.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -208,6 +209,9 @@ pub(crate) struct ComposeSpec {
     pub(crate) compose: String,
     /// Where the compose file is read from: the Main worktree, or the Worktree of an Isolated container.
     pub(crate) project_dir: PathBuf,
+    /// The compose file `settings.compose_file` declares, relative to `project_dir`, `None` for the one
+    /// `docker compose` finds there.
+    pub(crate) compose_file: Option<PathBuf>,
     /// `Some` when the container is Isolated, so that it gets a project name of its own.
     pub(crate) isolated: Option<Isolated>,
     /// The environment of the caller, then the Leases and the variables the compose file interpolates.
@@ -343,6 +347,9 @@ struct Docker {
     service: String,
     compose: String,
     project_dir: PathBuf,
+    /// The compose file `settings.compose_file` declares, relative to `project_dir`, given to every command with
+    /// `--file`. `None` for the one `docker compose` finds in `project_dir`.
+    compose_file: Option<PathBuf>,
     project: String,
     env: Vec<(String, String)>,
     /// The part of `env` the record keeps: what reaches the engine, and the variables Procly injected.
@@ -523,13 +530,14 @@ impl Composes {
     }
 
     /// The recent output of the container of the Compose service `name`, the service `compose` of the compose file
-    /// of `project_dir`, the Main worktree or the Worktree of an `isolated` container, whether it runs or not. Read
-    /// with `docker compose logs` in `env`, so that the compose file interpolates as it does for `up`.
+    /// of `project_dir`, the Main worktree or the Worktree of an `isolated` container, whether it runs or not, or of
+    /// `compose_file` in it when one is declared. Read with `docker compose logs` in `env`, so that the compose file
+    /// interpolates as it does for `up`.
     pub(crate) async fn logs(
         &self,
         name: &str,
         compose: &str,
-        project_dir: PathBuf,
+        (project_dir, compose_file): (PathBuf, Option<PathBuf>),
         isolated: Option<&Isolated>,
         env: Vec<(String, String)>,
     ) -> Result<String, ComposeError> {
@@ -537,6 +545,7 @@ impl Composes {
             service: name.to_owned(),
             compose: compose.to_owned(),
             project_dir,
+            compose_file,
             project: String::new(),
             env,
             recorded_env: Vec::new(),
@@ -547,12 +556,13 @@ impl Composes {
     }
 
     /// The command following the output of the container of the Compose service `name`, which Procly does not follow
-    /// itself: `docker compose logs -f` in `project_dir`, under the project name [`Composes::logs`] reads it with.
+    /// itself: `docker compose logs -f` in `project_dir`, on `compose_file` when one is declared, under the project
+    /// name [`Composes::logs`] reads it with.
     pub(crate) async fn follow_command(
         &self,
         name: &str,
         compose: &str,
-        project_dir: PathBuf,
+        (project_dir, compose_file): (PathBuf, Option<PathBuf>),
         isolated: Option<&Isolated>,
         env: Vec<(String, String)>,
     ) -> Result<String, ComposeError> {
@@ -560,14 +570,20 @@ impl Composes {
             service: name.to_owned(),
             compose: compose.to_owned(),
             project_dir,
+            compose_file,
             project: String::new(),
             env,
             recorded_env: Vec::new(),
         };
         docker.check_available().await?;
         docker.stack(isolated).await?;
+        let file = docker
+            .compose_file
+            .as_ref()
+            .map(|file| format!("--file {} ", shell_word(&file.to_string_lossy())))
+            .unwrap_or_default();
         Ok(format!(
-            "cd {} && docker compose --project-name {} logs -f {}",
+            "cd {} && docker compose {file}--project-name {} logs -f {}",
             shell_word(&docker.project_dir.to_string_lossy()),
             shell_word(&docker.project),
             shell_word(compose)
@@ -1010,6 +1026,7 @@ impl Container {
             service: record.service,
             compose: record.compose,
             project_dir: record.project_dir,
+            compose_file: record.compose_file,
             project: record.project,
             env: record.env.clone(),
             recorded_env: record.env,
@@ -1048,6 +1065,7 @@ impl Container {
             compose: alive.docker.compose.clone(),
             project: alive.docker.project.clone(),
             project_dir: alive.docker.project_dir.clone(),
+            compose_file: alive.docker.compose_file.clone(),
             env: alive.docker.recorded_env.clone(),
             port: alive.port,
             grace_ms: millis(alive.grace),
@@ -1248,6 +1266,7 @@ async fn start(spec: &ComposeSpec, key: &ComposeKey, ledger: &Ledger) -> Result<
         service: spec.name.clone(),
         compose: spec.compose.clone(),
         project_dir: spec.project_dir.clone(),
+        compose_file: spec.compose_file.clone(),
         project: String::new(),
         env: spec.env.clone(),
         recorded_env: recorded_env(&spec.env, &spec.injected),
@@ -1260,7 +1279,7 @@ async fn start(spec: &ComposeSpec, key: &ComposeKey, ledger: &Ledger) -> Result<
         .ok_or_else(|| ComposeError::UnknownService {
             service: spec.name.clone(),
             compose: spec.compose.clone(),
-            dir: spec.project_dir.clone(),
+            dir: docker.compose_dir(),
         })?;
     if spec.isolated.is_some()
         && let Some((what, key, value)) = stack.fixed_name(service)
@@ -1269,7 +1288,14 @@ async fn start(spec: &ComposeSpec, key: &ComposeKey, ledger: &Ledger) -> Result<
             service: spec.name.clone(),
             compose: spec.compose.clone(),
             what,
-            line: offending_line(spec.project_dir.clone(), spec.env.clone(), key, value).await,
+            line: offending_line(
+                spec.project_dir.clone(),
+                spec.compose_file.clone(),
+                spec.env.clone(),
+                key,
+                value,
+            )
+            .await,
         });
     }
     for published in &spec.published {
@@ -1332,14 +1358,27 @@ const COMPOSE_FILES: [(&str, &str); 4] = [
 ];
 
 /// The line of the compose files of `project_dir` that sets `key` to `value`, as `<file>:<line>: <text>`, or the
-/// setting alone when no line holds it as it is, such as one the compose file interpolates.
-async fn offending_line(project_dir: PathBuf, env: Vec<(String, String)>, key: &'static str, value: String) -> String {
+/// setting alone when no line holds it as it is, such as one the compose file interpolates. The compose file is
+/// `compose_file` when one is declared, which `--file` gives `docker compose` over `COMPOSE_FILE`.
+async fn offending_line(
+    project_dir: PathBuf,
+    compose_file: Option<PathBuf>,
+    env: Vec<(String, String)>,
+    key: &'static str,
+    value: String,
+) -> String {
     let setting = format!("{key}: {value}");
     let found = tokio::task::spawn_blocking(move || {
-        let files: Vec<PathBuf> = match env.iter().rev().find(|(name, _)| name == "COMPOSE_FILE") {
-            Some((_, files)) => std::env::split_paths(files)
-                .map(|file| project_dir.join(file))
-                .collect(),
+        let named = compose_file.map(|file| vec![project_dir.join(file)]).or_else(|| {
+            let (_, files) = env.iter().rev().find(|(name, _)| name == "COMPOSE_FILE")?;
+            Some(
+                std::env::split_paths(files)
+                    .map(|file| project_dir.join(file))
+                    .collect(),
+            )
+        });
+        let files: Vec<PathBuf> = match named {
+            Some(files) => files,
             None => COMPOSE_FILES
                 .iter()
                 .find(|(file, _)| project_dir.join(file).is_file())
@@ -1466,6 +1505,14 @@ impl Docker {
         match major(&version) {
             Some(major) if major < 2 => Err(unavailable(format!("found docker compose {version}"))),
             _ => Ok(()),
+        }
+    }
+
+    /// The directory of the compose file, which `docker compose` takes as the directory of the project.
+    fn compose_dir(&self) -> PathBuf {
+        match self.compose_file.as_deref().and_then(Path::parent) {
+            Some(parent) => self.project_dir.join(parent),
+            None => self.project_dir.clone(),
         }
     }
 
@@ -1787,21 +1834,25 @@ impl Docker {
         self.output(&command).await
     }
 
-    /// Runs `docker compose` with the arguments in the project directory, in the environment the compose file
-    /// interpolates. The program is looked up on the `PATH` of that environment, which is the caller's.
+    /// Runs `docker compose` with the arguments in the project directory, on the declared compose file when there is
+    /// one, in the environment the compose file interpolates. The program is looked up on the `PATH` of that
+    /// environment, which is the caller's.
     async fn output(&self, args: &[&str]) -> std::io::Result<Output> {
-        // The Isolated container of a Worktree removed without `procly down` is still found by its project name.
+        // The Isolated container of a Worktree removed without `procly down` is still found by its project name, with
+        // no compose file to read.
         let project_dir = self.project_dir.clone();
-        let dir = if tokio::task::spawn_blocking(move || project_dir.exists())
+        let (dir, file) = if tokio::task::spawn_blocking(move || project_dir.exists())
             .await
             .unwrap_or(false)
         {
-            &self.project_dir
+            (self.project_dir.as_path(), self.compose_file.as_deref())
         } else {
-            Path::new("/")
+            (Path::new("/"), None)
         };
+        let file = file.map(|file| [OsStr::new("--file"), file.as_os_str()]);
         Command::new("docker")
             .arg("compose")
+            .args(file.iter().flatten())
             .args(args)
             .current_dir(dir)
             .env_clear()
@@ -1954,6 +2005,7 @@ mod tests {
             worktrees: worktrees.iter().map(PathBuf::from).collect(),
             deadline_ms: None,
             isolated: isolated.map(PathBuf::from),
+            compose_file: None,
         }
     }
 
@@ -2075,7 +2127,15 @@ mod tests {
             "services:\n  db:\n    container_name: \"pg\"\n  cache:\n    container_name: ${NAME:-redis}\n",
         )
         .unwrap();
-        let line = |value: &str| offending_line(dir.path().to_owned(), Vec::new(), "container_name", value.to_owned());
+        let line = |value: &str| {
+            offending_line(
+                dir.path().to_owned(),
+                None,
+                Vec::new(),
+                "container_name",
+                value.to_owned(),
+            )
+        };
 
         assert_eq!(
             line("pg").await,

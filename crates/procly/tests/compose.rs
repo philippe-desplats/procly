@@ -1261,3 +1261,120 @@ fn docker_logs_of_a_compose_service_prints_the_recent_output_of_its_container() 
         "{document}"
     );
 }
+
+/// A Repository whose compose file is `apps/api/docker-compose.yml`, declared by `settings.compose_file`, with no
+/// compose file at the root, and a second Worktree. Its container prints a marker before it listens.
+fn subdirectory_fixture() -> Fixture {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let procly = Procly::with_clock();
+    let name = format!(
+        "pcl-sub-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    let api = main.join("apps/api");
+    std::fs::create_dir_all(&api).expect("create the directory of the compose file");
+    let talking = compose_file(&name).replace(
+        "command: [\"nc\", \"-lk\", \"-p\", \"80\", \"-e\", \"/bin/cat\"]",
+        "command: [\"sh\", \"-c\", \"echo procly-logs-marker; exec nc -lk -p 80 -e /bin/cat\"]",
+    );
+    std::fs::write(api.join("docker-compose.yml"), talking).expect("write the compose file");
+    std::fs::write(
+        main.join("procly.toml"),
+        format!(
+            "[settings]\ncompose_file = \"apps/api/docker-compose.yml\"\n{}",
+            config(port, "grace_period = \"1m\"\n")
+        ),
+    )
+    .expect("write the config");
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "--quiet", "--message", "compose"]);
+    let other = git_worktree_add(&main, "app-feature");
+    Fixture {
+        procly,
+        project: Project { name, dir: api },
+        main,
+        other,
+        port,
+    }
+}
+
+#[test]
+fn docker_a_declared_compose_file_in_a_subdirectory_runs_its_service_from_up_to_the_release_of_the_worktree() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = subdirectory_fixture();
+    let port = fixture.port;
+
+    let started = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    assert_success(&started);
+    assert_eq!(stdout(&started), format!("db started db port {port}\n"));
+    assert!(listens(port), "nothing listens on {port}");
+    let container = fixture.project.container();
+    assert!(
+        !container.is_empty(),
+        "no container in the project of the declared compose file"
+    );
+
+    let reused = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_eq!(stdout(&reused), format!("db reused db port {port}\n"));
+    assert_eq!(fixture.project.container(), container);
+
+    let logs = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    assert_success(&logs);
+    assert!(stdout(&logs).contains("procly-logs-marker"), "{}", stdout(&logs));
+    let follow = fixture.procly.procly_in(&fixture.main, &["logs", "--follow", "db"]);
+    assert!(
+        stderr(&follow).contains("--file apps/api/docker-compose.yml"),
+        "{}",
+        stderr(&follow)
+    );
+
+    // A Daemon that restarts stops the container from its record, through the declared compose file.
+    fixture.procly.stop_daemon();
+    let down = fixture.procly.procly_in(&fixture.main, &["down", "db"]);
+    assert_success(&down);
+    assert_eq!(stdout(&down), "db released, 1 other Worktree still needs it\n");
+    let released = fixture.procly.procly_in(&fixture.other, &["worktree", "release"]);
+    assert_success(&released);
+    assert!(
+        stdout(&released).starts_with("db released, it stops after 1m unless a Worktree needs it again\n"),
+        "{}",
+        stdout(&released)
+    );
+    fixture.procly.advance_clock(Duration::from_secs(61));
+    eventually("the container to stop after the Grace period", || {
+        !fixture.project.is_running()
+    });
+    assert_eq!(fixture.project.container(), container);
+    assert!(fixture.project.volume_exists());
+}
+
+#[test]
+fn docker_a_container_of_the_declared_compose_file_started_outside_procly_is_adopted_on_its_lease() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = subdirectory_fixture();
+    let port = fixture.port;
+    // As a developer starts it, from the directory of the compose file.
+    let output = Command::new("docker")
+        .args(["compose", "up", "--detach", "--wait", "db"])
+        .current_dir(&fixture.project.dir)
+        .env("DB_PORT", port.to_string())
+        .output()
+        .expect("docker runs");
+    assert_success(&output);
+    let container = fixture.project.container();
+
+    let up = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+
+    assert_success(&up);
+    assert_eq!(stdout(&up), format!("db reused db port {port}\n"));
+    assert_eq!(fixture.project.container(), container);
+    let status = stdout(&fixture.procly.procly_in(&fixture.main, &["status"]));
+    assert!(!status.contains("foreign container"), "{status}");
+}

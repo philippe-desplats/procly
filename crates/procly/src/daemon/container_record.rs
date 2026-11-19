@@ -42,6 +42,11 @@ pub(crate) struct ContainerRecord {
     /// the document when `None`, so that a record of a shared container reads as it did before Isolated ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) isolated: Option<PathBuf>,
+    /// The compose file `settings.compose_file` declared when the container started, relative to `project_dir`, so
+    /// that the next Daemon stops it through the same file. Left out of the document when `None`, the compose file
+    /// `docker compose` finds in `project_dir`, so that such a record reads as it did before the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compose_file: Option<PathBuf>,
 }
 
 impl ContainerRecord {

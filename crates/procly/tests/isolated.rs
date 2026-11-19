@@ -1395,3 +1395,75 @@ fn docker_logs_of_a_compose_service_reads_its_container_in_the_environment_of_it
     assert_success(&with);
     assert!(stdout(&with).contains("procly-held-marker"), "{}", stdout(&with));
 }
+
+/// The fixture with its compose file in `apps/api/docker-compose.yml`, declared by `settings.compose_file`, and none
+/// at the root.
+fn subdirectory_fixture() -> Fixture {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let procly = Procly::with_clock();
+    procly.narrow_range();
+    let name = format!(
+        "pcl-iso-sub-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let main = git_repository(procly.scratch(), "app");
+    let port = free_port();
+    std::fs::create_dir_all(main.join("apps/api")).expect("create the directory of the compose file");
+    std::fs::write(main.join("apps/api/docker-compose.yml"), compose_file(&name, "")).expect("write the compose file");
+    std::fs::write(
+        main.join("procly.toml"),
+        format!(
+            "[settings]\ncompose_file = \"apps/api/docker-compose.yml\"\n{}",
+            config(port)
+        ),
+    )
+    .expect("write the config");
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "--quiet", "--message", "compose"]);
+    let other = git_worktree_add(&main, "app-feature");
+    Fixture {
+        procly,
+        main_project: Project {
+            name: name.clone(),
+            dir: main.join("apps/api"),
+        },
+        other_project: Project {
+            name: format!("{name}-app_feature"),
+            dir: other.join("apps/api"),
+        },
+        main,
+        other,
+        port,
+    }
+}
+
+#[test]
+fn docker_a_declared_compose_file_in_a_subdirectory_runs_one_container_per_worktree() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = subdirectory_fixture();
+
+    let main = fixture.procly.procly_in(&fixture.main, &["up", "db"]);
+    let other = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+
+    assert_success(&main);
+    assert_success(&other);
+    let other_port = printed_port(&other);
+    assert_ne!(other_port, fixture.port);
+    let container = fixture.other_project.container();
+    assert!(!container.is_empty() && !fixture.main_project.container().is_empty());
+    assert_ne!(container, fixture.main_project.container());
+    assert!(listens(fixture.port) && listens(other_port));
+    let again = fixture.procly.procly_in(&fixture.other, &["up", "db"]);
+    assert_eq!(stdout(&again), format!("db reused db port {other_port}\n"));
+
+    let down = fixture.procly.procly_in(&fixture.other, &["down", "db"]);
+
+    assert_success(&down);
+    assert_eq!(stdout(&down), "db stopped\n");
+    assert!(!fixture.other_project.is_running());
+    assert_eq!(fixture.other_project.container(), container);
+    assert!(fixture.main_project.is_running());
+}
