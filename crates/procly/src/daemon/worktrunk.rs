@@ -43,7 +43,10 @@ pub(super) async fn answer(registry: &Arc<Registry>, cwd: PathBuf) -> Response {
     let registry = Arc::clone(registry);
     blocking("the hooks could not be written", move || Ok(install(&registry, &cwd)?))
         .await
-        .map_or_else(|message| Response::Error { message }, Response::WorktreeHooks)
+        .map_or_else(
+            |message| Response::Error { message, kind: None },
+            Response::WorktreeHooks,
+        )
 }
 
 /// The lines of the block, one per hook.

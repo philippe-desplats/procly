@@ -46,7 +46,7 @@ pub(super) async fn run(
     let (followed, mut follow) = match find(registry, &name, cwd, env).await {
         Ok(found) => found,
         Err(message) => {
-            let _ = send(&mut writer, Response::Error { message }).await;
+            let _ = send(&mut writer, Response::Error { message, kind: None }).await;
             return;
         }
     };

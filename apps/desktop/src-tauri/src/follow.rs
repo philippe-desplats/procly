@@ -359,6 +359,7 @@ mod tests {
             &state,
             vec![line(Response::Error {
                 message: "no job or service api".to_owned(),
+                kind: None,
             })],
         );
         let follower = Follower::new();
@@ -366,7 +367,7 @@ mod tests {
 
         let (received, thread) = run(state, &follower, 1);
 
-        assert!(matches!(next(&received), Response::Error { message } if message == "no job or service api"));
+        assert!(matches!(next(&received), Response::Error { message, .. } if message == "no job or service api"));
         thread.join().expect("the follow ends").expect("it ends well");
         // The follow let go of the connection, so the stand-in reads the end of it.
         daemon.join().expect("the stand-in Daemon sees the connection close");

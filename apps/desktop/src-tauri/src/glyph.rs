@@ -239,6 +239,7 @@ mod tests {
         tracker.observe(&status(), false);
         let error = Answer::Response(Response::Error {
             message: "no".to_owned(),
+            kind: None,
         });
 
         assert_eq!(tracker.observe(&error, true), Glyph::NeedsYou);

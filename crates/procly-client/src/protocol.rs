@@ -233,6 +233,11 @@ pub enum Response {
     WorktreeHooks(HooksReport),
     Error {
         message: String,
+        /// What kind of refusal the error is, when the caller can act on it rather than Procly having failed. Left out
+        /// for a failure of Procly itself, and absent from the answers of a Daemon that predates it, which read the
+        /// same.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ErrorKind>,
     },
     /// What the Service needs is held outside Procly, which never stops it.
     Conflict {
@@ -251,6 +256,16 @@ pub enum Response {
     },
     /// The Job or the Service of a followed [`Request::Logs`] has ended, and every line of its output was sent.
     LogsEnded,
+}
+
+/// What kind of refusal a [`Response::Error`] carries, which `procly` exits with its own code for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    /// A Conflict the caller resolves with the commands the message names, nothing being started or stopped: a Group
+    /// asked to start over a Service it covers that runs on its own.
+    Conflict,
 }
 
 /// Something started outside Procly that holds what a Service needs.
@@ -1195,6 +1210,39 @@ mod tests {
         .unwrap();
         assert_eq!(line, "{\"version\":23,\"request\":\"wait\",\"job\":\"3f9a1c2e\"}\n");
         assert!(matches!(decode::<Request>(&line), Ok(Request::Wait { job }) if job == "3f9a1c2e"));
+    }
+
+    #[test]
+    fn an_error_names_its_kind_only_when_it_has_one_and_reads_without_it() {
+        let conflict = encode(Response::Error {
+            message: "cannot start group dev".to_owned(),
+            kind: Some(ErrorKind::Conflict),
+        })
+        .unwrap();
+        assert_eq!(
+            conflict,
+            "{\"version\":23,\"response\":\"error\",\"message\":\"cannot start group dev\",\"kind\":\"conflict\"}\n"
+        );
+        assert!(matches!(
+            decode::<Response>(&conflict),
+            Ok(Response::Error {
+                kind: Some(ErrorKind::Conflict),
+                ..
+            })
+        ));
+
+        // A failure of Procly itself reads as it did before the kind existed, both ways.
+        let failure = encode(Response::Error {
+            message: "no job 3f9a1c2e".to_owned(),
+            kind: None,
+        })
+        .unwrap();
+        let before = "{\"version\":23,\"response\":\"error\",\"message\":\"no job 3f9a1c2e\"}\n";
+        assert_eq!(failure, before);
+        assert!(matches!(
+            decode::<Response>(before),
+            Ok(Response::Error { message, kind: None }) if message == "no job 3f9a1c2e"
+        ));
     }
 
     #[test]

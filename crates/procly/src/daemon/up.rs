@@ -15,11 +15,11 @@ use super::held::Admission;
 use super::lease::Scope as LeaseScope;
 use super::mismatch::Expectation;
 use super::portless::{self, Wanted};
-use super::service::{Proof, Relation, Service, ServiceSpec, Start};
+use super::service::{Proof, Relation, Service, ServiceError, ServiceSpec, Start};
 use super::{Registry, blocking, foreign, message, read_config, requester, topology_of};
 use crate::config::{Config, IsolationMode, ServiceConfig, ServiceKind};
 use crate::driver::{self, Driver};
-use crate::protocol::{Response, ServiceEnd, StartOutcome, UpService};
+use crate::protocol::{ErrorKind, Response, ServiceEnd, StartOutcome, UpService};
 use crate::topology::{self, Topology};
 use crate::{guard, ports, status};
 
@@ -170,7 +170,7 @@ pub(super) async fn up(
     };
     let (scope, order) = match planned {
         Ok(planned) => planned,
-        Err(message) => return Response::Error { message },
+        Err(message) => return Response::Error { message, kind: None },
     };
     // Before any start, so that a Service that does not become healthy can be restarted once its cause is fixed.
     for current in &order {
@@ -238,7 +238,7 @@ pub(super) async fn reach(
         };
         let (ports, urls) = match reach {
             Ok(reach) => reach,
-            Err(message) => return Response::Error { message },
+            Err(message) => return Response::Error { message, kind: None },
         };
         let mut warnings = Vec::new();
         if scope.config.settings.portless && !portless_warned {
@@ -286,6 +286,7 @@ pub(super) async fn reach(
         }
         (name, None) => Response::Error {
             message: format!("no service {} to start", name.unwrap_or_default()),
+            kind: None,
         },
     }
 }
@@ -460,11 +461,14 @@ async fn start(
             let (registry, scope, name, env) = (Arc::clone(registry), scope.clone(), name.to_owned(), env.to_owned());
             // Writing the generated files, granting the Leases and forking are blocking.
             blocking(START_FAILED, move || {
-                start_service(&registry, &scope, &name, env, gitignore)
+                Ok(start_service(&registry, &scope, &name, env, gitignore).map_err(refused))
             })
             .await
         };
-        match started.map_err(|message| Box::new(Response::Error { message }))? {
+        let started = started
+            .map_err(|message| Box::new(Response::Error { message, kind: None }))
+            .and_then(|started| started)?;
+        match started {
             Started::Process(Start::Ready { service, outcome, .. }) => {
                 // A Service found running that the Daemon kept without being able to list the processes is judged now
                 // if they can be listed, rather than answered for.
@@ -518,6 +522,19 @@ async fn start(
             Started::Compose { grace } => return up_compose(registry, scope, name, grace, env.to_owned()).await,
         }
     }
+}
+
+/// The answer to a start request that failed with `error`: a Conflict when it is a Group asked to start over a Service
+/// it covers that runs on its own, which the caller frees, and a failure of Procly otherwise.
+fn refused(error: anyhow::Error) -> Box<Response> {
+    let kind = match error.downcast_ref::<ServiceError>() {
+        Some(ServiceError::CoveredRunning { .. }) => Some(ErrorKind::Conflict),
+        Some(ServiceError::Spawn { .. } | ServiceError::Output { .. } | ServiceError::NoPid { .. }) | None => None,
+    };
+    Box::new(Response::Error {
+        message: message(error),
+        kind,
+    })
 }
 
 /// What a start request found out about the Service it asked for.
@@ -758,9 +775,11 @@ async fn up_compose(
             })),
             Ok(error) => Err(Box::new(Response::Error {
                 message: message(error),
+                kind: None,
             })),
             Err(error) => Err(Box::new(Response::Error {
                 message: message(error),
+                kind: None,
             })),
         },
     }

@@ -55,7 +55,7 @@ pub(super) async fn run(
     };
     let mut collected = match collected {
         Ok(collected) => collected,
-        Err(message) => return Response::Error { message },
+        Err(message) => return Response::Error { message, kind: None },
     };
     let limited = only.is_some();
     // Reported with the others, after them, though none of them is deleted.

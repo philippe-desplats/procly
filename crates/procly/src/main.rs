@@ -35,9 +35,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use procly_client::{protocol, state_dir};
 
 use crate::protocol::{
-    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, Held, HooksOutcome, InitReport, JobEnd, KeptBecause,
-    KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared, StartOutcome,
-    Stopped, UpService, Written,
+    BlockOutcome, BlockReport, CheckStatus, Conflict, EjectReport, ErrorKind, Held, HooksOutcome, InitReport, JobEnd,
+    KeptBecause, KeptLease, LeaseHeld, Occupant, ReleaseReport, Released, Request, Response, ServiceEnd, Spared,
+    StartOutcome, Stopped, UpService, Written,
 };
 use crate::state_dir::StateDir;
 
@@ -749,6 +749,15 @@ fn answer_up(state: &StateDir, request: &Request, json: bool) -> anyhow::Result<
                 })?;
             }
             Ok(conflicted(service, &conflicts, needed_by))
+        }
+        // A Group refused over the Services it covers that run on their own: the message names the commands that free
+        // them, and there is no document, as for a failure.
+        Response::Error {
+            message,
+            kind: Some(ErrorKind::Conflict),
+        } => {
+            eprintln!("procly: {message}");
+            Ok(ExitCode::from(EXIT_CONFLICT))
         }
         other => unexpected(other),
     }
@@ -1540,7 +1549,7 @@ fn guard_hook() -> ExitCode {
             )
         ),
         Ok(Response::Guard { off: true, .. }) => {}
-        Ok(Response::Error { message }) => eprintln!("procly guard: {message}, letting the command through"),
+        Ok(Response::Error { message, .. }) => eprintln!("procly guard: {message}, letting the command through"),
         Ok(other) => eprintln!("procly guard: unexpected answer {other:?}, letting the command through"),
         Err(error) => eprintln!("procly guard: {error:#}, letting the command through"),
     }
@@ -1818,7 +1827,7 @@ fn print(output: &str) -> anyhow::Result<()> {
 
 fn unexpected(response: Response) -> anyhow::Result<ExitCode> {
     match response {
-        Response::Error { message } => Err(anyhow::anyhow!(message)),
+        Response::Error { message, .. } => Err(anyhow::anyhow!(message)),
         other => Err(anyhow::anyhow!("unexpected answer from the daemon: {other:?}")),
     }
 }

@@ -128,6 +128,7 @@ mod tests {
             client.state(),
             Response::Error {
                 message: "web has no environment to restart with".to_owned(),
+                kind: None,
             },
         );
 
