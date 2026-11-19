@@ -1518,7 +1518,7 @@ fn docker_a_retention_delete_removes_the_container_of_a_declared_compose_file_in
     )
     .expect("write the config");
     leave_behind_the_other_container(&fixture);
-    assert!(!fixture.other_project.container().is_empty());
+    assert_ne!(fixture.other_project.container(), "");
 
     let released = fixture.procly.procly_in(&fixture.main, &["worktree", "release"]);
 

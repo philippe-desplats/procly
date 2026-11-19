@@ -147,7 +147,7 @@ impl Setup {
         let without: String = declared
             .lines()
             .filter(|line| !line.starts_with("compose_file = "))
-            .map(|line| format!("{line}\n"))
+            .flat_map(|line| [line, "\n"])
             .collect();
         let text = match path.into() {
             Some(path) => without.replacen("[settings]\n", &format!("[settings]\ncompose_file = '{path}'\n"), 1),
