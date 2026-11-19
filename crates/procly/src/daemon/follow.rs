@@ -122,12 +122,12 @@ async fn find(
         let name = name.to_owned();
         blocking("the logs could not be read", move || compose_service(&worktree, &name)).await?
     };
-    let Some((compose, project_dir, isolated)) = compose else {
+    let Some((compose, project, isolated)) = compose else {
         return Err(unknown());
     };
     let command = registry
         .composes
-        .follow_command(name, &compose, project_dir, isolated.as_ref(), env)
+        .follow_command(name, &compose, project, isolated.as_ref(), env)
         .await
         .map_err(super::message)?;
     Err(format!(

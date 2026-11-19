@@ -98,6 +98,8 @@ procly: the Group dev isolates a secondary Worktree only when each app it covers
 
 Procly looks for `compose.yaml`, `compose.yml`, `docker-compose.yaml` and `docker-compose.yml`, in that order, and reads the first as written, without Docker and without resolving its variables. Every service of the file becomes a Compose service of the same name, and nothing in the file is modified (ADR 0004).
 
+`init` reads the root of the Worktree only. A compose file in a subdirectory, such as `apps/api/docker-compose.yml` in a monorepo, is declared by hand with `compose_file` in the `[settings]` of `procly.toml`, with its services as Compose services, see [The compose file](configuration.md#the-compose-file). `procly doctor` names that line when it finds such a file.
+
 - A port published on a host port is declared under a Port name. The well-known port of a known technology has its usual name (`db` for Postgres, `redis`, `smtp` and `http` for Mailpit). A port that the compose file reads from `${PORT_<NAME>:-5432}` is named `<name>`. Any other is `port`, or `port_<container port>` among several.
 - A port written `${DB_PORT:-5432}` is declared at its default, and `DB_PORT` is derived from the Lease of its Port name, so that the compose file keeps interpolating the variable it already has. A variable that 2 services read is derived for the first only, since the Env file holds one template for it.
 - A service that publishes several ports gets the `health` port that its technology probes, else the first.

@@ -601,9 +601,9 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
         .await
     };
     match compose {
-        Ok(Some((compose, project_dir, isolated))) => registry
+        Ok(Some((compose, project, isolated))) => registry
             .composes
-            .logs(&name, &compose, project_dir, isolated.as_ref(), env)
+            .logs(&name, &compose, project, isolated.as_ref(), env)
             .await
             .map_or_else(failure, |output| Response::Logs { output }),
         Ok(None) => unknown(),
@@ -611,10 +611,17 @@ async fn service_logs(registry: &Registry, name: String, cwd: PathBuf, env: Vec<
     }
 }
 
-/// The service of the compose file, the project directory and the Isolation of the Compose service `name` of
-/// `worktree`, `None` when `name` is declared as no Compose service. Blocking, as reading the configuration is and
-/// finding the Main worktree runs git.
-fn compose_service(worktree: &Path, name: &str) -> anyhow::Result<Option<(String, PathBuf, Option<Isolated>)>> {
+/// The service of the compose file, the project directory with the compose file `settings.compose_file` declares in
+/// it, and the Isolation of the Compose service `name` of `worktree`, `None` when `name` is declared as no Compose
+/// service. Blocking, as reading the configuration is and finding the Main worktree runs git.
+#[expect(
+    clippy::type_complexity,
+    reason = "a private tuple read once by each of its 2 callers"
+)]
+fn compose_service(
+    worktree: &Path,
+    name: &str,
+) -> anyhow::Result<Option<(String, (PathBuf, Option<PathBuf>), Option<Isolated>)>> {
     let scope = up::Scope::of(worktree)?;
     match scope
         .config()
@@ -625,7 +632,8 @@ fn compose_service(worktree: &Path, name: &str) -> anyhow::Result<Option<(String
     {
         Some(config::ServiceKind::Compose { service }) => {
             let (project_dir, isolated) = scope.project(name)?;
-            Ok(Some((service.to_owned(), project_dir, isolated)))
+            let compose_file = scope.config().settings.compose_file.clone();
+            Ok(Some((service.to_owned(), (project_dir, compose_file), isolated)))
         }
         Some(config::ServiceKind::Process { .. } | config::ServiceKind::Group { .. }) | None => Ok(None),
     }

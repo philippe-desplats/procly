@@ -216,6 +216,10 @@ pub enum Response {
         /// The root of the Worktree, which a compose file given with an absolute path is placed against.
         root: PathBuf,
         services: Vec<GuardService>,
+        /// The compose file `settings.compose_file` declares, relative to `root`, `None` when the Worktree declares
+        /// none and Procly runs the compose file at its root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compose_file: Option<PathBuf>,
     },
     /// The Worktree, or with `repository` the Repository, is ejected.
     Eject(EjectReport),

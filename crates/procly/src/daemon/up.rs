@@ -807,6 +807,7 @@ fn prepare_compose(
         name: name.to_owned(),
         compose: compose.to_owned(),
         project_dir,
+        compose_file: scope.config.settings.compose_file.clone(),
         isolated,
         env,
         published,

@@ -131,7 +131,8 @@ pub(super) fn occupant(port: u16, env: Option<&[(String, String)]>) -> Option<(O
     })
 }
 
-/// Whether a running container of the compose service `service` whose project lives in `main` publishes `port`,
+/// Whether a running container of the compose service `service` whose project lives in `main`, the directory of its
+/// compose file in the Main worktree or in the Worktree of an Isolated container, publishes `port`,
 /// so that its Lease is the port that container already holds and Adoption finds it there. Blocking.
 pub(super) fn published_by_service(port: u16, main: &Path, service: &str) -> bool {
     let filter = format!("publish={port}");

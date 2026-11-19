@@ -14,6 +14,7 @@ use crate::client;
 use crate::config;
 use crate::daemon;
 use crate::driver::{self, Driver};
+use crate::guard;
 use crate::protocol::{Check, CheckStatus, DaemonChecks, DecodeError, PROTOCOL_VERSION, Request, Response};
 use crate::state_dir::StateDir;
 use crate::topology;
@@ -27,6 +28,10 @@ const DAEMON: &str = "daemon";
 const SESSION_UNIT: &str = "session_unit";
 /// The check of the `procly.toml` of the Worktree and of the Drivers it names.
 const CONFIGURATION: &str = "configuration";
+/// The check of the compose file the Compose services of the Worktree run from.
+const COMPOSE_FILE: &str = "compose_file";
+/// The directories the look for a compose file outside the root never enters.
+const SKIPPED_DIRECTORIES: [&str; 3] = ["node_modules", "target", "vendor"];
 
 /// Every check, in the order they are listed.
 #[derive(Debug)]
@@ -67,6 +72,7 @@ pub(crate) fn run(state: &StateDir, cwd: &Path) -> Report {
         session_unit(state),
         daemon::doctor::state_documents(state),
         configuration(worktree, &placement.unplaced),
+        compose_file(worktree, &placement.unplaced),
         daemon::doctor::guard(state, worktree, &placement.unplaced),
         portless(worktree, &placement.unplaced),
         daemon::doctor::worktrunk_hooks(state, worktree, &placement.unplaced),
@@ -302,6 +308,132 @@ fn configuration(worktree: Option<&Path>, unplaced: &str) -> Check {
     Check::failed(CONFIGURATION, problems.join("\n"), Some(fixes.join("\n")))
 }
 
+/// Whether the compose file the Compose services of the Worktree run from can be found.
+fn compose_file(worktree: Option<&Path>, unplaced: &str) -> Check {
+    let Some(worktree) = worktree else {
+        return Check::skipped(COMPOSE_FILE, unplaced);
+    };
+    if !worktree.join(config::VERSIONED_FILE).exists() {
+        return Check::skipped(
+            COMPOSE_FILE,
+            format!("{} has no {}", worktree.display(), config::VERSIONED_FILE),
+        );
+    }
+    match config::load(config::user_settings().as_deref(), worktree) {
+        Ok(config) => compose_file_check(worktree, &config),
+        Err(_) => Check::skipped(
+            COMPOSE_FILE,
+            "the configuration cannot be read, see the configuration check",
+        ),
+    }
+}
+
+/// Whether the Compose services `config` declares in `worktree` find the compose file `settings.compose_file` declares.
+/// Without the setting, `docker compose` finds its compose file at the root or through a `COMPOSE_FILE` doctor does
+/// not read, so the check never fails: it is skipped, and names the setting that declares the compose files it finds
+/// below a root that holds none.
+fn compose_file_check(worktree: &Path, config: &config::Config) -> Check {
+    let edit = format!("${{EDITOR:-vi}} {}", worktree.join(config::VERSIONED_FILE).display());
+    let services: Vec<&str> = config
+        .services
+        .iter()
+        .filter(|(_, declared)| declared.compose.is_some())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let at_root = guard::COMPOSE_FILES
+        .iter()
+        .map(|name| worktree.join(name))
+        .find(|file| file.is_file());
+    // Named only when nothing the Daemon would read is there.
+    let declaring = || {
+        let below = compose_files_below(worktree);
+        below
+            .first()
+            .map(|first| {
+                format!(
+                    ", declare {} with `compose_file = \"{}\"` in the [settings] of {}",
+                    below
+                        .iter()
+                        .map(|file| file.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" or "),
+                    first.display(),
+                    config::VERSIONED_FILE
+                )
+            })
+            .unwrap_or_default()
+    };
+    let Some(declared) = &config.settings.compose_file else {
+        let setting = if at_root.is_none() { declaring() } else { String::new() };
+        let why = if services.is_empty() {
+            "no Compose service is declared, none needs a compose file".to_owned()
+        } else {
+            "settings.compose_file is not set, the Compose services run from the compose file docker compose finds at \
+             the root of the Worktree or through COMPOSE_FILE"
+                .to_owned()
+        };
+        return Check::skipped(COMPOSE_FILE, format!("{why}{setting}"));
+    };
+    if services.is_empty() {
+        return Check::skipped(
+            COMPOSE_FILE,
+            "no Compose service is declared, none needs a compose file",
+        );
+    }
+    let services = services.join(", ");
+    let file = worktree.join(declared);
+    if file.is_file() {
+        Check::passed(
+            COMPOSE_FILE,
+            format!("the Compose services {services} run from {}", file.display()),
+        )
+    } else {
+        Check::failed(
+            COMPOSE_FILE,
+            format!(
+                "{} does not exist, the compose file settings.compose_file declares, which the Compose services \
+                 {services} run from",
+                file.display()
+            ),
+            Some(edit),
+        )
+    }
+}
+
+/// The compose files below the root of `worktree`, in its directories and theirs, relative to it and sorted. Hidden
+/// directories and those of dependencies and builds are not looked into.
+fn compose_files_below(worktree: &Path) -> Vec<PathBuf> {
+    let directories = |parent: &Path| -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(worktree.join(parent)) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                !name.starts_with('.') && !SKIPPED_DIRECTORIES.contains(&name.as_ref())
+            })
+            .map(|name| parent.join(name))
+            .collect()
+    };
+    let children = directories(Path::new(""));
+    let grandchildren: Vec<PathBuf> = children.iter().flat_map(|child| directories(child)).collect();
+    let mut found: Vec<PathBuf> = children
+        .iter()
+        .chain(&grandchildren)
+        .filter_map(|directory| {
+            guard::COMPOSE_FILES
+                .iter()
+                .map(|name| directory.join(name))
+                .find(|file| worktree.join(file).is_file())
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// Whether Portless is on for the Worktree and its `portless` executable is on the `PATH`.
 fn portless(worktree: Option<&Path>, unplaced: &str) -> Check {
     let Some(worktree) = worktree else {
@@ -463,5 +595,102 @@ mod tests {
             daemon_version: None,
         };
         assert_eq!(prompt(&report), None);
+    }
+
+    /// The configuration `text` of a Worktree, loaded without user settings.
+    fn loaded(worktree: &Path, text: &str) -> config::Config {
+        std::fs::write(worktree.join(config::VERSIONED_FILE), text).unwrap();
+        config::load(None, worktree).unwrap()
+    }
+
+    const COMPOSE_SERVICES: &str = "[services.db]\ncompose = 'postgres'\n[services.cache]\ncompose = 'redis'\n";
+
+    #[test]
+    fn a_compose_service_whose_compose_file_is_missing_fails_naming_the_path_looked_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path();
+        let declared = format!("[settings]\ncompose_file = 'apps/api/docker-compose.yml'\n{COMPOSE_SERVICES}");
+
+        let missing = compose_file_check(worktree, &loaded(worktree, &declared));
+        assert_eq!(missing.status, CheckStatus::Failed, "{}", missing.message);
+        assert!(
+            missing.message.contains(&format!(
+                "{} does not exist",
+                worktree.join("apps/api/docker-compose.yml").display()
+            )) && missing.message.contains("cache, db"),
+            "{}",
+            missing.message
+        );
+        assert_eq!(
+            missing.fix,
+            Some(format!("${{EDITOR:-vi}} {}", worktree.join("procly.toml").display()))
+        );
+
+        std::fs::create_dir_all(worktree.join("apps/api")).unwrap();
+        std::fs::write(worktree.join("apps/api/docker-compose.yml"), "services: {}\n").unwrap();
+        let found = compose_file_check(worktree, &loaded(worktree, &declared));
+        assert_eq!(found.status, CheckStatus::Passed, "{}", found.message);
+        assert!(
+            found
+                .message
+                .contains(&worktree.join("apps/api/docker-compose.yml").display().to_string()),
+            "{}",
+            found.message
+        );
+    }
+
+    #[test]
+    fn without_the_setting_the_check_never_fails_and_names_the_setting_of_a_compose_file_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path();
+        std::fs::create_dir_all(worktree.join("apps/api")).unwrap();
+        std::fs::create_dir_all(worktree.join("node_modules/pkg")).unwrap();
+        std::fs::write(worktree.join("node_modules/pkg/compose.yaml"), "services: {}\n").unwrap();
+
+        // `docker compose` may find its file through a `COMPOSE_FILE` doctor does not read.
+        let none = compose_file_check(worktree, &loaded(worktree, COMPOSE_SERVICES));
+        assert_eq!(none.status, CheckStatus::Skipped, "{}", none.message);
+        assert_eq!(none.fix, None);
+        assert!(
+            !none.message.contains("compose_file = ") && !none.message.contains("node_modules"),
+            "{}",
+            none.message
+        );
+
+        std::fs::write(worktree.join("apps/api/docker-compose.yml"), "services: {}\n").unwrap();
+        let below = compose_file_check(worktree, &loaded(worktree, COMPOSE_SERVICES));
+        assert_eq!(below.status, CheckStatus::Skipped, "{}", below.message);
+        assert!(
+            below
+                .message
+                .contains("declare apps/api/docker-compose.yml with `compose_file = \"apps/api/docker-compose.yml\"` in the [settings] of procly.toml"),
+            "{}",
+            below.message
+        );
+
+        std::fs::write(worktree.join("compose.yaml"), "services: {}\n").unwrap();
+        let rooted = compose_file_check(worktree, &loaded(worktree, COMPOSE_SERVICES));
+        assert_eq!(rooted.status, CheckStatus::Skipped, "{}", rooted.message);
+        assert!(!rooted.message.contains("compose_file = "), "{}", rooted.message);
+    }
+
+    #[test]
+    fn without_a_compose_service_the_check_is_skipped_and_names_the_setting_of_a_compose_file_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path();
+        let processes = "[services.web]\nrun = 'npm run dev'\n";
+        let nothing = compose_file_check(worktree, &loaded(worktree, processes));
+        assert_eq!(nothing.status, CheckStatus::Skipped);
+        assert!(!nothing.message.contains("compose_file = "), "{}", nothing.message);
+
+        std::fs::create_dir_all(worktree.join("infra")).unwrap();
+        std::fs::write(worktree.join("infra/compose.yml"), "services: {}\n").unwrap();
+        let below = compose_file_check(worktree, &loaded(worktree, processes));
+        assert_eq!(below.status, CheckStatus::Skipped);
+        assert!(
+            below.message.contains("`compose_file = \"infra/compose.yml\"`"),
+            "{}",
+            below.message
+        );
     }
 }

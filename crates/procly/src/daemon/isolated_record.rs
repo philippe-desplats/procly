@@ -7,7 +7,7 @@
 //! Worktree declared, and when the Daemon found the Worktree removed, so that a delayed deletion survives a restart.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -46,11 +46,25 @@ pub(crate) struct IsolatedRecord {
     /// deletion counts from. `None` while the Worktree is not known to be removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) removed_ms: Option<u64>,
+    /// The compose file `settings.compose_file` declared when the container started, relative to the Worktree. Left
+    /// out of the document when `None`, the compose file at the root, so that a record written before the setting
+    /// still means the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compose_file: Option<PathBuf>,
 }
 
 impl IsolatedRecord {
     pub(crate) fn key(&self) -> Key {
         (self.repository.clone(), self.service.clone(), self.worktree.clone())
+    }
+
+    /// The directory compose labels the container with as its working directory: the one of its compose file in the
+    /// Worktree.
+    pub(crate) fn project_dir(&self) -> PathBuf {
+        match self.compose_file.as_deref().and_then(Path::parent) {
+            Some(parent) => self.worktree.join(parent),
+            None => self.worktree.clone(),
+        }
     }
 }
 
@@ -205,6 +219,7 @@ mod tests {
             volumes: volumes.iter().map(|&volume| volume.to_owned()).collect(),
             retention: Retention::After(Duration::from_hours(24)),
             removed_ms: None,
+            compose_file: None,
         }
     }
 

@@ -46,7 +46,13 @@ export const REFRESH_REQUESTED = "refresh-requested";
 const DAEMON_CHECKS: readonly string[] = ["leased_ports", "orphans", "portless_aliases"];
 
 /** The checks that depend on the directory doctor runs in, which the Worktree screen shows. */
-const WORKTREE_CHECKS: readonly string[] = ["configuration", "guard", "portless", "worktrunk_hooks"];
+const WORKTREE_CHECKS: readonly string[] = [
+  "configuration",
+  "compose_file",
+  "guard",
+  "portless",
+  "worktrunk_hooks",
+];
 
 /** The fix the `daemon` check names for a Daemon of another release, which is how the window tells that drift. */
 const RESTART_FIX = "procly daemon stop";

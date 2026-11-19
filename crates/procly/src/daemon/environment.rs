@@ -625,9 +625,16 @@ fn with_lease_request<T>(
         (topology, pinned)
     };
     // Where the container runs from: the Main worktree, or the Worktree itself when it is Isolated.
-    let project_dir = &topology.worktree.path;
+    // Compose labels the container with the directory of its compose file, the one `settings.compose_file` declares.
+    let project_dir = match config.settings.compose_file.as_deref().and_then(Path::parent) {
+        Some(parent) => {
+            let joined = topology.worktree.path.join(parent);
+            std::fs::canonicalize(&joined).unwrap_or(joined)
+        }
+        None => topology.worktree.path.clone(),
+    };
     let held_by_container =
-        |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, project_dir, compose));
+        |port: u16| compose.is_some_and(|compose| foreign::published_by_service(port, &project_dir, compose));
     let mut running = registry.running();
     for name in stopping {
         running.remove(&(topology.worktree.path.clone(), name.clone()));

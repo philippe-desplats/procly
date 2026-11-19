@@ -388,6 +388,7 @@ mod tests {
             volumes: Vec::new(),
             retention: Retention::After(Duration::from_hours(24)),
             removed_ms: Some(5_000),
+            compose_file: None,
         }
     }
 

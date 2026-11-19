@@ -78,6 +78,7 @@ web = { http = 3200 }
 | `setup_progress_interval` | `"1m"` | How often a setup command of `procly worktree init` that is still running prints its elapsed time and the path of its log on stderr, at most once per second. See [Worktree init](worktree-init.md#a-long-setup). |
 | `driver_timeout` | `"5m"` | How long one command of a Driver (`ready`, `check`, `create`, `copy`, `drop`) may run in the container before `procly up` gives up on it and exits with 125, or `procly gc --apply` reports the resource it was dropping as not deleted. |
 | `portless` | `false` | Whether each Lease `procly up` prints as an `http://` URL is aliased to a stable [Portless](https://github.com/vercel-labs/portless) name, see [Portless aliases](#portless-aliases). |
+| `compose_file` | none | The compose file of the Repository, as a path relative to the root of the Worktree, such as `"apps/api/docker-compose.yml"`, which every Compose service runs from in place of the compose file at the root. Set it in `procly.toml` or `procly.local.toml`: the user settings refuse it, since it names a file of one Repository. See [The compose file](#the-compose-file). |
 
 Durations are written as `procly run --timeout` accepts them: `500ms`, `90s`, `5m`, `1h`, `30d`, or a bare number of seconds.
 
@@ -206,6 +207,27 @@ The container is in Shared mode when the Service sets no `driver`, and in Logica
 Containers of Shared and Logical Services are counted by Worktree. The first `procly up` starts the container (`started`), a `procly up` from any Worktree while it runs is a Reuse (`reused`). `procly down` lets the Worktree go of the container and prints how many other Worktrees still need it, or when it stops. Once the last Worktree let go, the container stops after the Grace period with `docker compose stop`: it is never removed, and its volumes are kept. A `procly up` before the Grace period ends keeps it running. A Worktree needs the container from its `procly up` until its own `procly down db` or `procly down`: stopping a Service that needs `db` leaves `db` counted, as `needs` is about starting. One limit in v0.1: `docker compose up` also starts the `depends_on` services of the compose file that do not run yet, and Procly neither counts nor stops them. When the Grace period of the Service ends, only its own container stops, and those dependencies keep running until a `docker compose stop` of their own. Procly cannot tell whether another compose service, or a developer, still needs them, and it never stops a container it does not own. Declare such a dependency as a Compose service of its own, listed in `needs`, to have it counted and stopped like any other.
 
 `procly up` fails with 125 and a message that names what to install when `docker` is not on the `PATH` of the command or `docker compose` is not v2. The Daemon records each container it started or adopted in `containers.json` of its state directory, with the Worktrees that need it and the end of a running Grace period, so a Daemon that exits or crashes leaves its containers running and the next Daemon resumes their counts and Grace periods, see [The Daemon across crashes and sessions](daemon.md#containers-after-a-crash-or-a-restart). A Worktree whose directory no longer exists, removed without `procly down`, stops counting. `procly status` does not list the Shared and Logical containers, which serve every Worktree, only Process services, Groups, Jobs and the Isolated containers of the Worktree, see [Isolated mode](#isolated-mode) and [JSON output](json.md#status).
+
+### The compose file
+
+By default the Compose services run from the compose file at the root of the Worktree, the first of `compose.yaml`, `compose.yml`, `docker-compose.yaml` and `docker-compose.yml` that exists there, with its override file, as `docker compose` finds it. A Repository whose compose file lives in a subdirectory, as in a monorepo, declares it in `[settings]`:
+
+```toml
+[settings]
+compose_file = "apps/api/docker-compose.yml"
+
+[services.db]
+compose = "postgres"
+ports = { db = 5432 }
+env = { DB_PORT = "{services.db.ports.db}" }
+```
+
+- The path is relative to the root of the Worktree and stays inside it: an absolute path, or one that climbs out with `..`, makes every command fail with 125 naming the setting. The user settings refuse it with the same exit code, since a file of one Repository would be looked for in every Repository.
+- Every `docker compose` command Procly runs for a Compose service gets the file with `--file`: `procly up`, `down`, `restart`, `logs`, `status`, `eject`, `worktree release`, the end of the Grace period and the [Retention policy](#retention-policy). In Shared and Logical mode the file is the one of the Main worktree, in [Isolated mode](#isolated-mode) the one of each Worktree, at the same path. `procly logs --follow` names a command that carries the same `--file`.
+- `docker compose` takes the directory of the file as the directory of the project, as it does for `cd apps/api && docker compose up`: the relative paths of the file, its `.env` file and the project name it gives when it sets no `name` come from that directory. Given a file, `docker compose` reads no override file next to it, and `--file` wins over a `COMPOSE_FILE` of the environment.
+- A container started from that file outside Procly is found and adopted as one started from the root, see below.
+- The container of a Service that runs keeps the compose file it started from until it stops: a changed `compose_file` takes effect on the next start, after `procly down` and the end of the Grace period, or after `procly eject`.
+- `procly doctor` fails its `compose_file` check when a Compose service cannot find the declared compose file, naming the path it looked at. Without the setting the check never fails, and its message names this setting when a compose file sits below a root that holds none, see [Checking the installation](doctor.md). The Guard sends a `docker compose` command on the declared file to `procly up` of the Compose services, see [Agents](agents.md).
 
 ### Containers started outside Procly
 
