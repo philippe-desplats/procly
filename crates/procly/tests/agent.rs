@@ -955,3 +955,43 @@ fn a_rules_block_in_an_empty_or_absent_file_starts_on_its_first_line() {
     assert!(read(&main.join("CLAUDE.md")).starts_with(RULES_OPEN));
     assert!(read(&other.join("AGENTS.md")).starts_with(RULES_OPEN));
 }
+
+#[test]
+fn the_guard_sends_a_compose_command_on_the_declared_compose_file_to_procly_up_and_names_the_setting_otherwise() {
+    let procly = Procly::new();
+    let main = repository_with_instructions(&procly);
+    let api = main.join("apps/api");
+    std::fs::create_dir_all(&api).unwrap();
+    write(&api.join("docker-compose.yml"), "services: {}\n");
+    let services = "[services.db]\ncompose = 'postgres'\n[services.cache]\ncompose = 'redis'\n";
+
+    write(&main.join("procly.toml"), services);
+    for (dir, command) in [
+        (&main, "docker compose -f apps/api/docker-compose.yml up -d"),
+        (&main, "cd apps/api && docker compose up -d"),
+        (&api, "docker compose up -d"),
+    ] {
+        let reason = denial(&guard(&procly, dir, command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(
+            reason.contains("Declare it with `compose_file = \"apps/api/docker-compose.yml\"`")
+                && !reason.contains("Declared Services"),
+            "{command}: {reason}"
+        );
+    }
+
+    write(
+        &main.join("procly.toml"),
+        &format!("[settings]\ncompose_file = 'apps/api/docker-compose.yml'\n{services}"),
+    );
+    for (dir, command) in [
+        (&main, "docker compose -f apps/api/docker-compose.yml up -d"),
+        (&main, "cd apps/api && docker compose up -d"),
+        (&api, "docker compose up -d"),
+    ] {
+        let reason = denial(&guard(&procly, dir, command)).unwrap_or_else(|| panic!("{command} went through"));
+        assert!(
+            reason.contains("Run `procly up cache && procly up db` instead."),
+            "{command}: {reason}"
+        );
+    }
+}

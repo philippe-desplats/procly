@@ -59,12 +59,7 @@ pub(super) async fn answer(registry: &Arc<Registry>, request: Request) -> Respon
     let work = move || match request {
         Request::AgentInstall { cwd, file } => install(&registry, &cwd, file.as_deref()).map(Response::AgentInstall),
         Request::Switch { cwd, off } => switch(&registry, &cwd, off).map(Response::Switched),
-        Request::Guard { cwd } => guard(&registry, &cwd).map(|(off, directory, root, services)| Response::Guard {
-            off,
-            directory,
-            root,
-            services,
-        }),
+        Request::Guard { cwd } => guard(&registry, &cwd),
         other => unreachable!("only agent requests are handed to the agent module, not {other:?}"),
     };
     blocking("the agent request could not be answered", move || Ok(work()?))
@@ -253,20 +248,17 @@ pub(super) fn switch(registry: &Registry, cwd: &Path, off: bool) -> Result<Switc
 }
 
 /// Whether the Repository holding `cwd` is Off, where `cwd` is relative to the root of its Worktree (`None` when it cannot be placed), and the Services the
-/// Worktree declares, which the Guard matches the command it blocks against and names in its answer. A configuration
-/// that cannot be read declares none: the Guard still answers.
-pub(super) fn guard(
-    registry: &Registry,
-    cwd: &Path,
-) -> Result<(bool, Option<PathBuf>, PathBuf, Vec<GuardService>), AgentError> {
+/// Worktree declares with the compose file it declares, which the Guard matches the command it blocks against and
+/// names in its answer. A configuration that cannot be read declares none: the Guard still answers.
+pub(super) fn guard(registry: &Registry, cwd: &Path) -> Result<Response, AgentError> {
     let topology = topology_in(cwd)?;
     let off = registry.offs.is_off(&topology.git_common_dir)?;
     let directory = topology::canonicalize(cwd)
         .ok()
         .and_then(|cwd| cwd.strip_prefix(&topology.worktree.path).map(Path::to_owned).ok());
-    let services = read_config(&topology.worktree.path)
+    let (services, compose_file) = read_config(&topology.worktree.path)
         .map(|config| {
-            config
+            let services = config
                 .services
                 .into_iter()
                 .map(|(name, declared)| GuardService {
@@ -274,10 +266,17 @@ pub(super) fn guard(
                     run: declared.run,
                     compose: declared.compose,
                 })
-                .collect()
+                .collect();
+            (services, config.settings.compose_file)
         })
         .unwrap_or_default();
-    Ok((off, directory, topology.worktree.path, services))
+    Ok(Response::Guard {
+        off,
+        directory,
+        root: topology.worktree.path,
+        services,
+        compose_file,
+    })
 }
 
 /// The instruction file to write: the one asked for, or the default one.

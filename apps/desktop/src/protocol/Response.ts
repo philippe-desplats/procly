@@ -65,7 +65,12 @@ directory: string | null,
 /**
  * The root of the Worktree, which a compose file given with an absolute path is placed against.
  */
-root: string, services: Array<GuardService>, } | { "response": "eject" } & EjectReport | { "response": "gc" } & GcReport | { "response": "worktree_release" } & ReleaseReport | { "response": "doctor" } & DaemonChecks | { "response": "worktree_hooks" } & HooksReport | { "response": "error", message: string, } | { "response": "conflict", service: string, conflicts: Array<Conflict>, 
+root: string, services: Array<GuardService>, 
+/**
+ * The compose file `settings.compose_file` declares, relative to `root`, `None` when the Worktree declares
+ * none and Procly runs the compose file at its root.
+ */
+compose_file?: string | null, } | { "response": "eject" } & EjectReport | { "response": "gc" } & GcReport | { "response": "worktree_release" } & ReleaseReport | { "response": "doctor" } & DaemonChecks | { "response": "worktree_hooks" } & HooksReport | { "response": "error", message: string, } | { "response": "conflict", service: string, conflicts: Array<Conflict>, 
 /**
  * The Service that needs this one, when `up` was asked for that one instead.
  */

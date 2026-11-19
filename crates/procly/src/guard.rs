@@ -54,11 +54,14 @@ pub(crate) fn tool_call(input: &str) -> Option<ToolCall> {
 /// run at the root of its Worktree, or else `procly up <service>` for the agent to pick among `services`. `directory`
 /// is where the command line was run, relative to the root of the Worktree, `None` when it is not known, and `root` is
 /// the root of the Worktree itself, which a compose file given with an absolute path is placed against.
+/// `compose_file` is the compose file `settings.compose_file` declares, relative to `root`, `None` when the Worktree
+/// declares none and Procly runs the compose file at its root.
 pub(crate) fn denial(
     recognized: &Recognized,
     services: &[GuardService],
     directory: Option<&Path>,
     root: &Path,
+    compose_file: Option<&Path>,
 ) -> String {
     let Recognized { kind, command, .. } = recognized;
     let why = match kind {
@@ -71,14 +74,31 @@ pub(crate) fn denial(
              between its worktrees."
         }
     };
-    let instead = match (equivalent(recognized, services, directory, root), kind) {
+    let instead = match (equivalent(recognized, services, directory, root, compose_file), kind) {
         (Some(equivalent), _) => format!("Run `{equivalent}` instead."),
-        (None, Kind::Compose) if let Some(file) = unmanaged_compose_file(recognized, directory, root) => {
-            // Nothing else to say: the Services of the root compose file would read as a way to start this one.
-            let reason = format!(
-                "The compose file `{file}` is not managed by Procly, which runs the compose file at the root of the \
-                 Worktree only, so no Procly command starts it."
-            );
+        (None, Kind::Compose)
+            if let Some(Unmanaged { typed, placed }) =
+                unmanaged_compose_file(recognized, directory, root, compose_file) =>
+        {
+            // Nothing else to say: the Services of the managed compose file would read as a way to start this one.
+            let reason = match (compose_file, placed) {
+                (Some(declared), _) => format!(
+                    "The compose file `{typed}` is not managed by Procly, which runs `{}`, the compose file \
+                     `compose_file` declares in the [settings] of procly.toml, so no Procly command starts it.",
+                    declared.display()
+                ),
+                (None, Some(placed)) => format!(
+                    "The compose file `{typed}` is not managed by Procly, which runs the compose file at the root of \
+                     the Worktree unless one is declared. Declare it with `compose_file = \"{}\"` in the [settings] \
+                     of procly.toml, and its services as Compose services, for Procly to start them.",
+                    placed.display()
+                ),
+                (None, None) => format!(
+                    "The compose file `{typed}` is not managed by Procly, which runs the compose file at the root of \
+                     the Worktree or the one `compose_file` declares in the [settings] of procly.toml, inside the \
+                     Worktree, so no Procly command starts it."
+                ),
+            };
             return answer(&format!("`{command}` {why} {reason}"));
         }
         (None, Kind::DevServer) => "Run `procly up <service>` instead.".to_owned(),
@@ -106,12 +126,14 @@ fn answer(reason: &str) -> String {
 }
 
 /// The Procly command that does what the blocked command does, `None` when nothing declared tells. `directory` is where
-/// the command line was run, relative to the root of the Worktree, and `root` is the root itself.
+/// the command line was run, relative to the root of the Worktree, `root` is the root itself, and `compose_file` the
+/// compose file `settings.compose_file` declares.
 fn equivalent(
     recognized: &Recognized,
     services: &[GuardService],
     directory: Option<&Path>,
     root: &Path,
+    compose_file: Option<&Path>,
 ) -> Option<String> {
     let blocked = words_of(&recognized.command);
     let blocked = strip_launchers(&blocked);
@@ -142,7 +164,7 @@ fn equivalent(
             }
         }
         Kind::Compose => {
-            if unmanaged_compose_file(recognized, directory, root).is_some() {
+            if unmanaged_compose_file(recognized, directory, root, compose_file).is_some() {
                 return None;
             }
             let named = compose_services(blocked);
@@ -186,25 +208,72 @@ fn compose_files(words: &[String]) -> Vec<&str> {
     files
 }
 
-/// The compose file a compose command is given that Procly does not manage, as typed, `None` when every file it is
-/// given is the compose file at the root of the Worktree, when it is given none, and when a file cannot be placed
-/// from where it is written. Procly drives that one file only (ADR 0004), so no Service of `procly.toml` is declared on
-/// another. A file given with an absolute path is placed against `root`, the root of the Worktree: the compose file of
-/// the root named that way is managed, any other absolute path, inside the Worktree or not, is not.
-fn unmanaged_compose_file(recognized: &Recognized, directory: Option<&Path>, root: &Path) -> Option<String> {
+/// A compose file Procly does not manage, which a compose command runs.
+#[derive(Debug, PartialEq, Eq)]
+struct Unmanaged {
+    /// As typed, or as found from where the command runs when the command names none.
+    typed: String,
+    /// Relative to the root of the Worktree, `None` when it is not inside it.
+    placed: Option<PathBuf>,
+}
+
+/// The compose file a compose command runs that Procly does not manage, `None` when every file it is given is the
+/// managed one, and when a file cannot be placed from where it is written. Procly drives one compose file only
+/// (ADR 0004): the one `compose_file` declares, relative to `root`, or else the one at the root of the Worktree. A
+/// command that is given no file runs the compose file Docker Compose finds from where it runs, in that directory or
+/// the nearest one above it up to the root, and the managed one when there is none to find. A file given with an
+/// absolute path is placed against `root`, the root of the Worktree: the managed file named that way is managed, any
+/// other absolute path, inside the Worktree or not, is not.
+fn unmanaged_compose_file(
+    recognized: &Recognized,
+    directory: Option<&Path>,
+    root: &Path,
+    compose_file: Option<&Path>,
+) -> Option<Unmanaged> {
     let place = place_of(recognized, directory, root);
     let blocked = words_of(&recognized.command);
-    compose_files(strip_launchers(&blocked))
-        .into_iter()
-        .find(|file| {
-            let resolved = if file.starts_with('/') {
-                Some(within(root, file))
-            } else {
-                place.as_deref().and_then(|place| resolve(place, file))
-            };
-            resolved.is_some_and(|resolved| !COMPOSE_FILES.iter().any(|name| resolved == Path::new(name)))
+    let managed = |resolved: &Path| match compose_file {
+        Some(declared) => {
+            resolve(Path::new(""), &declared.to_string_lossy()).is_some_and(|declared| declared == resolved)
+        }
+        None => COMPOSE_FILES.iter().any(|name| resolved == Path::new(name)),
+    };
+    let given = compose_files(strip_launchers(&blocked));
+    if given.is_empty() {
+        let found = found_compose_file(place.as_deref()?, root)?;
+        return (!managed(&found)).then(|| Unmanaged {
+            typed: found.display().to_string(),
+            placed: Some(found),
+        });
+    }
+    given.into_iter().find_map(|file| {
+        let resolved = if file.starts_with('/') {
+            Some(within(root, file))
+        } else {
+            place.as_deref().and_then(|place| resolve(place, file))
+        }?;
+        (!managed(&resolved)).then(|| Unmanaged {
+            typed: file.to_owned(),
+            placed: (resolved.is_relative() && !resolved.starts_with("..")).then_some(resolved),
         })
-        .map(str::to_owned)
+    })
+}
+
+/// The compose file Docker Compose runs from `place`, relative to `root`, when it is given none: the first of
+/// [`COMPOSE_FILES`] in `place`, or else in the nearest directory above it, up to the root of the Worktree. `None` when
+/// there is none, and when `place` is not inside the Worktree.
+fn found_compose_file(place: &Path, root: &Path) -> Option<PathBuf> {
+    if place.starts_with("..") || place.is_absolute() {
+        return None;
+    }
+    let mut directory = Some(place);
+    while let Some(here) = directory {
+        if let Some(name) = COMPOSE_FILES.iter().find(|name| root.join(here).join(name).is_file()) {
+            return Some(here.join(name));
+        }
+        directory = here.parent();
+    }
+    None
 }
 
 /// The compose files Docker Compose looks for, in the order it prefers them, which Procly drives when the Worktree has
@@ -875,7 +944,8 @@ mod tests {
     fn the_denial_names_the_command_the_services_and_the_procly_command() {
         let recognized = recognize("npm run dev").unwrap();
         let services = [process("api", "node api.js"), process("web", "next dev")];
-        let answer: Value = serde_json::from_str(&denial(&recognized, &services, Some(Path::new("")), root())).unwrap();
+        let answer: Value =
+            serde_json::from_str(&denial(&recognized, &services, Some(Path::new("")), root(), None)).unwrap();
         let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap();
@@ -900,6 +970,7 @@ mod tests {
                 &services,
                 Some(Path::new(directory)),
                 root(),
+                None,
             )
         };
         assert_eq!(
@@ -927,8 +998,15 @@ mod tests {
             process("admin", "pnpm dev --filter admin"),
             process("shop", "pnpm dev --filter shop"),
         ];
-        let equivalent =
-            |command: &str| equivalent(&recognize(command).unwrap(), &services, Some(Path::new("")), root());
+        let equivalent = |command: &str| {
+            equivalent(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new("")),
+                root(),
+                None,
+            )
+        };
         assert_eq!(equivalent("cd apps/api && pnpm dev").as_deref(), Some("procly up api"));
         assert_eq!(
             equivalent("cd ./apps/web && pnpm dev").as_deref(),
@@ -948,6 +1026,7 @@ mod tests {
                 &services,
                 Some(Path::new(directory)),
                 root(),
+                None,
             )
         };
         for command in [
@@ -991,7 +1070,8 @@ mod tests {
                 &recognize("turbo dev --filter=@acme/web").unwrap(),
                 &services,
                 Some(Path::new("")),
-                root()
+                root(),
+                None
             ),
             None
         );
@@ -1009,8 +1089,15 @@ mod tests {
             compose("db", "postgres"),
             process("web", "next dev"),
         ];
-        let equivalent =
-            |command: &str| equivalent(&recognize(command).unwrap(), &services, Some(Path::new("")), root());
+        let equivalent = |command: &str| {
+            equivalent(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new("")),
+                root(),
+                None,
+            )
+        };
         assert_eq!(
             equivalent("docker compose -f compose.yaml up -d postgres").as_deref(),
             Some("procly up db")
@@ -1033,7 +1120,7 @@ mod tests {
             process("api", "cd apps/api && bun run dev"),
         ];
         let equivalent = |command: &str, directory: Option<&Path>| {
-            equivalent(&recognize(command).unwrap(), &services, directory, root())
+            equivalent(&recognize(command).unwrap(), &services, directory, root(), None)
         };
         // Run from the directory of the Service, or moved there by a `cd`, whatever the way it is written.
         assert_eq!(
@@ -1077,6 +1164,7 @@ mod tests {
                 &services,
                 Some(Path::new(directory)),
                 root(),
+                None,
             )
         };
         for (command, directory, instead) in [
@@ -1106,7 +1194,7 @@ mod tests {
             process("dev", "bun run dev"),
         ];
         let equivalent = |command: &str, directory: Option<&Path>| {
-            equivalent(&recognize(command).unwrap(), &services, directory, root())
+            equivalent(&recognize(command).unwrap(), &services, directory, root(), None)
         };
         for (command, directory, instead) in [
             ("cd /p/work/acme/web/apps/web && bun run dev", Some(""), "procly up web"),
@@ -1169,7 +1257,13 @@ mod tests {
         std::os::unix::fs::symlink(temporary.path().join("elsewhere"), temporary.path().join("away")).unwrap();
         let services = [process("web", "cd apps/web && bun run dev")];
         let equivalent = |command: String, root: &Path| {
-            equivalent(&recognize(&command).unwrap(), &services, Some(Path::new("")), root)
+            equivalent(
+                &recognize(&command).unwrap(),
+                &services,
+                Some(Path::new("")),
+                root,
+                None,
+            )
         };
         let link = temporary.path().join("link").display().to_string();
         let canonical = root.canonicalize().unwrap();
@@ -1197,6 +1291,7 @@ mod tests {
                 &services,
                 Some(Path::new(directory)),
                 root(),
+                None,
             )
         };
         assert_eq!(equivalent("").as_deref(), Some("procly up web"));
@@ -1206,7 +1301,8 @@ mod tests {
     #[test]
     fn a_compose_command_names_the_compose_files_it_is_given() {
         let unmanaged = |command: &str, directory: &str| {
-            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root())
+            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root(), None)
+                .map(|unmanaged| unmanaged.typed)
         };
         for (command, directory, file) in [
             ("docker compose -f dev.yml up", "", "dev.yml"),
@@ -1234,7 +1330,7 @@ mod tests {
     #[test]
     fn the_compose_file_of_the_root_and_a_command_that_names_none_are_managed() {
         let unmanaged = |command: &str, directory: &str| {
-            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root())
+            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root(), None)
         };
         for (command, directory) in [
             ("docker compose up", ""),
@@ -1261,7 +1357,7 @@ mod tests {
             assert_eq!(unmanaged(command, directory), None, "{command}");
         }
         assert_eq!(
-            unmanaged_compose_file(&recognize("docker compose -f dev.yml up").unwrap(), None, root()),
+            unmanaged_compose_file(&recognize("docker compose -f dev.yml up").unwrap(), None, root(), None),
             None
         );
     }
@@ -1269,7 +1365,8 @@ mod tests {
     #[test]
     fn an_absolute_compose_file_other_than_the_one_of_the_root_is_not_managed() {
         let unmanaged = |command: &str, directory: &str| {
-            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root())
+            unmanaged_compose_file(&recognize(command).unwrap(), Some(Path::new(directory)), root(), None)
+                .map(|unmanaged| unmanaged.typed)
         };
         for (command, directory, file) in [
             // Inside the Worktree, a file Procly does not manage.
@@ -1323,8 +1420,10 @@ mod tests {
             unmanaged_compose_file(
                 &recognize("docker compose -f /p/work/acme/web/infra/other.yml up").unwrap(),
                 None,
-                root()
+                root(),
+                None
             )
+            .map(|unmanaged| unmanaged.typed)
             .as_deref(),
             Some("/p/work/acme/web/infra/other.yml")
         );
@@ -1370,7 +1469,8 @@ mod tests {
             compose: Some("postgres".to_owned()),
         }];
         let recognized = recognize("docker compose -f dev.yml up -d").unwrap();
-        let answer: Value = serde_json::from_str(&denial(&recognized, &services, Some(Path::new("")), root())).unwrap();
+        let answer: Value =
+            serde_json::from_str(&denial(&recognized, &services, Some(Path::new("")), root(), None)).unwrap();
         let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap();
@@ -1394,6 +1494,7 @@ mod tests {
                 &services,
                 Some(Path::new("")),
                 root(),
+                None,
             ))
             .unwrap();
             answer["hookSpecificOutput"]["permissionDecisionReason"]
@@ -1415,5 +1516,122 @@ mod tests {
         );
         let managed = reason("docker compose -f /p/work/acme/web/compose.yaml up -d");
         assert!(managed.contains("Run `procly up db` instead."), "{managed}");
+    }
+
+    /// A Worktree with a compose file in `apps/api` and none at its root, and the Compose services declared on it.
+    fn subdirectory_worktree() -> (tempfile::TempDir, [GuardService; 2]) {
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(worktree.path().join("apps/api/src")).unwrap();
+        std::fs::write(worktree.path().join("apps/api/docker-compose.yml"), "services: {}\n").unwrap();
+        let compose = |name: &str, compose: &str| GuardService {
+            name: name.to_owned(),
+            run: None,
+            compose: Some(compose.to_owned()),
+        };
+        (worktree, [compose("db", "postgres"), compose("cache", "redis")])
+    }
+
+    fn reason_of(answer: &str) -> String {
+        let answer: Value = serde_json::from_str(answer).unwrap();
+        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "deny");
+        answer["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[test]
+    fn a_compose_command_on_the_declared_compose_file_is_the_procly_up_of_its_compose_services() {
+        let (worktree, services) = subdirectory_worktree();
+        let root = worktree.path();
+        let declared = Some(Path::new("apps/api/docker-compose.yml"));
+        let reason = |command: &str, directory: &str| {
+            reason_of(&denial(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new(directory)),
+                root,
+                declared,
+            ))
+        };
+        for (command, directory) in [
+            ("docker compose -f apps/api/docker-compose.yml up -d", ""),
+            ("docker compose --file ./apps/api/docker-compose.yml up -d", ""),
+            ("docker compose -f docker-compose.yml up -d", "apps/api"),
+            ("cd apps/api && docker compose up -d", ""),
+            ("docker compose up -d", "apps/api"),
+            // Docker Compose looks for the compose file in the directories above the one it runs in.
+            ("cd apps/api/src && docker compose up -d", ""),
+            // With none to find, the command runs the compose file of no other place.
+            ("docker compose up -d", ""),
+        ] {
+            let reason = reason(command, directory);
+            assert!(
+                reason.contains("Run `procly up db && procly up cache` instead.")
+                    && reason.ends_with("Declared Services: db, cache."),
+                "{command} in {directory:?}: {reason}"
+            );
+        }
+        let named = reason("cd apps/api && docker compose up -d redis", "");
+        assert!(named.contains("Run `procly up cache` instead."), "{named}");
+        // A file at the root is no longer the one Procly runs once another is declared.
+        std::fs::write(root.join("compose.yaml"), "services: {}\n").unwrap();
+        for (command, typed) in [
+            ("docker compose up -d", "compose.yaml"),
+            ("docker compose -f compose.yaml up -d", "compose.yaml"),
+        ] {
+            let reason = reason(command, "");
+            assert!(
+                reason.contains(&format!(
+                    "The compose file `{typed}` is not managed by Procly, which runs `apps/api/docker-compose.yml`"
+                )) && !reason.contains("procly up"),
+                "{command}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_file_outside_the_root_that_none_declares_is_judged_where_it_is_and_the_setting_is_named() {
+        let (worktree, services) = subdirectory_worktree();
+        let root = worktree.path();
+        let reason = |command: &str| {
+            reason_of(&denial(
+                &recognize(command).unwrap(),
+                &services,
+                Some(Path::new("")),
+                root,
+                None,
+            ))
+        };
+        for command in [
+            "cd apps/api && docker compose up -d",
+            "docker compose -f apps/api/docker-compose.yml up -d",
+            "cd apps/api/src && docker compose up -d",
+        ] {
+            let reason = reason(command);
+            assert!(
+                reason.contains("is not managed by Procly")
+                    && reason.contains(
+                        "Declare it with `compose_file = \"apps/api/docker-compose.yml\"` in the [settings] of procly.toml"
+                    )
+                    && !reason.contains("Declared Services"),
+                "{command}: {reason}"
+            );
+        }
+        // Outside the Worktree, no setting declares it.
+        let outside = reason("docker compose -f /srv/app/compose.yaml up -d");
+        assert!(
+            outside.contains("`/srv/app/compose.yaml` is not managed by Procly")
+                && !outside.contains("compose_file = "),
+            "{outside}"
+        );
+        // A compose file at the root is the one the command runs, wherever the command runs below it.
+        std::fs::write(root.join("compose.yaml"), "services: {}\n").unwrap();
+        std::fs::remove_file(root.join("apps/api/docker-compose.yml")).unwrap();
+        let rooted = reason("cd apps/api && docker compose up -d");
+        assert!(
+            rooted.contains("Run `procly up db && procly up cache` instead."),
+            "{rooted}"
+        );
     }
 }
