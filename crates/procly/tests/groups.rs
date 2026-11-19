@@ -347,6 +347,44 @@ fn restart_of_a_stopped_covered_service_while_another_runs_on_its_own_is_a_confl
 }
 
 #[test]
+fn restart_of_a_group_started_once_while_a_service_it_covers_runs_on_its_own_is_a_conflict_that_starts_and_stops_nothing()
+ {
+    let procly = Procly::new();
+    let main = git_repository(procly.scratch(), "app");
+    let (web, api) = (free_port(), free_port());
+    let (starts, seen) = (procly.scratch().join("starts"), procly.scratch().join("seen"));
+    write(&main, "procly.toml", &monorepo(web, api, &starts, &seen));
+    // Once the Group was started, the Daemon holds its environment, which a Restart replays.
+    assert_success(&procly.procly_in(&main, &["up", "dev"]));
+    assert_success(&procly.procly_in(&main, &["down", "dev"]));
+    assert_success(&procly.procly_in(&main, &["up", "api"]));
+    let before = service_rows(&procly, &main);
+
+    for args in [&["restart", "dev"][..], &["restart", "dev", "--json"]] {
+        let refused = procly.procly_in(&main, args);
+
+        assert_eq!(refused.status.code(), Some(5), "{args:?}, stderr: {}", stderr(&refused));
+        assert_eq!(
+            stderr(&refused),
+            "procly: cannot start group dev, the services it covers run on their own: api, stop them first with \
+             `procly down api`\n",
+            "{args:?}"
+        );
+        assert_eq!(stdout(&refused), "", "{args:?}");
+    }
+    assert_eq!(
+        start_count(&starts),
+        1,
+        "the Group was started once, before it was stopped, and never again"
+    );
+    assert_eq!(
+        service_rows(&procly, &main),
+        before,
+        "api kept running and the Group stayed stopped, nothing was started or stopped"
+    );
+}
+
+#[test]
 fn up_of_a_service_that_needs_a_group_whose_covered_services_run_on_their_own_is_a_conflict_that_starts_and_stops_nothing()
  {
     let procly = Procly::new();

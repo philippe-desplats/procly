@@ -51,7 +51,8 @@ const EXIT_SERVICE_ENDED: u8 = 3;
 /// The exit code of `up` for a Service whose process listened on another port than its Lease.
 const EXIT_PORT_MISMATCH: u8 = 4;
 /// The exit code of `up` for a Compose service whose Leases or container name are held by what runs outside Procly,
-/// and of `worktree hooks` for a hook the Worktrunk config sets already.
+/// or for a Group asked to start over a Service it covers that runs on its own, and of `worktree hooks` for a hook the
+/// Worktrunk config sets already.
 const EXIT_CONFLICT: u8 = 5;
 /// The exit code of `gc --apply` when some Orphan could not be deleted.
 const EXIT_GC_FAILED: u8 = 6;
@@ -92,7 +93,8 @@ struct JsonFlag {
     about,
     after_help = "Exit codes: 0 on success, 2 on a usage error, 3 when `up` or `restart` finds the Service ended \
                   before it was healthy, 4 when `up` or `restart` finds a Port mismatch, 5 when `up` or `restart` finds \
-                  a conflict with what runs outside Procly, 6 when `gc --apply` could not delete \
+                  a conflict, with what runs outside Procly or because a Group is asked to start over a Service it \
+                  covers that runs on its own, 6 when `gc --apply` could not delete \
                   every Orphan, 7 when `doctor` found a problem, 124 when `wait` finds the Job timed out or `up` or `restart` \
                   waited past the health timeout, 125 when Procly itself fails, otherwise `wait` exits with the Job's own code (128 + N for a Job killed by \
                   signal N) and `worktree init` with the code of the setup command that failed. See \
@@ -125,8 +127,10 @@ enum Command {
         after_help = "Exit codes: 0 when the Service is healthy, 3 when it stopped before it became healthy \
                             (it exited, was killed by a signal, was stopped by `procly down` or for being idle, or kept crashing \
                             until Procly gave up restarting it), 4 when it listened on another port than its Lease \
-                            (Port mismatch) and its process tree was stopped, 5 when what it needs is held outside \
-                            Procly (a conflict, with the command that stops it, which Procly never runs), 124 when it \
+                            (Port mismatch) and its process tree was stopped, 5 on a conflict, when what it needs is held \
+                            outside Procly or a Group is asked to start over a Service it covers that runs on its own, \
+                            with the command that frees it, which Procly never runs, and nothing was started or \
+                            stopped, 124 when it \
                             did not become healthy \
                             within its health timeout and its process tree was stopped, 125 when Procly itself \
                             fails. See docs/exit-codes.md."
