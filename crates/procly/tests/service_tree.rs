@@ -744,23 +744,25 @@ mod without_the_process_list {
         held
     }
 
-    /// How long after the last `status` the Daemon may still read the processes to look for Foreign processes: it looks
-    /// every second for 3 s, and each look reads them twice.
+    /// How long after the last `status` the Daemon may still read the processes to look for Foreign processes. It looks
+    /// every `LOOK_EVERY` of 1 s for `KEEP_LOOKING` of 3 s after it (`daemon/foreign_cache.rs`), so the last look
+    /// begins at most 3 s after, and each look reads the processes twice within about 50 ms: 3.5 s covers it.
     const FOREIGN_LOOKS_FOR: Duration = Duration::from_millis(3500);
     /// The part of the 2 s health wait of a Service that cannot turn healthy in which the test counts the readings of
-    /// the processes. It ends before the deadline, at which the Daemon reads them once more to judge the ports, then
-    /// again to stop the Service.
-    const OWNERSHIP_WINDOW: Duration = Duration::from_millis(1800);
+    /// the processes. It ends about 500 ms before the deadline, at which the Daemon reads them once more to judge the
+    /// ports, then again to stop the Service, so that a loaded machine late on the window still counts none of those.
+    const OWNERSHIP_WINDOW: Duration = Duration::from_millis(1500);
 
     /// Runs `up` for the Service of `kept`, which cannot turn healthy, and counts the readings of the processes the
     /// Daemon makes in the [`OWNERSHIP_WINDOW`] that begins as the new instance starts: those of its health wait, which
     /// asks whether the tree of the Service listens on its Lease. A reading counts when the test sees it, so that one
-    /// seen late falls out of the window rather than into it.
+    /// seen late falls out of the window rather than into it. The count is `None` when `up` started no new instance,
+    /// as when it answered for the Service it found.
     fn up_counting_the_ownership_readings(
         procly: &Procly,
         listing: &Listing,
         kept: &Kept,
-    ) -> (std::process::Output, usize) {
+    ) -> (std::process::Output, Option<usize>) {
         let starts = kept.starts();
         std::thread::scope(|scope| {
             let up = scope.spawn(|| listing.procly_in(procly, &kept.main, &["up", "web"]));
@@ -776,8 +778,7 @@ mod without_the_process_list {
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
-            assert!(began.is_some(), "up did not start the service again");
-            (up.join().expect("up ran"), readings)
+            (up.join().expect("up ran"), began.map(|_| readings))
         })
     }
 
@@ -788,6 +789,12 @@ mod without_the_process_list {
         let stranger = restart_unable_to_list(&procly, &listing, &kept, true).expect("a stranger");
         // The `status` that started the Daemon has it look for Foreign processes for a while, which reads the processes.
         let asked = Instant::now();
+        // What `up` starts instead cannot bind the port and never turns healthy: bound the wait, and the readings of
+        // the processes it makes meanwhile.
+        kept.bound_the_health_wait();
+        // No Foreign look reads the processes in the window counted below: they run out while the listing is still
+        // refused, so that `up` comes right after the restore, before the Daemon judges the Service by itself.
+        std::thread::sleep(FOREIGN_LOOKS_FOR.saturating_sub(asked.elapsed()));
 
         listing.restore();
         if wait_for_the_judgement {
@@ -796,23 +803,8 @@ mod without_the_process_list {
                 procly.daemon_log().contains("no longer listened on its Lease")
             });
         }
-        // What `up` starts instead cannot bind the port and never turns healthy: bound the wait, and the readings of
-        // the processes it makes meanwhile.
-        kept.bound_the_health_wait();
-        // No Foreign look reads the processes in the window counted below: they are over before `up`.
-        std::thread::sleep(FOREIGN_LOOKS_FOR.saturating_sub(asked.elapsed()));
         let (output, listings) = up_counting_the_ownership_readings(&procly, &listing, &kept);
 
-        // Only the readings of the health wait are counted: the stops read the processes too, before and after the
-        // window, as often as they need to. While the stranger answers, the wait reads the processes as the new
-        // instance starts, then at most once every `OWNERSHIP_RETRY` of 250 ms: 1 + 1800 / 250, so 8 at most in the
-        // window, 10 leaves a margin of 2. Each reading also costs a `ps` of every process, a session and a group asked
-        // for each, and an `lsof`, which spaces them further: macOS read 5 to 6 times. Reading again with no pause
-        // after each answer read 16 to 20 times, and a retry of 50 ms 13 times.
-        assert!(
-            listings <= 10,
-            "up read the processes {listings} times for its ownership while a stranger held the port for 2 s"
-        );
         assert!(
             !common::stdout(&output).contains("reused"),
             "up answered that the service of another process was reused: {}",
@@ -822,6 +814,17 @@ mod without_the_process_list {
             !output.status.success(),
             "up found a service healthy on a port a stranger holds: {}",
             common::failure_message(&output)
+        );
+        let listings = listings.expect("up did not start the service again");
+        // Only the readings of the health wait are counted: the stops read the processes too, before and after the
+        // window, as often as they need to. While the stranger answers, the wait reads the processes as the new
+        // instance starts, then at most once every `OWNERSHIP_RETRY` of 250 ms: 1 + 1500 / 250, so 7 at most in the
+        // window, 9 leaves a margin of 2. Each reading also costs a `ps` of every process, a session and a group asked
+        // for each, and an `lsof`, which spaces them further: macOS read 4 to 5 times. Reading again with no pause
+        // after each answer read 15 to 16 times, and a retry of 50 ms 10 to 11 times.
+        assert!(
+            listings <= 9,
+            "up read the processes {listings} times for its ownership while a stranger held the port for 2 s"
         );
         assert!(
             common::is_alive(stranger.pid()),
