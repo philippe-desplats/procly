@@ -227,7 +227,7 @@ env = { DB_PORT = "{services.db.ports.db}" }
 - `docker compose` takes the directory of the file as the directory of the project, as it does for `cd apps/api && docker compose up`: the relative paths of the file, its `.env` file and the project name it gives when it sets no `name` come from that directory. Given a file, `docker compose` reads no override file next to it, and `--file` wins over a `COMPOSE_FILE` of the environment.
 - A container started from that file outside Procly is found and adopted as one started from the root, see below.
 - The container of a Service that runs keeps the compose file it started from until it stops: a changed `compose_file` takes effect on the next start, after `procly down` and the end of the Grace period, or after `procly eject`.
-- `procly doctor` fails its `compose_file` check when a Compose service cannot find its compose file, naming the path it looked at, and names this setting when a compose file sits below the root while none is declared, see [Checking the installation](doctor.md). The Guard sends a `docker compose` command on the declared file to `procly up` of the Compose services, see [Agents](agents.md).
+- `procly doctor` fails its `compose_file` check when a Compose service cannot find the declared compose file, naming the path it looked at. Without the setting the check never fails, and its message names this setting when a compose file sits below a root that holds none, see [Checking the installation](doctor.md). The Guard sends a `docker compose` command on the declared file to `procly up` of the Compose services, see [Agents](agents.md).
 
 ### Containers started outside Procly
 
