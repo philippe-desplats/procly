@@ -263,8 +263,8 @@ pub enum Response {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
-    /// A Conflict the caller resolves with the commands the message names, nothing being started or stopped: a Group
-    /// asked to start over a Service it covers that runs on its own.
+    /// A Conflict the caller resolves with the commands the message names: a Group asked to start over a Service it
+    /// covers that runs on its own. The Group and the Services it covers are not started or stopped.
     Conflict,
     /// A kind this side does not know, sent by a newer peer, read as a failure of Procly with its message kept. Thanks
     /// to it, a new kind needs no bump of [`PROTOCOL_VERSION`].

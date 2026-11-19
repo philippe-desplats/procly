@@ -129,8 +129,8 @@ enum Command {
                             until Procly gave up restarting it), 4 when it listened on another port than its Lease \
                             (Port mismatch) and its process tree was stopped, 5 on a conflict, when what it needs is held \
                             outside Procly or a Group is asked to start over a Service it covers that runs on its own, \
-                            with the command that frees it, which Procly never runs, and nothing was started or \
-                            stopped, 124 when it \
+                            with the command that frees it, which Procly never runs, and the Group and the Services it \
+                            covers are not started or stopped, 124 when it \
                             did not become healthy \
                             within its health timeout and its process tree was stopped, 125 when Procly itself \
                             fails. See docs/exit-codes.md."
