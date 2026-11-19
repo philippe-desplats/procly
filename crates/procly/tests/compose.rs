@@ -1378,3 +1378,39 @@ fn docker_a_container_of_the_declared_compose_file_started_outside_procly_is_ado
     let status = stdout(&fixture.procly.procly_in(&fixture.main, &["status"]));
     assert!(!status.contains("foreign container"), "{status}");
 }
+
+#[test]
+fn docker_a_daemon_that_restarts_keeps_the_declared_compose_file_of_the_container_it_reattaches() {
+    let Some(_docker) = require_docker() else {
+        return;
+    };
+    let fixture = subdirectory_fixture();
+    assert_success(&fixture.procly.procly_in(&fixture.main, &["up", "db"]));
+    assert_success(&fixture.procly.procly_in(&fixture.other, &["up", "db"]));
+    let container = fixture.project.container();
+    let record = || std::fs::read_to_string(fixture.procly.state_dir().join("containers.json")).unwrap_or_default();
+    assert!(
+        record().contains("\"compose_file\": \"apps/api/docker-compose.yml\""),
+        "{}",
+        record()
+    );
+
+    fixture.procly.stop_daemon();
+    // The verbs of the reattached container: its output, and a release that writes its record again.
+    let logs = fixture.procly.procly_in(&fixture.other, &["logs", "db"]);
+    assert_success(&logs);
+    assert!(stdout(&logs).contains("procly-logs-marker"), "{}", stdout(&logs));
+    let down = fixture.procly.procly_in(&fixture.other, &["down", "db"]);
+    assert_eq!(stdout(&down), "db released, 1 other Worktree still needs it\n");
+
+    // The record the next Daemon reads still names the file the container runs from.
+    assert!(
+        record().contains("\"compose_file\": \"apps/api/docker-compose.yml\""),
+        "{}",
+        record()
+    );
+    let ejected = fixture.procly.procly_in(&fixture.main, &["eject", "--repository"]);
+    assert_success(&ejected);
+    assert!(!fixture.project.is_running());
+    assert_eq!(fixture.project.container(), container);
+}
