@@ -194,7 +194,7 @@ $ procly daemon stop --json
 {"schema_version":1,"outcome":"not_running","pid":null}
 ```
 
-`outcome` is `stopped` when a Daemon ran and has gone, with the `pid` it was sent `SIGTERM` and `waited_ms`, the time it took to go in milliseconds. It is `not_running` when no Daemon held the lock of the state directory, a pid file left by a crash included, and `pid` is then `null` and there is no `waited_ms`. A Daemon still there after 10 s prints no document: the command exits with 125 and the reason on stderr, see [exit codes](exit-codes.md). The command never speaks the protocol, so the document is the same whatever version of Procly the Daemon runs, see [Stopping the Daemon](daemon.md#stopping-the-daemon).
+`outcome` is `stopped` when a Daemon ran and has gone, its socket removed and the lock of the state directory released, with the `pid` it was sent `SIGTERM` and `waited_ms`, the time it took to go in milliseconds. The process of that `pid` may still be exiting for a moment when the document is printed. It is `not_running` when no Daemon held the lock of the state directory, a pid file left by a crash included, and `pid` is then `null` and there is no `waited_ms`. A Daemon still there after 10 s prints no document: the command exits with 125 and the reason on stderr, see [exit codes](exit-codes.md). The command never speaks the protocol, so the document is the same whatever version of Procly the Daemon runs, see [Stopping the Daemon](daemon.md#stopping-the-daemon).
 
 ## `status`
 
