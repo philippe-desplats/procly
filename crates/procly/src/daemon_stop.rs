@@ -30,7 +30,8 @@ pub(crate) enum DaemonStop {
         /// Always `null`: no Daemon, no pid.
         pid: Option<i32>,
     },
-    /// The Daemon was signalled and its socket went.
+    /// The Daemon was signalled, its socket went and it released the lock of the state directory, so the next command
+    /// can start a Daemon. Its process may still be exiting, or be a zombie not yet reaped, when this is reported.
     Stopped { pid: i32, waited_ms: u64 },
 }
 

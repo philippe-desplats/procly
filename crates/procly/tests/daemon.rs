@@ -142,7 +142,9 @@ fn daemon_stop_stops_the_daemon_with_its_services_and_reports_how_long_it_waited
     assert_eq!(document["outcome"], "stopped");
     assert_eq!(document["pid"], pid);
     assert!(document["waited_ms"].is_u64(), "waited_ms is a number: {document}");
-    assert!(!common::is_alive(nix::unistd::Pid::from_raw(pid)));
+    // `stopped` means the socket and the lock are released, which the Daemon does as it exits: its process may still
+    // be exiting, or be a zombie not yet reaped, when `daemon stop` answers (#240).
+    common::wait_until_gone(nix::unistd::Pid::from_raw(pid));
     assert!(!procly.state_dir().join("procly.sock").exists());
     assert!(
         std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
