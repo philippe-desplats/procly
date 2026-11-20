@@ -13,7 +13,7 @@ repository = "https://github.com/philippe-desplats/procly"
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6", features = ["derive"] }
-nix = { version = "0.31.3", features = ["fs", "process", "signal", "user"] }
+nix = { version = "0.32.0", features = ["fs", "process", "signal", "user"] }
 portable-pty = "0.9.0"
 procly-client = { path = "crates/procly-client" }
 process-wrap = { version = "10.0.1", features = ["tokio1"] }
